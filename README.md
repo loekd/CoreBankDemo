@@ -1,0 +1,375 @@
+# Core Banking Demo - Building Resilient Mission-Critical Systems
+
+A demonstration project showing resilience patterns for mission-critical banking systems, built with .NET 10 and orchestrated with .NET Aspire. Designed for a 55-minute conference talk.
+
+## ⭐ What's Special
+
+- **One-Command Start** - `./start-aspire.sh` launches everything
+- **.NET Aspire** - Modern orchestration with built-in observability
+- **Real-World Patterns** - Retry, Circuit Breaker, Outbox, Inbox, Ordering
+- **Live Observability** - Aspire Dashboard + Jaeger tracing
+- **Chaos Testing** - Dev Proxy for failure injection
+- **Production-Ready** - Patterns used in actual banking systems
+
+## Architecture
+
+```
+┌─────────────────┐         ┌──────────────┐         ┌─────────────────┐
+│  Payments API   │────────▶│  Dev Proxy   │────────▶│ Core Bank API   │
+│  (Your Service) │         │  (Chaos)     │         │  (Legacy SaaS)  │
+└─────────────────┘         └──────────────┘         └─────────────────┘
+        │                                                      │
+        │ Outbox Pattern                                      │ Inbox Pattern
+        ▼                                                      ▼
+   ┌─────────┐                                           ┌─────────┐
+   │ SQLite  │                                           │ SQLite  │
+   └─────────┘                                           └─────────┘
+        │                                                      │
+        └──────────────────────────────────────────────────────┘
+                          Both send traces to
+                                  │
+                                  ▼
+                           ┌──────────┐
+                           │  Jaeger  │
+                           └──────────┘
+```
+
+## Quick Start
+
+### Option 1: Using Aspire (Recommended) ⭐
+
+```bash
+# Start everything with .NET Aspire
+cd CoreBankDemo.AppHost
+dotnet run
+```
+
+This will launch:
+- ✅ Payments API (http://localhost:5294)
+- ✅ Core Bank API (http://localhost:5032)
+- ✅ Jaeger (http://localhost:16686)
+- ✅ Aspire Dashboard (http://localhost:15888)
+
+**For chaos testing, run Dev Proxy separately:**
+```bash
+# Terminal 2
+dotnet tool restore
+dotnet devproxy --config-file devproxy.json
+```
+
+### Option 2: Manual Start (3 terminals)
+
+**Terminal 1 - Core Bank API:**
+```bash
+cd CoreBankDemo.CoreBankAPI
+dotnet run
+# Runs on http://localhost:5032
+```
+
+**Terminal 2 - Payments API:**
+```bash
+cd CoreBankDemo.PaymentsAPI
+dotnet run
+# Runs on http://localhost:5294
+```
+
+**Terminal 3 - Infrastructure:**
+```bash
+docker compose up -d  # Jaeger only
+dotnet tool restore
+dotnet devproxy --config-file devproxy.json
+```
+
+### Access UIs
+
+- **Aspire Dashboard:** http://localhost:15888 (when using Aspire)
+- **Jaeger Tracing:** http://localhost:16686
+- **Payments API OpenAPI:** http://localhost:5294/openapi/v1.json
+- **Core Bank API OpenAPI:** http://localhost:5032/openapi/v1.json
+- **Health Checks:** 
+  - Payments API: http://localhost:5294/health
+  - Core Bank API: http://localhost:5032/health
+
+## Demo Flow
+
+### Stage 0: Baseline (5 min)
+
+**Goal:** Show basic architecture working perfectly.
+
+**Configuration:**
+- All features disabled
+- Direct calls to Core Bank API
+
+**Demo:**
+1. Send payment request via `demo-requests.http`
+2. Show successful processing
+3. Explain architecture: Payments API → Core Bank API
+
+**Key Point:** Works great when everything is perfect!
+
+---
+
+### Stage 1: Retry & Circuit Breaker (10 min)
+
+**Goal:** Handle transient failures.
+
+**Setup:**
+1. Enable DevProxy: Set `"enabled": true` in `devproxy.json` for `GenericRandomErrorPlugin`
+2. Restart DevProxy
+3. Update `appsettings.Development.json`:
+   ```json
+   "CoreBankApi": {
+     "BaseUrl": "http://localhost:8000"
+   }
+   ```
+
+**Demo:**
+1. Show random failures (503, 429, 500)
+2. Explain `AddStandardResilienceHandler()` in `Program.cs:17`
+3. Show retries in logs
+4. Open Jaeger and show:
+   - Multiple HTTP spans for retries
+   - Latency measurements
+   - Success after retries
+
+**What's included:**
+- Exponential backoff retry
+- Circuit breaker
+- Timeout policies
+
+**Code Reference:** `CoreBankDemo.PaymentsAPI/Program.cs:17`
+
+**Key Point:** Handles ~95% of real-world transient issues.
+
+---
+
+### Stage 2: Outbox Pattern (15 min)
+
+**Goal:** Handle longer outages without losing requests.
+
+**Configuration:**
+Already enabled in `appsettings.Development.json`:
+```json
+"Features": {
+  "UseOutbox": true
+}
+```
+
+**Demo:**
+1. Keep DevProxy error rate high or stop Core Bank API entirely
+2. Send payment requests
+3. Show 202 Accepted response with "Pending" status
+4. Query outbox: `GET http://localhost:5294/api/outbox`
+5. Show messages stored locally in SQLite
+6. Restart Core Bank API or reduce DevProxy errors
+7. Watch OutboxProcessor logs - see automatic retry
+8. Query outbox again - show "Completed" status
+
+**How it works:**
+- Payment requests stored in local database
+- Background service (`OutboxProcessor.cs`) polls every 5 seconds
+- Retries failed messages up to 5 times
+- Eventually consistent processing
+
+**Code References:**
+- Outbox storage: `CoreBankDemo.PaymentsAPI/Program.cs:53-79`
+- Background processor: `CoreBankDemo.PaymentsAPI/OutboxProcessor.cs`
+- Database model: `CoreBankDemo.PaymentsAPI/OutboxMessage.cs`
+
+**Key Point:** Don't lose customer requests! But this introduces new problems...
+
+---
+
+### Stage 3: Inbox Pattern (10 min)
+
+**Goal:** Prevent duplicate processing (idempotency).
+
+**Problem:**
+- Retry can cause duplicate transactions
+- Customer charged twice!
+
+**Configuration:**
+Enable Inbox in Core Bank API `appsettings.Development.json`:
+```json
+"Features": {
+  "UseInbox": true
+}
+```
+
+**Demo:**
+1. Show idempotency key in transaction request
+2. Manually send same transaction twice:
+   ```http
+   POST http://localhost:5032/api/transactions/process
+   {
+     "fromAccount": "NL91ABNA0417164300",
+     "toAccount": "NL20INGB0001234567",
+     "amount": 100.00,
+     "currency": "EUR",
+     "idempotencyKey": "test-123"
+   }
+   ```
+3. Query inbox: `GET http://localhost:5032/api/inbox`
+4. Show same `transactionId` returned for duplicate
+5. Explain: first request creates transaction, second returns cached result
+
+**How it works:**
+- Core Bank API stores processed requests with idempotency key
+- Duplicate requests return original response
+- No duplicate charges
+
+**Code Reference:** `CoreBankDemo.CoreBankAPI/Program.cs:36-90`
+
+**Key Point:** Critical for financial systems - exactly-once processing.
+
+---
+
+### Stage 4: Message Ordering (10 min)
+
+**Goal:** Maintain per-account ordering while scaling.
+
+**Problem:**
+- Multiple payments from same account processed out of order
+- Balance calculations can be wrong
+- Race conditions
+
+**Configuration:**
+Already enabled in `appsettings.Development.json`:
+```json
+"Features": {
+  "UseOrdering": true
+}
+```
+
+**Demo:**
+1. Create multiple payments from same account quickly
+2. Show `PartitionKey` in outbox (set to `FromAccount`)
+3. Explain processing logic:
+   - One message per partition at a time
+   - Multiple partitions processed concurrently
+   - Ordering preserved within each account
+4. Show logs: messages from different accounts processed in parallel
+
+**How it works:**
+- Each message partitioned by `FromAccount`
+- Processor takes oldest message per partition
+- Sequential processing per account
+- Parallel processing across accounts
+
+**Code References:**
+- Partition key: `CoreBankDemo.PaymentsAPI/Program.cs:73`
+- Ordering logic: `CoreBankDemo.PaymentsAPI/OutboxProcessor.cs:44-79`
+
+**Key Point:** Balance scalability with ordering guarantees.
+
+---
+
+### Stage 5: Wrap-up (5 min)
+
+**Tools that help:**
+- **.NET Aspire:** Orchestration and observability (see [ASPIRE.md](ASPIRE.md))
+- **Dev Proxy:** Chaos testing in development
+- **Jaeger:** Distributed tracing and observability
+- **DevContainer:** Consistent development environment
+- **Entity Framework:** Simple persistence
+- **OpenTelemetry:** Standard instrumentation
+
+**Pattern Layering:**
+1. **Retry/Circuit Breaker:** First line of defense (transient failures)
+2. **Outbox:** Second line (sustained outages)
+3. **Inbox:** Data integrity (idempotency)
+4. **Ordering:** Business logic guarantees (per-entity consistency)
+
+**Key Takeaways:**
+1. Resilience is layered - no single solution
+2. Observability is not optional
+3. Test failure scenarios in development
+4. Tools exist - don't build everything from scratch
+
+## Feature Flags
+
+Control patterns via `appsettings.json`:
+
+```json
+"Features": {
+  "UseOutbox": false,    // Store-and-forward for outages
+  "UseInbox": false,     // Idempotency/deduplication
+  "UseOrdering": false   // Per-account ordering
+}
+```
+
+## Test Accounts
+
+Valid accounts in Core Bank API:
+- `NL91ABNA0417164300`
+- `NL20INGB0001234567`
+- `NL39RABO0300065264`
+
+## DevProxy Configuration
+
+### Enable Random Errors
+Edit `devproxy.json`:
+```json
+{
+  "name": "GenericRandomErrorPlugin",
+  "enabled": true  // Set to true
+}
+```
+
+### Add Latency
+```json
+{
+  "name": "LatencyPlugin",
+  "enabled": true  // Set to true
+}
+```
+
+### Rate Limiting
+```json
+{
+  "name": "RateLimitingPlugin",
+  "enabled": true  // Set to true
+}
+```
+
+## Database Files
+
+- `payments.db` - Payments API outbox
+- `corebank.db` - Core Bank API inbox
+
+Delete these files to reset state.
+
+## Troubleshooting
+
+**DevProxy not working?**
+```bash
+dotnet tool restore
+dotnet devproxy --help
+```
+
+**Port already in use?**
+```bash
+lsof -ti:5032 | xargs kill  # Core Bank API
+lsof -ti:5294 | xargs kill  # Payments API
+lsof -ti:8000 | xargs kill  # Dev Proxy
+```
+
+**Jaeger not showing traces?**
+- Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `appsettings.json`
+- Ensure docker compose is running: `docker compose ps`
+
+**Database errors?**
+```bash
+# Delete and recreate
+rm CoreBankDemo.PaymentsAPI/payments.db
+rm CoreBankDemo.CoreBankAPI/corebank.db
+# Restart APIs
+```
+
+## Further Reading
+
+- [Resilience Patterns](https://learn.microsoft.com/en-us/dotnet/core/resilience/)
+- [Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html)
+- [Idempotent Consumer](https://microservices.io/patterns/communication-style/idempotent-consumer.html)
+- [Dev Proxy](https://learn.microsoft.com/en-us/microsoft-cloud/dev/dev-proxy/)
+- [OpenTelemetry .NET](https://opentelemetry.io/docs/languages/net/)

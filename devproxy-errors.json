@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/dev-proxy/main/schemas/v0.22.0/genericrandomerrorfile.schema.json",
+  "errors": [
+    {
+      "request": {
+        "url": "http://localhost:5032/api/*",
+        "method": "POST"
+      },
+      "responses": [
+        {
+          "statusCode": 503,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Service temporarily unavailable"
+          }
+        },
+        {
+          "statusCode": 429,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Retry-After",
+              "value": "60"
+            }
+          ],
+          "body": {
+            "error": "Too many requests"
+          }
+        },
+        {
+          "statusCode": 500,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Internal server error"
+          }
+        }
+      ]
+    }
+  ]
+}

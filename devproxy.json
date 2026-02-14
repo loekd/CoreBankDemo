@@ -1,0 +1,40 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/dev-proxy/main/schemas/v0.22.0/devproxyrc.schema.json",
+  "plugins": [
+    {
+      "name": "GenericRandomErrorPlugin",
+      "enabled": false,
+      "pluginPath": "~appFolder/plugins/dev-proxy-plugins.dll",
+      "configSection": "errorsCoreBank"
+    },
+    {
+      "name": "RateLimitingPlugin",
+      "enabled": false,
+      "pluginPath": "~appFolder/plugins/dev-proxy-plugins.dll",
+      "configSection": "rateLimiting"
+    },
+    {
+      "name": "LatencyPlugin",
+      "enabled": false,
+      "pluginPath": "~appFolder/plugins/dev-proxy-plugins.dll",
+      "configSection": "latency"
+    }
+  ],
+  "urlsToWatch": [
+    "http://localhost:5032/*"
+  ],
+  "port": 8000,
+  "record": false,
+  "errorsCoreBank": {
+    "errorsFile": "devproxy-errors.json"
+  },
+  "rateLimiting": {
+    "costPerRequest": 1,
+    "rateLimit": 10,
+    "resetTimeWindowSeconds": 60
+  },
+  "latency": {
+    "minMs": 200,
+    "maxMs": 2000
+  }
+}

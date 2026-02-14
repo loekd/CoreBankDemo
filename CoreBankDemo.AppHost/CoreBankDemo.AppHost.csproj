@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Sdk Name="Aspire.AppHost.Sdk" Version="13.1.1" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>6bc51f0a-6833-4e24-8146-a9ad9fb8b58e</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AppHost" Version="13.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CoreBankDemo.PaymentsAPI\CoreBankDemo.PaymentsAPI.csproj" />
+    <ProjectReference Include="..\CoreBankDemo.CoreBankAPI\CoreBankDemo.CoreBankAPI.csproj" />
+  </ItemGroup>
+
+</Project>

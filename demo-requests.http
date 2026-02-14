@@ -1,0 +1,163 @@
+### ===== STAGE 0: BASELINE DEMO =====
+
+### 1. Process Payment (Valid Account)
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 100.00,
+  "currency": "EUR"
+}
+
+### 2. Process Payment (Invalid Account)
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "INVALID-ACCOUNT",
+  "amount": 50.00,
+  "currency": "EUR"
+}
+
+### ===== STAGE 1: RETRY & CIRCUIT BREAKER =====
+### (Enable GenericRandomErrorPlugin in devproxy.json first)
+
+### 3. Test through DevProxy - Will retry on failures
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 75.50,
+  "currency": "EUR"
+}
+
+### ===== STAGE 2: OUTBOX PATTERN =====
+### (UseOutbox: true in appsettings.Development.json)
+
+### 4. Send payment - gets stored in outbox
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 200.00,
+  "currency": "EUR"
+}
+
+### 5. Query outbox messages
+GET http://localhost:5294/api/outbox
+
+### ===== STAGE 3: INBOX PATTERN (IDEMPOTENCY) =====
+### (UseInbox: true in CoreBankAPI appsettings.Development.json)
+
+### 6. Send transaction with idempotency key (first time)
+POST http://localhost:5032/api/transactions/process
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 100.00,
+  "currency": "EUR",
+  "idempotencyKey": "demo-payment-001"
+}
+
+### 7. Send SAME transaction again - should return cached response
+POST http://localhost:5032/api/transactions/process
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 100.00,
+  "currency": "EUR",
+  "idempotencyKey": "demo-payment-001"
+}
+
+### 8. Query inbox messages
+GET http://localhost:5032/api/inbox
+
+### ===== STAGE 4: MESSAGE ORDERING =====
+### (UseOrdering: true in appsettings.Development.json)
+
+### 9. Multiple payments from Account 1 (should process in order)
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 10.00,
+  "currency": "EUR"
+}
+
+### 10. Account 1 payment #2
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL39RABO0300065264",
+  "amount": 20.00,
+  "currency": "EUR"
+}
+
+### 11. Account 1 payment #3
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 30.00,
+  "currency": "EUR"
+}
+
+### 12. Multiple payments from Account 2 (processes in parallel with Account 1)
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL20INGB0001234567",
+  "toAccount": "NL91ABNA0417164300",
+  "amount": 50.00,
+  "currency": "EUR"
+}
+
+### 13. Account 2 payment #2
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL20INGB0001234567",
+  "toAccount": "NL39RABO0300065264",
+  "amount": 60.00,
+  "currency": "EUR"
+}
+
+### 14. Check outbox to see partitions
+GET http://localhost:5294/api/outbox
+
+### ===== DIRECT CORE BANK API TESTS =====
+
+### 15. Direct Core Bank - Validate Account
+POST http://localhost:5032/api/accounts/validate
+Content-Type: application/json
+
+{
+  "accountNumber": "NL91ABNA0417164300"
+}
+
+### 16. Test through DevProxy (port 8000)
+POST http://localhost:8000/api/accounts/validate
+Content-Type: application/json
+
+{
+  "accountNumber": "NL91ABNA0417164300"
+}
