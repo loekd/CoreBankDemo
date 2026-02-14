@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Models;
+using Dapr.Client;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
@@ -8,18 +9,18 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 [Route("api/[controller]")]
 public class PaymentsController : ControllerBase
 {
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly DaprClient _daprClient;
     private readonly PaymentsDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
 
     public PaymentsController(
-        IHttpClientFactory httpClientFactory,
+        DaprClient daprClient,
         PaymentsDbContext dbContext,
         IConfiguration configuration,
         TimeProvider timeProvider)
     {
-        _httpClientFactory = httpClientFactory;
+        _daprClient = daprClient;
         _dbContext = dbContext;
         _configuration = configuration;
         _timeProvider = timeProvider;
@@ -71,28 +72,24 @@ public class PaymentsController : ControllerBase
             return Accepted($"/api/payments/{paymentId}", response);
         }
 
-        // Direct processing (original behavior)
-        var client = _httpClientFactory.CreateClient("CoreBank");
-        var coreBankUrl = _configuration["CoreBankApi:BaseUrl"] ?? "http://localhost:5032";
-
+        // Direct processing using Dapr service invocation
         try
         {
-            // Step 1: Validate account with legacy core bank
-            var validationResponse = await client.PostAsJsonAsync(
-                $"{coreBankUrl}/api/accounts/validate",
+            // Step 1: Validate account with legacy core bank using Dapr
+            var validation = await _daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
+                "corebank-api",
+                "api/accounts/validate",
                 new { AccountNumber = request.ToAccount });
-
-            validationResponse.EnsureSuccessStatusCode();
-            var validation = await validationResponse.Content.ReadFromJsonAsync<AccountValidationResponse>();
 
             if (validation?.IsValid != true)
             {
                 return BadRequest(new { Errors = new[] { "Invalid account number" } });
             }
 
-            // Step 2: Process transaction with legacy core bank
-            var transactionResponse = await client.PostAsJsonAsync(
-                $"{coreBankUrl}/api/transactions/process",
+            // Step 2: Process transaction with legacy core bank using Dapr
+            var transaction = await _daprClient.InvokeMethodAsync<object, TransactionResponse>(
+                "corebank-api",
+                "api/transactions/process",
                 new
                 {
                     FromAccount = request.FromAccount,
@@ -101,9 +98,6 @@ public class PaymentsController : ControllerBase
                     Currency = request.Currency,
                     IdempotencyKey = paymentId
                 });
-
-            transactionResponse.EnsureSuccessStatusCode();
-            var transaction = await transactionResponse.Content.ReadFromJsonAsync<TransactionResponse>();
 
             var successResponse = new PaymentResponse(
                 paymentId,
@@ -116,7 +110,7 @@ public class PaymentsController : ControllerBase
 
             return Ok(successResponse);
         }
-        catch (HttpRequestException ex)
+        catch (Exception ex)
         {
             return Problem(
                 title: "Core Bank System Unavailable",

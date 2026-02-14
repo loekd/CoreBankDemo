@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
+using Dapr.Client;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
@@ -12,15 +13,18 @@ public class TransactionsController : ControllerBase
     private readonly CoreBankDbContext _dbContext;
     private readonly IConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
+    private readonly DaprClient _daprClient;
 
     public TransactionsController(
         CoreBankDbContext dbContext,
         IConfiguration configuration,
-        TimeProvider timeProvider)
+        TimeProvider timeProvider,
+        DaprClient daprClient)
     {
         _dbContext = dbContext;
         _configuration = configuration;
         _timeProvider = timeProvider;
+        _daprClient = daprClient;
     }
 
     [HttpPost("process")]
@@ -129,11 +133,36 @@ public class TransactionsController : ControllerBase
 
         await _dbContext.SaveChangesAsync();
 
+        var transactionId = Guid.NewGuid().ToString();
         var response = new TransactionResponse(
-            Guid.NewGuid().ToString(),
+            transactionId,
             "Completed",
             _timeProvider.GetUtcNow()
         );
+
+        // Publish transaction completed event via Dapr pub/sub
+        try
+        {
+            await _daprClient.PublishEventAsync(
+                "pubsub",
+                "transaction-completed",
+                new
+                {
+                    TransactionId = transactionId,
+                    FromAccount = request.FromAccount,
+                    ToAccount = request.ToAccount,
+                    Amount = request.Amount,
+                    Currency = request.Currency,
+                    CompletedAt = _timeProvider.GetUtcNow().UtcDateTime,
+                    IdempotencyKey = request.IdempotencyKey
+                });
+        }
+        catch (Exception ex)
+        {
+            // Log the error but don't fail the transaction
+            // This ensures the transaction succeeds even if pub/sub is temporarily unavailable
+            Console.WriteLine($"Failed to publish transaction event: {ex.Message}");
+        }
 
         return Ok(response);
     }

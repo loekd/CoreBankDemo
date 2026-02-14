@@ -12,8 +12,9 @@ public class Program
         // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
         builder.AddServiceDefaults();
 
-        // Add controllers
-        builder.Services.AddControllers();
+        // Add Dapr
+        builder.Services.AddControllers().AddDapr();
+        builder.Services.AddDaprClient();
         builder.Services.AddOpenApi();
         builder.Services.AddEndpointsApiExplorer();
         builder.Services.AddSwaggerGen();
