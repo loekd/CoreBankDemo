@@ -30,92 +30,120 @@ public class PaymentsController : ControllerBase
     public async Task<IActionResult> ProcessPayment([FromBody] PaymentRequest request)
     {
         if (!ModelState.IsValid)
-        {
-            var errors = ModelState.Values
-                .SelectMany(v => v.Errors)
-                .Select(e => e.ErrorMessage)
-                .ToList();
-            return BadRequest(new { Errors = errors });
-        }
+            return BadRequest(new { Errors = GetModelErrors() });
 
         var paymentId = Guid.NewGuid().ToString();
+        var messageId = Guid.NewGuid().ToString();
         var useOutbox = _configuration.GetValue<bool>("Features:UseOutbox");
 
         if (useOutbox)
+            return await ProcessWithOutbox(request, paymentId, messageId);
+
+        return await ProcessDirectly(request, paymentId);
+    }
+
+    private async Task<IActionResult> ProcessWithOutbox(PaymentRequest request, string paymentId, string messageId)
+    {
+        // Check for duplicate message
+        var existingMessage = await _dbContext.OutboxMessages
+            .FirstOrDefaultAsync(m => m.MessageId == messageId);
+
+        if (existingMessage != null)
         {
-            // Store in outbox for later processing
-            var outboxMessage = new OutboxMessage
+            return Accepted($"/api/payments/{existingMessage.PaymentId}",
+                CreatePendingResponse(existingMessage.PaymentId, request));
+        }
+
+        var outboxMessage = new OutboxMessage
+        {
+            Id = Guid.NewGuid(),
+            MessageId = messageId,
+            PaymentId = paymentId,
+            FromAccount = request.FromAccount,
+            ToAccount = request.ToAccount,
+            Amount = request.Amount,
+            Currency = request.Currency,
+            CreatedAt = _timeProvider.GetUtcNow().UtcDateTime,
+            Status = "Pending"
+        };
+
+        _dbContext.OutboxMessages.Add(outboxMessage);
+        await _dbContext.SaveChangesAsync();
+
+        return Accepted($"/api/payments/{paymentId}", CreatePendingResponse(paymentId, request));
+    }
+
+    private async Task<IActionResult> ProcessDirectly(PaymentRequest request, string paymentId)
+    {
+        try
+        {
+            if (!await ValidateAccount(request.ToAccount))
+                return BadRequest(new { Errors = new[] { "Invalid account number" } });
+
+            var transaction = await ProcessTransaction(request, paymentId);
+
+            return Ok(CreateSuccessResponse(paymentId, transaction, request));
+        }
+        catch (Exception ex)
+        {
+            return Problem(title: "Core Bank System Unavailable", detail: ex.Message, statusCode: 503);
+        }
+    }
+
+    private async Task<bool> ValidateAccount(string accountNumber)
+    {
+        var validation = await _daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
+            "corebank-api",
+            "api/accounts/validate",
+            new { AccountNumber = accountNumber });
+
+        return validation?.IsValid == true;
+    }
+
+    private async Task<TransactionResponse> ProcessTransaction(PaymentRequest request, string paymentId)
+    {
+        return await _daprClient.InvokeMethodAsync<object, TransactionResponse>(
+            "corebank-api",
+            "api/transactions/process",
+            new
             {
-                Id = Guid.NewGuid(),
-                PaymentId = paymentId,
                 FromAccount = request.FromAccount,
                 ToAccount = request.ToAccount,
                 Amount = request.Amount,
                 Currency = request.Currency,
-                CreatedAt = _timeProvider.GetUtcNow().UtcDateTime,
-                Status = "Pending",
-                PartitionKey = request.FromAccount // Partition by account for ordering
-            };
+                IdempotencyKey = paymentId
+            });
+    }
 
-            _dbContext.OutboxMessages.Add(outboxMessage);
-            await _dbContext.SaveChangesAsync();
+    private List<string> GetModelErrors()
+    {
+        return ModelState.Values
+            .SelectMany(v => v.Errors)
+            .Select(e => e.ErrorMessage)
+            .ToList();
+    }
 
-            var response = new PaymentResponse(
-                paymentId,
-                "pending",
-                "Pending",
-                request.Amount,
-                request.Currency,
-                _timeProvider.GetUtcNow()
-            );
+    private PaymentResponse CreatePendingResponse(string paymentId, PaymentRequest request)
+    {
+        return new PaymentResponse(
+            paymentId,
+            "pending",
+            "Pending",
+            request.Amount,
+            request.Currency,
+            _timeProvider.GetUtcNow()
+        );
+    }
 
-            return Accepted($"/api/payments/{paymentId}", response);
-        }
-
-        // Direct processing using Dapr service invocation
-        try
-        {
-            // Step 1: Validate account with legacy core bank using Dapr
-            var validation = await _daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
-                "corebank-api",
-                "api/accounts/validate",
-                new { AccountNumber = request.ToAccount });
-
-            if (validation?.IsValid != true)
-            {
-                return BadRequest(new { Errors = new[] { "Invalid account number" } });
-            }
-
-            // Step 2: Process transaction with legacy core bank using Dapr
-            var transaction = await _daprClient.InvokeMethodAsync<object, TransactionResponse>(
-                "corebank-api",
-                "api/transactions/process",
-                new
-                {
-                    FromAccount = request.FromAccount,
-                    ToAccount = request.ToAccount,
-                    Amount = request.Amount,
-                    Currency = request.Currency,
-                    IdempotencyKey = paymentId
-                });
-
-            var successResponse = new PaymentResponse(
-                paymentId,
-                transaction?.TransactionId ?? "unknown",
-                "Completed",
-                request.Amount,
-                request.Currency,
-                _timeProvider.GetUtcNow()
-            );
-
-            return Ok(successResponse);
-        }
-        catch (Exception ex)
-        {
-            return Problem(
-                title: "Core Bank System Unavailable",
-                detail: ex.Message,
-                statusCode: 503);
-        }
+    private PaymentResponse CreateSuccessResponse(string paymentId, TransactionResponse transaction, PaymentRequest request)
+    {
+        return new PaymentResponse(
+            paymentId,
+            transaction?.TransactionId ?? "unknown",
+            "Completed",
+            request.Amount,
+            request.Currency,
+            _timeProvider.GetUtcNow()
+        );
     }
 }
