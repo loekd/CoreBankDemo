@@ -12,8 +12,8 @@ public class InboxMessage
     public required string Currency { get; set; }
     public string? TransactionId { get; set; }
     public string Status { get; set; } = "Pending"; // Pending, Processing, Completed, Failed
-    public DateTimeOffset ReceivedAt { get; set; }
-    public DateTimeOffset? ProcessedAt { get; set; }
+    public DateTime ReceivedAt { get; set; }
+    public DateTime? ProcessedAt { get; set; }
     public int RetryCount { get; set; }
     public string? LastError { get; set; }
     public string? ResponsePayload { get; set; }

@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using System.Text.Json;
+using CoreBankDemo.CoreBankAPI.Models;
 
 namespace CoreBankDemo.CoreBankAPI;
 
@@ -8,12 +9,14 @@ public class InboxProcessor : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<InboxProcessor> _logger;
+    private readonly TimeProvider _timeProvider;
     private readonly ActivitySource _activitySource = new("InboxProcessor");
 
-    public InboxProcessor(IServiceProvider serviceProvider, ILogger<InboxProcessor> logger)
+    public InboxProcessor(IServiceProvider serviceProvider, ILogger<InboxProcessor> logger, TimeProvider timeProvider)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _timeProvider = timeProvider;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -62,22 +65,69 @@ public class InboxProcessor : BackgroundService
                 message.Status = "Processing";
                 await dbContext.SaveChangesAsync(cancellationToken);
 
-                // Simulate transaction processing in legacy core bank
+                // Get accounts
+                var fromAccount = await dbContext.Accounts
+                    .FirstOrDefaultAsync(a => a.AccountNumber == message.FromAccount, cancellationToken);
+                
+                var toAccount = await dbContext.Accounts
+                    .FirstOrDefaultAsync(a => a.AccountNumber == message.ToAccount, cancellationToken);
+
+                // Re-validate (defensive check)
+                if (fromAccount == null || !fromAccount.IsActive)
+                {
+                    message.Status = "Failed";
+                    message.LastError = $"Source account {message.FromAccount} not found or inactive";
+                    _logger.LogWarning("Transaction {IdempotencyKey} failed: {Error}", 
+                        message.IdempotencyKey, message.LastError);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    continue;
+                }
+
+                if (toAccount == null || !toAccount.IsActive)
+                {
+                    message.Status = "Failed";
+                    message.LastError = $"Destination account {message.ToAccount} not found or inactive";
+                    _logger.LogWarning("Transaction {IdempotencyKey} failed: {Error}", 
+                        message.IdempotencyKey, message.LastError);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    continue;
+                }
+
+                if (fromAccount.Balance < message.Amount)
+                {
+                    message.Status = "Failed";
+                    message.LastError = $"Insufficient funds. Available: {fromAccount.Balance}, Required: {message.Amount}";
+                    _logger.LogWarning("Transaction {IdempotencyKey} failed: {Error}", 
+                        message.IdempotencyKey, message.LastError);
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                    continue;
+                }
+
+                // Process transaction: deduct from source, credit to destination
+                fromAccount.Balance -= message.Amount;
+                fromAccount.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
+
+                toAccount.Balance += message.Amount;
+                toAccount.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
+
                 var transactionId = Guid.NewGuid().ToString();
+                var processedAt = _timeProvider.GetUtcNow();
                 var response = new TransactionResponse(
                     transactionId,
                     "Completed",
-                    DateTimeOffset.UtcNow
+                    processedAt
                 );
 
                 message.TransactionId = transactionId;
                 message.Status = "Completed";
-                message.ProcessedAt = DateTimeOffset.UtcNow;
+                message.ProcessedAt = processedAt.UtcDateTime;
                 message.ResponsePayload = JsonSerializer.Serialize(response);
 
                 _logger.LogInformation(
-                    "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}, transaction {TransactionId}",
-                    message.Id, message.IdempotencyKey, transactionId);
+                    "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}, transaction {TransactionId}. " +
+                    "Transferred {Amount} {Currency} from {FromAccount} to {ToAccount}",
+                    message.Id, message.IdempotencyKey, transactionId, message.Amount, message.Currency, 
+                    message.FromAccount, message.ToAccount);
             }
             catch (Exception ex)
             {

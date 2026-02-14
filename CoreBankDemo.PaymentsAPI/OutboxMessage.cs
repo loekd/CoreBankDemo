@@ -10,8 +10,8 @@ public class OutboxMessage
     public required string ToAccount { get; set; }
     public decimal Amount { get; set; }
     public required string Currency { get; set; }
-    public DateTimeOffset CreatedAt { get; set; }
-    public DateTimeOffset? ProcessedAt { get; set; }
+    public DateTime CreatedAt { get; set; }
+    public DateTime? ProcessedAt { get; set; }
     public int RetryCount { get; set; }
     public string? LastError { get; set; }
     public string Status { get; set; } = "Pending"; // Pending, Processing, Completed, Failed

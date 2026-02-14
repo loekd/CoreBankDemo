@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
+using CoreBankDemo.PaymentsAPI.Models;
 
 namespace CoreBankDemo.PaymentsAPI;
 
@@ -7,12 +8,14 @@ public class OutboxProcessor : BackgroundService
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<OutboxProcessor> _logger;
+    private readonly TimeProvider _timeProvider;
     private readonly ActivitySource _activitySource = new("OutboxProcessor");
 
-    public OutboxProcessor(IServiceProvider serviceProvider, ILogger<OutboxProcessor> logger)
+    public OutboxProcessor(IServiceProvider serviceProvider, ILogger<OutboxProcessor> logger, TimeProvider timeProvider)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
+        _timeProvider = timeProvider;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -131,7 +134,7 @@ public class OutboxProcessor : BackgroundService
                 transactionResponse.EnsureSuccessStatusCode();
 
                 message.Status = "Completed";
-                message.ProcessedAt = DateTimeOffset.UtcNow;
+                message.ProcessedAt = _timeProvider.GetUtcNow().UtcDateTime;
                 _logger.LogInformation("Successfully processed outbox message {MessageId} for payment {PaymentId}",
                     message.Id, message.PaymentId);
             }
