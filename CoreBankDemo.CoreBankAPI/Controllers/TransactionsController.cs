@@ -2,180 +2,150 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
-using Dapr.Client;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class TransactionsController : ControllerBase
+public class TransactionsController(
+    CoreBankDbContext dbContext,
+    IConfiguration configuration,
+    TimeProvider timeProvider)
+    : ControllerBase
 {
-    private readonly CoreBankDbContext _dbContext;
-    private readonly IConfiguration _configuration;
-    private readonly TimeProvider _timeProvider;
-    private readonly DaprClient _daprClient;
-
-    public TransactionsController(
-        CoreBankDbContext dbContext,
-        IConfiguration configuration,
-        TimeProvider timeProvider,
-        DaprClient daprClient)
-    {
-        _dbContext = dbContext;
-        _configuration = configuration;
-        _timeProvider = timeProvider;
-        _daprClient = daprClient;
-    }
-
     [HttpPost("process")]
     public async Task<IActionResult> ProcessTransaction([FromBody] TransactionRequest request)
     {
         if (!ModelState.IsValid)
-        {
-            var errors = ModelState.Values
-                .SelectMany(v => v.Errors)
-                .Select(e => e.ErrorMessage)
-                .ToList();
-            return BadRequest(new { Errors = errors });
-        }
+            return BadRequest(new { Errors = GetModelErrors() });
 
-        var useInbox = _configuration.GetValue<bool>("Features:UseInbox");
+        var validationResult = await ValidateTransactionRequest(request);
+        if (!validationResult.IsValid)
+            return BadRequest(new { Errors = validationResult.Errors });
+
         var idempotencyKey = request.IdempotencyKey;
-
-        // Validate accounts exist and have sufficient funds
-        var fromAccount = await _dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.FromAccount);
-
-        var toAccount = await _dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.ToAccount);
-
-        var validationErrors = new List<string>();
-
-        if (fromAccount == null)
-            validationErrors.Add($"Source account {request.FromAccount} not found");
-        else if (!fromAccount.IsActive)
-            validationErrors.Add($"Source account {request.FromAccount} is not active");
-        else if (fromAccount.Balance < request.Amount)
-            validationErrors.Add($"Insufficient funds. Available: {fromAccount.Balance} {fromAccount.Currency}, Required: {request.Amount} {request.Currency}");
-        else if (fromAccount.Currency != request.Currency)
-            validationErrors.Add($"Currency mismatch. Account currency: {fromAccount.Currency}, Transaction currency: {request.Currency}");
-
-        if (toAccount == null)
-            validationErrors.Add($"Destination account {request.ToAccount} not found");
-        else if (!toAccount.IsActive)
-            validationErrors.Add($"Destination account {request.ToAccount} is not active");
-
-        if (validationErrors.Any())
-            return BadRequest(new { Errors = validationErrors });
-
-        if (useInbox && !string.IsNullOrEmpty(idempotencyKey))
+        for (int attempt = 1; attempt <= 3; attempt++)
         {
-            // Check if already received (idempotency check)
-            var existing = await _dbContext.InboxMessages
+            // Check for duplicate request
+            var existing = await dbContext.InboxMessages
                 .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey);
 
             if (existing != null)
+                return HandleExistingInboxMessage(existing);
+            try
             {
-                // Already received - return cached response based on status
-                if (existing.Status == "Completed" && !string.IsNullOrEmpty(existing.ResponsePayload))
+                await ProcessWithInbox(request);
+                break;
+            }
+            catch (DbUpdateException)
+            {
+                // Another instance has inserted this transaction in the inbox
+                await Task.Delay(TimeSpan.FromSeconds(1));
+                if (attempt == 3)
                 {
-                    var cachedResponse = JsonSerializer.Deserialize<TransactionResponse>(existing.ResponsePayload);
-                    return Ok(cachedResponse);
-                }
-                else if (existing.Status == "Pending" || existing.Status == "Processing")
-                {
-                    // Still processing
-                    return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
-                    {
-                        IdempotencyKey = existing.IdempotencyKey,
-                        Status = existing.Status,
-                        Message = "Transaction is being processed"
-                    });
-                }
-                else if (existing.Status == "Failed")
-                {
-                    return BadRequest(new { Errors = new[] { existing.LastError ?? "Transaction failed" } });
+                    throw;
                 }
             }
+        }
+        
+        return Accepted($"/api/transactions/{idempotencyKey}", new
+        {
+            IdempotencyKey = idempotencyKey,
+            Status = "Pending",
+            Message = "Transaction accepted for processing"
+        });
+    }
 
-            // Calculate partition based on idempotencyKey
-            var partitionCount = _configuration.GetValue<int>("InboxProcessing:PartitionCount");
-            var partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
+    private async Task<ValidationResult> ValidateTransactionRequest(TransactionRequest request)
+    {
+        var fromAccount = await dbContext.Accounts
+            .FirstOrDefaultAsync(a => a.AccountNumber == request.FromAccount);
 
-            // Validation passed - store in inbox for processing
-            var inboxMessage = new InboxMessage
+        var toAccount = await dbContext.Accounts
+            .FirstOrDefaultAsync(a => a.AccountNumber == request.ToAccount);
+
+        var errors = new List<string>();
+
+        // Validate source account
+        if (fromAccount == null)
+            errors.Add($"Source account {request.FromAccount} not found");
+        else if (!fromAccount.IsActive)
+            errors.Add($"Source account {request.FromAccount} is not active");
+        else if (fromAccount.Balance < request.Amount)
+            errors.Add($"Insufficient funds. Available: {fromAccount.Balance} {fromAccount.Currency}, Required: {request.Amount} {request.Currency}");
+        else if (fromAccount.Currency != request.Currency)
+            errors.Add($"Currency mismatch. Account currency: {fromAccount.Currency}, Transaction currency: {request.Currency}");
+
+        // Validate destination account
+        if (toAccount == null)
+            errors.Add($"Destination account {request.ToAccount} not found");
+        else if (!toAccount.IsActive)
+            errors.Add($"Destination account {request.ToAccount} is not active");
+
+        return new ValidationResult(errors.Count == 0, errors, fromAccount, toAccount);
+    }
+
+    private async Task ProcessWithInbox(TransactionRequest request)
+    {
+        var idempotencyKey = request.IdempotencyKey;
+        var partitionCount = configuration.GetValue<int>("InboxProcessing:PartitionCount");
+        var partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
+
+        var inboxMessage = new InboxMessage
+        {
+            Id = Guid.NewGuid(),
+            IdempotencyKey = idempotencyKey,
+            PartitionId = partitionId,
+            FromAccount = request.FromAccount,
+            ToAccount = request.ToAccount,
+            Amount = request.Amount,
+            Currency = request.Currency,
+            ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
+            Status = "Pending"
+        };
+
+        dbContext.InboxMessages.Add(inboxMessage);
+        await dbContext.SaveChangesAsync();
+    }
+
+    private IActionResult HandleExistingInboxMessage(InboxMessage existing)
+    {
+        if (existing.Status == "Completed" && !string.IsNullOrEmpty(existing.ResponsePayload))
+        {
+            var cachedResponse = JsonSerializer.Deserialize<TransactionResponse>(existing.ResponsePayload);
+            return Ok(cachedResponse);
+        }
+
+        if (existing.Status is "Pending" or "Processing")
+        {
+            return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
             {
-                Id = Guid.NewGuid(),
-                IdempotencyKey = idempotencyKey,
-                PartitionId = partitionId,
-                FromAccount = request.FromAccount,
-                ToAccount = request.ToAccount,
-                Amount = request.Amount,
-                Currency = request.Currency,
-                ReceivedAt = _timeProvider.GetUtcNow().UtcDateTime,
-                Status = "Pending"
-            };
-
-            _dbContext.InboxMessages.Add(inboxMessage);
-            await _dbContext.SaveChangesAsync();
-
-            return Accepted($"/api/transactions/{idempotencyKey}", new
-            {
-                IdempotencyKey = idempotencyKey,
-                Status = "Pending",
-                Message = "Transaction accepted for processing"
+                IdempotencyKey = existing.IdempotencyKey,
+                Status = existing.Status,
+                Message = "Transaction is being processed"
             });
         }
 
-        // Direct processing (when inbox is disabled)
-        // Deduct from source account
-        fromAccount!.Balance -= request.Amount;
-        fromAccount.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
+        if (existing.Status is "Failed")
+            return BadRequest(new { Errors = new[] { existing.LastError ?? "Transaction failed" } });
 
-        // Credit to destination account
-        toAccount!.Balance += request.Amount;
-        toAccount.UpdatedAt = _timeProvider.GetUtcNow().UtcDateTime;
-
-        await _dbContext.SaveChangesAsync();
-
-        var transactionId = Guid.NewGuid().ToString();
-        var response = new TransactionResponse(
-            transactionId,
-            "Completed",
-            _timeProvider.GetUtcNow()
-        );
-
-        // Publish transaction completed event via Dapr pub/sub
-        try
-        {
-            await _daprClient.PublishEventAsync(
-                "pubsub",
-                "transaction-completed",
-                new
-                {
-                    TransactionId = transactionId,
-                    FromAccount = request.FromAccount,
-                    ToAccount = request.ToAccount,
-                    Amount = request.Amount,
-                    Currency = request.Currency,
-                    CompletedAt = _timeProvider.GetUtcNow().UtcDateTime,
-                    IdempotencyKey = request.IdempotencyKey
-                });
-        }
-        catch (Exception ex)
-        {
-            // Log the error but don't fail the transaction
-            // This ensures the transaction succeeds even if pub/sub is temporarily unavailable
-            Console.WriteLine($"Failed to publish transaction event: {ex.Message}");
-        }
-
-        return Ok(response);
+        return StatusCode(500, new { Errors = new[] { "Unknown transaction status" } });
     }
+
+    private List<string> GetModelErrors()
+    {
+        return ModelState.Values
+            .SelectMany(v => v.Errors)
+            .Select(e => e.ErrorMessage)
+            .ToList();
+    }
+
+    private record ValidationResult(bool IsValid, List<string> Errors, Account? FromAccount, Account? ToAccount);
 
     [HttpGet("{idempotencyKey}")]
     public async Task<IActionResult> GetTransactionStatus(string idempotencyKey)
     {
-        var message = await _dbContext.InboxMessages
+        var message = await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey);
 
         if (message == null)
