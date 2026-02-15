@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
+using Microsoft.Data.Sqlite;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
@@ -14,12 +15,14 @@ public class TransactionsController(
     : ControllerBase
 {
     [HttpPost("process")]
-    public async Task<IActionResult> ProcessTransaction([FromBody] TransactionRequest request)
+    public async Task<IActionResult> ProcessTransaction([FromBody] TransactionRequest request, CancellationToken cancellationToken = default)
     {
+        await Task.Delay(TimeSpan.FromSeconds(12), cancellationToken);
+        
         if (!ModelState.IsValid)
             return BadRequest(new { Errors = GetModelErrors() });
 
-        var validationResult = await ValidateTransactionRequest(request);
+        var validationResult = await ValidateTransactionRequest(request, cancellationToken);
         if (!validationResult.IsValid)
             return BadRequest(new { Errors = validationResult.Errors });
 
@@ -28,19 +31,19 @@ public class TransactionsController(
         {
             // Check for duplicate request
             var existing = await dbContext.InboxMessages
-                .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey);
+                .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
 
             if (existing != null)
                 return HandleExistingInboxMessage(existing);
             try
             {
-                await ProcessWithInbox(request);
+                await ProcessWithInbox(request, cancellationToken);
                 break;
             }
-            catch (DbUpdateException)
+            catch (DbUpdateException ex) when (ex.InnerException is SqliteException { SqliteErrorCode: 19 })
             {
                 // Another instance has inserted this transaction in the inbox
-                await Task.Delay(TimeSpan.FromSeconds(1));
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 if (attempt == 3)
                 {
                     throw;
@@ -56,13 +59,13 @@ public class TransactionsController(
         });
     }
 
-    private async Task<ValidationResult> ValidateTransactionRequest(TransactionRequest request)
+    private async Task<ValidationResult> ValidateTransactionRequest(TransactionRequest request, CancellationToken cancellationToken)
     {
         var fromAccount = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.FromAccount);
+            .FirstOrDefaultAsync(a => a.AccountNumber == request.FromAccount, cancellationToken);
 
         var toAccount = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.ToAccount);
+            .FirstOrDefaultAsync(a => a.AccountNumber == request.ToAccount, cancellationToken);
 
         var errors = new List<string>();
 
@@ -85,7 +88,7 @@ public class TransactionsController(
         return new ValidationResult(errors.Count == 0, errors, fromAccount, toAccount);
     }
 
-    private async Task ProcessWithInbox(TransactionRequest request)
+    private async Task ProcessWithInbox(TransactionRequest request, CancellationToken cancellationToken)
     {
         var idempotencyKey = request.IdempotencyKey;
         var partitionCount = configuration.GetValue<int>("InboxProcessing:PartitionCount");
@@ -105,31 +108,30 @@ public class TransactionsController(
         };
 
         dbContext.InboxMessages.Add(inboxMessage);
-        await dbContext.SaveChangesAsync();
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private IActionResult HandleExistingInboxMessage(InboxMessage existing)
     {
-        if (existing.Status == "Completed" && !string.IsNullOrEmpty(existing.ResponsePayload))
+        switch (existing.Status)
         {
-            var cachedResponse = JsonSerializer.Deserialize<TransactionResponse>(existing.ResponsePayload);
-            return Ok(cachedResponse);
-        }
-
-        if (existing.Status is "Pending" or "Processing")
-        {
-            return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
+            case "Completed" when !string.IsNullOrEmpty(existing.ResponsePayload):
             {
-                IdempotencyKey = existing.IdempotencyKey,
-                Status = existing.Status,
-                Message = "Transaction is being processed"
-            });
+                var cachedResponse = JsonSerializer.Deserialize<TransactionResponse>(existing.ResponsePayload);
+                return Ok(cachedResponse);
+            }
+            case "Pending" or "Processing":
+                return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
+                {
+                    IdempotencyKey = existing.IdempotencyKey,
+                    Status = existing.Status,
+                    Message = "Transaction is being processed"
+                });
+            case "Failed":
+                return BadRequest(new { Errors = new[] { existing.LastError ?? "Transaction failed" } });
+            default:
+                return StatusCode(500, new { Errors = new[] { "Unknown transaction status" } });
         }
-
-        if (existing.Status is "Failed")
-            return BadRequest(new { Errors = new[] { existing.LastError ?? "Transaction failed" } });
-
-        return StatusCode(500, new { Errors = new[] { "Unknown transaction status" } });
     }
 
     private List<string> GetModelErrors()
@@ -143,10 +145,10 @@ public class TransactionsController(
     private record ValidationResult(bool IsValid, List<string> Errors, Account? FromAccount, Account? ToAccount);
 
     [HttpGet("{idempotencyKey}")]
-    public async Task<IActionResult> GetTransactionStatus(string idempotencyKey)
+    public async Task<IActionResult> GetTransactionStatus(string idempotencyKey, CancellationToken cancellationToken = default)
     {
         var message = await dbContext.InboxMessages
-            .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey);
+            .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
 
         if (message == null)
             return NotFound(new { Errors = new[] { "Transaction not found" } });

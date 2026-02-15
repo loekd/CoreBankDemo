@@ -17,7 +17,7 @@ public class AccountsController : ControllerBase
     }
 
     [HttpPost("validate")]
-    public async Task<IActionResult> ValidateAccount([FromBody] AccountValidationRequest request)
+    public async Task<IActionResult> ValidateAccount([FromBody] AccountValidationRequest request, CancellationToken cancellationToken = default)
     {
         if (!ModelState.IsValid)
         {
@@ -29,7 +29,7 @@ public class AccountsController : ControllerBase
         }
 
         var account = await _dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.AccountNumber);
+            .FirstOrDefaultAsync(a => a.AccountNumber == request.AccountNumber, cancellationToken);
 
         var isValid = account != null && account.IsActive;
 
@@ -47,7 +47,8 @@ public class AccountsController : ControllerBase
     public async Task<IActionResult> GetAccountDetails(
         [FromRoute]
         [StringLength(34, MinimumLength = 15, ErrorMessage = "AccountNumber must be between 15 and 34 characters")]
-        string accountNumber)
+        string accountNumber,
+        CancellationToken cancellationToken = default)
     {
         if (!ModelState.IsValid)
         {
@@ -59,7 +60,7 @@ public class AccountsController : ControllerBase
         }
 
         var account = await _dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == accountNumber);
+            .FirstOrDefaultAsync(a => a.AccountNumber == accountNumber, cancellationToken);
 
         if (account == null)
             return NotFound(new { Errors = new[] { $"Account {accountNumber} not found" } });

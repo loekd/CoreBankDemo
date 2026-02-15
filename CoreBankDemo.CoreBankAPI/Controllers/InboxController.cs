@@ -15,12 +15,12 @@ public class InboxController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetInboxMessages()
+    public async Task<IActionResult> GetInboxMessages(CancellationToken cancellationToken = default)
     {
         var messages = await _dbContext.InboxMessages
             .OrderByDescending(m => m.ReceivedAt)
             .Take(50)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         return Ok(messages);
     }

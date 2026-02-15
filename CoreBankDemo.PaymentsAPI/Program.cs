@@ -1,5 +1,5 @@
 using Microsoft.EntityFrameworkCore;
-using CoreBankDemo.PaymentsAPI;
+using CoreBankDemo.PaymentsAPI.Outbox;
 
 var builder = WebApplication.CreateBuilder(args);
 

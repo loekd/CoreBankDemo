@@ -1,4 +1,4 @@
-namespace CoreBankDemo.PaymentsAPI;
+namespace CoreBankDemo.PaymentsAPI.Outbox;
 
 public static class PartitionHelper
 {

@@ -1,23 +1,24 @@
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using CoreBankDemo.PaymentsAPI.Models;
+using CoreBankDemo.ServiceDefaults;
 using Dapr.Client;
 
-namespace CoreBankDemo.PaymentsAPI;
+namespace CoreBankDemo.PaymentsAPI.Outbox;
 
 public class OutboxProcessor(
     IServiceProvider serviceProvider,
-    ILogger<OutboxProcessor> logger,
-    TimeProvider timeProvider)
+    TimeProvider timeProvider,
+    IDistributedLockService lockService,
+    ILogger<OutboxProcessor> logger)
     : BackgroundService
 {
     private readonly ActivitySource _activitySource = new("OutboxProcessor");
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
-    private readonly string _instanceId = Guid.NewGuid().ToString();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("Outbox Processor started with instance ID: {InstanceId}", _instanceId);
+        logger.LogInformation("Outbox Processor started");
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -38,80 +39,46 @@ public class OutboxProcessor(
     {
         using var scope = serviceProvider.CreateScope();
         var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
-        var daprClient = scope.ServiceProvider.GetRequiredService<DaprClient>();
-
         var partitionCount = configuration.GetValue<int>("OutboxProcessing:PartitionCount");
-        var lockExpirySeconds = configuration.GetValue<int>("OutboxProcessing:LockExpirySeconds");
 
-        // Try to acquire lock for each partition
-        for (int partitionId = 0; partitionId < partitionCount; partitionId++)
-        {
-            var lockOwner = $"{_instanceId}-partition-{partitionId}";
-            var lockName = $"outbox-partition-{partitionId}";
+        // Process all partitions in parallel
+        logger.LogInformation("Processing {PartitionCount} partitions", partitionCount);
+        var tasks = Enumerable.Range(0, partitionCount)
+            .Select(async partitionId =>
+            { 
+                var lockName = $"outbox-partition-{partitionId}";
+                return await lockService.ExecuteWithLockAsync(
+                        lockName,
+                        async ct => await ProcessPartitionMessages(partitionId, ct),
+                        cancellationToken);   
+                })
+            .ToArray();
 
-            try
-            {
-#pragma warning disable DAPR_DISTRIBUTEDLOCK
-                
-                // Try to acquire lock
-                var lockResponse = await daprClient.Lock(
-                    "lockstore",
-                    lockName,
-                    lockOwner,
-                    lockExpirySeconds,
-                    cancellationToken);
-
-                if (lockResponse.Success)
-                {
-                    logger.LogInformation("Acquired lock for partition {PartitionId}", partitionId);
-
-                    try
-                    {
-                        await ProcessPartitionMessages(partitionId, cancellationToken);
-                    }
-                    finally
-                    {
-                        // Release lock
-                        await daprClient.Unlock("lockstore", lockName, lockOwner, cancellationToken);
-                        logger.LogInformation("Released lock for partition {PartitionId}", partitionId);
-                    }
-#pragma warning restore DAPR_DISTRIBUTEDLOCK
-                }
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to acquire or process partition {PartitionId}", partitionId);
-            }
-        }
+        await Task.WhenAll(tasks);
     }
 
     private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
     {
         using var scope = serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-        var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
-        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
-        var pendingMessages = await GetPendingMessagesForPartition(dbContext, partitionId, cancellationToken);
+        var pendingMessageIds = await GetPendingMessageIdsForPartition(dbContext, partitionId, cancellationToken);
 
-        if (pendingMessages.Count == 0)
+        if (pendingMessageIds.Count == 0)
             return;
 
         logger.LogInformation("Processing {Count} pending outbox messages in partition {PartitionId}",
-            pendingMessages.Count, partitionId);
+            pendingMessageIds.Count, partitionId);
 
-        foreach (var message in pendingMessages)
+        foreach (var messageId in pendingMessageIds)
         {
-            // Process each message in its own DB context to ensure isolation
-            await ProcessMessageIsolated(message.Id, httpClientFactory, configuration, cancellationToken);
+            await ProcessMessage(messageId, cancellationToken);
         }
     }
 
 
-    private async Task ProcessMessageIsolated(
+    private async Task ProcessMessage(
         Guid messageId,
-        IHttpClientFactory httpClientFactory,
-        IConfiguration configuration,
         CancellationToken cancellationToken)
     {
         using var scope = serviceProvider.CreateScope();
@@ -169,12 +136,12 @@ public class OutboxProcessor(
         }
     }
 
-    private static async Task<List<OutboxMessage>> GetPendingMessagesForPartition(
+    private async Task<List<Guid>> GetPendingMessageIdsForPartition(
         PaymentsDbContext dbContext,
         int partitionId,
         CancellationToken cancellationToken)
     {
-        var staleThreshold = DateTime.UtcNow.Subtract(ProcessingTimeout);
+        var staleThreshold = timeProvider.GetUtcNow().Subtract(ProcessingTimeout).UtcDateTime;
 
         return await dbContext.OutboxMessages
             .Where(m => m.PartitionId == partitionId &&
@@ -183,6 +150,7 @@ public class OutboxProcessor(
                         (m.Status == "Processing" && m.CreatedAt < staleThreshold)))
             .OrderBy(m => m.CreatedAt)
             .Take(10)
+            .Select(m => m.Id)
             .ToListAsync(cancellationToken);
     }
 
@@ -199,7 +167,7 @@ public class OutboxProcessor(
                 new { AccountNumber = message.ToAccount },
                 cancellationToken);
 
-            if (validation?.IsValid == true)
+            if (validation.IsValid)
                 return ValidationResult.Success();
 
             return ValidationResult.Failure("Invalid account number");

@@ -1,26 +1,20 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using CoreBankDemo.PaymentsAPI.Outbox;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class OutboxController : ControllerBase
+public class OutboxController(PaymentsDbContext dbContext) : ControllerBase
 {
-    private readonly PaymentsDbContext _dbContext;
-
-    public OutboxController(PaymentsDbContext dbContext)
-    {
-        _dbContext = dbContext;
-    }
-
     [HttpGet]
-    public async Task<IActionResult> GetOutboxMessages()
+    public async Task<IActionResult> GetOutboxMessages(CancellationToken cancellationToken = default)
     {
-        var messages = await _dbContext.OutboxMessages
+        var messages = await dbContext.OutboxMessages
             .OrderByDescending(m => m.CreatedAt)
             .Take(50)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
 
         return Ok(messages);
     }

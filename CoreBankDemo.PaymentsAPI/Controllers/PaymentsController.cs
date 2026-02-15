@@ -1,61 +1,61 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Models;
-using Dapr.Client;
+using CoreBankDemo.PaymentsAPI.Outbox;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class PaymentsController : ControllerBase
+public class PaymentsController(
+    PaymentsDbContext dbContext,
+    IConfiguration configuration,
+    TimeProvider timeProvider) : ControllerBase
 {
-    private readonly DaprClient _daprClient;
-    private readonly PaymentsDbContext _dbContext;
-    private readonly IConfiguration _configuration;
-    private readonly TimeProvider _timeProvider;
-
-    public PaymentsController(
-        DaprClient daprClient,
-        PaymentsDbContext dbContext,
-        IConfiguration configuration,
-        TimeProvider timeProvider)
-    {
-        _daprClient = daprClient;
-        _dbContext = dbContext;
-        _configuration = configuration;
-        _timeProvider = timeProvider;
-    }
-
     [HttpPost]
-    public async Task<IActionResult> ProcessPayment([FromBody] PaymentRequest request)
+    public async Task<IActionResult> ProcessPayment([FromBody] PaymentRequest request, CancellationToken cancellationToken = default)
     {
         if (!ModelState.IsValid)
             return BadRequest(new { Errors = GetModelErrors() });
 
         var paymentId = Guid.NewGuid().ToString();
         var messageId = Guid.NewGuid().ToString();
-        var useOutbox = _configuration.GetValue<bool>("Features:UseOutbox");
 
-        if (useOutbox)
-            return await ProcessWithOutbox(request, paymentId, messageId);
-
-        return await ProcessDirectly(request, paymentId);
-    }
-
-    private async Task<IActionResult> ProcessWithOutbox(PaymentRequest request, string paymentId, string messageId)
-    {
-        // Check for duplicate message
-        var existingMessage = await _dbContext.OutboxMessages
-            .FirstOrDefaultAsync(m => m.MessageId == messageId);
-
-        if (existingMessage != null)
+        // Retry loop to handle unique constraint violations (concurrency)
+        for (int attempt = 1; attempt <= 3; attempt++)
         {
-            return Accepted($"/api/payments/{existingMessage.PaymentId}",
-                CreatePendingResponse(existingMessage.PaymentId, request));
+            // Check for duplicate message
+            var existing = await dbContext.OutboxMessages
+                .FirstOrDefaultAsync(m => m.MessageId == messageId, cancellationToken);
+
+            if (existing != null)
+            {
+                return Accepted($"/api/payments/{existing.PaymentId}",
+                    CreatePendingResponse(existing.PaymentId, request));
+            }
+
+            try
+            {
+                await StoreInOutbox(request, paymentId, messageId, cancellationToken);
+                break; // Success - exit retry loop
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is SqliteException sqliteEx &&
+                                               sqliteEx.SqliteErrorCode == 19)
+            {
+                // UNIQUE constraint violation - another instance inserted this message
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                if (attempt == 3)
+                    throw;
+            }
         }
 
-        // Calculate partition based on messageId
-        var partitionCount = _configuration.GetValue<int>("OutboxProcessing:PartitionCount");
+        return Accepted($"/api/payments/{paymentId}", CreatePendingResponse(paymentId, request));
+    }
+
+    private async Task StoreInOutbox(PaymentRequest request, string paymentId, string messageId, CancellationToken cancellationToken)
+    {
+        var partitionCount = configuration.GetValue<int>("OutboxProcessing:PartitionCount");
         var partitionId = PartitionHelper.GetPartitionId(messageId, partitionCount);
 
         var outboxMessage = new OutboxMessage
@@ -68,56 +68,12 @@ public class PaymentsController : ControllerBase
             ToAccount = request.ToAccount,
             Amount = request.Amount,
             Currency = request.Currency,
-            CreatedAt = _timeProvider.GetUtcNow().UtcDateTime,
+            CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
             Status = "Pending"
         };
 
-        _dbContext.OutboxMessages.Add(outboxMessage);
-        await _dbContext.SaveChangesAsync();
-
-        return Accepted($"/api/payments/{paymentId}", CreatePendingResponse(paymentId, request));
-    }
-
-    private async Task<IActionResult> ProcessDirectly(PaymentRequest request, string paymentId)
-    {
-        try
-        {
-            if (!await ValidateAccount(request.ToAccount))
-                return BadRequest(new { Errors = new[] { "Invalid account number" } });
-
-            var transaction = await ProcessTransaction(request, paymentId);
-
-            return Ok(CreateSuccessResponse(paymentId, transaction, request));
-        }
-        catch (Exception ex)
-        {
-            return Problem(title: "Core Bank System Unavailable", detail: ex.Message, statusCode: 503);
-        }
-    }
-
-    private async Task<bool> ValidateAccount(string accountNumber)
-    {
-        var validation = await _daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
-            "corebank-api",
-            "api/accounts/validate",
-            new { AccountNumber = accountNumber });
-
-        return validation?.IsValid == true;
-    }
-
-    private async Task<TransactionResponse> ProcessTransaction(PaymentRequest request, string paymentId)
-    {
-        return await _daprClient.InvokeMethodAsync<object, TransactionResponse>(
-            "corebank-api",
-            "api/transactions/process",
-            new
-            {
-                FromAccount = request.FromAccount,
-                ToAccount = request.ToAccount,
-                Amount = request.Amount,
-                Currency = request.Currency,
-                IdempotencyKey = paymentId
-            });
+        dbContext.OutboxMessages.Add(outboxMessage);
+        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private List<string> GetModelErrors()
@@ -136,19 +92,7 @@ public class PaymentsController : ControllerBase
             "Pending",
             request.Amount,
             request.Currency,
-            _timeProvider.GetUtcNow()
-        );
-    }
-
-    private PaymentResponse CreateSuccessResponse(string paymentId, TransactionResponse transaction, PaymentRequest request)
-    {
-        return new PaymentResponse(
-            paymentId,
-            transaction?.TransactionId ?? "unknown",
-            "Completed",
-            request.Amount,
-            request.Currency,
-            _timeProvider.GetUtcNow()
+            timeProvider.GetUtcNow()
         );
     }
 }
