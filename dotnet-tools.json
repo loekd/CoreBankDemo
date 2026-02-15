@@ -6,7 +6,15 @@
       "version": "0.22.0",
       "commands": [
         "devproxy"
-      ]
+      ],
+      "rollForward": false
+    },
+    "dotnet-outdated-tool": {
+      "version": "4.7.0",
+      "commands": [
+        "dotnet-outdated"
+      ],
+      "rollForward": false
     }
   }
 }

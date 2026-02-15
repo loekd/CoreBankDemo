@@ -6,6 +6,7 @@ public class OutboxMessage
 {
     public Guid Id { get; set; }
     public required string MessageId { get; set; } // Unique message ID for deduplication
+    public int PartitionId { get; set; } // Partition assignment for load distribution
     public required string PaymentId { get; set; }
     public required string FromAccount { get; set; }
     public required string ToAccount { get; set; }
@@ -32,6 +33,7 @@ public class PaymentsDbContext : DbContext
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => e.MessageId).IsUnique(); // Unique index for deduplication
+            entity.HasIndex(e => new { e.PartitionId, e.Status, e.CreatedAt }); // Partition-based query index
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.CreatedAt);
             entity.Property(e => e.MessageId).IsRequired().HasMaxLength(100);

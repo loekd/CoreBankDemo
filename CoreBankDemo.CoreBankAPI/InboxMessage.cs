@@ -6,6 +6,7 @@ public class InboxMessage
 {
     public Guid Id { get; set; }
     public required string IdempotencyKey { get; set; }
+    public int PartitionId { get; set; } // Partition assignment for load distribution
     public required string FromAccount { get; set; }
     public required string ToAccount { get; set; }
     public decimal Amount { get; set; }
@@ -34,6 +35,7 @@ public class CoreBankDbContext : DbContext
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => e.IdempotencyKey).IsUnique();
+            entity.HasIndex(e => new { e.PartitionId, e.Status, e.ReceivedAt }); // Partition-based query index
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.ReceivedAt);
             entity.Property(e => e.IdempotencyKey).IsRequired().HasMaxLength(100);

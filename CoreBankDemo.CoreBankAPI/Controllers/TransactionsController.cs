@@ -98,11 +98,16 @@ public class TransactionsController : ControllerBase
                 }
             }
 
+            // Calculate partition based on idempotencyKey
+            var partitionCount = _configuration.GetValue<int>("InboxProcessing:PartitionCount");
+            var partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
+
             // Validation passed - store in inbox for processing
             var inboxMessage = new InboxMessage
             {
                 Id = Guid.NewGuid(),
                 IdempotencyKey = idempotencyKey,
+                PartitionId = partitionId,
                 FromAccount = request.FromAccount,
                 ToAccount = request.ToAccount,
                 Amount = request.Amount,

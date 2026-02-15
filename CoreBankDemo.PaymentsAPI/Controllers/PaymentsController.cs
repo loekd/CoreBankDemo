@@ -54,10 +54,15 @@ public class PaymentsController : ControllerBase
                 CreatePendingResponse(existingMessage.PaymentId, request));
         }
 
+        // Calculate partition based on messageId
+        var partitionCount = _configuration.GetValue<int>("OutboxProcessing:PartitionCount");
+        var partitionId = PartitionHelper.GetPartitionId(messageId, partitionCount);
+
         var outboxMessage = new OutboxMessage
         {
             Id = Guid.NewGuid(),
             MessageId = messageId,
+            PartitionId = partitionId,
             PaymentId = paymentId,
             FromAccount = request.FromAccount,
             ToAccount = request.ToAccount,

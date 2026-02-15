@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using CoreBankDemo.PaymentsAPI.Models;
+using Dapr.Client;
 
 namespace CoreBankDemo.PaymentsAPI;
 
@@ -12,39 +13,92 @@ public class OutboxProcessor(
 {
     private readonly ActivitySource _activitySource = new("OutboxProcessor");
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
+    private readonly string _instanceId = Guid.NewGuid().ToString();
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        logger.LogInformation("Outbox Processor started");
+        logger.LogInformation("Outbox Processor started with instance ID: {InstanceId}", _instanceId);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ProcessPendingMessages(stoppingToken);
+                await ProcessPartitions(stoppingToken);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Error processing outbox messages");
+                logger.LogError(ex, "Error processing outbox partitions");
             }
 
             await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
         }
     }
 
-    private async Task ProcessPendingMessages(CancellationToken cancellationToken)
+    private async Task ProcessPartitions(CancellationToken cancellationToken)
+    {
+        using var scope = serviceProvider.CreateScope();
+        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+        var daprClient = scope.ServiceProvider.GetRequiredService<DaprClient>();
+
+        var partitionCount = configuration.GetValue<int>("OutboxProcessing:PartitionCount");
+        var lockExpirySeconds = configuration.GetValue<int>("OutboxProcessing:LockExpirySeconds");
+
+        // Try to acquire lock for each partition
+        for (int partitionId = 0; partitionId < partitionCount; partitionId++)
+        {
+            var lockOwner = $"{_instanceId}-partition-{partitionId}";
+            var lockName = $"outbox-partition-{partitionId}";
+
+            try
+            {
+#pragma warning disable DAPR_DISTRIBUTEDLOCK
+                
+                // Try to acquire lock
+                var lockResponse = await daprClient.Lock(
+                    "lockstore",
+                    lockName,
+                    lockOwner,
+                    lockExpirySeconds,
+                    cancellationToken);
+
+                if (lockResponse.Success)
+                {
+                    logger.LogInformation("Acquired lock for partition {PartitionId}", partitionId);
+
+                    try
+                    {
+                        await ProcessPartitionMessages(partitionId, cancellationToken);
+                    }
+                    finally
+                    {
+                        // Release lock
+                        await daprClient.Unlock("lockstore", lockName, lockOwner, cancellationToken);
+                        logger.LogInformation("Released lock for partition {PartitionId}", partitionId);
+                    }
+#pragma warning restore DAPR_DISTRIBUTEDLOCK
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to acquire or process partition {PartitionId}", partitionId);
+            }
+        }
+    }
+
+    private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
     {
         using var scope = serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
         var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
         var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
-        var pendingMessages = await GetPendingMessages(dbContext, cancellationToken);
+        var pendingMessages = await GetPendingMessagesForPartition(dbContext, partitionId, cancellationToken);
 
         if (pendingMessages.Count == 0)
             return;
 
-        logger.LogInformation("Processing {Count} pending outbox messages", pendingMessages.Count);
+        logger.LogInformation("Processing {Count} pending outbox messages in partition {PartitionId}",
+            pendingMessages.Count, partitionId);
 
         foreach (var message in pendingMessages)
         {
@@ -52,6 +106,7 @@ public class OutboxProcessor(
             await ProcessMessageIsolated(message.Id, httpClientFactory, configuration, cancellationToken);
         }
     }
+
 
     private async Task ProcessMessageIsolated(
         Guid messageId,
@@ -61,6 +116,7 @@ public class OutboxProcessor(
     {
         using var scope = serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+        var daprClient = scope.ServiceProvider.GetRequiredService<DaprClient>();
 
         // Reload message in fresh context with row-level locking
         var message = await dbContext.OutboxMessages
@@ -75,11 +131,8 @@ public class OutboxProcessor(
 
         try
         {
-            var client = httpClientFactory.CreateClient("CoreBank");
-            var coreBankUrl = configuration["CoreBankApi:BaseUrl"] ?? "http://localhost:5032";
-
             // Validate account (transient operation - no DB save)
-            var validationResult = await ValidateAccount(message, client, coreBankUrl, cancellationToken);
+            var validationResult = await ValidateAccount(message, daprClient, cancellationToken);
 
             if (!validationResult.IsValid)
             {
@@ -93,7 +146,7 @@ public class OutboxProcessor(
             }
 
             // Process transaction (transient operation - no DB save)
-            await ProcessTransaction(message, client, coreBankUrl, cancellationToken);
+            await ProcessTransaction(message, daprClient, cancellationToken);
 
             // SUCCESS - mark as completed (single save)
             message.Status = "Completed";
@@ -116,14 +169,16 @@ public class OutboxProcessor(
         }
     }
 
-    private static async Task<List<OutboxMessage>> GetPendingMessages(
+    private static async Task<List<OutboxMessage>> GetPendingMessagesForPartition(
         PaymentsDbContext dbContext,
+        int partitionId,
         CancellationToken cancellationToken)
     {
         var staleThreshold = DateTime.UtcNow.Subtract(ProcessingTimeout);
 
         return await dbContext.OutboxMessages
-            .Where(m => m.RetryCount < 5 &&
+            .Where(m => m.PartitionId == partitionId &&
+                       m.RetryCount < 5 &&
                        (m.Status == "Pending" ||
                         (m.Status == "Processing" && m.CreatedAt < staleThreshold)))
             .OrderBy(m => m.CreatedAt)
@@ -133,20 +188,16 @@ public class OutboxProcessor(
 
     private static async Task<ValidationResult> ValidateAccount(
         OutboxMessage message,
-        HttpClient client,
-        string coreBankUrl,
+        DaprClient daprClient,
         CancellationToken cancellationToken)
     {
         try
         {
-            var validationResponse = await client.PostAsJsonAsync(
-                $"{coreBankUrl}/api/accounts/validate",
+            var validation = await daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
+                "corebank-api",
+                "api/accounts/validate",
                 new { AccountNumber = message.ToAccount },
                 cancellationToken);
-
-            validationResponse.EnsureSuccessStatusCode();
-            var validation = await validationResponse.Content
-                .ReadFromJsonAsync<AccountValidationResponse>(cancellationToken);
 
             if (validation?.IsValid == true)
                 return ValidationResult.Success();
@@ -162,12 +213,12 @@ public class OutboxProcessor(
 
     private static async Task ProcessTransaction(
         OutboxMessage message,
-        HttpClient client,
-        string coreBankUrl,
+        DaprClient daprClient,
         CancellationToken cancellationToken)
     {
-        var transactionResponse = await client.PostAsJsonAsync(
-            $"{coreBankUrl}/api/transactions/process",
+        await daprClient.InvokeMethodAsync(
+            "corebank-api",
+            "api/transactions/process",
             new
             {
                 FromAccount = message.FromAccount,
@@ -177,8 +228,6 @@ public class OutboxProcessor(
                 IdempotencyKey = message.PaymentId
             },
             cancellationToken);
-
-        transactionResponse.EnsureSuccessStatusCode();
     }
 
     private record ValidationResult(bool IsValid, string? Error)

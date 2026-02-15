@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
+using Dapr.Client;
 
 namespace CoreBankDemo.CoreBankAPI;
 
@@ -12,6 +13,7 @@ public class InboxProcessor : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ActivitySource _activitySource = new("InboxProcessor");
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
+    private readonly string _instanceId = Guid.NewGuid().ToString();
 
     public InboxProcessor(IServiceProvider serviceProvider, ILogger<InboxProcessor> logger, TimeProvider timeProvider)
     {
@@ -22,34 +24,85 @@ public class InboxProcessor : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Inbox Processor started");
+        _logger.LogInformation("Inbox Processor started with instance ID: {InstanceId}", _instanceId);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ProcessPendingMessages(stoppingToken);
+                await ProcessPartitions(stoppingToken);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing inbox messages");
+                _logger.LogError(ex, "Error processing inbox partitions");
             }
 
             await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
         }
     }
 
-    private async Task ProcessPendingMessages(CancellationToken cancellationToken)
+    private async Task ProcessPartitions(CancellationToken cancellationToken)
+    {
+        using var scope = _serviceProvider.CreateScope();
+        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+        var daprClient = scope.ServiceProvider.GetRequiredService<DaprClient>();
+
+        var partitionCount = configuration.GetValue<int>("InboxProcessing:PartitionCount");
+        var lockExpirySeconds = configuration.GetValue<int>("InboxProcessing:LockExpirySeconds");
+
+        // Try to acquire lock for each partition
+        for (int partitionId = 0; partitionId < partitionCount; partitionId++)
+        {
+            var lockOwner = $"{_instanceId}-partition-{partitionId}";
+            var lockName = $"inbox-partition-{partitionId}";
+
+            try
+            {
+#pragma warning disable DAPR_DISTRIBUTEDLOCK
+                // Try to acquire lock
+                var lockResponse = await daprClient.Lock(
+                    "lockstore",
+                    lockName,
+                    lockOwner,
+                    lockExpirySeconds,
+                    cancellationToken);
+
+                if (lockResponse.Success)
+                {
+                    _logger.LogInformation("Acquired lock for partition {PartitionId}", partitionId);
+
+                    try
+                    {
+                        await ProcessPartitionMessages(partitionId, cancellationToken);
+                    }
+                    finally
+                    {
+                        // Release lock
+                        await daprClient.Unlock("lockstore", lockName, lockOwner, cancellationToken);
+#pragma warning restore DAPR_DISTRIBUTEDLOCK
+                        _logger.LogInformation("Released lock for partition {PartitionId}", partitionId);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to acquire or process partition {PartitionId}", partitionId);
+            }
+        }
+    }
+
+    private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
     {
         using var scope = _serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
 
-        var pendingMessages = await GetPendingMessages(dbContext, cancellationToken);
+        var pendingMessages = await GetPendingMessagesForPartition(dbContext, partitionId, cancellationToken);
 
         if (pendingMessages.Count == 0)
             return;
 
-        _logger.LogInformation("Processing {Count} pending inbox messages", pendingMessages.Count);
+        _logger.LogInformation("Processing {Count} pending inbox messages in partition {PartitionId}",
+            pendingMessages.Count, partitionId);
 
         foreach (var message in pendingMessages)
         {
@@ -57,6 +110,7 @@ public class InboxProcessor : BackgroundService
             await ProcessMessageIsolated(message.Id, cancellationToken);
         }
     }
+
 
     private async Task ProcessMessageIsolated(Guid messageId, CancellationToken cancellationToken)
     {
@@ -155,14 +209,16 @@ public class InboxProcessor : BackgroundService
         });
     }
 
-    private static async Task<List<InboxMessage>> GetPendingMessages(
+    private static async Task<List<InboxMessage>> GetPendingMessagesForPartition(
         CoreBankDbContext dbContext,
+        int partitionId,
         CancellationToken cancellationToken)
     {
         var staleThreshold = DateTime.UtcNow.Subtract(ProcessingTimeout);
 
         return await dbContext.InboxMessages
-            .Where(m => m.RetryCount < 5 &&
+            .Where(m => m.PartitionId == partitionId &&
+                       m.RetryCount < 5 &&
                        (m.Status == "Pending" ||
                         (m.Status == "Processing" && m.ReceivedAt < staleThreshold)))
             .OrderBy(m => m.ReceivedAt)
