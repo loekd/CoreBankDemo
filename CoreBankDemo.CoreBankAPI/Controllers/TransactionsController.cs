@@ -1,8 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
+using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
@@ -10,15 +13,15 @@ namespace CoreBankDemo.CoreBankAPI.Controllers;
 [Route("api/[controller]")]
 public class TransactionsController(
     CoreBankDbContext dbContext,
-    IConfiguration configuration,
+    IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider)
     : ControllerBase
 {
+    private readonly InboxProcessingOptions _inboxOptions = inboxOptions.Value;
+
     [HttpPost("process")]
     public async Task<IActionResult> ProcessTransaction([FromBody] TransactionRequest request, CancellationToken cancellationToken = default)
     {
-        await Task.Delay(TimeSpan.FromSeconds(12), cancellationToken);
-        
         if (!ModelState.IsValid)
             return BadRequest(new { Errors = GetModelErrors() });
 
@@ -26,7 +29,7 @@ public class TransactionsController(
         if (!validationResult.IsValid)
             return BadRequest(new { Errors = validationResult.Errors });
 
-        var idempotencyKey = request.IdempotencyKey;
+        var idempotencyKey = request.TransactionId;
         for (int attempt = 1; attempt <= 3; attempt++)
         {
             // Check for duplicate request
@@ -90,8 +93,8 @@ public class TransactionsController(
 
     private async Task ProcessWithInbox(TransactionRequest request, CancellationToken cancellationToken)
     {
-        var idempotencyKey = request.IdempotencyKey;
-        var partitionCount = configuration.GetValue<int>("InboxProcessing:PartitionCount");
+        var idempotencyKey = request.TransactionId;
+        var partitionCount = _inboxOptions.PartitionCount;
         var partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
 
         var inboxMessage = new InboxMessage
@@ -104,7 +107,8 @@ public class TransactionsController(
             Amount = request.Amount,
             Currency = request.Currency,
             ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
-            Status = "Pending"
+            Status = "Pending",
+            TransactionId = request.TransactionId
         };
 
         dbContext.InboxMessages.Add(inboxMessage);

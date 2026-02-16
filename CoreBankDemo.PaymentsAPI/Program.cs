@@ -1,10 +1,15 @@
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.ServiceDefaults.Configuration;
+using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-builder.AddServiceDefaults();
+builder.AddServiceDefaults("CoreBank.PaymentsAPI");
+
+// Add configuration options with validation
+builder.AddOutboxProcessingOptions();
 
 // Add Dapr
 builder.Services.AddControllers().AddDapr();

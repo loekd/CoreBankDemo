@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using CoreBankDemo.CoreBankAPI.Inbox;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.CoreBankAPI.Models;

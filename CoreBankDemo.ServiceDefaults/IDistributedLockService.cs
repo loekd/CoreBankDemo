@@ -9,11 +9,13 @@ public interface IDistributedLockService
     /// Executes an action while holding a distributed lock with automatic heartbeat renewal
     /// </summary>
     /// <param name="lockName">Name of the lock to acquire</param>
+    /// <param name="lockExpirySeconds">Number of seconds to hold the lock</param>
     /// <param name="workload">The work to perform while holding the lock</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if lock was acquired and work completed, false if lock was not acquired</returns>
     Task<bool> ExecuteWithLockAsync(
         string lockName,
+        int lockExpirySeconds,
         Func<CancellationToken, Task> workload,
         CancellationToken cancellationToken = default);
 }

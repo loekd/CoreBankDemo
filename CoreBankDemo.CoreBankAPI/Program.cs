@@ -1,16 +1,22 @@
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using CoreBankDemo.CoreBankAPI.Inbox;
+using CoreBankDemo.CoreBankAPI.Outbox;
 
 namespace CoreBankDemo.CoreBankAPI;
 
-public class Program
+public static class Program
 {
     public static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
 
         // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-        builder.AddServiceDefaults();
+        builder.AddServiceDefaults("CoreBank.CoreBankAPI");
+
+        // Add configuration options with validation
+        builder.AddInboxProcessingOptions();
+        builder.AddMessagingOutboxProcessingOptions();
 
         // Add Dapr
         builder.Services.AddControllers().AddDapr();
@@ -25,60 +31,20 @@ public class Program
         // Database for Inbox pattern
         builder.Services.AddDbContext<CoreBankDbContext>(options =>
             options.UseSqlite("Data Source=corebank.db"));
-
-        // Inbox processor (controlled by feature flag)
-        var useInbox = builder.Configuration.GetValue<bool>("Features:UseInbox");
-        if (useInbox)
-        {
-            builder.Services.AddHostedService<InboxProcessor>();
-        }
+        
+        //Register all services
+        builder.Services.AddHostedService<InboxProcessor>();
+        builder.Services.AddHostedService<MessagingOutboxProcessor>();
+        
+        builder.Services.AddTransient<IInboxMessageRepository, InboxMessageRepository>();
+        builder.Services.AddTransient<ITransactionExecutor, TransactionExecutor>();
+        builder.Services.AddTransient<IOutboxPublisher, OutboxPublisher>();
+        builder.Services.AddTransient<TransactionValidator>();
 
         var app = builder.Build();
         
         // Ensure database is created and seeded
-        using (var scope = app.Services.CreateScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-            db.Database.EnsureCreated();
-            
-            // Seed accounts if empty
-            if (!db.Accounts.Any())
-            {
-                var accounts = new[]
-                {
-                    new Account
-                    {
-                        AccountNumber = "NL91ABNA0417164300",
-                        AccountHolderName = "John Doe",
-                        Balance = 5000.00m,
-                        Currency = "EUR",
-                        IsActive = true,
-                        CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
-                    },
-                    new Account
-                    {
-                        AccountNumber = "NL20INGB0001234567",
-                        AccountHolderName = "Jane Smith",
-                        Balance = 10000.00m,
-                        Currency = "EUR",
-                        IsActive = true,
-                        CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
-                    },
-                    new Account
-                    {
-                        AccountNumber = "NL39RABO0300065264",
-                        AccountHolderName = "Bob Johnson",
-                        Balance = 2500.00m,
-                        Currency = "EUR",
-                        IsActive = true,
-                        CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
-                    }
-                };
-                
-                db.Accounts.AddRange(accounts);
-                db.SaveChanges();
-            }
-        }
+        InitializeDatabaseWithSeedAccounts(app);
 
         // Map default endpoints (health checks, etc.)
         app.MapDefaultEndpoints();
@@ -93,5 +59,50 @@ public class Program
         app.MapControllers();
 
         app.Run();
+    }
+
+    private static void InitializeDatabaseWithSeedAccounts(WebApplication app)
+    {
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
+        db.Database.EnsureCreated();
+            
+        // Seed accounts if empty
+        if (db.Accounts.Any()) 
+            return;
+        
+        var accounts = new[]
+        {
+            new Account
+            {
+                AccountNumber = "NL91ABNA0417164300",
+                AccountHolderName = "John Doe",
+                Balance = 5000.00m,
+                Currency = "EUR",
+                IsActive = true,
+                CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
+            },
+            new Account
+            {
+                AccountNumber = "NL20INGB0001234567",
+                AccountHolderName = "Jane Smith",
+                Balance = 10000.00m,
+                Currency = "EUR",
+                IsActive = true,
+                CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
+            },
+            new Account
+            {
+                AccountNumber = "NL39RABO0300065264",
+                AccountHolderName = "Bob Johnson",
+                Balance = 2500.00m,
+                Currency = "EUR",
+                IsActive = true,
+                CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
+            }
+        };
+                
+        db.Accounts.AddRange(accounts);
+        db.SaveChanges();
     }
 }

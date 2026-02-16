@@ -59,7 +59,9 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
         opt.WithReference(pubsub);
         opt.WithReference(lockStore);
     })
-    .WithUrl("/swagger", "Swagger UI");
+    .WithUrl("/swagger", "Swagger UI")
+    .WaitFor(pubsub)
+    .WaitFor(lockStore);
 
 // Payments API (Main Service) with Dapr sidecar
 // Ports are defined in launchSettings.json (5294)
@@ -79,6 +81,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
         opt.WithReference(pubsub);
         opt.WithReference(lockStore);
     })
-    .WithUrl("/swagger", "Swagger UI");
+    .WithUrl("/swagger", "Swagger UI")
+    .WaitFor(coreBankApi);
 
 builder.Build().Run();

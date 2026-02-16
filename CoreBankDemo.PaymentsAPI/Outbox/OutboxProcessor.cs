@@ -2,7 +2,9 @@ using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.ServiceDefaults;
+using CoreBankDemo.ServiceDefaults.Configuration;
 using Dapr.Client;
+using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
@@ -10,11 +12,13 @@ public class OutboxProcessor(
     IServiceProvider serviceProvider,
     TimeProvider timeProvider,
     IDistributedLockService lockService,
+    IOptions<OutboxProcessingOptions> options,
     ILogger<OutboxProcessor> logger)
     : BackgroundService
 {
     private readonly ActivitySource _activitySource = new("OutboxProcessor");
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
+    private readonly OutboxProcessingOptions _options = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -37,9 +41,7 @@ public class OutboxProcessor(
 
     private async Task ProcessPartitions(CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
-        var partitionCount = configuration.GetValue<int>("OutboxProcessing:PartitionCount");
+        var partitionCount = _options.PartitionCount;
 
         // Process all partitions in parallel
         logger.LogInformation("Processing {PartitionCount} partitions", partitionCount);
@@ -49,6 +51,7 @@ public class OutboxProcessor(
                 var lockName = $"outbox-partition-{partitionId}";
                 return await lockService.ExecuteWithLockAsync(
                         lockName,
+                        _options.LockExpirySeconds,
                         async ct => await ProcessPartitionMessages(partitionId, ct),
                         cancellationToken);   
                 })
@@ -94,7 +97,7 @@ public class OutboxProcessor(
 
         using var activity = _activitySource.StartActivity("ProcessOutboxMessage");
         activity?.SetTag("outbox.id", message.Id);
-        activity?.SetTag("payment.id", message.PaymentId);
+        activity?.SetTag("payment.id", message.TransactionId);
 
         try
         {
@@ -121,7 +124,7 @@ public class OutboxProcessor(
             await dbContext.SaveChangesAsync(cancellationToken);
 
             logger.LogInformation("Successfully processed outbox message {MessageId} for payment {PaymentId}",
-                message.Id, message.PaymentId);
+                message.Id, message.TransactionId);
         }
         catch (Exception ex)
         {
@@ -159,24 +162,16 @@ public class OutboxProcessor(
         DaprClient daprClient,
         CancellationToken cancellationToken)
     {
-        try
-        {
-            var validation = await daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
-                "corebank-api",
-                "api/accounts/validate",
-                new { AccountNumber = message.ToAccount },
-                cancellationToken);
+        var validation = await daprClient.InvokeMethodAsync<object, AccountValidationResponse>(
+            "corebank-api",
+            "api/accounts/validate",
+            new { AccountNumber = message.ToAccount },
+            cancellationToken);
 
-            if (validation.IsValid)
-                return ValidationResult.Success();
+        if (validation.IsValid)
+            return ValidationResult.Success();
 
-            return ValidationResult.Failure("Invalid account number");
-        }
-        catch (HttpRequestException)
-        {
-            // Network errors are transient - let them bubble up
-            throw;
-        }
+        return ValidationResult.Failure("Invalid account number");
     }
 
     private static async Task ProcessTransaction(
@@ -193,7 +188,7 @@ public class OutboxProcessor(
                 ToAccount = message.ToAccount,
                 Amount = message.Amount,
                 Currency = message.Currency,
-                IdempotencyKey = message.PaymentId
+                TransactionId = message.TransactionId
             },
             cancellationToken);
     }

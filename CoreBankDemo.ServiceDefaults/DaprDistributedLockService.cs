@@ -1,5 +1,4 @@
 using Dapr.Client;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
 namespace CoreBankDemo.ServiceDefaults;
@@ -8,17 +7,16 @@ namespace CoreBankDemo.ServiceDefaults;
 
 public class DaprDistributedLockService(
     DaprClient daprClient,
-    IConfiguration configuration,
     ILogger<DaprDistributedLockService> logger) : IDistributedLockService
 {
     private const string LockStoreName = "lockstore";
 
     public async Task<bool> ExecuteWithLockAsync(
         string lockName,
+        int lockExpirySeconds,
         Func<CancellationToken, Task> workload,
         CancellationToken cancellationToken = default)
     {
-        var lockExpirySeconds = configuration.GetValue<int>("OutboxProcessing:LockExpirySeconds", 30);
         var lockOwner = $"{Environment.MachineName}-{Guid.NewGuid()}";
 
         try

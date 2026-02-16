@@ -1,32 +1,13 @@
+using CoreBankDemo.CoreBankAPI.Inbox;
+using CoreBankDemo.CoreBankAPI.Outbox;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI;
 
-public class InboxMessage
+public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : DbContext(options)
 {
-    public Guid Id { get; set; }
-    public required string IdempotencyKey { get; set; }
-    public int PartitionId { get; set; } // Partition assignment for load distribution
-    public required string FromAccount { get; set; }
-    public required string ToAccount { get; set; }
-    public decimal Amount { get; set; }
-    public required string Currency { get; set; }
-    public string? TransactionId { get; set; }
-    public string Status { get; set; } = "Pending"; // Pending, Processing, Completed, Failed
-    public DateTime ReceivedAt { get; set; }
-    public DateTime? ProcessedAt { get; set; }
-    public int RetryCount { get; set; }
-    public string? LastError { get; set; }
-    public string? ResponsePayload { get; set; }
-}
-
-public class CoreBankDbContext : DbContext
-{
-    public CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : base(options)
-    {
-    }
-
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
+    public DbSet<MessagingOutboxMessage> MessagingOutboxMessages => Set<MessagingOutboxMessage>();
     public DbSet<Account> Accounts => Set<Account>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -53,6 +34,18 @@ public class CoreBankDbContext : DbContext
             entity.Property(e => e.AccountHolderName).IsRequired().HasMaxLength(200);
             entity.Property(e => e.Currency).IsRequired().HasMaxLength(3);
             entity.HasIndex(e => e.IsActive);
+        });
+
+        modelBuilder.Entity<MessagingOutboxMessage>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.PartitionId, e.Status, e.CreatedAt }); // Partition-based query index
+            entity.HasIndex(e => e.TransactionId).IsUnique();
+            entity.HasIndex(e => e.Status);
+            entity.Property(e => e.TransactionId).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.EventType).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.EventSource).IsRequired().HasMaxLength(200);
         });
     }
 }

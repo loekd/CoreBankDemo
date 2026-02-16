@@ -16,7 +16,7 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.CreatedAt);
             entity.Property(e => e.MessageId).IsRequired().HasMaxLength(100);
-            entity.Property(e => e.PaymentId).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.TransactionId).IsRequired().HasMaxLength(100);
             entity.Property(e => e.FromAccount).IsRequired().HasMaxLength(50);
             entity.Property(e => e.ToAccount).IsRequired().HasMaxLength(50);
             entity.Property(e => e.Currency).IsRequired().HasMaxLength(3);

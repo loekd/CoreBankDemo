@@ -1,10 +1,11 @@
+using System.Diagnostics;
 using CoreBankDemo.ServiceDefaults;
+using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.ServiceDiscovery;
 using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
@@ -19,95 +20,131 @@ public static class Extensions
     private const string HealthEndpointPath = "/health";
     private const string AlivenessEndpointPath = "/alive";
 
-    public static TBuilder AddServiceDefaults<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
+    extension<TBuilder>(TBuilder builder) where TBuilder : IHostApplicationBuilder
     {
-        builder.ConfigureOpenTelemetry();
-
-        builder.AddDefaultHealthChecks();
-
-        builder.Services.AddServiceDiscovery();
-
-        builder.Services.ConfigureHttpClientDefaults(http =>
+        public TBuilder AddServiceDefaults(string serviceName)
         {
-            // Turn on resilience by default
-            http.AddStandardResilienceHandler();
+            builder.ConfigureOpenTelemetry(serviceName);
 
-            // Turn on service discovery by default
-            http.AddServiceDiscovery();
-        });
+            builder.AddDefaultHealthChecks();
 
-        // Register distributed lock service
-        builder.Services.AddSingleton<IDistributedLockService, DaprDistributedLockService>();
+            builder.Services.AddServiceDiscovery();
 
-        // Uncomment the following to restrict the allowed schemes for service discovery.
-        // builder.Services.Configure<ServiceDiscoveryOptions>(options =>
-        // {
-        //     options.AllowedSchemes = ["https"];
-        // });
-
-        return builder;
-    }
-
-    public static TBuilder ConfigureOpenTelemetry<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
-    {
-        builder.Logging.AddOpenTelemetry(logging =>
-        {
-            logging.IncludeFormattedMessage = true;
-            logging.IncludeScopes = true;
-        });
-
-        builder.Services.AddOpenTelemetry()
-            .WithMetrics(metrics =>
+            builder.Services.ConfigureHttpClientDefaults(http =>
             {
-                metrics.AddAspNetCoreInstrumentation()
-                    .AddHttpClientInstrumentation()
-                    .AddRuntimeInstrumentation();
-            })
-            .WithTracing(tracing =>
-            {
-                tracing.AddSource(builder.Environment.ApplicationName)
-                    .AddAspNetCoreInstrumentation(tracing =>
-                        // Exclude health check requests from tracing
-                        tracing.Filter = context =>
-                            !context.Request.Path.StartsWithSegments(HealthEndpointPath)
-                            && !context.Request.Path.StartsWithSegments(AlivenessEndpointPath)
-                    )
-                    // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
-                    //.AddGrpcClientInstrumentation()
-                    .AddHttpClientInstrumentation();
+                // Turn on resilience by default
+                http.AddStandardResilienceHandler();
+
+                // Turn on service discovery by default
+                http.AddServiceDiscovery();
             });
 
-        builder.AddOpenTelemetryExporters();
+            // Register distributed lock service
+            builder.Services.AddSingleton<IDistributedLockService, DaprDistributedLockService>();
 
-        return builder;
-    }
+            // Uncomment the following to restrict the allowed schemes for service discovery.
+            // builder.Services.Configure<ServiceDiscoveryOptions>(options =>
+            // {
+            //     options.AllowedSchemes = ["https"];
+            // });
 
-    private static TBuilder AddOpenTelemetryExporters<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
-    {
-        var useOtlpExporter = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
-
-        if (useOtlpExporter)
-        {
-            builder.Services.AddOpenTelemetry().UseOtlpExporter();
+            return builder;
         }
 
-        // Uncomment the following lines to enable the Azure Monitor exporter (requires the Azure.Monitor.OpenTelemetry.AspNetCore package)
-        //if (!string.IsNullOrEmpty(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
-        //{
-        //    builder.Services.AddOpenTelemetry()
-        //       .UseAzureMonitor();
-        //}
+        public TBuilder AddInboxProcessingOptions()
+        {
+            builder.Services.AddOptions<InboxProcessingOptions>()
+                .BindConfiguration(InboxProcessingOptions.SectionName)
+                .ValidateDataAnnotations()
+                .ValidateOnStart();
 
-        return builder;
-    }
+            return builder;
+        }
 
-    public static TBuilder AddDefaultHealthChecks<TBuilder>(this TBuilder builder) where TBuilder : IHostApplicationBuilder
-    {
-        builder.Services.AddHealthChecks()
-            // Add a default liveness check to ensure app is responsive
-            .AddCheck("self", () => HealthCheckResult.Healthy(), ["live"]);
+        public TBuilder AddOutboxProcessingOptions()
+        {
+            builder.Services.AddOptions<OutboxProcessingOptions>()
+                .BindConfiguration(OutboxProcessingOptions.SectionName)
+                .ValidateDataAnnotations()
+                .ValidateOnStart();
 
-        return builder;
+            return builder;
+        }
+
+        public TBuilder AddMessagingOutboxProcessingOptions()
+        {
+            builder.Services.AddOptions<MessagingOutboxProcessingOptions>()
+                .BindConfiguration(MessagingOutboxProcessingOptions.SectionName)
+                .ValidateDataAnnotations()
+                .ValidateOnStart();
+
+            return builder;
+        }
+
+        private TBuilder ConfigureOpenTelemetry(string serviceName)
+        {
+            builder.Logging.AddOpenTelemetry(logging =>
+            {
+                logging.IncludeFormattedMessage = true;
+                logging.IncludeScopes = true;
+            });
+
+            builder.Services.AddOpenTelemetry()
+                .WithMetrics(metrics =>
+                {
+                    metrics.AddAspNetCoreInstrumentation()
+                        .AddHttpClientInstrumentation()
+                        .AddRuntimeInstrumentation();
+                })
+                .WithTracing(tracing =>
+                {
+                    tracing.AddSource(builder.Environment.ApplicationName)
+                        .AddAspNetCoreInstrumentation(tracing =>
+                            // Exclude health check requests from tracing
+                            tracing.Filter = context =>
+                                !context.Request.Path.StartsWithSegments(HealthEndpointPath)
+                                && !context.Request.Path.StartsWithSegments(AlivenessEndpointPath)
+                        )
+                        // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
+                        //.AddGrpcClientInstrumentation()
+                        .AddHttpClientInstrumentation();
+                });
+
+            builder.AddOpenTelemetryExporters(serviceName);
+
+            return builder;
+        }
+
+        private TBuilder AddOpenTelemetryExporters(string serviceName)
+        {
+            var useOtlpExporter = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
+
+            if (useOtlpExporter)
+            {
+                builder.Services.AddOpenTelemetry().UseOtlpExporter();
+            }
+        
+            var activitySource = new ActivitySource(serviceName);
+            builder.Services.AddSingleton(activitySource);
+
+            // Uncomment the following lines to enable the Azure Monitor exporter (requires the Azure.Monitor.OpenTelemetry.AspNetCore package)
+            //if (!string.IsNullOrEmpty(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
+            //{
+            //    builder.Services.AddOpenTelemetry()
+            //       .UseAzureMonitor();
+            //}
+
+            return builder;
+        }
+
+        private TBuilder AddDefaultHealthChecks()
+        {
+            builder.Services.AddHealthChecks()
+                // Add a default liveness check to ensure app is responsive
+                .AddCheck("self", () => HealthCheckResult.Healthy(), ["live"]);
+
+            return builder;
+        }
     }
 
     public static WebApplication MapDefaultEndpoints(this WebApplication app)

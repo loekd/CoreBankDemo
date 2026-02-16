@@ -20,7 +20,7 @@ public record TransactionRequest(
     [RegularExpression(@"^[A-Z]{3}$", ErrorMessage = "Currency must be 3 uppercase letters")]
     string Currency,
 
-    [Required(ErrorMessage = "IdempotencyKey is required")]
-    [StringLength(100, MinimumLength = 1, ErrorMessage = "IdempotencyKey must be between 1 and 100 characters")]
-    string IdempotencyKey
+    [Required(ErrorMessage = "TransactionId is required")]
+    [StringLength(100, MinimumLength = 1, ErrorMessage = "TransactionId must be between 1 and 100 characters")]
+    string TransactionId
 );

@@ -3,6 +3,8 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.ServiceDefaults.Configuration;
+using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
@@ -10,9 +12,11 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 [Route("api/[controller]")]
 public class PaymentsController(
     PaymentsDbContext dbContext,
-    IConfiguration configuration,
+    IOptions<OutboxProcessingOptions> outboxOptions,
     TimeProvider timeProvider) : ControllerBase
 {
+    private readonly OutboxProcessingOptions _outboxOptions = outboxOptions.Value;
+
     [HttpPost]
     public async Task<IActionResult> ProcessPayment([FromBody] PaymentRequest request, CancellationToken cancellationToken = default)
     {
@@ -31,8 +35,8 @@ public class PaymentsController(
 
             if (existing != null)
             {
-                return Accepted($"/api/payments/{existing.PaymentId}",
-                    CreatePendingResponse(existing.PaymentId, request));
+                return Accepted($"/api/payments/{existing.TransactionId}",
+                    CreatePendingResponse(existing.TransactionId, request));
             }
 
             try
@@ -55,7 +59,7 @@ public class PaymentsController(
 
     private async Task StoreInOutbox(PaymentRequest request, string paymentId, string messageId, CancellationToken cancellationToken)
     {
-        var partitionCount = configuration.GetValue<int>("OutboxProcessing:PartitionCount");
+        var partitionCount = _outboxOptions.PartitionCount;
         var partitionId = PartitionHelper.GetPartitionId(messageId, partitionCount);
 
         var outboxMessage = new OutboxMessage
@@ -63,7 +67,7 @@ public class PaymentsController(
             Id = Guid.NewGuid(),
             MessageId = messageId,
             PartitionId = partitionId,
-            PaymentId = paymentId,
+            TransactionId = paymentId,
             FromAccount = request.FromAccount,
             ToAccount = request.ToAccount,
             Amount = request.Amount,
