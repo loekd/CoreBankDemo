@@ -1,5 +1,6 @@
 using System.Diagnostics;
-using System.Text.Json;
+using System.Net.Mime;
+using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Dapr.Client;
@@ -104,7 +105,7 @@ public class MessagingOutboxProcessor(
         }
     }
 
-    private async Task<MessagingOutboxMessage?> LoadMessage(
+    private static async Task<MessagingOutboxMessage?> LoadMessage(
         CoreBankDbContext dbContext,
         Guid messageId,
         CancellationToken cancellationToken)
@@ -127,13 +128,32 @@ public class MessagingOutboxProcessor(
         MessagingOutboxMessage message,
         CancellationToken cancellationToken)
     {
-        var eventData = DeserializeEventData(message.EventData);
-        await PublishEvent(daprClient, message, eventData, cancellationToken);
-    }
+        var payload = new TransactionResponse(message.TransactionId,
+            message.TransactionStatus,
+            message.ProcessedAt ?? message.CreatedAt);
 
-    private object DeserializeEventData(string eventDataJson)
-    {
-        return JsonSerializer.Deserialize<object>(eventDataJson) ?? new { };
+        // Build CloudEvent as a dictionary to avoid serialization issues with CloudNative.CloudEvents
+        var cloudEvent = new Dictionary<string, object>
+        {
+            ["id"] = message.Id.ToString(),
+            ["specversion"] = "1.0",
+            ["type"] = message.EventType,
+            ["source"] = message.EventSource,
+            ["subject"] = $"transaction/{message.TransactionId}",
+            ["datacontenttype"] = MediaTypeNames.Application.Json,
+            ["data"] = payload
+        };
+
+        // Publish the CloudEvent directly through Dapr with rawPayload to preserve CloudEvent structure
+        var metadata = new Dictionary<string, string>
+        {
+            ["rawPayload"] = "true"
+        };
+
+        await daprClient.PublishEventAsync(
+            _options.PubSubName,
+            _options.TopicName,
+            cloudEvent, metadata, cancellationToken);
     }
 
     private async Task MarkMessageAsCompleted(
@@ -167,20 +187,6 @@ public class MessagingOutboxProcessor(
         logger.LogInformation(
             "Successfully published CloudEvent for messaging outbox message {MessageId}, transaction {TransactionId}",
             message.Id, message.TransactionId);
-    }
-
-    private async Task PublishEvent(
-        DaprClient daprClient,
-        MessagingOutboxMessage message,
-        object eventData,
-        CancellationToken cancellationToken)
-    {
-        // Dapr automatically wraps the event as a CloudEvent
-        await daprClient.PublishEventAsync(
-            _options.PubSubName,
-            _options.TopicName,
-            eventData,
-            cancellationToken);
     }
     
 

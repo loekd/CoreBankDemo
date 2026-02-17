@@ -1,5 +1,5 @@
-using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Inbox;
+using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
 
@@ -24,6 +24,7 @@ public class OutboxPublisher(
     TimeProvider timeProvider) : IOutboxPublisher
 {
     private readonly MessagingOutboxProcessingOptions _options = options.Value;
+    
     public async Task PublishTransactionCompletedAsync(
         CoreBankDbContext dbContext,
         InboxMessage message,
@@ -44,7 +45,7 @@ public class OutboxPublisher(
     private async Task CreateOutboxMessageAsync(
         CoreBankDbContext dbContext,
         InboxMessage message,
-        string status,
+        string transactionStatus,
         string? errorReason,
         CancellationToken cancellationToken)
     {
@@ -52,10 +53,9 @@ public class OutboxPublisher(
         var outboxPartitionCount = _options.PartitionCount;
         var outboxPartitionId = PartitionHelper.GetPartitionId(message.TransactionId!, outboxPartitionCount);
 
-        var eventData = CreateEventData(message, status, errorReason, timestamp);
-        var eventType = status == "Completed"
-            ? "com.corebank.transaction.completed"
-            : "com.corebank.transaction.failed";
+        var eventType = transactionStatus == "Completed"
+            ? Constants.TransactionCompleted
+            : Constants.TransactionFailed;
 
         var outboxMessage = new MessagingOutboxMessage
         {
@@ -65,34 +65,16 @@ public class OutboxPublisher(
             Status = "Pending",
             EventType = eventType,
             EventSource = "https://corebank-api/transactions",
-            EventData = JsonSerializer.Serialize(eventData),
+            FromAccount = message.FromAccount,
+            ToAccount = message.ToAccount,
+            Amount = message.Amount,
+            Currency = message.Currency,
+            TransactionStatus = transactionStatus,
+            ErrorReason = errorReason,
             CreatedAt = timestamp.UtcDateTime
         };
 
         dbContext.MessagingOutboxMessages.Add(outboxMessage);
         await dbContext.SaveChangesAsync(cancellationToken);
-    }
-
-    private static Dictionary<string, object> CreateEventData(InboxMessage message, string status, string? errorReason, DateTimeOffset timestamp)
-    {
-        var eventData = new Dictionary<string, object>
-        {
-            ["TransactionId"] = message.TransactionId!,
-            ["FromAccount"] = message.FromAccount,
-            ["ToAccount"] = message.ToAccount,
-            ["Amount"] = message.Amount,
-            ["Currency"] = message.Currency,
-            ["Status"] = status
-        };
-
-        if (status == "Completed")
-            eventData["ProcessedAt"] = timestamp;
-        else
-        {
-            eventData["Reason"] = errorReason ?? "Unknown error";
-            eventData["FailedAt"] = timestamp;
-        }
-
-        return eventData;
     }
 }

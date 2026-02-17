@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
+using CoreBankDemo.PaymentsAPI.Handlers;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -36,6 +37,8 @@ if (useOutbox)
     builder.Services.AddHostedService<OutboxProcessor>();
 }
 
+builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
+
 var app = builder.Build();
 
 // Ensure database is created
@@ -54,6 +57,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
+app.UseCloudEvents();
+
+app.MapSubscribeHandler();
 
 app.MapControllers();
 

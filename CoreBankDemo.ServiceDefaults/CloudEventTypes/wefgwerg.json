@@ -1,0 +1,18 @@
+{
+  "data": {
+    "processedAt": "2026-02-17T16:19:47.010725+01:00",
+    "status": "Completed",
+    "transactionId": "fde12928-2faa-49a1-939c-d7fee5164b08"
+  },
+  "datacontenttype": "application/json",
+  "id": "a22f4a4d-8cd7-485f-86c8-6caba8787e66",
+  "pubsubname": "pubsub",
+  "source": "https://corebank-api/transactions",
+  "specversion": "1.0",
+  "time": "2026-02-17T17:19:53+01:00",
+  "topic": "transaction-events",
+  "traceid": "00-77e31a7ff18d82c72f3ec44b643551bb-4c3ebcbab4de86d2-01",
+  "traceparent": "00-77e31a7ff18d82c72f3ec44b643551bb-4c3ebcbab4de86d2-01",
+  "tracestate": "",
+  "type": "com.corebank.transaction.completed"
+}
