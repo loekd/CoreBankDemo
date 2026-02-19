@@ -6,6 +6,7 @@ using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
@@ -108,7 +109,9 @@ public class TransactionsController(
             Currency = request.Currency,
             ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
             Status = "Pending",
-            TransactionId = request.TransactionId
+            TransactionId = request.TransactionId,
+            TraceParent = Activity.Current?.Id,
+            TraceState = Activity.Current?.TraceStateString
         };
 
         dbContext.InboxMessages.Add(inboxMessage);

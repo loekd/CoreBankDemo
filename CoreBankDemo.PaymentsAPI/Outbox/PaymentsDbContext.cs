@@ -21,6 +21,8 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
             entity.Property(e => e.ToAccount).IsRequired().HasMaxLength(50);
             entity.Property(e => e.Currency).IsRequired().HasMaxLength(3);
             entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.TraceParent).HasMaxLength(55);
+            entity.Property(e => e.TraceState).HasMaxLength(512);
         });
     }
 }

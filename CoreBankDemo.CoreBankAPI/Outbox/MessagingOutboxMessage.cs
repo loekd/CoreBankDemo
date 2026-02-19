@@ -21,4 +21,6 @@ public class MessagingOutboxMessage
     public DateTime? ProcessedAt { get; set; }
     public int RetryCount { get; set; }
     public string? LastError { get; set; }
+    public string? TraceParent { get; set; }
+    public string? TraceState { get; set; }
 }

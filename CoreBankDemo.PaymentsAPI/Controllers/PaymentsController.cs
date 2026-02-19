@@ -5,6 +5,7 @@ using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
+using System.Diagnostics;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
@@ -73,7 +74,9 @@ public class PaymentsController(
             Amount = request.Amount,
             Currency = request.Currency,
             CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
-            Status = "Pending"
+            Status = "Pending",
+            TraceParent = Activity.Current?.Id,
+            TraceState = Activity.Current?.TraceStateString
         };
 
         dbContext.OutboxMessages.Add(outboxMessage);

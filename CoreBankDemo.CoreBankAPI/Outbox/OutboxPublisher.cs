@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
@@ -71,7 +72,9 @@ public class OutboxPublisher(
             Currency = message.Currency,
             TransactionStatus = transactionStatus,
             ErrorReason = errorReason,
-            CreatedAt = timestamp.UtcDateTime
+            CreatedAt = timestamp.UtcDateTime,
+            TraceParent = message.TraceParent ?? Activity.Current?.Id,
+            TraceState = message.TraceState ?? Activity.Current?.TraceStateString
         };
 
         dbContext.MessagingOutboxMessages.Add(outboxMessage);

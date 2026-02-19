@@ -116,7 +116,14 @@ public class MessagingOutboxProcessor(
 
     private Activity? CreateActivity(MessagingOutboxMessage message)
     {
-        var activity = _activitySource.StartActivity("ProcessMessagingOutboxMessage");
+        ActivityContext parentContext;
+        var hasParent = !string.IsNullOrWhiteSpace(message.TraceParent)
+                        && ActivityContext.TryParse(message.TraceParent, message.TraceState, out parentContext);
+
+        var activity = hasParent
+            ? _activitySource.StartActivity("ProcessMessagingOutboxMessage", ActivityKind.Producer, parentContext)
+            : _activitySource.StartActivity("ProcessMessagingOutboxMessage", ActivityKind.Producer);
+
         activity?.SetTag("outbox.id", message.Id);
         activity?.SetTag("transaction.id", message.TransactionId);
         activity?.SetTag("event.type", message.EventType);
@@ -143,6 +150,19 @@ public class MessagingOutboxProcessor(
             ["datacontenttype"] = MediaTypeNames.Application.Json,
             ["data"] = payload
         };
+
+        var traceParent = Activity.Current?.Id ?? message.TraceParent;
+        var traceState = Activity.Current?.TraceStateString ?? message.TraceState;
+
+        if (!string.IsNullOrWhiteSpace(traceParent))
+        {
+            cloudEvent["traceparent"] = traceParent;
+        }
+
+        if (!string.IsNullOrWhiteSpace(traceState))
+        {
+            cloudEvent["tracestate"] = traceState;
+        }
 
         // Publish the CloudEvent directly through Dapr with rawPayload to preserve CloudEvent structure
         var metadata = new Dictionary<string, string>

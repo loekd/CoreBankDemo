@@ -25,6 +25,8 @@ public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : Db
             entity.Property(e => e.Currency).IsRequired().HasMaxLength(3);
             entity.Property(e => e.TransactionId).HasMaxLength(100);
             entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.TraceParent).HasMaxLength(55);
+            entity.Property(e => e.TraceState).HasMaxLength(512);
         });
 
         modelBuilder.Entity<Account>(entity =>
@@ -46,6 +48,8 @@ public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : Db
             entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
             entity.Property(e => e.EventType).IsRequired().HasMaxLength(100);
             entity.Property(e => e.EventSource).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.TraceParent).HasMaxLength(55);
+            entity.Property(e => e.TraceState).HasMaxLength(512);
         });
     }
 }

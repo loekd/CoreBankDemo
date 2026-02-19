@@ -9,18 +9,14 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 [ApiController]
 public class TransactionEventsController(ITransactionEventHandler handler) : ControllerBase
 {
-    private static readonly string[] AcceptedTypes =
-    [
-        Constants.TransactionCompleted,
-        Constants.TransactionFailed
-    ];
-
     [Topic("pubsub", "transaction-events")]
     [HttpPost("events/transactions")]
     public async Task<IActionResult> HandleTransactionCompleted(
         [FromBody] TransactionCompletedEvent transactionCompletedEvent,
         CancellationToken cancellationToken = default)
     {
+        // OpenTelemetry AspNetCore instrumentation automatically extracts traceparent/tracestate from HTTP headers
+        // The handler will create a span that's automatically linked to the parent trace
         var response = await handler.HandleAsync(transactionCompletedEvent, cancellationToken);
         return Ok(response);
     }

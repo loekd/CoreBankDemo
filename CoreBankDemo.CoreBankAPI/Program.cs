@@ -12,7 +12,7 @@ public static class Program
         var builder = WebApplication.CreateBuilder(args);
 
         // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-        builder.AddServiceDefaults("CoreBank.CoreBankAPI");
+        builder.AddServiceDefaults("CoreBank.CoreBankAPI", new[] { nameof(InboxProcessor), nameof(MessagingOutboxProcessor) });
 
         // Add configuration options with validation
         builder.AddInboxProcessingOptions();
@@ -63,6 +63,7 @@ public static class Program
 
     private static void InitializeDatabaseWithSeedAccounts(WebApplication app)
     {
+        app.RecreateSqliteDatabase("corebank.db");
         using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
         db.Database.EnsureCreated();

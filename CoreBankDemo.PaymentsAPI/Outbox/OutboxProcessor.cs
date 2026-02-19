@@ -95,9 +95,7 @@ public class OutboxProcessor(
         if (message == null)
             return;
 
-        using var activity = _activitySource.StartActivity("ProcessOutboxMessage");
-        activity?.SetTag("outbox.id", message.Id);
-        activity?.SetTag("payment.id", message.TransactionId);
+        using var activity = CreateActivity(message);
 
         try
         {
@@ -137,6 +135,20 @@ public class OutboxProcessor(
             logger.LogWarning(ex, "Failed to process outbox message {MessageId}, retry count: {RetryCount}",
                 message.Id, message.RetryCount);
         }
+    }
+
+    private Activity? CreateActivity(OutboxMessage message)
+    {
+        var hasParent = !string.IsNullOrWhiteSpace(message.TraceParent)
+                        && ActivityContext.TryParse(message.TraceParent, message.TraceState, out var parentContext);
+
+        var activity = hasParent
+            ? _activitySource.StartActivity("ProcessOutboxMessage", ActivityKind.Consumer, parentContext)
+            : _activitySource.StartActivity("ProcessOutboxMessage", ActivityKind.Consumer);
+
+        activity?.SetTag("outbox.id", message.Id);
+        activity?.SetTag("payment.id", message.TransactionId);
+        return activity;
     }
 
     private async Task<List<Guid>> GetPendingMessageIdsForPartition(

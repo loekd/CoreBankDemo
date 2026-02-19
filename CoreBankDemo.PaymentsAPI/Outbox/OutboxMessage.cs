@@ -15,4 +15,6 @@ public class OutboxMessage
     public int RetryCount { get; set; }
     public string? LastError { get; set; }
     public string Status { get; set; } = "Pending"; // Pending, Processing, Completed, Failed
+    public string? TraceParent { get; set; }
+    public string? TraceState { get; set; }
 }

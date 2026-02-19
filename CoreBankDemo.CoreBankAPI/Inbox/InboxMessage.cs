@@ -16,4 +16,6 @@ public class InboxMessage
     public int RetryCount { get; set; }
     public string? LastError { get; set; }
     public string? ResponsePayload { get; set; }
+    public string? TraceParent { get; set; }
+    public string? TraceState { get; set; }
 }

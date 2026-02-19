@@ -128,7 +128,14 @@ public class InboxProcessor(
 
     private Activity? CreateActivity(InboxMessage message)
     {
-        var activity = _activitySource.StartActivity("ProcessInboxMessage");
+        ActivityContext parentContext;
+        var hasParent = !string.IsNullOrWhiteSpace(message.TraceParent)
+                        && ActivityContext.TryParse(message.TraceParent, message.TraceState, out parentContext);
+
+        var activity = hasParent
+            ? _activitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer, parentContext)
+            : _activitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer);
+
         activity?.SetTag("inbox.id", message.Id);
         activity?.SetTag("idempotency.key", message.IdempotencyKey);
         return activity;

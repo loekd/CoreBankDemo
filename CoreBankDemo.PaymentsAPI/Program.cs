@@ -7,7 +7,7 @@ using CoreBankDemo.PaymentsAPI.Handlers;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-builder.AddServiceDefaults("CoreBank.PaymentsAPI");
+builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler) });
 
 // Add configuration options with validation
 builder.AddOutboxProcessingOptions();
@@ -42,6 +42,7 @@ builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
 var app = builder.Build();
 
 // Ensure database is created
+app.RecreateSqliteDatabase("payments.db");
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();

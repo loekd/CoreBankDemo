@@ -7,9 +7,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
+using OpenTelemetry.Exporter;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 
+// ReSharper disable once CheckNamespace
 namespace Microsoft.Extensions.Hosting;
 
 // Adds common .NET Aspire services: service discovery, resilience, health checks, and OpenTelemetry.
@@ -24,7 +26,12 @@ public static class Extensions
     {
         public TBuilder AddServiceDefaults(string serviceName)
         {
-            builder.ConfigureOpenTelemetry(serviceName);
+            return builder.AddServiceDefaults(serviceName, Array.Empty<string>());
+        }
+
+        public TBuilder AddServiceDefaults(string serviceName, params string[] additionalActivitySources)
+        {
+            builder.ConfigureOpenTelemetry(serviceName, additionalActivitySources);
 
             builder.AddDefaultHealthChecks();
 
@@ -81,7 +88,7 @@ public static class Extensions
             return builder;
         }
 
-        private TBuilder ConfigureOpenTelemetry(string serviceName)
+        private void ConfigureOpenTelemetry(string serviceName, string[] additionalActivitySources)
         {
             builder.Logging.AddOpenTelemetry(logging =>
             {
@@ -99,51 +106,49 @@ public static class Extensions
                 .WithTracing(tracing =>
                 {
                     tracing.AddSource(builder.Environment.ApplicationName)
-                        .AddAspNetCoreInstrumentation(tracing =>
+                        .AddSource(serviceName)
+                        .AddAspNetCoreInstrumentation(tr =>
                             // Exclude health check requests from tracing
-                            tracing.Filter = context =>
+                            tr.Filter = context =>
                                 !context.Request.Path.StartsWithSegments(HealthEndpointPath)
                                 && !context.Request.Path.StartsWithSegments(AlivenessEndpointPath)
                         )
                         // Uncomment the following line to enable gRPC instrumentation (requires the OpenTelemetry.Instrumentation.GrpcNetClient package)
                         //.AddGrpcClientInstrumentation()
                         .AddHttpClientInstrumentation();
+
+                    foreach (var sourceName in additionalActivitySources.Where(name => !string.IsNullOrWhiteSpace(name)))
+                    {
+                        tracing.AddSource(sourceName);
+                    }
                 });
 
             builder.AddOpenTelemetryExporters(serviceName);
-
-            return builder;
         }
 
-        private TBuilder AddOpenTelemetryExporters(string serviceName)
+        private void AddOpenTelemetryExporters(string serviceName)
         {
-            var useOtlpExporter = !string.IsNullOrWhiteSpace(builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"]);
+            // Use a custom env var that Aspire won't override (Aspire auto-injects OTEL_EXPORTER_OTLP_ENDPOINT to its dashboard)
+            var jaegerEndpoint = builder.Configuration["JAEGER_OTLP_ENDPOINT"];
 
-            if (useOtlpExporter)
+            if (!string.IsNullOrWhiteSpace(jaegerEndpoint))
+            {
+                builder.Services.AddOpenTelemetry().UseOtlpExporter(OtlpExportProtocol.Grpc, new Uri(jaegerEndpoint));
+            }
+            else
             {
                 builder.Services.AddOpenTelemetry().UseOtlpExporter();
             }
-        
+
             var activitySource = new ActivitySource(serviceName);
             builder.Services.AddSingleton(activitySource);
-
-            // Uncomment the following lines to enable the Azure Monitor exporter (requires the Azure.Monitor.OpenTelemetry.AspNetCore package)
-            //if (!string.IsNullOrEmpty(builder.Configuration["APPLICATIONINSIGHTS_CONNECTION_STRING"]))
-            //{
-            //    builder.Services.AddOpenTelemetry()
-            //       .UseAzureMonitor();
-            //}
-
-            return builder;
         }
 
-        private TBuilder AddDefaultHealthChecks()
+        private void AddDefaultHealthChecks()
         {
             builder.Services.AddHealthChecks()
                 // Add a default liveness check to ensure app is responsive
                 .AddCheck("self", () => HealthCheckResult.Healthy(), ["live"]);
-
-            return builder;
         }
     }
 
@@ -161,6 +166,34 @@ public static class Extensions
             {
                 Predicate = r => r.Tags.Contains("live")
             });
+        }
+
+        return app;
+    }
+
+    public static WebApplication RecreateSqliteDatabase(this WebApplication app, string databaseFileName)
+    {
+        var basePath = app.Environment.ContentRootPath;
+        var databasePath = Path.IsPathRooted(databaseFileName)
+            ? databaseFileName
+            : Path.Combine(basePath, databaseFileName);
+
+        var walPath = databasePath + "-wal";
+        var shmPath = databasePath + "-shm";
+
+        if (File.Exists(databasePath))
+        {
+            File.Delete(databasePath);
+        }
+
+        if (File.Exists(walPath))
+        {
+            File.Delete(walPath);
+        }
+
+        if (File.Exists(shmPath))
+        {
+            File.Delete(shmPath);
         }
 
         return app;
