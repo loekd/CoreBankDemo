@@ -127,6 +127,7 @@ public class MessagingOutboxProcessor(
         activity?.SetTag("outbox.id", message.Id);
         activity?.SetTag("transaction.id", message.TransactionId);
         activity?.SetTag("event.type", message.EventType);
+        activity?.SetTag("queue_duration_ms", (long)(timeProvider.GetUtcNow().UtcDateTime - message.CreatedAt).TotalMilliseconds);
         return activity;
     }
 

@@ -148,6 +148,7 @@ public class OutboxProcessor(
 
         activity?.SetTag("outbox.id", message.Id);
         activity?.SetTag("payment.id", message.TransactionId);
+        activity?.SetTag("queue_duration_ms", (long)(timeProvider.GetUtcNow().UtcDateTime - message.CreatedAt).TotalMilliseconds);
         return activity;
     }
 

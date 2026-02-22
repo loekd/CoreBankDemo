@@ -138,6 +138,7 @@ public class InboxProcessor(
 
         activity?.SetTag("inbox.id", message.Id);
         activity?.SetTag("idempotency.key", message.IdempotencyKey);
+        activity?.SetTag("queue_duration_ms", (long)(DateTime.UtcNow - message.ReceivedAt).TotalMilliseconds);
         return activity;
     }
 
