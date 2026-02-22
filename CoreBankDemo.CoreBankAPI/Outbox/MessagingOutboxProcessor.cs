@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net.Mime;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults;
+using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Dapr.Client;
 using Microsoft.EntityFrameworkCore;
@@ -136,9 +137,16 @@ public class MessagingOutboxProcessor(
         MessagingOutboxMessage message,
         CancellationToken cancellationToken)
     {
-        var payload = new TransactionResponse(message.TransactionId,
-            message.TransactionStatus,
-            message.ProcessedAt ?? message.CreatedAt);
+        object payload = message.EventType == Constants.BalanceUpdated
+            ? new BalanceUpdatedResponse(
+                message.TransactionId,
+                message.FromAccount,
+                message.Amount,
+                message.NewBalance ?? 0m,
+                message.Currency)
+            : new TransactionResponse(message.TransactionId,
+                message.TransactionStatus,
+                message.ProcessedAt ?? message.CreatedAt);
 
         // Build CloudEvent as a dictionary to avoid serialization issues with CloudNative.CloudEvents
         var cloudEvent = new Dictionary<string, object>

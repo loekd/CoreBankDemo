@@ -42,7 +42,7 @@ public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : Db
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => new { e.PartitionId, e.Status, e.CreatedAt }); // Partition-based query index
-            entity.HasIndex(e => e.TransactionId).IsUnique();
+            entity.HasIndex(e => new { e.TransactionId, e.EventType, e.FromAccount }).IsUnique();
             entity.HasIndex(e => e.Status);
             entity.Property(e => e.TransactionId).IsRequired().HasMaxLength(100);
             entity.Property(e => e.Status).IsRequired().HasMaxLength(20);

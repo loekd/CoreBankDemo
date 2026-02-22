@@ -7,7 +7,7 @@ using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
 [ApiController]
-public class TransactionEventsController(ITransactionEventHandler handler) : ControllerBase
+public class TransactionEventsController(ITransactionEventHandler handler, ILogger<TransactionEventsController> logger) : ControllerBase
 {
     [Topic("pubsub", "transaction-events")]
     [HttpPost("events/transactions")]
@@ -15,9 +15,10 @@ public class TransactionEventsController(ITransactionEventHandler handler) : Con
         [FromBody] TransactionCompletedEvent transactionCompletedEvent,
         CancellationToken cancellationToken = default)
     {
+        logger.LogInformation("Received transaction completed event: {TransactionId}", transactionCompletedEvent.TransactionId);
         // OpenTelemetry AspNetCore instrumentation automatically extracts traceparent/tracestate from HTTP headers
         // The handler will create a span that's automatically linked to the parent trace
-        var response = await handler.HandleAsync(transactionCompletedEvent, cancellationToken);
-        return Ok(response);
+        await handler.HandleAsync(transactionCompletedEvent, cancellationToken);
+        return Ok(new { status = "SUCCESS" });
     }
 }

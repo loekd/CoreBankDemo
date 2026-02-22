@@ -18,6 +18,13 @@ public interface IOutboxPublisher
         InboxMessage message,
         string? errorReason,
         CancellationToken cancellationToken);
+
+    Task PublishBalanceUpdatedAsync(
+        CoreBankDbContext dbContext,
+        InboxMessage message,
+        string accountNumber,
+        decimal newBalance,
+        CancellationToken cancellationToken);
 }
 
 public class OutboxPublisher(
@@ -25,25 +32,59 @@ public class OutboxPublisher(
     TimeProvider timeProvider) : IOutboxPublisher
 {
     private readonly MessagingOutboxProcessingOptions _options = options.Value;
-    
-    public async Task PublishTransactionCompletedAsync(
+
+    public Task PublishTransactionCompletedAsync(
         CoreBankDbContext dbContext,
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        await CreateOutboxMessageAsync(dbContext, message, "Completed", null, cancellationToken);
+        return CreateOutboxMessageAsync(dbContext, message, "Completed", null, cancellationToken);
     }
 
-    public async Task PublishTransactionFailedAsync(
+    public Task PublishTransactionFailedAsync(
         CoreBankDbContext dbContext,
         InboxMessage message,
         string? errorReason,
         CancellationToken cancellationToken)
     {
-        await CreateOutboxMessageAsync(dbContext, message, "Failed", errorReason, cancellationToken);
+        return CreateOutboxMessageAsync(dbContext, message, "Failed", errorReason, cancellationToken);
     }
 
-    private async Task CreateOutboxMessageAsync(
+    public Task PublishBalanceUpdatedAsync(
+        CoreBankDbContext dbContext,
+        InboxMessage message,
+        string accountNumber,
+        decimal newBalance,
+        CancellationToken cancellationToken)
+    {
+        var timestamp = timeProvider.GetUtcNow();
+        var outboxPartitionId = PartitionHelper.GetPartitionId(accountNumber, _options.PartitionCount);
+        var delta = accountNumber == message.FromAccount ? -message.Amount : message.Amount;
+
+        var outboxMessage = new MessagingOutboxMessage
+        {
+            Id = Guid.NewGuid(),
+            PartitionId = outboxPartitionId,
+            TransactionId = message.TransactionId!,
+            Status = "Pending",
+            EventType = Constants.BalanceUpdated,
+            EventSource = "https://corebank-api/accounts",
+            FromAccount = accountNumber,
+            ToAccount = accountNumber,
+            Amount = delta,
+            NewBalance = newBalance,
+            Currency = message.Currency,
+            TransactionStatus = "Completed",
+            CreatedAt = timestamp.UtcDateTime,
+            TraceParent = message.TraceParent ?? Activity.Current?.Id,
+            TraceState = message.TraceState ?? Activity.Current?.TraceStateString
+        };
+
+        dbContext.MessagingOutboxMessages.Add(outboxMessage);
+        return Task.CompletedTask;
+    }
+
+    private Task CreateOutboxMessageAsync(
         CoreBankDbContext dbContext,
         InboxMessage message,
         string transactionStatus,
@@ -51,8 +92,7 @@ public class OutboxPublisher(
         CancellationToken cancellationToken)
     {
         var timestamp = timeProvider.GetUtcNow();
-        var outboxPartitionCount = _options.PartitionCount;
-        var outboxPartitionId = PartitionHelper.GetPartitionId(message.TransactionId!, outboxPartitionCount);
+        var outboxPartitionId = PartitionHelper.GetPartitionId(message.TransactionId!, _options.PartitionCount);
 
         var eventType = transactionStatus == "Completed"
             ? Constants.TransactionCompleted
@@ -78,6 +118,6 @@ public class OutboxPublisher(
         };
 
         dbContext.MessagingOutboxMessages.Add(outboxMessage);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        return Task.CompletedTask;
     }
 }

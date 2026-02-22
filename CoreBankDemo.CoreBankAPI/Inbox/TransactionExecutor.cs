@@ -11,12 +11,12 @@ public interface ITransactionExecutor
         InboxMessage message,
         CancellationToken cancellationToken);
 
-    Task ExecuteSuccessfulTransactionAsync(
-        CoreBankDbContext dbContext,
+    (decimal NewFromBalance, decimal NewToBalance) ApplySuccessfulTransaction(
         InboxMessage message,
         Account fromAccount,
-        Account toAccount,
-        CancellationToken cancellationToken);
+        Account toAccount);
+
+    Task SaveAsync(CoreBankDbContext dbContext, CancellationToken cancellationToken);
 
     void PrepareFailedTransaction(InboxMessage message, string? error);
 }
@@ -37,12 +37,10 @@ public class TransactionExecutor(TimeProvider timeProvider) : ITransactionExecut
         return (fromAccount, toAccount);
     }
 
-    public async Task ExecuteSuccessfulTransactionAsync(
-        CoreBankDbContext dbContext,
+    public (decimal NewFromBalance, decimal NewToBalance) ApplySuccessfulTransaction(
         InboxMessage message,
         Account fromAccount,
-        Account toAccount,
-        CancellationToken cancellationToken)
+        Account toAccount)
     {
         var processedAt = timeProvider.GetUtcNow();
         var transactionId = EnsureTransactionId(message);
@@ -50,8 +48,11 @@ public class TransactionExecutor(TimeProvider timeProvider) : ITransactionExecut
         UpdateAccountBalances(fromAccount, toAccount, message.Amount, processedAt);
         UpdateMessageForSuccess(message, transactionId, processedAt);
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        return (fromAccount.Balance, toAccount.Balance);
     }
+
+    public Task SaveAsync(CoreBankDbContext dbContext, CancellationToken cancellationToken)
+        => dbContext.SaveChangesAsync(cancellationToken);
 
     public void PrepareFailedTransaction(InboxMessage message, string? error)
     {

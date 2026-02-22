@@ -150,6 +150,7 @@ public class InboxProcessor(
     {
         transactionExecutor.PrepareFailedTransaction(message, validationResult.Error);
         await outboxPublisher.PublishTransactionFailedAsync(dbContext, message, validationResult.Error, cancellationToken);
+        await transactionExecutor.SaveAsync(dbContext, cancellationToken);
 
         logger.LogWarning("Transaction {IdempotencyKey} failed validation: {Error}",
             message.IdempotencyKey, validationResult.Error);
@@ -162,8 +163,13 @@ public class InboxProcessor(
         Account toAccount,
         CancellationToken cancellationToken)
     {
-        await transactionExecutor.ExecuteSuccessfulTransactionAsync(dbContext, message, fromAccount, toAccount, cancellationToken);
+        var (newFromBalance, newToBalance) = transactionExecutor.ApplySuccessfulTransaction(message, fromAccount, toAccount);
+
         await outboxPublisher.PublishTransactionCompletedAsync(dbContext, message, cancellationToken);
+        await outboxPublisher.PublishBalanceUpdatedAsync(dbContext, message, message.FromAccount, newFromBalance, cancellationToken);
+        await outboxPublisher.PublishBalanceUpdatedAsync(dbContext, message, message.ToAccount, newToBalance, cancellationToken);
+
+        await transactionExecutor.SaveAsync(dbContext, cancellationToken);
     }
 
     private async Task HandleTransactionErrorAsync(

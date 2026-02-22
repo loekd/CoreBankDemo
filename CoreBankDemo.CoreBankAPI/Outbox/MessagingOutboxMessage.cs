@@ -13,6 +13,7 @@ public class MessagingOutboxMessage
     public required string FromAccount { get; set; }
     public required string ToAccount { get; set; }
     public decimal Amount { get; set; }
+    public decimal? NewBalance { get; set; }
     public required string Currency { get; set; }
     public required string TransactionStatus { get; set; } // Completed, Failed
     public string? ErrorReason { get; set; }
