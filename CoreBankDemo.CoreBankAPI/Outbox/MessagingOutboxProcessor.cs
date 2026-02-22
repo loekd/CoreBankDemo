@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Net.Mime;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
@@ -148,41 +147,29 @@ public class MessagingOutboxProcessor(
                 message.TransactionStatus,
                 message.ProcessedAt ?? message.CreatedAt);
 
-        // Build CloudEvent as a dictionary to avoid serialization issues with CloudNative.CloudEvents
-        var cloudEvent = new Dictionary<string, object>
+        // Let Dapr build the CloudEvent envelope. Set the type via metadata so the
+        // subscriber can route by event type using Topic match expressions.
+        var metadata = new Dictionary<string, string>
         {
-            ["id"] = message.Id.ToString(),
-            ["specversion"] = "1.0",
-            ["type"] = message.EventType,
-            ["source"] = message.EventSource,
-            ["subject"] = $"transaction/{message.TransactionId}",
-            ["datacontenttype"] = MediaTypeNames.Application.Json,
-            ["data"] = payload
+            ["cloudevent.id"] = message.Id.ToString(),
+            ["cloudevent.type"] = message.EventType,
+            ["cloudevent.source"] = message.EventSource,
+            ["cloudevent.subject"] = $"transaction/{message.TransactionId}",
         };
 
         var traceParent = Activity.Current?.Id ?? message.TraceParent;
         var traceState = Activity.Current?.TraceStateString ?? message.TraceState;
 
         if (!string.IsNullOrWhiteSpace(traceParent))
-        {
-            cloudEvent["traceparent"] = traceParent;
-        }
+            metadata["cloudevent.traceparent"] = traceParent;
 
         if (!string.IsNullOrWhiteSpace(traceState))
-        {
-            cloudEvent["tracestate"] = traceState;
-        }
-
-        // Publish the CloudEvent directly through Dapr with rawPayload to preserve CloudEvent structure
-        var metadata = new Dictionary<string, string>
-        {
-            ["rawPayload"] = "true"
-        };
+            metadata["cloudevent.tracestate"] = traceState;
 
         await daprClient.PublishEventAsync(
             _options.PubSubName,
             _options.TopicName,
-            cloudEvent, metadata, cancellationToken);
+            payload, metadata, cancellationToken);
     }
 
     private async Task MarkMessageAsCompleted(
