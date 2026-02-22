@@ -1,4 +1,4 @@
-namespace CoreBankDemo.PaymentsAPI.Models;
+namespace CoreBankDemo.ServiceDefaults.CloudEventTypes;
 
 public record BalanceUpdatedEvent(
     string TransactionId,
@@ -7,3 +7,4 @@ public record BalanceUpdatedEvent(
     decimal NewBalance,
     string Currency
 );
+

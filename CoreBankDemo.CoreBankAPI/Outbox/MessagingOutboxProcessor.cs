@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
@@ -136,16 +135,24 @@ public class MessagingOutboxProcessor(
         MessagingOutboxMessage message,
         CancellationToken cancellationToken)
     {
-        object payload = message.EventType == Constants.BalanceUpdated
-            ? new BalanceUpdatedResponse(
+        object payload = message.EventType switch
+        {
+            Constants.BalanceUpdated => new BalanceUpdatedEvent(
                 message.TransactionId,
                 message.FromAccount,
                 message.Amount,
                 message.NewBalance ?? 0m,
-                message.Currency)
-            : new TransactionResponse(message.TransactionId,
+                message.Currency),
+            Constants.TransactionFailed => new TransactionFailedEvent(
+                message.TransactionId,
                 message.TransactionStatus,
-                message.ProcessedAt ?? message.CreatedAt);
+                message.ProcessedAt ?? message.CreatedAt,
+                message.ErrorReason),
+            _ => new TransactionCompletedEvent(
+                message.TransactionId,
+                message.TransactionStatus,
+                message.ProcessedAt ?? message.CreatedAt)
+        };
 
         // Let Dapr build the CloudEvent envelope. Set the type via metadata so the
         // subscriber can route by event type using Topic match expressions.

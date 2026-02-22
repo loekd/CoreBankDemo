@@ -1,4 +1,4 @@
-namespace CoreBankDemo.PaymentsAPI.Models;
+namespace CoreBankDemo.ServiceDefaults.CloudEventTypes;
 
 public record TransactionCompletedEvent(
     string TransactionId,
