@@ -1,4 +1,3 @@
-using Dapr;
 using Microsoft.AspNetCore.Mvc;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
@@ -8,7 +7,6 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 [ApiController]
 public class TransactionEventsController(ITransactionEventHandler handler, ILogger<TransactionEventsController> logger) : ControllerBase
 {
-    [Topic("pubsub", "transaction-events")]
     [HttpPost("events/transactions/completed")]
     public async Task<IActionResult> TransactionCompleted(
         [FromBody] TransactionCompletedEvent e,
@@ -18,7 +16,6 @@ public class TransactionEventsController(ITransactionEventHandler handler, ILogg
         return Ok();
     }
 
-    [Topic("pubsub", "transaction-events")]
     [HttpPost("events/transactions/failed")]
     public async Task<IActionResult> TransactionFailed(
         [FromBody] TransactionFailedEvent e,
@@ -28,7 +25,6 @@ public class TransactionEventsController(ITransactionEventHandler handler, ILogg
         return Ok();
     }
 
-    [Topic("pubsub", "transaction-events")]
     [HttpPost("events/transactions/balance-updated")]
     public async Task<IActionResult> BalanceUpdated(
         [FromBody] BalanceUpdatedEvent e,
