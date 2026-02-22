@@ -1,4 +1,3 @@
-using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.ServiceDefaults.Configuration;
@@ -24,8 +23,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddSingleton(TimeProvider.System);
 
 // Database for Outbox pattern
-builder.Services.AddDbContext<PaymentsDbContext>(options =>
-    options.UseSqlite("Data Source=payments.db"));
+builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 
 // Resilience (still using standard resilience handler for retry/circuit breaker)
 builder.Services.AddHttpClient("CoreBank")
@@ -43,7 +41,6 @@ builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
 var app = builder.Build();
 
 // Ensure database is created
-app.RecreateSqliteDatabase("payments.db");
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();

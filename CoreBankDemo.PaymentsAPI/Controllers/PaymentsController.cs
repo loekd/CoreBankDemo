@@ -1,10 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using System.Diagnostics;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
@@ -54,8 +54,8 @@ public class PaymentsController(
                 await StoreInOutbox(request, paymentId, messageId, cancellationToken);
                 break;
             }
-            catch (DbUpdateException ex) when (ex.InnerException is SqliteException sqliteEx &&
-                                               sqliteEx.SqliteErrorCode == 19)
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx &&
+                                               pgEx.SqlState == PostgresErrorCodes.UniqueViolation)
             {
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 if (attempt == 3)

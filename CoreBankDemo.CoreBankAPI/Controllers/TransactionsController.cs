@@ -4,8 +4,8 @@ using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults.Configuration;
-using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using System.Diagnostics;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
@@ -62,7 +62,8 @@ public class TransactionsController(
                 await ProcessWithInbox(request, cancellationToken);
                 break;
             }
-            catch (DbUpdateException ex) when (ex.InnerException is SqliteException { SqliteErrorCode: 19 })
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx &&
+                                               pgEx.SqlState == PostgresErrorCodes.UniqueViolation)
             {
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 if (attempt == 3)

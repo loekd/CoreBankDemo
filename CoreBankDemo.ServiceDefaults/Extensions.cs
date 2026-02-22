@@ -168,33 +168,6 @@ public static class Extensions
             });
         }
 
-        return app;
-    }
-
-    public static WebApplication RecreateSqliteDatabase(this WebApplication app, string databaseFileName)
-    {
-        var basePath = app.Environment.ContentRootPath;
-        var databasePath = Path.IsPathRooted(databaseFileName)
-            ? databaseFileName
-            : Path.Combine(basePath, databaseFileName);
-
-        var walPath = databasePath + "-wal";
-        var shmPath = databasePath + "-shm";
-
-        if (File.Exists(databasePath))
-        {
-            File.Delete(databasePath);
-        }
-
-        if (File.Exists(walPath))
-        {
-            File.Delete(walPath);
-        }
-
-        if (File.Exists(shmPath))
-        {
-            File.Delete(shmPath);
-        }
 
         return app;
     }

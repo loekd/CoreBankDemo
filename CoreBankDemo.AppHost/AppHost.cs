@@ -1,6 +1,6 @@
 using System.Collections.Immutable;
 using CommunityToolkit.Aspire.Hosting.Dapr;
-using Projects;
+
 
 var builder = DistributedApplication.CreateBuilder(args);
 
@@ -15,6 +15,14 @@ var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0"
 
 // APIs and Dapr sidecars run on the host, not in Docker, so use localhost (port 4317 is mapped from the Jaeger container)
 var jaegerOtlpGrpcEndpoint = "http://localhost:4317";
+
+// Add PostgreSQL for Payments API and Core Bank API
+var postgres = builder.AddPostgres("postgres")
+    .WithLifetime(ContainerLifetime.Persistent)
+    .WithPgAdmin();
+
+var paymentsDb = postgres.AddDatabase("paymentsdb");
+var coreBankDb = postgres.AddDatabase("corebankdb");
 
 // Add Redis for Dapr components (pub/sub + lock store)
 // Use a parameter with default value so Dapr YAML can use the same password
@@ -49,6 +57,8 @@ var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComp
 // Core Bank API (Legacy System) with Dapr sidecar
 // Ports are defined in launchSettings.json (5032)
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
+    .WithReference(coreBankDb)
+    .WaitFor(coreBankDb)
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithDaprSidecar(opt =>
     {
@@ -73,6 +83,8 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
 // Payments API (Main Service) with Dapr sidecar
 // Ports are defined in launchSettings.json (5294)
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
+    .WithReference(paymentsDb)
+    .WaitFor(paymentsDb)
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithReference(coreBankApi)
     .WithDaprSidecar(opt =>

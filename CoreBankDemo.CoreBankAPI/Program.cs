@@ -1,4 +1,3 @@
-using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Outbox;
 
@@ -28,8 +27,7 @@ public static class Program
         builder.Services.AddSingleton(TimeProvider.System);
 
         // Database for Inbox pattern
-        builder.Services.AddDbContext<CoreBankDbContext>(options =>
-            options.UseSqlite("Data Source=corebank.db"));
+        builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
         
         //Register all services
         builder.Services.AddHostedService<InboxProcessor>();
@@ -62,7 +60,6 @@ public static class Program
 
     private static void InitializeDatabaseWithSeedAccounts(WebApplication app)
     {
-        app.RecreateSqliteDatabase("corebank.db");
         using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
         db.Database.EnsureCreated();
