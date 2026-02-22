@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
 using CoreBankDemo.PaymentsAPI.Handlers;
@@ -7,7 +8,7 @@ using CoreBankDemo.PaymentsAPI.Handlers;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler) });
+builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler), nameof(PaymentsController) });
 
 // Add configuration options with validation
 builder.AddOutboxProcessingOptions();

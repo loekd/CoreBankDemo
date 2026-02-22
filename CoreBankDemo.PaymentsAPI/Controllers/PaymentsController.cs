@@ -16,26 +16,35 @@ public class PaymentsController(
     IOptions<OutboxProcessingOptions> outboxOptions,
     TimeProvider timeProvider) : ControllerBase
 {
+    private static readonly ActivitySource ActivitySource = new(nameof(PaymentsController));
     private readonly OutboxProcessingOptions _outboxOptions = outboxOptions.Value;
 
     [HttpPost]
     public async Task<IActionResult> ProcessPayment([FromBody] PaymentRequest request, CancellationToken cancellationToken = default)
     {
+        using var activity = StartPaymentActivity(request);
+
         if (!ModelState.IsValid)
-            return BadRequest(new { Errors = GetModelErrors() });
+        {
+            var errors = GetModelErrors();
+            activity?.SetTag("outcome", "invalid_request");
+            activity?.SetTag("outcome.errors", string.Join(", ", errors));
+            activity?.SetStatus(ActivityStatusCode.Error, "Invalid request");
+            return BadRequest(new { Errors = errors });
+        }
 
         var paymentId = Guid.NewGuid().ToString();
         var messageId = Guid.NewGuid().ToString();
+        activity?.SetTag("payment.id", paymentId);
 
-        // Retry loop to handle unique constraint violations (concurrency)
         for (int attempt = 1; attempt <= 3; attempt++)
         {
-            // Check for duplicate message
             var existing = await dbContext.OutboxMessages
                 .FirstOrDefaultAsync(m => m.MessageId == messageId, cancellationToken);
 
             if (existing != null)
             {
+                activity?.SetTag("outcome", "duplicate");
                 return Accepted($"/api/payments/{existing.TransactionId}",
                     CreatePendingResponse(existing.TransactionId, request));
             }
@@ -43,19 +52,29 @@ public class PaymentsController(
             try
             {
                 await StoreInOutbox(request, paymentId, messageId, cancellationToken);
-                break; // Success - exit retry loop
+                break;
             }
             catch (DbUpdateException ex) when (ex.InnerException is SqliteException sqliteEx &&
                                                sqliteEx.SqliteErrorCode == 19)
             {
-                // UNIQUE constraint violation - another instance inserted this message
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 if (attempt == 3)
                     throw;
             }
         }
 
+        activity?.SetTag("outcome", "accepted");
         return Accepted($"/api/payments/{paymentId}", CreatePendingResponse(paymentId, request));
+    }
+
+    private static Activity? StartPaymentActivity(PaymentRequest request)
+    {
+        var activity = ActivitySource.StartActivity("Payment.Received", ActivityKind.Server);
+        activity?.SetTag("payment.from_account", request.FromAccount);
+        activity?.SetTag("payment.to_account", request.ToAccount);
+        activity?.SetTag("payment.amount", request.Amount);
+        activity?.SetTag("payment.currency", request.Currency);
+        return activity;
     }
 
     private async Task StoreInOutbox(PaymentRequest request, string paymentId, string messageId, CancellationToken cancellationToken)

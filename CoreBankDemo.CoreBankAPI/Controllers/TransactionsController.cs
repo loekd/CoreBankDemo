@@ -23,22 +23,40 @@ public class TransactionsController(
     [HttpPost("process")]
     public async Task<IActionResult> ProcessTransaction([FromBody] TransactionRequest request, CancellationToken cancellationToken = default)
     {
+        // Enrich the current span (propagated from the Payments outbox via Dapr) with transaction details
+        EnrichCurrentActivity(request);
+
         if (!ModelState.IsValid)
-            return BadRequest(new { Errors = GetModelErrors() });
+        {
+            var errors = GetModelErrors();
+            Activity.Current?.SetTag("outcome", "invalid_request");
+            Activity.Current?.SetTag("outcome.errors", string.Join(", ", errors));
+            Activity.Current?.SetStatus(ActivityStatusCode.Error, "Invalid request");
+            return BadRequest(new { Errors = errors });
+        }
 
         var validationResult = await ValidateTransactionRequest(request, cancellationToken);
         if (!validationResult.IsValid)
+        {
+            Activity.Current?.SetTag("outcome", "validation_failed");
+            Activity.Current?.SetTag("outcome.errors", string.Join(", ", validationResult.Errors));
+            Activity.Current?.SetStatus(ActivityStatusCode.Error, "Validation failed");
             return BadRequest(new { Errors = validationResult.Errors });
+        }
 
         var idempotencyKey = request.TransactionId;
         for (int attempt = 1; attempt <= 3; attempt++)
         {
-            // Check for duplicate request
             var existing = await dbContext.InboxMessages
                 .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
 
             if (existing != null)
+            {
+                Activity.Current?.SetTag("outcome", "duplicate");
+                Activity.Current?.SetTag("outcome.existing_status", existing.Status);
                 return HandleExistingInboxMessage(existing);
+            }
+
             try
             {
                 await ProcessWithInbox(request, cancellationToken);
@@ -46,21 +64,30 @@ public class TransactionsController(
             }
             catch (DbUpdateException ex) when (ex.InnerException is SqliteException { SqliteErrorCode: 19 })
             {
-                // Another instance has inserted this transaction in the inbox
                 await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
                 if (attempt == 3)
-                {
                     throw;
-                }
             }
         }
-        
+
+        Activity.Current?.SetTag("outcome", "accepted");
         return Accepted($"/api/transactions/{idempotencyKey}", new
         {
             IdempotencyKey = idempotencyKey,
             Status = "Pending",
             Message = "Transaction accepted for processing"
         });
+    }
+
+    private static void EnrichCurrentActivity(TransactionRequest request)
+    {
+        var activity = Activity.Current;
+        if (activity == null) return;
+        activity.SetTag("transaction.id", request.TransactionId);
+        activity.SetTag("transaction.from_account", request.FromAccount);
+        activity.SetTag("transaction.to_account", request.ToAccount);
+        activity.SetTag("transaction.amount", request.Amount);
+        activity.SetTag("transaction.currency", request.Currency);
     }
 
     private async Task<ValidationResult> ValidateTransactionRequest(TransactionRequest request, CancellationToken cancellationToken)
