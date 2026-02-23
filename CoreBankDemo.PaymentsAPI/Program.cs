@@ -1,7 +1,5 @@
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.PaymentsAPI.Controllers;
-using CoreBankDemo.ServiceDefaults.Configuration;
-using Microsoft.Extensions.Options;
 using CoreBankDemo.PaymentsAPI.Handlers;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -25,9 +23,23 @@ builder.Services.AddSingleton(TimeProvider.System);
 // Database for Outbox pattern
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 
-// Resilience (still using standard resilience handler for retry/circuit breaker)
-builder.Services.AddHttpClient("CoreBank")
-    .AddStandardResilienceHandler();
+// Outbox: select Core Bank API transport based on feature flag
+var useDapr = builder.Configuration.GetValue<bool>("Features:UseDapr");
+if (useDapr)
+{
+    builder.Services.AddSingleton<ICoreBankApiClient, DaprCoreBankApiClient>();
+}
+else
+{
+    builder.Services.AddHttpClient<ICoreBankApiClient, HttpCoreBankApiClient>(client =>
+        {
+            client.BaseAddress = new Uri("https+http://corebank-api");
+        })
+        .AddServiceDiscovery()
+        .AddStandardResilienceHandler();
+}
+
+builder.Services.AddSingleton<IOutboxMessageHandler, OutboxMessageHandler>();
 
 // Outbox processor (controlled by feature flag)
 var useOutbox = builder.Configuration.GetValue<bool>("Features:UseOutbox");
