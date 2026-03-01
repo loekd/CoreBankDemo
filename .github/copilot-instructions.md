@@ -1,5 +1,16 @@
 # Copilot Instructions for CoreBankDemo
 
+## General Principles
+
+### Code Quality
+- Most important: this is a demo project featuring mission critical code. Always review and create code from this point of view.
+- Ask for permission before making code changes, unless they have minimal impact.
+- Keep this document up to date.
+- **Don't overdo refactoring** - Keep changes minimal and focused.
+- **Separate HTTP logic from business logic** - Private methods should return business types (e.g., `Task`, `Task<T>`), not HTTP results (`IActionResult`)
+- **Always use proper validation** - Use data annotations and ModelState validation
+- **Return all validation errors at once** - Use `{ Errors: [...] }` format with all problems in a single response
+
 ## Project Overview
 
 This is **demo code** for a conference talk on building resilient mission-critical banking systems. It uses .NET 10, .NET Aspire, Dapr, and SQLite. Despite being a demo, all code should reflect **mission-critical quality** — it must be correct, resilient, and observable.
