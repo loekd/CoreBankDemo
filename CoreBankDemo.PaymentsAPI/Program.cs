@@ -16,8 +16,6 @@ builder.Services.AddDaprClient();
 builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
-// Add TimeProvider
 builder.Services.AddSingleton(TimeProvider.System);
 
 // Database for Outbox pattern
@@ -35,19 +33,12 @@ else
         {
             client.BaseAddress = new Uri("https+http://corebank-api");
         })
-        .AddServiceDiscovery()
-        .AddStandardResilienceHandler();
+        .AddServiceDiscovery();
+    //.AddStandardResilienceHandler();
 }
 
 builder.Services.AddSingleton<IOutboxMessageHandler, OutboxMessageHandler>();
-
-// Outbox processor (controlled by feature flag)
-var useOutbox = builder.Configuration.GetValue<bool>("Features:UseOutbox");
-if (useOutbox)
-{
-    builder.Services.AddHostedService<OutboxProcessor>();
-}
-
+builder.Services.AddHostedService<OutboxProcessor>();
 builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
 
 var app = builder.Build();

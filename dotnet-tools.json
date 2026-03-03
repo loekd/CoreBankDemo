@@ -1,14 +1,7 @@
 {
   "version": 1,
   "isRoot": true,
-  "tools": {
-    "microsoft.devproxy": {
-      "version": "0.22.0",
-      "commands": [
-        "devproxy"
-      ],
-      "rollForward": false
-    },
+  "tools": {    
     "dotnet-outdated-tool": {
       "version": "4.7.0",
       "commands": [

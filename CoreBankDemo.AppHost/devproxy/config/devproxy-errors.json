@@ -1,9 +1,9 @@
 {
-  "$schema": "https://raw.githubusercontent.com/microsoft/dev-proxy/main/schemas/v0.22.0/genericrandomerrorfile.schema.json",
+  "$schema": "https://raw.githubusercontent.com/dotnet/dev-proxy/main/schemas/v2.1.0/genericrandomerrorplugin.errorsfile.schema.json",
   "errors": [
     {
       "request": {
-        "url": "http://localhost:5032/api/*",
+        "url": "http://127.0.0.1:5032/api/accounts/validate",
         "method": "POST"
       },
       "responses": [
@@ -28,7 +28,7 @@
             },
             {
               "name": "Retry-After",
-              "value": "60"
+              "value": "5"
             }
           ],
           "body": {
@@ -51,3 +51,4 @@
     }
   ]
 }
+
