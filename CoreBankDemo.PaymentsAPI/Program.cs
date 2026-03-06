@@ -1,3 +1,5 @@
+using CoreBankDemo.PaymentsAPI;
+using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
@@ -5,10 +7,11 @@ using CoreBankDemo.PaymentsAPI.Handlers;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler), nameof(PaymentsController) });
+builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler), nameof(PaymentsController), nameof(InboxProcessor) });
 
 // Add configuration options with validation
 builder.AddOutboxProcessingOptions();
+builder.AddInboxProcessingOptions();
 
 // Add Dapr
 builder.Services.AddControllers().AddDapr();
@@ -18,7 +21,7 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSingleton(TimeProvider.System);
 
-// Database for Outbox pattern
+// Database for Outbox and Inbox patterns
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 
 // Outbox: select Core Bank API transport based on feature flag
@@ -40,6 +43,10 @@ else
 builder.Services.AddSingleton<IOutboxMessageHandler, OutboxMessageHandler>();
 builder.Services.AddHostedService<OutboxProcessor>();
 builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
+
+// Inbox: de-duplicate incoming transaction events
+builder.Services.AddTransient<IInboxMessageRepository, InboxMessageRepository>();
+builder.Services.AddHostedService<InboxProcessor>();
 
 var app = builder.Build();
 

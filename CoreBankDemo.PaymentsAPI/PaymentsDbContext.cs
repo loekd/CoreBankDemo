@@ -1,10 +1,13 @@
+using CoreBankDemo.PaymentsAPI.Inbox;
+using CoreBankDemo.PaymentsAPI.Outbox;
 using Microsoft.EntityFrameworkCore;
 
-namespace CoreBankDemo.PaymentsAPI.Outbox;
+namespace CoreBankDemo.PaymentsAPI;
 
 public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : DbContext(options)
 {
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -24,5 +27,20 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
             entity.Property(e => e.TraceParent).HasMaxLength(55);
             entity.Property(e => e.TraceState).HasMaxLength(512);
         });
+
+        modelBuilder.Entity<InboxMessage>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.IdempotencyKey).IsUnique();
+            entity.HasIndex(e => new { e.PartitionId, e.Status, e.ReceivedAt }); // Partition-based query index
+            entity.HasIndex(e => e.Status);
+            entity.HasIndex(e => e.ReceivedAt);
+            entity.Property(e => e.IdempotencyKey).IsRequired().HasMaxLength(200);
+            entity.Property(e => e.EventType).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
+            entity.Property(e => e.TraceParent).HasMaxLength(55);
+            entity.Property(e => e.TraceState).HasMaxLength(512);
+        });
     }
 }
+
