@@ -63,11 +63,8 @@ public class InboxProcessor(
 
     private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-
         var pendingMessageIds = await messageRepository.GetPendingMessageIdsForPartitionAsync(
-            dbContext, partitionId, cancellationToken);
+            partitionId, cancellationToken);
 
         if (pendingMessageIds.Count == 0)
             return;
@@ -83,11 +80,7 @@ public class InboxProcessor(
 
     private async Task ProcessMessageAsync(Guid messageId, CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-        var handler = scope.ServiceProvider.GetRequiredService<ITransactionEventHandler>();
-
-        var message = await messageRepository.LoadMessageAsync(dbContext, messageId, cancellationToken);
+        var message = await messageRepository.LoadMessageAsync(messageId, cancellationToken);
         if (message == null)
             return;
 
@@ -95,11 +88,15 @@ public class InboxProcessor(
 
         try
         {
-            await messageRepository.MarkAsProcessingAsync(dbContext, message, cancellationToken);
+            await messageRepository.MarkAsProcessingAsync(message, cancellationToken);
 
-            await DispatchEventAsync(handler, message, cancellationToken);
+            using var scope = serviceProvider.CreateScope();
+            var handler = scope.ServiceProvider.GetRequiredService<ITransactionEventHandler>();
 
-            await messageRepository.MarkAsCompletedAsync(dbContext, message, cancellationToken);
+            await messageRepository.ExecuteInTransactionAsync(
+                message,
+                ct => DispatchEventAsync(handler, message, ct),
+                cancellationToken);
 
             logger.LogInformation(
                 "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}",
@@ -108,7 +105,7 @@ public class InboxProcessor(
         catch (Exception ex)
         {
             await messageRepository.MarkMessageAsFailedWithRetryAsync(
-                dbContext, messageId, ex.Message, cancellationToken);
+                messageId, ex.Message, cancellationToken);
 
             logger.LogWarning(ex, "Failed to process inbox message {MessageId}, retry count: {RetryCount}",
                 message.Id, message.RetryCount);
@@ -145,7 +142,7 @@ public class InboxProcessor(
         }
     }
 
-    private Activity? CreateActivity(InboxMessage message)
+    private static Activity? CreateActivity(InboxMessage message)
     {
         var hasParent = !string.IsNullOrWhiteSpace(message.TraceParent)
                         && ActivityContext.TryParse(message.TraceParent, message.TraceState, out var parentContext);

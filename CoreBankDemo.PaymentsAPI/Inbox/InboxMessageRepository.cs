@@ -1,50 +1,51 @@
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace CoreBankDemo.PaymentsAPI.Inbox;
 
 public interface IInboxMessageRepository
 {
     Task<bool> StoreIfNewAsync(
-        PaymentsDbContext dbContext,
         InboxMessage message,
         CancellationToken cancellationToken);
 
     Task<InboxMessage?> LoadMessageAsync(
-        PaymentsDbContext dbContext,
         Guid messageId,
         CancellationToken cancellationToken);
 
     Task<List<Guid>> GetPendingMessageIdsForPartitionAsync(
-        PaymentsDbContext dbContext,
         int partitionId,
         CancellationToken cancellationToken);
 
     Task MarkAsProcessingAsync(
-        PaymentsDbContext dbContext,
         InboxMessage message,
         CancellationToken cancellationToken);
 
-    Task MarkAsCompletedAsync(
-        PaymentsDbContext dbContext,
+    /// <summary>
+    /// Executes <paramref name="work"/> and marks the message as completed atomically
+    /// </summary>
+    Task ExecuteInTransactionAsync(
         InboxMessage message,
+        Func<CancellationToken, Task> work,
         CancellationToken cancellationToken);
 
     Task MarkMessageAsFailedWithRetryAsync(
-        PaymentsDbContext dbContext,
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken);
 }
 
-public class InboxMessageRepository(TimeProvider timeProvider) : IInboxMessageRepository
+public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvider timeProvider) : IInboxMessageRepository
 {
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
     public async Task<bool> StoreIfNewAsync(
-        PaymentsDbContext dbContext,
         InboxMessage message,
         CancellationToken cancellationToken)
     {
+        using var scope = serviceProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+
         var exists = await dbContext.InboxMessages
             .AnyAsync(m => m.IdempotencyKey == message.IdempotencyKey, cancellationToken);
 
@@ -52,24 +53,36 @@ public class InboxMessageRepository(TimeProvider timeProvider) : IInboxMessageRe
             return false;
 
         dbContext.InboxMessages.Add(message);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return true;
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            // Concurrent insert race — already stored by another instance
+            return false;
+        }
     }
 
     public async Task<InboxMessage?> LoadMessageAsync(
-        PaymentsDbContext dbContext,
         Guid messageId,
         CancellationToken cancellationToken)
     {
+        using var scope = serviceProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+
         return await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == messageId, cancellationToken);
     }
 
     public async Task<List<Guid>> GetPendingMessageIdsForPartitionAsync(
-        PaymentsDbContext dbContext,
         int partitionId,
         CancellationToken cancellationToken)
     {
+        using var scope = serviceProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+
         var staleThreshold = timeProvider.GetUtcNow().Subtract(ProcessingTimeout).UtcDateTime;
 
         return await dbContext.InboxMessages
@@ -84,42 +97,56 @@ public class InboxMessageRepository(TimeProvider timeProvider) : IInboxMessageRe
     }
 
     public async Task MarkAsProcessingAsync(
-        PaymentsDbContext dbContext,
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        message.Status = "Processing";
-        await dbContext.SaveChangesAsync(cancellationToken);
+        using var scope = serviceProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+
+        await dbContext.InboxMessages
+            .Where(m => m.Id == message.Id)
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, "Processing"), cancellationToken);
     }
 
-    public async Task MarkAsCompletedAsync(
-        PaymentsDbContext dbContext,
+    public async Task ExecuteInTransactionAsync(
         InboxMessage message,
+        Func<CancellationToken, Task> work,
         CancellationToken cancellationToken)
     {
-        message.Status = "Completed";
-        message.ProcessedAt = timeProvider.GetUtcNow().UtcDateTime;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        using var scope = serviceProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+        var strategy = dbContext.Database.CreateExecutionStrategy();
+
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+
+            await work(cancellationToken);
+
+            var processedAt = timeProvider.GetUtcNow().UtcDateTime;
+            await dbContext.InboxMessages
+                .Where(m => m.Id == message.Id)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(m => m.Status, "Completed")
+                    .SetProperty(m => m.ProcessedAt, processedAt), cancellationToken);
+
+            await transaction.CommitAsync(cancellationToken);
+        });
     }
 
     public async Task MarkMessageAsFailedWithRetryAsync(
-        PaymentsDbContext dbContext,
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken)
     {
-        var message = await dbContext.InboxMessages
-            .FirstOrDefaultAsync(m => m.Id == messageId, cancellationToken);
+        using var scope = serviceProvider.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
 
-        if (message != null)
-        {
-            message.Status = "Pending";
-            message.RetryCount++;
-            message.LastError = errorMessage;
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
+        await dbContext.InboxMessages
+            .Where(m => m.Id == messageId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.Status, "Pending")
+                .SetProperty(m => m.RetryCount, m => m.RetryCount + 1)
+                .SetProperty(m => m.LastError, errorMessage), cancellationToken);
     }
 }
-
-
-

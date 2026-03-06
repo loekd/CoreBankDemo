@@ -5,16 +5,13 @@ using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using Npgsql;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
 [ApiController]
 public class TransactionEventsController(
     IInboxMessageRepository inboxRepository,
-    PaymentsDbContext dbContext,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
     ILogger<TransactionEventsController> logger) : ControllerBase
@@ -75,30 +72,10 @@ public class TransactionEventsController(
             TraceState = Activity.Current?.TraceStateString
         };
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        var isNew = await inboxRepository.StoreIfNewAsync(message, cancellationToken);
+        if (!isNew)
         {
-            try
-            {
-                var isNew = await inboxRepository.StoreIfNewAsync(dbContext, message, cancellationToken);
-                if (!isNew)
-                {
-                    logger.LogInformation("Duplicate event ignored: {IdempotencyKey}", idempotencyKey);
-                }
-                return;
-            }
-            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx &&
-                                               pgEx.SqlState == PostgresErrorCodes.UniqueViolation)
-            {
-                if (attempt < 3)
-                {
-                    // Transient race between check and insert — retry
-                    dbContext.ChangeTracker.Clear();
-                    continue;
-                }
-
-                // After retries, treat as duplicate
-                logger.LogInformation("Duplicate event detected via constraint: {IdempotencyKey}", idempotencyKey);
-            }
+            logger.LogInformation("Duplicate event ignored: {IdempotencyKey}", idempotencyKey);
         }
     }
 }
