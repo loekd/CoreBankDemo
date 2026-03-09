@@ -1,11 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
-using Npgsql;
 using System.Diagnostics;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
@@ -13,7 +11,8 @@ namespace CoreBankDemo.CoreBankAPI.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 public class TransactionsController(
-    CoreBankDbContext dbContext,
+    IInboxMessageRepository inboxRepository,
+    IAccountRepository accountRepository,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider)
     : ControllerBase
@@ -35,7 +34,9 @@ public class TransactionsController(
             return BadRequest(new { Errors = errors });
         }
 
-        var validationResult = await ValidateTransactionRequest(request, cancellationToken);
+        var validationResult = await accountRepository.ValidateTransactionRequestAsync(
+            request.FromAccount, request.ToAccount, request.Amount, request.Currency, cancellationToken);
+
         if (!validationResult.IsValid)
         {
             Activity.Current?.SetTag("outcome", "validation_failed");
@@ -44,37 +45,29 @@ public class TransactionsController(
             return BadRequest(new { Errors = validationResult.Errors });
         }
 
-        var idempotencyKey = request.TransactionId;
-        for (int attempt = 1; attempt <= 3; attempt++)
+        var existing = await inboxRepository.FindByIdempotencyKeyAsync(request.TransactionId, cancellationToken);
+        if (existing != null)
         {
-            var existing = await dbContext.InboxMessages
-                .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
+            Activity.Current?.SetTag("outcome", "duplicate");
+            Activity.Current?.SetTag("outcome.existing_status", existing.Status);
+            return HandleExistingInboxMessage(existing);
+        }
 
-            if (existing != null)
-            {
-                Activity.Current?.SetTag("outcome", "duplicate");
-                Activity.Current?.SetTag("outcome.existing_status", existing.Status);
-                return HandleExistingInboxMessage(existing);
-            }
-
-            try
-            {
-                await ProcessWithInbox(request, cancellationToken);
-                break;
-            }
-            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx &&
-                                               pgEx.SqlState == PostgresErrorCodes.UniqueViolation)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
-                if (attempt == 3)
-                    throw;
-            }
+        var isNew = await inboxRepository.StoreIfNewAsync(BuildInboxMessage(request), cancellationToken);
+        if (!isNew)
+        {
+            // Lost a concurrent race — load and return the winner's record
+            existing = await inboxRepository.FindByIdempotencyKeyAsync(request.TransactionId, cancellationToken);
+            Activity.Current?.SetTag("outcome", "duplicate");
+            return existing != null
+                ? HandleExistingInboxMessage(existing)
+                : StatusCode(500, new { Errors = new[] { "Failed to store or retrieve transaction" } });
         }
 
         Activity.Current?.SetTag("outcome", "accepted");
-        return Accepted($"/api/transactions/{idempotencyKey}", new
+        return Accepted($"/api/transactions/{request.TransactionId}", new
         {
-            IdempotencyKey = idempotencyKey,
+            IdempotencyKey = request.TransactionId,
             Status = "Pending",
             Message = "Transaction accepted for processing"
         });
@@ -91,45 +84,14 @@ public class TransactionsController(
         activity.SetTag("transaction.currency", request.Currency);
     }
 
-    private async Task<ValidationResult> ValidateTransactionRequest(TransactionRequest request, CancellationToken cancellationToken)
+    private InboxMessage BuildInboxMessage(TransactionRequest request)
     {
-        var fromAccount = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.FromAccount, cancellationToken);
+        var partitionId = PartitionHelper.GetPartitionId(request.TransactionId, _inboxOptions.PartitionCount);
 
-        var toAccount = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.ToAccount, cancellationToken);
-
-        var errors = new List<string>();
-
-        // Validate source account
-        if (fromAccount == null)
-            errors.Add($"Source account {request.FromAccount} not found");
-        else if (!fromAccount.IsActive)
-            errors.Add($"Source account {request.FromAccount} is not active");
-        else if (fromAccount.Balance < request.Amount)
-            errors.Add($"Insufficient funds. Available: {fromAccount.Balance} {fromAccount.Currency}, Required: {request.Amount} {request.Currency}");
-        else if (fromAccount.Currency != request.Currency)
-            errors.Add($"Currency mismatch. Account currency: {fromAccount.Currency}, Transaction currency: {request.Currency}");
-
-        // Validate destination account
-        if (toAccount == null)
-            errors.Add($"Destination account {request.ToAccount} not found");
-        else if (!toAccount.IsActive)
-            errors.Add($"Destination account {request.ToAccount} is not active");
-
-        return new ValidationResult(errors.Count == 0, errors, fromAccount, toAccount);
-    }
-
-    private async Task ProcessWithInbox(TransactionRequest request, CancellationToken cancellationToken)
-    {
-        var idempotencyKey = request.TransactionId;
-        var partitionCount = _inboxOptions.PartitionCount;
-        var partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
-
-        var inboxMessage = new InboxMessage
+        return new InboxMessage
         {
             Id = Guid.NewGuid(),
-            IdempotencyKey = idempotencyKey,
+            IdempotencyKey = request.TransactionId,
             PartitionId = partitionId,
             FromAccount = request.FromAccount,
             ToAccount = request.ToAccount,
@@ -141,9 +103,6 @@ public class TransactionsController(
             TraceParent = Activity.Current?.Id,
             TraceState = Activity.Current?.TraceStateString
         };
-
-        dbContext.InboxMessages.Add(inboxMessage);
-        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private IActionResult HandleExistingInboxMessage(InboxMessage existing)
@@ -177,13 +136,10 @@ public class TransactionsController(
             .ToList();
     }
 
-    private record ValidationResult(bool IsValid, List<string> Errors, Account? FromAccount, Account? ToAccount);
-
     [HttpGet("{idempotencyKey}")]
     public async Task<IActionResult> GetTransactionStatus(string idempotencyKey, CancellationToken cancellationToken = default)
     {
-        var message = await dbContext.InboxMessages
-            .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
+        var message = await inboxRepository.FindByIdempotencyKeyAsync(idempotencyKey, cancellationToken);
 
         if (message == null)
             return NotFound(new { Errors = new[] { "Transaction not found" } });

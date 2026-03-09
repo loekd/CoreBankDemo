@@ -33,7 +33,8 @@ public static class Program
         builder.Services.AddHostedService<InboxProcessor>();
         builder.Services.AddHostedService<MessagingOutboxProcessor>();
         
-        builder.Services.AddTransient<IInboxMessageRepository, InboxMessageRepository>();
+        builder.Services.AddSingleton<IInboxMessageRepository, InboxMessageRepository>();
+        builder.Services.AddSingleton<IAccountRepository, AccountRepository>();
         builder.Services.AddTransient<ITransactionExecutor, TransactionExecutor>();
         builder.Services.AddTransient<IOutboxPublisher, OutboxPublisher>();
         builder.Services.AddTransient<TransactionValidator>();
