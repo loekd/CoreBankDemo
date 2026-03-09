@@ -1,10 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
-using Npgsql;
 using System.Diagnostics;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
@@ -12,7 +10,7 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 public class PaymentsController(
-    PaymentsDbContext dbContext,
+    IOutboxRepository outboxRepository,
     IOptions<OutboxProcessingOptions> outboxOptions,
     TimeProvider timeProvider) : ControllerBase
 {
@@ -37,30 +35,14 @@ public class PaymentsController(
         var messageId = Guid.NewGuid().ToString();
         activity?.SetTag("payment.id", paymentId);
 
-        for (int attempt = 1; attempt <= 3; attempt++)
+        var outboxMessage = BuildOutboxMessage(request, paymentId, messageId);
+        var isNew = await outboxRepository.StoreIfNewAsync(outboxMessage, cancellationToken);
+        if (!isNew)
         {
-            var existing = await dbContext.OutboxMessages
-                .FirstOrDefaultAsync(m => m.MessageId == messageId, cancellationToken);
-
-            if (existing != null)
-            {
-                activity?.SetTag("outcome", "duplicate");
-                return Accepted($"/api/payments/{existing.TransactionId}",
-                    CreatePendingResponse(existing.TransactionId, request));
-            }
-
-            try
-            {
-                await StoreInOutbox(request, paymentId, messageId, cancellationToken);
-                break;
-            }
-            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx &&
-                                               pgEx.SqlState == PostgresErrorCodes.UniqueViolation)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
-                if (attempt == 3)
-                    throw;
-            }
+            var existing = await outboxRepository.FindByMessageIdAsync(messageId, cancellationToken);
+            activity?.SetTag("outcome", "duplicate");
+            return Accepted($"/api/payments/{existing?.TransactionId ?? paymentId}",
+                CreatePendingResponse(existing?.TransactionId ?? paymentId, request));
         }
 
         activity?.SetTag("outcome", "accepted");
@@ -77,12 +59,11 @@ public class PaymentsController(
         return activity;
     }
 
-    private async Task StoreInOutbox(PaymentRequest request, string paymentId, string messageId, CancellationToken cancellationToken)
+    private OutboxMessage BuildOutboxMessage(PaymentRequest request, string paymentId, string messageId)
     {
-        var partitionCount = _outboxOptions.PartitionCount;
-        var partitionId = PartitionHelper.GetPartitionId(messageId, partitionCount);
+        var partitionId = PartitionHelper.GetPartitionId(messageId, _outboxOptions.PartitionCount);
 
-        var outboxMessage = new OutboxMessage
+        return new OutboxMessage
         {
             Id = Guid.NewGuid(),
             MessageId = messageId,
@@ -97,9 +78,6 @@ public class PaymentsController(
             TraceParent = Activity.Current?.Id,
             TraceState = Activity.Current?.TraceStateString
         };
-
-        dbContext.OutboxMessages.Add(outboxMessage);
-        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private List<string> GetModelErrors()

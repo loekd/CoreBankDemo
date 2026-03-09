@@ -15,23 +15,20 @@ public interface IInboxMessageRepository
         CancellationToken cancellationToken);
 
     Task<InboxMessage?> LoadMessageAsync(
-        CoreBankDbContext dbContext,
         Guid messageId,
         CancellationToken cancellationToken);
 
     Task<List<Guid>> GetPendingMessageIdsForPartitionAsync(
-        CoreBankDbContext dbContext,
         int partitionId,
         CancellationToken cancellationToken);
 
     Task MarkMessageAsFailedWithRetryAsync(
-        CoreBankDbContext dbContext,
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken);
 }
 
-public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvider timeProvider) : IInboxMessageRepository
+public class InboxMessageRepository(CoreBankDbContext dbContext, TimeProvider timeProvider) : IInboxMessageRepository
 {
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
@@ -39,9 +36,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         string idempotencyKey,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-
         return await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
     }
@@ -50,8 +44,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
 
         var exists = await dbContext.InboxMessages
             .AnyAsync(m => m.IdempotencyKey == message.IdempotencyKey, cancellationToken);
@@ -73,7 +65,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
     }
 
     public async Task<InboxMessage?> LoadMessageAsync(
-        CoreBankDbContext dbContext,
         Guid messageId,
         CancellationToken cancellationToken)
     {
@@ -82,7 +73,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
     }
 
     public async Task<List<Guid>> GetPendingMessageIdsForPartitionAsync(
-        CoreBankDbContext dbContext,
         int partitionId,
         CancellationToken cancellationToken)
     {
@@ -100,7 +90,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
     }
 
     public async Task MarkMessageAsFailedWithRetryAsync(
-        CoreBankDbContext dbContext,
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken)

@@ -41,11 +41,12 @@ else
 }
 
 builder.Services.AddSingleton<IOutboxMessageHandler, OutboxMessageHandler>();
+builder.Services.AddScoped<IOutboxRepository, OutboxRepository>();
 builder.Services.AddHostedService<OutboxProcessor>();
 builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
 
 // Inbox: de-duplicate incoming transaction events
-builder.Services.AddTransient<IInboxMessageRepository, InboxMessageRepository>();
+builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
 builder.Services.AddHostedService<InboxProcessor>();
 
 var app = builder.Build();

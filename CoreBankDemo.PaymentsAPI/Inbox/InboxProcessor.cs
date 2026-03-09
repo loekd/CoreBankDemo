@@ -12,7 +12,6 @@ public class InboxProcessor(
     IServiceProvider serviceProvider,
     ILogger<InboxProcessor> logger,
     IDistributedLockService lockService,
-    IInboxMessageRepository messageRepository,
     IOptions<InboxProcessingOptions> options)
     : BackgroundService
 {
@@ -63,7 +62,10 @@ public class InboxProcessor(
 
     private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
     {
-        var pendingMessageIds = await messageRepository.GetPendingMessageIdsForPartitionAsync(
+        using var scope = serviceProvider.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
+
+        var pendingMessageIds = await repository.GetPendingMessageIdsForPartitionAsync(
             partitionId, cancellationToken);
 
         if (pendingMessageIds.Count == 0)
@@ -80,7 +82,11 @@ public class InboxProcessor(
 
     private async Task ProcessMessageAsync(Guid messageId, CancellationToken cancellationToken)
     {
-        var message = await messageRepository.LoadMessageAsync(messageId, cancellationToken);
+        using var scope = serviceProvider.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
+        var handler = scope.ServiceProvider.GetRequiredService<ITransactionEventHandler>();
+
+        var message = await repository.LoadMessageAsync(messageId, cancellationToken);
         if (message == null)
             return;
 
@@ -88,12 +94,9 @@ public class InboxProcessor(
 
         try
         {
-            await messageRepository.MarkAsProcessingAsync(message, cancellationToken);
+            await repository.MarkAsProcessingAsync(message, cancellationToken);
 
-            using var scope = serviceProvider.CreateScope();
-            var handler = scope.ServiceProvider.GetRequiredService<ITransactionEventHandler>();
-
-            await messageRepository.ExecuteInTransactionAsync(
+            await repository.ExecuteInTransactionAsync(
                 message,
                 ct => DispatchEventAsync(handler, message, ct),
                 cancellationToken);
@@ -104,7 +107,7 @@ public class InboxProcessor(
         }
         catch (Exception ex)
         {
-            await messageRepository.MarkMessageAsFailedWithRetryAsync(
+            await repository.MarkMessageAsFailedWithRetryAsync(
                 messageId, ex.Message, cancellationToken);
 
             logger.LogWarning(ex, "Failed to process inbox message {MessageId}, retry count: {RetryCount}",

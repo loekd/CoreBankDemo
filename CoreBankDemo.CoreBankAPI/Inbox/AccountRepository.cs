@@ -14,7 +14,7 @@ public interface IAccountRepository
         CancellationToken cancellationToken);
 }
 
-public class AccountRepository(IServiceProvider serviceProvider) : IAccountRepository
+public class AccountRepository(CoreBankDbContext dbContext) : IAccountRepository
 {
     public async Task<AccountValidationResult> ValidateTransactionRequestAsync(
         string fromAccount,
@@ -23,8 +23,6 @@ public class AccountRepository(IServiceProvider serviceProvider) : IAccountRepos
         string currency,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
 
         var from = await dbContext.Accounts
             .FirstOrDefaultAsync(a => a.AccountNumber == fromAccount, cancellationToken);

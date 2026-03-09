@@ -35,7 +35,7 @@ public interface IInboxMessageRepository
         CancellationToken cancellationToken);
 }
 
-public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvider timeProvider) : IInboxMessageRepository
+public class InboxMessageRepository(PaymentsDbContext dbContext, TimeProvider timeProvider) : IInboxMessageRepository
 {
     private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
@@ -43,9 +43,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-
         var exists = await dbContext.InboxMessages
             .AnyAsync(m => m.IdempotencyKey == message.IdempotencyKey, cancellationToken);
 
@@ -69,9 +66,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         Guid messageId,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-
         return await dbContext.InboxMessages
             .FirstOrDefaultAsync(m => m.Id == messageId, cancellationToken);
     }
@@ -80,9 +74,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         int partitionId,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-
         var staleThreshold = timeProvider.GetUtcNow().Subtract(ProcessingTimeout).UtcDateTime;
 
         return await dbContext.InboxMessages
@@ -100,9 +91,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-
         await dbContext.InboxMessages
             .Where(m => m.Id == message.Id)
             .ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, "Processing"), cancellationToken);
@@ -113,8 +101,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         Func<CancellationToken, Task> work,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
         var strategy = dbContext.Database.CreateExecutionStrategy();
 
         await strategy.ExecuteAsync(async () =>
@@ -139,8 +125,6 @@ public class InboxMessageRepository(IServiceProvider serviceProvider, TimeProvid
         string errorMessage,
         CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
 
         await dbContext.InboxMessages
             .Where(m => m.Id == messageId)

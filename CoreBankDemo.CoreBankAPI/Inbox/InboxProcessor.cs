@@ -12,10 +12,7 @@ public class InboxProcessor(
     IServiceProvider serviceProvider,
     ILogger<InboxProcessor> logger,
     IDistributedLockService lockService,
-    IInboxMessageRepository messageRepository,
     TransactionValidator transactionValidator,
-    ITransactionExecutor transactionExecutor,
-    IOutboxPublisher outboxPublisher,
     IOptions<InboxProcessingOptions> options)
     : BackgroundService
 {
@@ -43,7 +40,6 @@ public class InboxProcessor(
 
     private async Task ProcessPartitions(CancellationToken cancellationToken)
     {
-        using var scope = serviceProvider.CreateScope();
         var partitionCount = _options.PartitionCount;
         // Process all partitions in parallel for maximum throughput
         logger.LogInformation("Processing {PartitionCount} partitions", partitionCount);
@@ -68,10 +64,10 @@ public class InboxProcessor(
     private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
     {
         using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
+        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
 
-        var pendingMessageIds = await messageRepository.GetPendingMessageIdsForPartitionAsync(
-            dbContext, partitionId, cancellationToken);
+        var pendingMessageIds = await repository.GetPendingMessageIdsForPartitionAsync(
+            partitionId, cancellationToken);
 
         if (pendingMessageIds.Count == 0)
             return;
@@ -85,11 +81,13 @@ public class InboxProcessor(
         }
     }
 
-
     private async Task ProcessMessageIsolatedAsync(Guid messageId, CancellationToken cancellationToken)
     {
         using var scope = serviceProvider.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
+        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
+        var executor = scope.ServiceProvider.GetRequiredService<ITransactionExecutor>();
+        var publisher = scope.ServiceProvider.GetRequiredService<IOutboxPublisher>();
         var strategy = dbContext.Database.CreateExecutionStrategy();
 
         await strategy.ExecuteAsync(async () =>
@@ -98,30 +96,30 @@ public class InboxProcessor(
 
             try
             {
-                var message = await messageRepository.LoadMessageAsync(dbContext, messageId, cancellationToken);
+                var message = await repository.LoadMessageAsync(messageId, cancellationToken);
                 if (message == null)
                     return;
 
                 using var activity = CreateActivity(message);
 
-                var (fromAccount, toAccount) = await transactionExecutor.LoadAccountsAsync(dbContext, message, cancellationToken);
+                var (fromAccount, toAccount) = await executor.LoadAccountsAsync(dbContext, message, cancellationToken);
                 var validationResult = transactionValidator.ValidateTransaction(message, fromAccount, toAccount);
 
                 if (!validationResult.IsValid)
                 {
-                    await HandleFailedTransactionAsync(dbContext, message, validationResult, cancellationToken);
+                    await HandleFailedTransactionAsync(dbContext, message, validationResult, executor, publisher, cancellationToken);
                     await transaction.CommitAsync(cancellationToken);
                     return;
                 }
 
-                await ExecuteSuccessfulTransactionAsync(dbContext, message, fromAccount!, toAccount!, cancellationToken);
+                await ExecuteSuccessfulTransactionAsync(dbContext, message, fromAccount!, toAccount!, executor, publisher, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
 
                 LogTransactionSuccess(message);
             }
             catch (Exception ex)
             {
-                await HandleTransactionErrorAsync(transaction, dbContext, messageId, ex, cancellationToken);
+                await HandleTransactionErrorAsync(transaction, repository, messageId, ex, cancellationToken);
             }
         });
     }
@@ -146,11 +144,13 @@ public class InboxProcessor(
         CoreBankDbContext dbContext,
         InboxMessage message,
         ValidationResult validationResult,
+        ITransactionExecutor executor,
+        IOutboxPublisher publisher,
         CancellationToken cancellationToken)
     {
-        transactionExecutor.PrepareFailedTransaction(message, validationResult.Error);
-        await outboxPublisher.PublishTransactionFailedAsync(dbContext, message, validationResult.Error, cancellationToken);
-        await transactionExecutor.SaveAsync(dbContext, cancellationToken);
+        executor.PrepareFailedTransaction(message, validationResult.Error);
+        await publisher.PublishTransactionFailedAsync(dbContext, message, validationResult.Error, cancellationToken);
+        await executor.SaveAsync(dbContext, cancellationToken);
 
         logger.LogWarning("Transaction {IdempotencyKey} failed validation: {Error}",
             message.IdempotencyKey, validationResult.Error);
@@ -161,26 +161,28 @@ public class InboxProcessor(
         InboxMessage message,
         Account fromAccount,
         Account toAccount,
+        ITransactionExecutor executor,
+        IOutboxPublisher publisher,
         CancellationToken cancellationToken)
     {
-        var (newFromBalance, newToBalance) = transactionExecutor.ApplySuccessfulTransaction(message, fromAccount, toAccount);
+        var (newFromBalance, newToBalance) = executor.ApplySuccessfulTransaction(message, fromAccount, toAccount);
 
-        await outboxPublisher.PublishTransactionCompletedAsync(dbContext, message, cancellationToken);
-        await outboxPublisher.PublishBalanceUpdatedAsync(dbContext, message, message.FromAccount, newFromBalance, cancellationToken);
-        await outboxPublisher.PublishBalanceUpdatedAsync(dbContext, message, message.ToAccount, newToBalance, cancellationToken);
+        await publisher.PublishTransactionCompletedAsync(dbContext, message, cancellationToken);
+        await publisher.PublishBalanceUpdatedAsync(dbContext, message, message.FromAccount, newFromBalance, cancellationToken);
+        await publisher.PublishBalanceUpdatedAsync(dbContext, message, message.ToAccount, newToBalance, cancellationToken);
 
-        await transactionExecutor.SaveAsync(dbContext, cancellationToken);
+        await executor.SaveAsync(dbContext, cancellationToken);
     }
 
     private async Task HandleTransactionErrorAsync(
         IDbContextTransaction transaction,
-        CoreBankDbContext dbContext,
+        IInboxMessageRepository repository,
         Guid messageId,
         Exception ex,
         CancellationToken cancellationToken)
     {
         await transaction.RollbackAsync(cancellationToken);
-        await messageRepository.MarkMessageAsFailedWithRetryAsync(dbContext, messageId, ex.Message, cancellationToken);
+        await repository.MarkMessageAsFailedWithRetryAsync(messageId, ex.Message, cancellationToken);
 
         logger.LogWarning(ex, "Failed to process inbox message {MessageId}",
             messageId);
