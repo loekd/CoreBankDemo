@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.Messaging.Outbox;
 
@@ -12,7 +13,6 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
 {
     protected readonly TDbContext DbContext;
     protected readonly TimeProvider TimeProvider;
-    private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
     protected OutboxMessageRepositoryBase(TDbContext dbContext, TimeProvider timeProvider)
     {
@@ -37,15 +37,15 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
         int partitionId,
         CancellationToken cancellationToken)
     {
-        var staleThreshold = TimeProvider.GetUtcNow().Subtract(ProcessingTimeout).UtcDateTime;
+        var staleThreshold = TimeProvider.GetUtcNow().Subtract(Defaults.ProcessingTimeout).UtcDateTime;
 
         return await OutboxMessages
             .Where(m => m.PartitionId == partitionId &&
-                       m.RetryCount < 5 &&
-                       (m.Status == "Pending" ||
-                        (m.Status == "Processing" && m.CreatedAt < staleThreshold)))
+                       m.RetryCount < Defaults.MaxRetryCount &&
+                       (m.Status == Status.Pending ||
+                        (m.Status == Status.Processing && m.CreatedAt < staleThreshold)))
             .OrderBy(m => m.CreatedAt)
-            .Take(10)
+            .Take(Defaults.BatchSize)
             .Select(m => m.Id)
             .ToListAsync(cancellationToken);
     }
@@ -54,7 +54,7 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
         TMessage message,
         CancellationToken cancellationToken)
     {
-        message.Status = "Completed";
+        message.Status = Status.Completed;
         message.ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime;
         await DbContext.SaveChangesAsync(cancellationToken);
     }
@@ -64,7 +64,7 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
         string errorMessage,
         CancellationToken cancellationToken)
     {
-        message.Status = "Pending";
+        message.Status = Status.Pending;
         message.RetryCount++;
         message.LastError = errorMessage;
         await DbContext.SaveChangesAsync(cancellationToken);

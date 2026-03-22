@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.Messaging.Inbox;
 
@@ -64,7 +65,7 @@ public abstract class InboxProcessorBase<TMessage, TDbContext> : BackgroundServi
                 _logger.LogError(ex, "Error processing inbox partitions");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            await Task.Delay(Defaults.PollingInterval, stoppingToken);
         }
     }
 

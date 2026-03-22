@@ -1,6 +1,7 @@
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
@@ -29,7 +30,7 @@ public class OutboxProcessor(
                 logger.LogError(ex, "Error processing outbox partitions");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            await Task.Delay(Defaults.PollingInterval, stoppingToken);
         }
     }
 

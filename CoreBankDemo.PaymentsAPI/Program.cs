@@ -38,7 +38,6 @@ else
             client.BaseAddress = new Uri("https+http://corebank-api");
         })
         .AddServiceDiscovery();
-    //.AddStandardResilienceHandler();
 }
 
 builder.Services.AddSingleton<IOutboxMessageHandler, OutboxMessageHandler>();

@@ -21,12 +21,14 @@ public class DaprDistributedLockService(
 
         try
         {
+#pragma warning disable DAPR_DISTRIBUTEDLOCK
             var lockResponse = await daprClient.Lock(
                 LockStoreName,
                 lockName,
                 lockOwner,
                 lockExpirySeconds,
                 cancellationToken);
+#pragma warning restore DAPR_DISTRIBUTEDLOCK
 
             if (!lockResponse.Success)
             {
@@ -58,7 +60,9 @@ public class DaprDistributedLockService(
             }
             finally
             {
+#pragma warning disable DAPR_DISTRIBUTEDLOCK
                 await daprClient.Unlock(LockStoreName, lockName, lockOwner, cancellationToken);
+#pragma warning restore DAPR_DISTRIBUTEDLOCK
                 logger.LogInformation("Released lock {LockName}", lockName);
             }
         }

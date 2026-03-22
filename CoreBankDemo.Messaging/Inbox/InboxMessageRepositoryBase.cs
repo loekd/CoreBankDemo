@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.Messaging.Inbox;
 
@@ -12,7 +13,6 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
 {
     protected readonly TDbContext DbContext;
     protected readonly TimeProvider TimeProvider;
-    private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
     protected InboxMessageRepositoryBase(TDbContext dbContext, TimeProvider timeProvider)
     {
@@ -68,15 +68,15 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
         int partitionId,
         CancellationToken cancellationToken)
     {
-        var staleThreshold = TimeProvider.GetUtcNow().Subtract(ProcessingTimeout).UtcDateTime;
+        var staleThreshold = TimeProvider.GetUtcNow().Subtract(Defaults.ProcessingTimeout).UtcDateTime;
 
         return await InboxMessages
             .Where(m => m.PartitionId == partitionId &&
-                       m.RetryCount < 5 &&
-                       (m.Status == "Pending" ||
-                        (m.Status == "Processing" && m.ReceivedAt < staleThreshold)))
+                       m.RetryCount < Defaults.MaxRetryCount &&
+                       (m.Status == Status.Pending ||
+                        (m.Status == Status.Processing && m.ReceivedAt < staleThreshold)))
             .OrderBy(m => m.ReceivedAt)
-            .Take(10)
+            .Take(Defaults.BatchSize)
             .Select(m => m.Id)
             .ToListAsync(cancellationToken);
     }
@@ -87,7 +87,7 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
     {
         await InboxMessages
             .Where(m => m.Id == message.Id)
-            .ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, "Processing"), cancellationToken);
+            .ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, Status.Processing), cancellationToken);
     }
 
     public virtual async Task MarkMessageAsFailedWithRetryAsync(
@@ -98,7 +98,7 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
         await InboxMessages
             .Where(m => m.Id == messageId)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(m => m.Status, "Pending")
+                .SetProperty(m => m.Status, Status.Pending)
                 .SetProperty(m => m.RetryCount, m => m.RetryCount + 1)
                 .SetProperty(m => m.LastError, errorMessage), cancellationToken);
     }
@@ -123,7 +123,7 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
             await InboxMessages
                 .Where(m => m.Id == message.Id)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(m => m.Status, "Completed")
+                    .SetProperty(m => m.Status, Status.Completed)
                     .SetProperty(m => m.ProcessedAt, processedAt), cancellationToken);
 
             await transaction.CommitAsync(cancellationToken);

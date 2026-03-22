@@ -6,6 +6,8 @@ using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
+using CoreBankDemo.Messaging;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
@@ -67,7 +69,7 @@ public class TransactionEventsController(
             EventType = eventType,
             EventPayload = eventPayload,
             ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
-            Status = "Pending",
+            Status = Status.Pending,
             TraceParent = Activity.Current?.Id,
             TraceState = Activity.Current?.TraceStateString
         };

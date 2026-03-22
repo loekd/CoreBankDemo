@@ -2,11 +2,13 @@
 
 A demonstration project showing resilience patterns for mission-critical banking systems, built with .NET 10 and orchestrated with .NET Aspire. Designed for a 55-minute conference talk.
 
-## ⭐ What's Special
+## What's Special
 
 - **One-Command Start** - `./start-aspire.sh` launches everything
 - **.NET Aspire** - Modern orchestration with built-in observability
 - **Real-World Patterns** - Retry, Circuit Breaker, Outbox, Inbox, Ordering
+- **Shared Libraries** - Reusable inbox/outbox base classes eliminate duplication
+- **Type-Safe Constants** - No magic strings, centralized configuration
 - **Live Observability** - Aspire Dashboard + Jaeger tracing
 - **Chaos Testing** - Dev Proxy for failure injection
 - **Production-Ready** - Patterns used in actual banking systems
@@ -36,49 +38,24 @@ A demonstration project showing resilience patterns for mission-critical banking
 
 ## Quick Start
 
-### Option 1: Using Aspire (Recommended) ⭐
+### Option 1: Using Aspire (Recommended)
 
 ```bash
 # Start everything with .NET Aspire
 cd CoreBankDemo.AppHost
-dotnet run
+aspire run
 ```
 
 This will launch:
-- ✅ Payments API (http://localhost:5294)
-- ✅ Core Bank API (http://localhost:5032)
-- ✅ Jaeger (http://localhost:16686)
-- ✅ Aspire Dashboard (http://localhost:15888)
+- Payments API (http://localhost:5294)
+- Core Bank API (http://localhost:5032)
+- Dev Proxy (http://localhost:8000) - Chaos engineering proxy
+- PostgreSQL databases (paymentsdb, corebankdb)
+- Jaeger (http://localhost:16686)
+- Aspire Dashboard (http://localhost:15888)
 
-**For chaos testing, run Dev Proxy separately:**
-```bash
-# Terminal 2
-dotnet tool restore
-dotnet devproxy --config-file devproxy.json
-```
+**Everything runs automatically - no manual steps needed!**
 
-### Option 2: Manual Start (3 terminals)
-
-**Terminal 1 - Core Bank API:**
-```bash
-cd CoreBankDemo.CoreBankAPI
-dotnet run
-# Runs on http://localhost:5032
-```
-
-**Terminal 2 - Payments API:**
-```bash
-cd CoreBankDemo.PaymentsAPI
-dotnet run
-# Runs on http://localhost:5294
-```
-
-**Terminal 3 - Infrastructure:**
-```bash
-docker compose up -d  # Jaeger only
-dotnet tool restore
-dotnet devproxy --config-file devproxy.json
-```
 
 ### Access UIs
 
@@ -115,13 +92,8 @@ dotnet devproxy --config-file devproxy.json
 
 **Setup:**
 1. Enable DevProxy: Set `"enabled": true` in `devproxy.json` for `GenericRandomErrorPlugin`
-2. Restart DevProxy
-3. Update `appsettings.Development.json`:
-   ```json
-   "CoreBankApi": {
-     "BaseUrl": "http://localhost:8000"
-   }
-   ```
+2. Restart Aspire (Ctrl+C and `dotnet run` again)
+   - Aspire will automatically restart DevProxy with new configuration
 
 **Demo:**
 1. Show random failures (503, 429, 500)
@@ -156,13 +128,13 @@ Already enabled in `appsettings.Development.json`:
 ```
 
 **Demo:**
-1. Keep DevProxy error rate high or stop Core Bank API entirely
+1. Keep DevProxy error rate high or stop Core Bank API in Aspire Dashboard
 2. Send payment requests
 3. Show 202 Accepted response with "Pending" status
 4. Query outbox: `GET http://localhost:5294/api/outbox`
-5. Show messages stored locally in SQLite
-6. Restart Core Bank API or reduce DevProxy errors
-7. Watch OutboxProcessor logs - see automatic retry
+5. Show messages stored in PostgreSQL (paymentsdb)
+6. Restart Core Bank API in Aspire Dashboard or reduce DevProxy errors
+7. Watch OutboxProcessor logs in Aspire Dashboard - see automatic retry
 8. Query outbox again - show "Completed" status
 
 **How it works:**
@@ -334,17 +306,18 @@ Edit `devproxy.json`:
 
 ## Database Files
 
-- `payments.db` - Payments API outbox
-- `corebank.db` - Core Bank API inbox
+- `paymentsdb` - Payments API outbox and inbox (PostgreSQL)
+- `corebankdb` - Core Bank API inbox and messaging outbox (PostgreSQL)
 
-Delete these files to reset state.
+To reset state, delete the database containers or clear the tables.
 
 ## Troubleshooting
 
 **DevProxy not working?**
 ```bash
-dotnet tool restore
-dotnet devproxy --help
+# Ensure the devproxy executable is in the project root
+./devproxy --help
+# Or check the devproxy.json configuration file
 ```
 
 **Port already in use?**
@@ -360,16 +333,54 @@ lsof -ti:8000 | xargs kill  # Dev Proxy
 
 **Database errors?**
 ```bash
-# Delete and recreate
-rm CoreBankDemo.PaymentsAPI/payments.db
-rm CoreBankDemo.CoreBankAPI/corebank.db
-# Restart APIs
+# Clear PostgreSQL databases via Aspire Dashboard or restart with clean volumes
+# Databases are automatically created on startup
 ```
+
+## Load Testing
+
+The project includes comprehensive load tests that validate the system under concurrent load:
+
+```bash
+# Run load tests with k6
+dotnet run --project CoreBankDemo.LoadTests
+```
+
+**What it tests:**
+- Exactly-once processing under concurrent load (10 VUs submitting 1000+ transactions)
+- Idempotency: ~10% are deliberate retry attempts with duplicate idempotency keys
+- End-to-end flow: Payments API outbox → Core Bank API inbox → transaction processing
+- No failed messages, no pending messages, no duplicate processing
+
+**Configuration:** Edit `CoreBankDemo.LoadTests/appsettings.json`:
+```json
+{
+  "LoadTest": {
+    "TransactionCount": "1000",  // Total unique transactions
+    "VuCount": "10"               // Concurrent virtual users
+  }
+}
+```
+
+The load test uses disposable PostgreSQL and Redis instances, seeded with 10 test accounts (€10M each). See [CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md) for details.
+
+## Architecture & Technical Details
+
+For detailed architecture information, database schemas, and implementation details, see:
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete technical architecture documentation
+  - Shared library design (CoreBankDemo.Messaging)
+  - Pattern implementations (Inbox/Outbox/Partitioning)
+  - Database schemas
+  - Configuration options
+  - Design decisions and rationale
+  - Load testing strategy
 
 ## Further Reading
 
+- [.NET Aspire Documentation](https://learn.microsoft.com/en-us/dotnet/aspire/)
 - [Resilience Patterns](https://learn.microsoft.com/en-us/dotnet/core/resilience/)
-- [Transactional Outbox](https://microservices.io/patterns/data/transactional-outbox.html)
-- [Idempotent Consumer](https://microservices.io/patterns/communication-style/idempotent-consumer.html)
+- [Transactional Outbox Pattern](https://microservices.io/patterns/data/transactional-outbox.html)
+- [Idempotent Consumer Pattern](https://microservices.io/patterns/communication-style/idempotent-consumer.html)
 - [Dev Proxy](https://learn.microsoft.com/en-us/microsoft-cloud/dev/dev-proxy/)
 - [OpenTelemetry .NET](https://opentelemetry.io/docs/languages/net/)
+- [Dapr Distributed Application Runtime](https://dapr.io/)

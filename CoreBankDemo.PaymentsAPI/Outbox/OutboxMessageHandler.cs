@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
@@ -10,22 +11,21 @@ public class OutboxMessageHandler(
     ILogger<OutboxMessageHandler> logger) : IOutboxMessageHandler
 {
     private readonly ActivitySource _activitySource = new("OutboxProcessor");
-    private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
     public async Task<List<Guid>> GetPendingMessageIdsForPartitionAsync(
         PaymentsDbContext dbContext,
         int partitionId,
         CancellationToken cancellationToken)
     {
-        var staleThreshold = timeProvider.GetUtcNow().Subtract(ProcessingTimeout).UtcDateTime;
+        var staleThreshold = timeProvider.GetUtcNow().Subtract(Defaults.ProcessingTimeout).UtcDateTime;
 
         return await dbContext.OutboxMessages
             .Where(m => m.PartitionId == partitionId &&
-                        m.RetryCount < 5 &&
-                        (m.Status == "Pending" ||
-                         (m.Status == "Processing" && m.CreatedAt < staleThreshold)))
+                        m.RetryCount < Defaults.MaxRetryCount &&
+                        (m.Status == Status.Pending ||
+                         (m.Status == Status.Processing && m.CreatedAt < staleThreshold)))
             .OrderBy(m => m.CreatedAt)
-            .Take(10)
+            .Take(Defaults.BatchSize)
             .Select(m => m.Id)
             .ToListAsync(cancellationToken);
     }
@@ -49,7 +49,7 @@ public class OutboxMessageHandler(
 
             if (!validationResult.IsValid)
             {
-                message.Status = "Failed";
+                message.Status = Status.Failed;
                 message.LastError = validationResult.Error;
                 await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -60,7 +60,7 @@ public class OutboxMessageHandler(
 
             await coreBankApiClient.ProcessTransactionAsync(message, cancellationToken);
 
-            message.Status = "Completed";
+            message.Status = Status.Completed;
             message.ProcessedAt = timeProvider.GetUtcNow().UtcDateTime;
             await dbContext.SaveChangesAsync(cancellationToken);
 
@@ -69,7 +69,7 @@ public class OutboxMessageHandler(
         }
         catch (Exception ex)
         {
-            message.Status = "Pending";
+            message.Status = Status.Pending;
             message.RetryCount++;
             message.LastError = ex.Message;
             await dbContext.SaveChangesAsync(cancellationToken);
