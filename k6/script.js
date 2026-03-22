@@ -1,5 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import exec from 'k6/execution';
 import { uuidv4 } from 'https://jslib.k6.io/k6-utils/1.4.0/index.js';
 
 // ---------------------------------------------------------------------------
@@ -32,20 +33,15 @@ const RETRY_RATIO    = 0.10;
 const RETRY_COUNT    = Math.floor(TRANSACTION_COUNT * RETRY_RATIO);
 const UNIQUE_COUNT   = TRANSACTION_COUNT; // we want this many unique transactions processed
 
-// Pre-generate unique message IDs. k6 init context runs once per VU,
-// so we use a shared module-level array indexed by iteration.
-const messageIds = [];
-for (let i = 0; i < UNIQUE_COUNT; i++) {
-    messageIds.push(uuidv4());
-}
-
-// The first RETRY_COUNT IDs will be submitted twice to test deduplication.
-const retryIds = messageIds.slice(0, RETRY_COUNT);
+// IMPORTANT: In k6, the init context runs ONCE PER VU, not once globally!
+// To ensure idempotency keys are truly shared across VUs, we use deterministic generation
+// based on iteration index instead of pre-generating random UUIDs.
+// This ensures iteration N always gets the same idempotency key regardless of which VU runs it.
 
 export const options = {
     vus: VU_COUNT,
     iterations: TRANSACTION_COUNT + RETRY_COUNT, // unique + deliberate retries
-    teardownTimeout: '10m',
+    teardownTimeout: '1m',
     thresholds: {
         // All requests must complete without unexpected HTTP errors
         'http_req_failed': ['rate<0.01'],
@@ -55,7 +51,7 @@ export const options = {
 };
 
 // ---------------------------------------------------------------------------
-// Setup — called once before load. Verifies the APIs are reachable.
+// Setup — called once before load. Resets database and verifies APIs.
 // ---------------------------------------------------------------------------
 export function setup() {
     console.log(`Starting load test: ${UNIQUE_COUNT} unique transactions, ${VU_COUNT} VUs, ${RETRY_COUNT} intentional retries`);
@@ -74,6 +70,18 @@ export function setup() {
         'payments-api is healthy': (r) => r.status === 200,
     });
 
+    // Reset database to clean state
+    console.log('Resetting database to clean state...');
+    const resetRes = http.post(`${SUPPORT_URL}/reset`);
+    check(resetRes, {
+        'database reset successful': (r) => r.status === 200,
+    });
+
+    if (resetRes.status === 200) {
+        const resetData = JSON.parse(resetRes.body);
+        console.log(`Reset complete: ${resetData.accountsReset} accounts, total balance: €${resetData.totalBalance.toLocaleString()}`);
+    }
+
     return { startTime: Date.now() };
 }
 
@@ -87,11 +95,12 @@ export default function () {
     let isRetry = false;
 
     if (iterationIndex < UNIQUE_COUNT) {
-        // Normal unique transaction
-        messageId = messageIds[iterationIndex];
+        // Normal unique transaction - use deterministic ID based on iteration
+        messageId = `load-test-${iterationIndex.toString().padStart(10, '0')}`;
     } else {
         // Deliberate retry: reuse one of the first RETRY_COUNT IDs
-        messageId = retryIds[iterationIndex % RETRY_COUNT];
+        const retryIndex = iterationIndex % RETRY_COUNT;
+        messageId = `load-test-${retryIndex.toString().padStart(10, '0')}`;
         isRetry = true;
     }
 
@@ -107,7 +116,10 @@ export default function () {
     });
 
     const params = {
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': messageId
+        },
         tags: { type: 'payment' },
     };
 
@@ -178,12 +190,21 @@ export function teardown(data) {
         'no pending inbox messages':      (r) => r.checks.noPendingMessages.passed === true,
         'no duplicate processing':        (r) => r.checks.noDuplicateProcessing.passed === true,
         'all submitted transactions processed': (r) => r.checks.allSubmittedProcessed.passed === true,
+        'balance conservation':           (r) => r.checks.balanceConservation.passed === true,
+        'balances correct':               (r) => r.checks.balancesCorrect.passed === true,
     });
 
     if (!result.allPassed) {
         console.error('ONE OR MORE ASSERTIONS FAILED — see details above');
+
+        // Log balance discrepancies if present
+        if (result.checks.balancesCorrect && !result.checks.balancesCorrect.passed) {
+            console.error('\n========== BALANCE DISCREPANCIES ==========');
+            console.error(JSON.stringify(result.checks.balancesCorrect.discrepancies, null, 2));
+            console.error('==========================================\n');
+        }
     } else {
-        console.log('✓ All exactly-once guarantees verified successfully');
+        console.log('✓ All exactly-once guarantees and balance correctness verified successfully');
     }
 }
 

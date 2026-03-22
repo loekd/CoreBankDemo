@@ -26,32 +26,47 @@ static void SeedLoadTestAccounts(WebApplication app)
 {
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<CoreBankReadDbContext>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
 
-    var now = TimeProvider.System.GetUtcNow().UtcDateTime;
-
-    var loadTestAccounts = Enumerable.Range(1, 10)
-        .Select(i => new Account
+    var strategy = db.Database.CreateExecutionStrategy();
+    strategy.Execute(
+        state: (db, logger),
+        operation: (context, state) =>
         {
-            AccountNumber     = $"NL{i:D2}LOAD{i:D10}",
-            AccountHolderName = $"Load Test Account {i:D2}",
-            Balance           = 10_000_000.00m,
-            Currency          = "EUR",
-            IsActive          = true,
-            CreatedAt         = now
-        })
-        .ToList();
+            var (dbContext, log) = state;
+            var now = TimeProvider.System.GetUtcNow().UtcDateTime;
 
-    // Only insert accounts that don't already exist (idempotent)
-    var existing = db.Accounts
-        .Where(a => a.AccountNumber.StartsWith("NL") && a.AccountNumber.Contains("LOAD"))
-        .Select(a => a.AccountNumber)
-        .ToHashSet();
+            var loadTestAccounts = Enumerable.Range(1, 10)
+                .Select(i => new Account
+                {
+                    AccountNumber     = $"NL{i:D2}LOAD{i:D10}",
+                    AccountHolderName = $"Load Test Account {i:D2}",
+                    Balance           = 10_000_000.00m,
+                    Currency          = "EUR",
+                    IsActive          = true,
+                    CreatedAt         = now
+                })
+                .ToList();
 
-    var toInsert = loadTestAccounts.Where(a => !existing.Contains(a.AccountNumber)).ToList();
-    if (toInsert.Count == 0)
-        return;
+            // Only insert accounts that don't already exist (idempotent)
+            var existing = dbContext.Accounts
+                .Where(a => a.AccountNumber.StartsWith("NL") && a.AccountNumber.Contains("LOAD"))
+                .Select(a => a.AccountNumber)
+                .ToHashSet();
 
-    db.Accounts.AddRange(toInsert);
-    db.SaveChanges();
+            var toInsert = loadTestAccounts.Where(a => !existing.Contains(a.AccountNumber)).ToList();
+            if (toInsert.Count == 0)
+            {
+                log.LogInformation("Load test accounts already seeded");
+                return (object?)null;
+            }
+
+            dbContext.Accounts.AddRange(toInsert);
+            dbContext.SaveChanges();
+            log.LogInformation("Seeded {Count} load test accounts", toInsert.Count);
+            return (object?)null;
+        },
+        verifySucceeded: null
+    );
 }
 

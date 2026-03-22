@@ -33,8 +33,11 @@ public class PaymentsController(
             return BadRequest(new { Errors = errors });
         }
 
-        var paymentId = Guid.NewGuid().ToString();
+        // Use client-provided idempotency key if present, otherwise generate new one
+        var idempotencyKeyFromHeader = Request.Headers["Idempotency-Key"].FirstOrDefault();
+        var paymentId = idempotencyKeyFromHeader ?? Guid.NewGuid().ToString();
         activity?.SetTag("payment.id", paymentId);
+        activity?.SetTag("payment.idempotency_key_provided", idempotencyKeyFromHeader != null);
 
         var outboxMessage = BuildOutboxMessage(request, paymentId);
         var isNew = await outboxRepository.StoreIfNewAsync(outboxMessage, cancellationToken);
