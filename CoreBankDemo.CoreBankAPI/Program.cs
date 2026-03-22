@@ -64,12 +64,14 @@ public static class Program
         using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
         db.Database.EnsureCreated();
-            
+
         // Seed accounts if empty
-        if (db.Accounts.Any()) 
+        if (db.Accounts.Any())
             return;
-        
-        var accounts = new[]
+
+        var now = TimeProvider.System.GetUtcNow().UtcDateTime;
+
+        var accounts = new List<Account>
         {
             new Account
             {
@@ -78,7 +80,7 @@ public static class Program
                 Balance = 5000.00m,
                 Currency = "EUR",
                 IsActive = true,
-                CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
+                CreatedAt = now
             },
             new Account
             {
@@ -87,7 +89,7 @@ public static class Program
                 Balance = 10000.00m,
                 Currency = "EUR",
                 IsActive = true,
-                CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
+                CreatedAt = now
             },
             new Account
             {
@@ -96,10 +98,11 @@ public static class Program
                 Balance = 2500.00m,
                 Currency = "EUR",
                 IsActive = true,
-                CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime
+                CreatedAt = now
             }
         };
-                
+
+
         db.Accounts.AddRange(accounts);
         db.SaveChanges();
     }

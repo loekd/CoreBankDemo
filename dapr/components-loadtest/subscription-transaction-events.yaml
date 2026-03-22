@@ -1,0 +1,19 @@
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: transaction-events-subscription
+spec:
+  pubsubname: pubsub
+  topic: transaction-events
+  routes:
+    rules:
+      - match: event.type == "com.corebank.transaction.completed"
+        path: /events/transactions/completed
+      - match: event.type == "com.corebank.transaction.failed"
+        path: /events/transactions/failed
+      - match: event.type == "com.corebank.account.balance.updated"
+        path: /events/transactions/balance-updated
+    default: /events/transactions/unknown
+scopes:
+  - payments-api
+

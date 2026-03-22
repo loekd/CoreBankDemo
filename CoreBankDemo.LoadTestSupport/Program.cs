@@ -1,0 +1,57 @@
+using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.LoadTestSupport;
+using CoreBankDemo.LoadTestSupport.Endpoints;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.AddServiceDefaults("CoreBank.LoadTestSupport");
+
+// Connect to both databases (read-only mirror for assertions)
+builder.AddNpgsqlDbContext<CoreBankReadDbContext>("corebankdb");
+builder.AddNpgsqlDbContext<PaymentsReadDbContext>("paymentsdb");
+
+var app = builder.Build();
+
+// Seed the 10 load test accounts into the CoreBank database.
+// CoreBankAPI (which we wait for) has already run EnsureCreated() and seeded
+// the regular accounts, so the schema and table are guaranteed to exist here.
+SeedLoadTestAccounts(app);
+
+app.MapDefaultEndpoints();
+app.MapAssertEndpoints();
+
+app.Run();
+
+static void SeedLoadTestAccounts(WebApplication app)
+{
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<CoreBankReadDbContext>();
+
+    var now = TimeProvider.System.GetUtcNow().UtcDateTime;
+
+    var loadTestAccounts = Enumerable.Range(1, 10)
+        .Select(i => new Account
+        {
+            AccountNumber     = $"NL{i:D2}LOAD{i:D10}",
+            AccountHolderName = $"Load Test Account {i:D2}",
+            Balance           = 10_000_000.00m,
+            Currency          = "EUR",
+            IsActive          = true,
+            CreatedAt         = now
+        })
+        .ToList();
+
+    // Only insert accounts that don't already exist (idempotent)
+    var existing = db.Accounts
+        .Where(a => a.AccountNumber.StartsWith("NL") && a.AccountNumber.Contains("LOAD"))
+        .Select(a => a.AccountNumber)
+        .ToHashSet();
+
+    var toInsert = loadTestAccounts.Where(a => !existing.Contains(a.AccountNumber)).ToList();
+    if (toInsert.Count == 0)
+        return;
+
+    db.Accounts.AddRange(toInsert);
+    db.SaveChanges();
+}
+

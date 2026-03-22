@@ -47,8 +47,16 @@ public static class Extensions
                 http.AddServiceDiscovery();
             });
 
-            // Register distributed lock service
-            builder.Services.AddSingleton<IDistributedLockService, DaprDistributedLockService>();
+            // Register distributed lock service only when DaprClient is available.
+            // Services that don't use Dapr (e.g. read-only support APIs) skip this.
+            builder.Services.AddSingleton<IDistributedLockService>(sp =>
+            {
+                var daprClient = sp.GetService<Dapr.Client.DaprClient>();
+                if (daprClient is null)
+                    return new NoOpDistributedLockService();
+                var logger = sp.GetRequiredService<ILogger<DaprDistributedLockService>>();
+                return new DaprDistributedLockService(daprClient, logger);
+            });
 
             // Uncomment the following to restrict the allowed schemes for service discovery.
             // builder.Services.Configure<ServiceDiscoveryOptions>(options =>
