@@ -28,30 +28,14 @@ public class TransactionExecutor(TimeProvider timeProvider) : ITransactionExecut
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        // Acquire row-level locks in a consistent alphabetical order to prevent deadlocks
-        // between concurrent transactions in different partitions that share an account.
-        Account? fromAccount, toAccount;
-        if (string.Compare(message.FromAccount, message.ToAccount, StringComparison.Ordinal) < 0)
-        {
-            fromAccount = await LoadForUpdateAsync(dbContext, message.FromAccount, cancellationToken);
-            toAccount   = await LoadForUpdateAsync(dbContext, message.ToAccount,   cancellationToken);
-        }
-        else
-        {
-            toAccount   = await LoadForUpdateAsync(dbContext, message.ToAccount,   cancellationToken);
-            fromAccount = await LoadForUpdateAsync(dbContext, message.FromAccount, cancellationToken);
-        }
+        var fromAccount = await dbContext.Accounts
+            .FirstOrDefaultAsync(a => a.AccountNumber == message.FromAccount, cancellationToken);
+
+        var toAccount = await dbContext.Accounts
+            .FirstOrDefaultAsync(a => a.AccountNumber == message.ToAccount, cancellationToken);
 
         return (fromAccount, toAccount);
     }
-
-    private static Task<Account?> LoadForUpdateAsync(
-        CoreBankDbContext dbContext,
-        string accountNumber,
-        CancellationToken cancellationToken)
-        => dbContext.Accounts
-            .FromSqlRaw("SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {0} FOR UPDATE", accountNumber)
-            .FirstOrDefaultAsync(cancellationToken);
 
     public (decimal NewFromBalance, decimal NewToBalance) ApplySuccessfulTransaction(
         InboxMessage message,
