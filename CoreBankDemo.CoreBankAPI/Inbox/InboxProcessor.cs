@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CoreBankDemo.CoreBankAPI.Outbox;
+using CoreBankDemo.Messaging.Inbox;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -8,86 +9,32 @@ using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
 
-public class InboxProcessor(
-    IServiceProvider serviceProvider,
-    ILogger<InboxProcessor> logger,
-    IDistributedLockService lockService,
-    TransactionValidator transactionValidator,
-    IOptions<InboxProcessingOptions> options)
-    : BackgroundService
+public class InboxProcessor : InboxProcessorBase<InboxMessage, CoreBankDbContext>
 {
-    private readonly ActivitySource _activitySource = new("InboxProcessor");
-    private readonly InboxProcessingOptions _options = options.Value;
+    private readonly TransactionValidator _transactionValidator;
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public InboxProcessor(
+        IServiceProvider serviceProvider,
+        ILogger<InboxProcessor> logger,
+        IDistributedLockService lockService,
+        TransactionValidator transactionValidator,
+        IOptions<InboxProcessingOptions> options)
+        : base(serviceProvider, logger, lockService, options, "InboxProcessor")
     {
-        logger.LogInformation("Inbox Processor started");
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                await ProcessPartitions(stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error processing inbox partitions");
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-        }
+        _transactionValidator = transactionValidator;
     }
 
-    private async Task ProcessPartitions(CancellationToken cancellationToken)
+    protected override string LockNamePrefix => "inbox";
+
+    protected override async Task ProcessMessageAsync(
+        InboxMessage message,
+        IServiceProvider scopedServiceProvider,
+        CancellationToken cancellationToken)
     {
-        var partitionCount = _options.PartitionCount;
-        // Process all partitions in parallel for maximum throughput
-        logger.LogInformation("Processing {PartitionCount} partitions", partitionCount);
-        var tasks = Enumerable.Range(0, partitionCount)
-            .Select(partitionId => ProcessPartition(partitionId, cancellationToken))
-            .ToArray();
-
-        await Task.WhenAll(tasks);
-    }
-
-    private async Task ProcessPartition(int partitionId, CancellationToken cancellationToken)
-    {
-        var lockName = $"inbox-partition-{partitionId}";
-
-        await lockService.ExecuteWithLockAsync(
-            lockName,
-            _options.LockExpirySeconds,
-            async ct => await ProcessPartitionMessages(partitionId, ct),
-            cancellationToken);
-    }
-
-    private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
-    {
-        using var scope = serviceProvider.CreateScope();
-        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
-
-        var pendingMessageIds = await repository.GetPendingMessageIdsForPartitionAsync(
-            partitionId, cancellationToken);
-
-        if (pendingMessageIds.Count == 0)
-            return;
-
-        logger.LogInformation("Processing {Count} pending inbox messages in partition {PartitionId}",
-            pendingMessageIds.Count, partitionId);
-
-        foreach (var messageId in pendingMessageIds)
-        {
-            await ProcessMessageIsolatedAsync(messageId, cancellationToken);
-        }
-    }
-
-    private async Task ProcessMessageIsolatedAsync(Guid messageId, CancellationToken cancellationToken)
-    {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
-        var executor = scope.ServiceProvider.GetRequiredService<ITransactionExecutor>();
-        var publisher = scope.ServiceProvider.GetRequiredService<IOutboxPublisher>();
+        var dbContext = GetService<CoreBankDbContext>(scopedServiceProvider);
+        var repository = GetService<IInboxMessageRepository>(scopedServiceProvider);
+        var executor = GetService<ITransactionExecutor>(scopedServiceProvider);
+        var publisher = GetService<IOutboxPublisher>(scopedServiceProvider);
         var strategy = dbContext.Database.CreateExecutionStrategy();
 
         await strategy.ExecuteAsync(async () =>
@@ -96,14 +43,8 @@ public class InboxProcessor(
 
             try
             {
-                var message = await repository.LoadMessageAsync(messageId, cancellationToken);
-                if (message == null)
-                    return;
-
-                using var activity = CreateActivity(message);
-
                 var (fromAccount, toAccount) = await executor.LoadAccountsAsync(dbContext, message, cancellationToken);
-                var validationResult = transactionValidator.ValidateTransaction(message, fromAccount, toAccount);
+                var validationResult = _transactionValidator.ValidateTransaction(message, fromAccount, toAccount);
 
                 if (!validationResult.IsValid)
                 {
@@ -115,29 +56,13 @@ public class InboxProcessor(
                 await ExecuteSuccessfulTransactionAsync(dbContext, message, fromAccount!, toAccount!, executor, publisher, cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
 
-                LogTransactionSuccess(message);
+                LogTransactionSuccess(message, scopedServiceProvider);
             }
             catch (Exception ex)
             {
-                await HandleTransactionErrorAsync(transaction, repository, messageId, ex, cancellationToken);
+                await HandleTransactionErrorAsync(transaction, repository, message.Id, ex, cancellationToken);
             }
         });
-    }
-
-    private Activity? CreateActivity(InboxMessage message)
-    {
-        ActivityContext parentContext;
-        var hasParent = !string.IsNullOrWhiteSpace(message.TraceParent)
-                        && ActivityContext.TryParse(message.TraceParent, message.TraceState, out parentContext);
-
-        var activity = hasParent
-            ? _activitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer, parentContext)
-            : _activitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer);
-
-        activity?.SetTag("inbox.id", message.Id);
-        activity?.SetTag("idempotency.key", message.IdempotencyKey);
-        activity?.SetTag("queue_duration_ms", (long)(DateTime.UtcNow - message.ReceivedAt).TotalMilliseconds);
-        return activity;
     }
 
     private async Task HandleFailedTransactionAsync(
@@ -151,9 +76,6 @@ public class InboxProcessor(
         executor.PrepareFailedTransaction(message, validationResult.Error);
         await publisher.PublishTransactionFailedAsync(dbContext, message, validationResult.Error, cancellationToken);
         await executor.SaveAsync(dbContext, cancellationToken);
-
-        logger.LogWarning("Transaction {IdempotencyKey} failed validation: {Error}",
-            message.IdempotencyKey, validationResult.Error);
     }
 
     private async Task ExecuteSuccessfulTransactionAsync(
@@ -183,13 +105,11 @@ public class InboxProcessor(
     {
         await transaction.RollbackAsync(cancellationToken);
         await repository.MarkMessageAsFailedWithRetryAsync(messageId, ex.Message, cancellationToken);
-
-        logger.LogWarning(ex, "Failed to process inbox message {MessageId}",
-            messageId);
     }
 
-    private void LogTransactionSuccess(InboxMessage message)
+    private void LogTransactionSuccess(InboxMessage message, IServiceProvider scopedServiceProvider)
     {
+        var logger = scopedServiceProvider.GetRequiredService<ILogger<InboxProcessor>>();
         logger.LogInformation(
             "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}, transaction {TransactionId}. " +
             "Transferred {Amount} {Currency} from {FromAccount} to {ToAccount}",

@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Text.Json;
+using CoreBankDemo.Messaging.Inbox;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
@@ -8,111 +8,38 @@ using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.PaymentsAPI.Inbox;
 
-public class InboxProcessor(
-    IServiceProvider serviceProvider,
-    ILogger<InboxProcessor> logger,
-    IDistributedLockService lockService,
-    IOptions<InboxProcessingOptions> options)
-    : BackgroundService
+public class InboxProcessor : InboxProcessorBase<InboxMessage, PaymentsDbContext>
 {
-    private static readonly ActivitySource ActivitySource = new(nameof(InboxProcessor));
-    private readonly InboxProcessingOptions _options = options.Value;
-
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public InboxProcessor(
+        IServiceProvider serviceProvider,
+        ILogger<InboxProcessor> logger,
+        IDistributedLockService lockService,
+        IOptions<InboxProcessingOptions> options)
+        : base(serviceProvider, logger, lockService, options, nameof(InboxProcessor))
     {
-        logger.LogInformation("Payments Inbox Processor started");
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                await ProcessPartitions(stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error processing inbox partitions");
-            }
-
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-        }
     }
 
-    private async Task ProcessPartitions(CancellationToken cancellationToken)
+    protected override string LockNamePrefix => "payments-inbox";
+
+    protected override async Task ProcessMessageAsync(
+        InboxMessage message,
+        IServiceProvider scopedServiceProvider,
+        CancellationToken cancellationToken)
     {
-        var partitionCount = _options.PartitionCount;
-        logger.LogInformation("Processing {PartitionCount} inbox partitions", partitionCount);
+        var repository = GetService<IInboxMessageRepository>(scopedServiceProvider);
+        var handler = GetService<ITransactionEventHandler>(scopedServiceProvider);
 
-        var tasks = Enumerable.Range(0, partitionCount)
-            .Select(partitionId => ProcessPartition(partitionId, cancellationToken))
-            .ToArray();
+        await repository.MarkAsProcessingAsync(message, cancellationToken);
 
-        await Task.WhenAll(tasks);
-    }
-
-    private async Task ProcessPartition(int partitionId, CancellationToken cancellationToken)
-    {
-        var lockName = $"payments-inbox-partition-{partitionId}";
-
-        await lockService.ExecuteWithLockAsync(
-            lockName,
-            _options.LockExpirySeconds,
-            async ct => await ProcessPartitionMessages(partitionId, ct),
+        await repository.ExecuteInTransactionAsync(
+            message,
+            ct => DispatchEventAsync(handler, message, ct),
             cancellationToken);
-    }
 
-    private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
-    {
-        using var scope = serviceProvider.CreateScope();
-        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
-
-        var pendingMessageIds = await repository.GetPendingMessageIdsForPartitionAsync(
-            partitionId, cancellationToken);
-
-        if (pendingMessageIds.Count == 0)
-            return;
-
-        logger.LogInformation("Processing {Count} pending inbox messages in partition {PartitionId}",
-            pendingMessageIds.Count, partitionId);
-
-        foreach (var messageId in pendingMessageIds)
-        {
-            await ProcessMessageAsync(messageId, cancellationToken);
-        }
-    }
-
-    private async Task ProcessMessageAsync(Guid messageId, CancellationToken cancellationToken)
-    {
-        using var scope = serviceProvider.CreateScope();
-        var repository = scope.ServiceProvider.GetRequiredService<IInboxMessageRepository>();
-        var handler = scope.ServiceProvider.GetRequiredService<ITransactionEventHandler>();
-
-        var message = await repository.LoadMessageAsync(messageId, cancellationToken);
-        if (message == null)
-            return;
-
-        using var activity = CreateActivity(message);
-
-        try
-        {
-            await repository.MarkAsProcessingAsync(message, cancellationToken);
-
-            await repository.ExecuteInTransactionAsync(
-                message,
-                ct => DispatchEventAsync(handler, message, ct),
-                cancellationToken);
-
-            logger.LogInformation(
-                "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}",
-                message.Id, message.IdempotencyKey);
-        }
-        catch (Exception ex)
-        {
-            await repository.MarkMessageAsFailedWithRetryAsync(
-                messageId, ex.Message, cancellationToken);
-
-            logger.LogWarning(ex, "Failed to process inbox message {MessageId}, retry count: {RetryCount}",
-                message.Id, message.RetryCount);
-        }
+        var logger = scopedServiceProvider.GetRequiredService<ILogger<InboxProcessor>>();
+        logger.LogInformation(
+            "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}",
+            message.Id, message.IdempotencyKey);
     }
 
     private static async Task DispatchEventAsync(
@@ -144,21 +71,4 @@ public class InboxProcessor(
                 throw new InvalidOperationException($"Unknown event type: {message.EventType}");
         }
     }
-
-    private static Activity? CreateActivity(InboxMessage message)
-    {
-        var hasParent = !string.IsNullOrWhiteSpace(message.TraceParent)
-                        && ActivityContext.TryParse(message.TraceParent, message.TraceState, out var parentContext);
-
-        var activity = hasParent
-            ? ActivitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer, parentContext)
-            : ActivitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer);
-
-        activity?.SetTag("inbox.id", message.Id);
-        activity?.SetTag("idempotency.key", message.IdempotencyKey);
-        activity?.SetTag("event.type", message.EventType);
-        return activity;
-    }
 }
-
-

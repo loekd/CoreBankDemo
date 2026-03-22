@@ -1,28 +1,11 @@
 using CoreBankDemo.CoreBankAPI.Inbox;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
+using CoreBankDemo.Messaging.Inbox;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
-[ApiController]
-[Route("api/[controller]")]
-public class InboxController : ControllerBase
+public class InboxController : InboxControllerBase<InboxMessage, CoreBankDbContext>
 {
-    private readonly CoreBankDbContext _dbContext;
-
-    public InboxController(CoreBankDbContext dbContext)
+    public InboxController(InboxMessageRepository repository) : base(repository)
     {
-        _dbContext = dbContext;
-    }
-
-    [HttpGet]
-    public async Task<IActionResult> GetInboxMessages(CancellationToken cancellationToken = default)
-    {
-        var messages = await _dbContext.InboxMessages
-            .OrderByDescending(m => m.ReceivedAt)
-            .Take(50)
-            .ToListAsync(cancellationToken);
-
-        return Ok(messages);
     }
 }

@@ -5,8 +5,8 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 
 public interface IOutboxRepository
 {
-    Task<OutboxMessage?> FindByMessageIdAsync(
-        string messageId,
+    Task<OutboxMessage?> FindByIdempotencyKeyAsync(
+        string idempotencyKey,
         CancellationToken cancellationToken);
 
     Task<bool> StoreIfNewAsync(
@@ -16,12 +16,12 @@ public interface IOutboxRepository
 
 public class OutboxRepository(PaymentsDbContext dbContext) : IOutboxRepository
 {
-    public async Task<OutboxMessage?> FindByMessageIdAsync(
-        string messageId,
+    public async Task<OutboxMessage?> FindByIdempotencyKeyAsync(
+        string idempotencyKey,
         CancellationToken cancellationToken)
     {
         return await dbContext.OutboxMessages
-            .FirstOrDefaultAsync(m => m.MessageId == messageId, cancellationToken);
+            .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
     }
 
     public async Task<bool> StoreIfNewAsync(
@@ -29,7 +29,7 @@ public class OutboxRepository(PaymentsDbContext dbContext) : IOutboxRepository
         CancellationToken cancellationToken)
     {
         var exists = await dbContext.OutboxMessages
-            .AnyAsync(m => m.MessageId == message.MessageId, cancellationToken);
+            .AnyAsync(m => m.IdempotencyKey == message.IdempotencyKey, cancellationToken);
 
         if (exists)
             return false;

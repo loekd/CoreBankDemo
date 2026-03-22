@@ -19,6 +19,7 @@
 
     <ItemGroup>
         <ProjectReference Include="..\CoreBankDemo.ServiceDefaults\CoreBankDemo.ServiceDefaults.csproj" />
+        <ProjectReference Include="..\CoreBankDemo.Messaging\CoreBankDemo.Messaging.csproj" />
     </ItemGroup>
 
 </Project>

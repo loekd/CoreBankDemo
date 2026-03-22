@@ -32,14 +32,13 @@ public class PaymentsController(
         }
 
         var paymentId = Guid.NewGuid().ToString();
-        var messageId = Guid.NewGuid().ToString();
         activity?.SetTag("payment.id", paymentId);
 
-        var outboxMessage = BuildOutboxMessage(request, paymentId, messageId);
+        var outboxMessage = BuildOutboxMessage(request, paymentId);
         var isNew = await outboxRepository.StoreIfNewAsync(outboxMessage, cancellationToken);
         if (!isNew)
         {
-            var existing = await outboxRepository.FindByMessageIdAsync(messageId, cancellationToken);
+            var existing = await outboxRepository.FindByIdempotencyKeyAsync(paymentId, cancellationToken);
             activity?.SetTag("outcome", "duplicate");
             return Accepted($"/api/payments/{existing?.TransactionId ?? paymentId}",
                 CreatePendingResponse(existing?.TransactionId ?? paymentId, request));
@@ -59,14 +58,14 @@ public class PaymentsController(
         return activity;
     }
 
-    private OutboxMessage BuildOutboxMessage(PaymentRequest request, string paymentId, string messageId)
+    private OutboxMessage BuildOutboxMessage(PaymentRequest request, string paymentId)
     {
-        var partitionId = PartitionHelper.GetPartitionId(messageId, _outboxOptions.PartitionCount);
+        var partitionId = PartitionHelper.GetPartitionId(paymentId, _outboxOptions.PartitionCount);
 
         return new OutboxMessage
         {
             Id = Guid.NewGuid(),
-            MessageId = messageId,
+            IdempotencyKey = paymentId,
             PartitionId = partitionId,
             TransactionId = paymentId,
             FromAccount = request.FromAccount,

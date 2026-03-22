@@ -1,5 +1,6 @@
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Outbox;
+using CoreBankDemo.Messaging.Inbox;
 
 namespace CoreBankDemo.CoreBankAPI;
 
@@ -33,6 +34,7 @@ public static class Program
         builder.Services.AddHostedService<InboxProcessor>();
         builder.Services.AddHostedService<MessagingOutboxProcessor>();
         
+        builder.Services.AddScoped<InboxMessageRepositoryBase<InboxMessage, CoreBankDbContext>, InboxMessageRepository>();
         builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
         builder.Services.AddScoped<IAccountRepository, AccountRepository>();
         builder.Services.AddTransient<ITransactionExecutor, TransactionExecutor>();

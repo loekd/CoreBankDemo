@@ -1,4 +1,4 @@
-namespace CoreBankDemo.CoreBankAPI;
+namespace CoreBankDemo.Messaging;
 
 public static class PartitionHelper
 {

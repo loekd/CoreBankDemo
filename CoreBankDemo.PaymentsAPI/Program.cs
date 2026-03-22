@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging.Inbox;
 using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
@@ -46,6 +47,7 @@ builder.Services.AddHostedService<OutboxProcessor>();
 builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
 
 // Inbox: de-duplicate incoming transaction events
+builder.Services.AddScoped<InboxMessageRepositoryBase<InboxMessage, PaymentsDbContext>, InboxMessageRepository>();
 builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
 builder.Services.AddHostedService<InboxProcessor>();
 

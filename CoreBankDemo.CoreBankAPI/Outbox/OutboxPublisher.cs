@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CoreBankDemo.CoreBankAPI.Inbox;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;

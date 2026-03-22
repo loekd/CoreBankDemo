@@ -1,10 +1,12 @@
+using CoreBankDemo.Messaging.Outbox;
+
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
-public class OutboxMessage
+public class OutboxMessage : IOutboxMessage
 {
     public Guid Id { get; set; }
-    public required string MessageId { get; set; } // Unique message ID for deduplication
-    public int PartitionId { get; set; } // Partition assignment for load distribution
+    public required string IdempotencyKey { get; set; }
+    public int PartitionId { get; set; }
     public required string TransactionId { get; set; }
     public required string FromAccount { get; set; }
     public required string ToAccount { get; set; }
