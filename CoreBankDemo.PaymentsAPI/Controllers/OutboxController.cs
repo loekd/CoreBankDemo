@@ -21,11 +21,13 @@ public class OutboxController(PaymentsDbContext dbContext) : ControllerBase
     [HttpGet("check-index")]
     public async Task<IActionResult> CheckIndex(CancellationToken cancellationToken = default)
     {
-        var sql = @"
-            SELECT indexname, indexdef
-            FROM pg_indexes
-            WHERE tablename = 'OutboxMessages'
-            ORDER BY indexname";
+        var sql = """
+                  ß
+                              SELECT indexname, indexdef
+                              FROM pg_indexes
+                              WHERE tablename = 'OutboxMessages'
+                              ORDER BY indexname
+                  """;
 
         await using var connection = dbContext.Database.GetDbConnection();
         await connection.OpenAsync(cancellationToken);

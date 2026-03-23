@@ -28,11 +28,24 @@ public class TransactionExecutor(TimeProvider timeProvider) : ITransactionExecut
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        var fromAccount = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == message.FromAccount, cancellationToken);
+        // Lock accounts in consistent alphabetical order to prevent deadlocks when
+        // concurrent transactions involve the same accounts in opposite directions.
+        var (firstKey, secondKey) = string.Compare(message.FromAccount, message.ToAccount, StringComparison.Ordinal) < 0
+            ? (message.FromAccount, message.ToAccount)
+            : (message.ToAccount, message.FromAccount);
 
-        var toAccount = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == message.ToAccount, cancellationToken);
+        // SELECT FOR UPDATE acquires row-level locks for the duration of the transaction,
+        // preventing lost updates when multiple partitions process messages concurrently.
+        await dbContext.Accounts
+            .FromSqlRaw("SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {0} FOR UPDATE", firstKey)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        await dbContext.Accounts
+            .FromSqlRaw("SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {0} FOR UPDATE", secondKey)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        var fromAccount = dbContext.Accounts.Local.FirstOrDefault(a => a.AccountNumber == message.FromAccount);
+        var toAccount = dbContext.Accounts.Local.FirstOrDefault(a => a.AccountNumber == message.ToAccount);
 
         return (fromAccount, toAccount);
     }

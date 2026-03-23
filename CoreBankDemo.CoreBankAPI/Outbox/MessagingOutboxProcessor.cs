@@ -35,7 +35,7 @@ public class MessagingOutboxProcessor(
                 logger.LogError(ex, "Error processing messaging outbox partitions");
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(_options.PollingIntervalMs), stoppingToken);
         }
     }
 

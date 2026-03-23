@@ -68,7 +68,7 @@ public abstract class OutboxProcessorBase<TMessage, TDbContext> : BackgroundServ
                 _logger.LogError(ex, "Error processing outbox partitions");
             }
 
-            await Task.Delay(Defaults.PollingInterval, stoppingToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(_options.PollingIntervalMs), stoppingToken);
         }
     }
 

@@ -19,6 +19,10 @@ public record MessagingOutboxProcessingOptions
     public int LockRenewIntervalSeconds { get; init; }
 
     [Required]
+    [Range(100, 300_000, ErrorMessage = "PollingIntervalMs must be between 100 and 300000")]
+    public int PollingIntervalMs { get; init; } = 5_000;
+
+    [Required]
     [MinLength(1, ErrorMessage = "PubSubName is required")]
     public string PubSubName { get; init; } = "pubsub";
 

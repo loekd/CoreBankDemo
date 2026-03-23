@@ -65,7 +65,7 @@ public abstract class InboxProcessorBase<TMessage, TDbContext> : BackgroundServi
                 _logger.LogError(ex, "Error processing inbox partitions");
             }
 
-            await Task.Delay(Defaults.PollingInterval, stoppingToken);
+            await Task.Delay(TimeSpan.FromMilliseconds(_options.PollingIntervalMs), stoppingToken);
         }
     }
 
