@@ -6,6 +6,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults("CoreBank.LoadTestSupport");
 
+// Health checks so Aspire's WaitFor blocks until both schemas are ready
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<CoreBankReadDbContext>("corebankread-db")
+    .AddDbContextCheck<PaymentsReadDbContext>("paymentsread-db");
+
 // Connect to both databases (read-only mirror for assertions)
 builder.AddNpgsqlDbContext<CoreBankReadDbContext>("corebankdb");
 builder.AddNpgsqlDbContext<PaymentsReadDbContext>("paymentsdb");
@@ -69,4 +74,3 @@ static void SeedLoadTestAccounts(WebApplication app)
         verifySucceeded: null
     );
 }
-

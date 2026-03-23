@@ -51,6 +51,7 @@ var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComp
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
+    .WithHttpHealthCheck("/health")
     .WithDaprSidecar(opt =>
     {
         opt.WithOptions(new DaprSidecarOptions
@@ -94,6 +95,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
 var loadTestSupport = builder.AddProject<Projects.CoreBankDemo_LoadTestSupport>("loadtest-support")
     .WithReference(paymentsDb)
     .WithReference(coreBankDb)
+    .WithHttpHealthCheck("/health")
     .WaitFor(coreBankApi)
     .WaitFor(paymentsApi);
 

@@ -62,6 +62,7 @@ var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComp
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
+    .WithHttpHealthCheck("/health")
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithDaprSidecar(opt =>
     {
@@ -100,6 +101,7 @@ if (useDevProxy)
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
+    .WithHttpHealthCheck("/health")
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(coreBankApi)

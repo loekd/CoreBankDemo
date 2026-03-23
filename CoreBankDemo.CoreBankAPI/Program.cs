@@ -13,6 +13,10 @@ public static class Program
         // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
         builder.AddServiceDefaults("CoreBank.CoreBankAPI", new[] { nameof(InboxProcessor), nameof(MessagingOutboxProcessor) });
 
+        // Explicit DB health check so Aspire's WaitFor blocks until the schema is ready
+        builder.Services.AddHealthChecks()
+            .AddDbContextCheck<CoreBankDbContext>("corebank-db");
+
         // Add configuration options with validation
         builder.AddInboxProcessingOptions();
         builder.AddMessagingOutboxProcessingOptions();

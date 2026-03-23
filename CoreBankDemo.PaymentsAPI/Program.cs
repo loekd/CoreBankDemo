@@ -10,6 +10,10 @@ var builder = WebApplication.CreateBuilder(args);
 // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
 builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler), nameof(PaymentsController), nameof(InboxProcessor) });
 
+// Explicit DB health check so Aspire's WaitFor blocks until the schema is ready
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<PaymentsDbContext>("payments-db");
+
 // Add configuration options with validation
 builder.AddOutboxProcessingOptions();
 builder.AddInboxProcessingOptions();
