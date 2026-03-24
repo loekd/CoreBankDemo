@@ -23,7 +23,10 @@ var app = builder.Build();
 SeedLoadTestAccounts(app);
 
 app.MapDefaultEndpoints();
+app.MapResetEndpoints();
 app.MapAssertEndpoints();
+app.MapInboxEndpoints();
+app.MapOutboxEndpoints();
 
 app.Run();
 
