@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging.Outbox;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -14,13 +15,20 @@ public interface IOutboxRepository
         CancellationToken cancellationToken);
 }
 
-public class OutboxRepository(PaymentsDbContext dbContext) : IOutboxRepository
+public class OutboxRepository : OutboxMessageRepositoryBase<OutboxMessage, PaymentsDbContext>, IOutboxRepository
 {
+    public OutboxRepository(PaymentsDbContext dbContext, TimeProvider timeProvider)
+        : base(dbContext, timeProvider)
+    {
+    }
+
+    protected override DbSet<OutboxMessage> OutboxMessages => DbContext.OutboxMessages;
+
     public async Task<OutboxMessage?> FindByIdempotencyKeyAsync(
         string idempotencyKey,
         CancellationToken cancellationToken)
     {
-        return await dbContext.OutboxMessages
+        return await OutboxMessages
             .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
     }
 
@@ -28,16 +36,16 @@ public class OutboxRepository(PaymentsDbContext dbContext) : IOutboxRepository
         OutboxMessage message,
         CancellationToken cancellationToken)
     {
-        var exists = await dbContext.OutboxMessages
+        var exists = await OutboxMessages
             .AnyAsync(m => m.IdempotencyKey == message.IdempotencyKey, cancellationToken);
 
         if (exists)
             return false;
 
-        dbContext.OutboxMessages.Add(message);
+        OutboxMessages.Add(message);
         try
         {
-            await dbContext.SaveChangesAsync(cancellationToken);
+            await DbContext.SaveChangesAsync(cancellationToken);
             return true;
         }
         catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })

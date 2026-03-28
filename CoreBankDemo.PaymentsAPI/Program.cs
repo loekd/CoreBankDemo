@@ -1,4 +1,5 @@
 using CoreBankDemo.Messaging.Inbox;
+using CoreBankDemo.Messaging.Outbox;
 using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
@@ -28,23 +29,15 @@ builder.Services.AddSingleton(TimeProvider.System);
 
 // Database for Outbox and Inbox patterns
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
+builder.Services.AddHttpClient<ICoreBankApiClient, HttpCoreBankApiClient>(client =>
+    {
+        client.BaseAddress = new Uri("https+http://corebank-api");
+    })
+    .AddServiceDiscovery();
 
-// Outbox: select Core Bank API transport based on feature flag
-var useDapr = builder.Configuration.GetValue<bool>("Features:UseDapr");
-if (useDapr)
-{
-    builder.Services.AddSingleton<ICoreBankApiClient, DaprCoreBankApiClient>();
-}
-else
-{
-    builder.Services.AddHttpClient<ICoreBankApiClient, HttpCoreBankApiClient>(client =>
-        {
-            client.BaseAddress = new Uri("https+http://corebank-api");
-        })
-        .AddServiceDiscovery();
-}
 
-builder.Services.AddSingleton<IOutboxMessageHandler, OutboxMessageHandler>();
+// Outbox: ensure reliable message delivery to CoreBank API
+builder.Services.AddScoped<OutboxMessageRepositoryBase<OutboxMessage, PaymentsDbContext>, OutboxRepository>();
 builder.Services.AddScoped<IOutboxRepository, OutboxRepository>();
 builder.Services.AddHostedService<OutboxProcessor>();
 builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using CoreBankDemo.Messaging.Outbox;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
@@ -5,75 +7,73 @@ using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
-public class OutboxProcessor(
-    IServiceProvider serviceProvider,
-    IDistributedLockService lockService,
-    IOutboxMessageHandler messageProcessor,
-    IOptions<OutboxProcessingOptions> options,
-    ILogger<OutboxProcessor> logger)
-    : BackgroundService
+public class OutboxProcessor : OutboxProcessorBase<OutboxMessage, PaymentsDbContext>
 {
-    private readonly OutboxProcessingOptions _options = options.Value;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly TimeProvider _timeProvider;
+    private readonly ILogger<OutboxProcessor> _logger;
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public OutboxProcessor(
+        IServiceProvider serviceProvider,
+        ILogger<OutboxProcessor> logger,
+        IDistributedLockService lockService,
+        TimeProvider timeProvider,
+        IOptions<OutboxProcessingOptions> options)
+        : base(serviceProvider, logger, lockService, timeProvider, options, nameof(OutboxProcessor))
     {
-        logger.LogInformation("Outbox Processor started");
+        _serviceProvider = serviceProvider;
+        _timeProvider = timeProvider;
+        _logger = logger;
+    }
 
-        while (!stoppingToken.IsCancellationRequested)
+    protected override string LockNamePrefix => "payments-outbox";
+
+    protected override async Task ProcessMessageAsync(
+        OutboxMessage message,
+        IServiceProvider scopedServiceProvider,
+        CancellationToken cancellationToken)
+    {
+        var coreBankApiClient = GetService<ICoreBankApiClient>(scopedServiceProvider);
+        var dbContext = GetService<PaymentsDbContext>(scopedServiceProvider);
+
+        var validationResult = await ValidateAccountAsync(coreBankApiClient, message, cancellationToken);
+
+        if (!validationResult.IsValid)
         {
-            try
-            {
-                await ProcessPartitions(stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Error processing outbox partitions");
-            }
+            message.Status = Status.Failed;
+            message.LastError = validationResult.Error;
+            await dbContext.SaveChangesAsync(cancellationToken);
 
-            await Task.Delay(Defaults.PollingInterval, stoppingToken);
-        }
-    }
-
-    private async Task ProcessPartitions(CancellationToken cancellationToken)
-    {
-        var partitionCount = _options.PartitionCount;
-        logger.LogInformation("Processing {PartitionCount} partitions", partitionCount);
-
-        var tasks = Enumerable.Range(0, partitionCount)
-            .Select(partitionId => ProcessPartition(partitionId, cancellationToken))
-            .ToArray();
-
-        await Task.WhenAll(tasks);
-    }
-
-    private async Task ProcessPartition(int partitionId, CancellationToken cancellationToken)
-    {
-        var lockName = $"outbox-partition-{partitionId}";
-
-        await lockService.ExecuteWithLockAsync(
-            lockName,
-            _options.LockExpirySeconds,
-            async ct => await ProcessPartitionMessages(partitionId, ct),
-            cancellationToken);
-    }
-
-    private async Task ProcessPartitionMessages(int partitionId, CancellationToken cancellationToken)
-    {
-        using var scope = serviceProvider.CreateScope();
-        var dbContext = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-
-        var pendingMessageIds = await messageProcessor.GetPendingMessageIdsForPartitionAsync(
-            dbContext, partitionId, cancellationToken);
-
-        if (pendingMessageIds.Count == 0)
+            _logger.LogWarning("Outbox message {MessageId} failed validation: {Error}",
+                message.Id, validationResult.Error);
             return;
-
-        logger.LogInformation("Processing {Count} pending outbox messages in partition {PartitionId}",
-            pendingMessageIds.Count, partitionId);
-
-        foreach (var messageId in pendingMessageIds)
-        {
-            await messageProcessor.ProcessMessageAsync(messageId, cancellationToken);
         }
+
+        await coreBankApiClient.ProcessTransactionAsync(message, cancellationToken);
+
+        message.Status = Status.Completed;
+        message.ProcessedAt = _timeProvider.GetUtcNow().UtcDateTime;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation("Successfully processed outbox message {MessageId} for payment {PaymentId}",
+            message.Id, message.TransactionId);
+    }
+
+    private static async Task<ValidationResult> ValidateAccountAsync(
+        ICoreBankApiClient coreBankApiClient,
+        OutboxMessage message,
+        CancellationToken cancellationToken)
+    {
+        var response = await coreBankApiClient.ValidateAccountAsync(message.ToAccount, cancellationToken);
+
+        return response.IsValid
+            ? ValidationResult.Success()
+            : ValidationResult.Failure("Invalid account number");
+    }
+
+    private record ValidationResult(bool IsValid, string? Error)
+    {
+        public static ValidationResult Success() => new(true, null);
+        public static ValidationResult Failure(string error) => new(false, error);
     }
 }
