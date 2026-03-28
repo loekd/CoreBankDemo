@@ -13,10 +13,12 @@ var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0"
     .WithHttpEndpoint(port: 16686, targetPort: 16686, name: "jaeger-ui")
     .WithEndpoint(port: 4317, targetPort: 4317, name: "otlp-grpc")
     .WithEndpoint(port: 4318, targetPort: 4318, name: "otlp-http")
-    .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true");
+    .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true")
+    .WithEndpointProxySupport(false);
 
-// APIs and Dapr sidecars run on the host, not in Docker, so use localhost (port 4317 is mapped from the Jaeger container)
-var jaegerOtlpGrpcEndpoint = "http://localhost:4317";
+// Resolve the host-visible Jaeger OTLP endpoint from Aspire.
+// This avoids hardcoding localhost:4317, which can be remapped to a dynamic host port.
+var jaegerOtlpGrpcEndpoint = jaeger.GetEndpoint("otlp-grpc");
 
 // Add PostgreSQL for Payments API and Core Bank API
 var postgres = builder.AddPostgres("postgres")

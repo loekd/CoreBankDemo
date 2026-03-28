@@ -10,6 +10,7 @@ using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Instrumentation.GrpcNetClient;
 using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 
 // ReSharper disable once CheckNamespace
@@ -99,6 +100,8 @@ public static class Extensions
 
         private void ConfigureOpenTelemetry(string serviceName, string[] additionalActivitySources)
         {
+            var otlpEndpoint = builder.ResolveOtlpEndpoint();
+
             builder.Logging.AddOpenTelemetry(logging =>
             {
                 logging.IncludeFormattedMessage = true;
@@ -106,11 +109,25 @@ public static class Extensions
             });
 
             builder.Services.AddOpenTelemetry()
+                .ConfigureResource(resource => resource.AddService(serviceName))
                 .WithMetrics(metrics =>
                 {
                     metrics.AddAspNetCoreInstrumentation()
                         .AddHttpClientInstrumentation()
                         .AddRuntimeInstrumentation();
+
+                    if (otlpEndpoint is not null)
+                    {
+                        metrics.AddOtlpExporter(options =>
+                        {
+                            options.Endpoint = otlpEndpoint;
+                            options.Protocol = OtlpExportProtocol.Grpc;
+                        });
+                    }
+                    else
+                    {
+                        metrics.AddOtlpExporter();
+                    }
                 })
                 .WithTracing(tracing =>
                 {
@@ -129,27 +146,58 @@ public static class Extensions
                     {
                         tracing.AddSource(sourceName);
                     }
+
+                    if (otlpEndpoint is not null)
+                    {
+                        tracing.AddOtlpExporter(options =>
+                        {
+                            options.Endpoint = otlpEndpoint;
+                            options.Protocol = OtlpExportProtocol.Grpc;
+                        });
+                    }
+                    else
+                    {
+                        tracing.AddOtlpExporter();
+                    }
                 });
-
-            builder.AddOpenTelemetryExporters(serviceName);
-        }
-
-        private void AddOpenTelemetryExporters(string serviceName)
-        {
-            // Use a custom env var that Aspire won't override (Aspire auto-injects OTEL_EXPORTER_OTLP_ENDPOINT to its dashboard)
-            var jaegerEndpoint = builder.Configuration["JAEGER_OTLP_ENDPOINT"];
-
-            if (!string.IsNullOrWhiteSpace(jaegerEndpoint))
-            {
-                builder.Services.AddOpenTelemetry().UseOtlpExporter(OtlpExportProtocol.Grpc, new Uri(jaegerEndpoint));
-            }
-            else
-            {
-                builder.Services.AddOpenTelemetry().UseOtlpExporter();
-            }
 
             var activitySource = new ActivitySource(serviceName);
             builder.Services.AddSingleton(activitySource);
+        }
+
+        private Uri? ResolveOtlpEndpoint()
+        {
+            // Prefer explicit Jaeger endpoint over Aspire's OTEL_EXPORTER_OTLP_ENDPOINT default.
+            var endpointValue = builder.Configuration["JAEGER_OTLP_ENDPOINT"];
+            if (string.IsNullOrWhiteSpace(endpointValue))
+            {
+                return null;
+            }
+
+            if (Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpointUri))
+            {
+                return endpointUri.Scheme.Equals("tcp", StringComparison.OrdinalIgnoreCase)
+                    ? new UriBuilder(endpointUri)
+                    {
+                        Scheme = Uri.UriSchemeHttp,
+                        Port = endpointUri.IsDefaultPort ? 4317 : endpointUri.Port
+                    }.Uri
+                    : endpointUri;
+            }
+
+            var normalizedEndpoint = $"http://{endpointValue}";
+            if (Uri.TryCreate(normalizedEndpoint, UriKind.Absolute, out endpointUri))
+            {
+                return endpointUri.Scheme.Equals("tcp", StringComparison.OrdinalIgnoreCase)
+                    ? new UriBuilder(endpointUri)
+                    {
+                        Scheme = Uri.UriSchemeHttp,
+                        Port = endpointUri.IsDefaultPort ? 4317 : endpointUri.Port
+                    }.Uri
+                    : endpointUri;
+            }
+
+            throw new InvalidOperationException($"Invalid JAEGER_OTLP_ENDPOINT value '{endpointValue}'.");
         }
 
         private void AddDefaultHealthChecks()
