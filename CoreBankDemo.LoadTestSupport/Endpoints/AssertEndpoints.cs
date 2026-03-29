@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.PaymentsAPI;
 
 namespace CoreBankDemo.LoadTestSupport.Endpoints;
 
@@ -10,7 +12,7 @@ public static class AssertEndpoints
     public static void MapAssertEndpoints(this IEndpointRouteBuilder app)
     {
         // Poll this until all outbox messages are published AND all inbox messages are processed
-        app.MapGet("/assert/drain", async (CoreBankReadDbContext coreBankDb, PaymentsReadDbContext paymentsDb, CancellationToken ct) =>
+        app.MapGet("/assert/drain", async (CoreBankDbContext coreBankDb, PaymentsDbContext paymentsDb, CancellationToken ct) =>
         {
             // Payments outbox: messages still waiting to be published via Dapr
             var outboxPending = await paymentsDb.OutboxMessages
@@ -40,8 +42,9 @@ public static class AssertEndpoints
 
         // Full assertion suite — call this after drain reports IsDrained=true
         app.MapGet("/assert/results", async (
-            CoreBankReadDbContext coreBankDb,
-            PaymentsReadDbContext paymentsDb,
+            int? expectedUnique,
+            CoreBankDbContext coreBankDb,
+            PaymentsDbContext paymentsDb,
             CancellationToken ct) =>
         {
             // Inbox stats from CoreBank
@@ -66,6 +69,15 @@ public static class AssertEndpoints
             var totalOutbox = await paymentsDb.OutboxMessages.CountAsync(ct);
             var outboxCompleted = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == "Completed", ct);
             var outboxPending = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == "Pending" || m.Status == "Processing", ct);
+            var outboxUniqueKeys = await paymentsDb.OutboxMessages
+                .Select(m => m.IdempotencyKey)
+                .Distinct()
+                .CountAsync(ct);
+            var completedUniqueKeys = allInbox
+                .Where(m => m.Status == "Completed")
+                .Select(m => m.IdempotencyKey)
+                .Distinct()
+                .Count();
 
             // Account balances and verification
             var loadTestAccounts = await coreBankDb.Accounts
@@ -121,6 +133,13 @@ public static class AssertEndpoints
                         : $"{duplicateKeys.Count} duplicate key(s): {string.Join(", ", duplicateKeys.Select(d => $"{d.Key}(x{d.Count})"))}",
                     Duplicates = duplicateKeys
                 },
+                ExpectedUniqueProcessed = new
+                {
+                    Passed = !expectedUnique.HasValue || completedUniqueKeys == expectedUnique.Value,
+                    Detail = expectedUnique.HasValue
+                        ? $"ExpectedUnique={expectedUnique.Value}, CompletedUnique={completedUniqueKeys}"
+                        : $"CompletedUnique={completedUniqueKeys}"
+                },
                 AllSubmittedProcessed = new
                 {
                     Passed = completedCount == totalOutbox,
@@ -145,6 +164,7 @@ public static class AssertEndpoints
                 checks.NoFailedMessages.Passed &&
                 checks.NoPendingMessages.Passed &&
                 checks.NoDuplicateProcessing.Passed &&
+                checks.ExpectedUniqueProcessed.Passed &&
                 checks.AllSubmittedProcessed.Passed &&
                 checks.BalanceConservation.Passed &&
                 checks.BalancesCorrect.Passed;
@@ -161,6 +181,8 @@ public static class AssertEndpoints
                     InboxCompleted = completedCount,
                     InboxFailed = failedCount,
                     InboxPending = pendingCount,
+                    OutboxUniqueKeys = outboxUniqueKeys,
+                    CompletedUniqueKeys = completedUniqueKeys,
                     TotalBalance = totalBalance,
                     ExpectedTotalBalance = expectedTotalBalance,
                     AccountCount = loadTestAccounts.Count
@@ -198,6 +220,5 @@ public static class AssertEndpoints
         return balances;
     }
 }
-
 
 

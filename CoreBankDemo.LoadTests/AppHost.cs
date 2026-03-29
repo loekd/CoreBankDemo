@@ -51,6 +51,7 @@ var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComp
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
+    .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
     .WithDaprSidecar(opt =>
     {
@@ -75,6 +76,9 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     .WaitFor(paymentsDb)
     .WithReference(coreBankApi)
     .WithEnvironment("Features__UseDapr", "true")
+    .WithExternalHttpEndpoints()
+    .WithHttpHealthCheck("/health")
+    .WithHttpEndpoint(name: "load-test", port: 5295)
     .WaitFor(coreBankApi)
     .WithDaprSidecar(opt =>
     {
@@ -95,7 +99,9 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
 var loadTestSupport = builder.AddProject<Projects.CoreBankDemo_LoadTestSupport>("loadtest-support")
     .WithReference(paymentsDb)
     .WithReference(coreBankDb)
+    .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
+    .WithHttpEndpoint(name: "load-test", port: 5181)
     .WaitFor(coreBankApi)
     .WaitFor(paymentsApi);
 
@@ -114,8 +120,8 @@ builder.AddContainer("k6", "grafana/k6")
         "run",
         "--env", $"TRANSACTION_COUNT={transactionCount}",
         "--env", $"VU_COUNT={vuCount}",
-        "--env", "PAYMENTS_API_URL=http://host.docker.internal:5294",
-        "--env", "LOAD_TEST_SUPPORT_URL=http://host.docker.internal:5180",
+        "--env", "PAYMENTS_API_URL=http://host.docker.internal:5295",
+        "--env", "LOAD_TEST_SUPPORT_URL=http://host.docker.internal:5181",
         "/scripts/script.js")
     .WithBindMount(k6ScriptPath, "/scripts", isReadOnly: true)
     .WaitFor(loadTestSupport)

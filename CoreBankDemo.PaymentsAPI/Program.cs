@@ -13,7 +13,18 @@ builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcesso
 
 // Explicit DB health check so Aspire's WaitFor blocks until the schema is ready
 builder.Services.AddHealthChecks()
-    .AddDbContextCheck<PaymentsDbContext>("payments-db");
+    .AddDbContextCheck<PaymentsDbContext>("payments-db")
+    .AddCheck("payments-schema", () =>
+    {
+        // Check will run after EnsureCreated() completes
+        // This ensures dependent services only start after schema is ready
+        using var scope = builder.Services.BuildServiceProvider().CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
+
+        // Verify critical tables exist by attempting a simple query
+        var outboxExists = db.OutboxMessages.Any();
+        return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Schema initialized");
+    });
 
 // Add configuration options with validation
 builder.AddOutboxProcessingOptions();

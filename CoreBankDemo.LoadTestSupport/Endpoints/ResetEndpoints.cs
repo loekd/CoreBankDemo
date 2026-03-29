@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.PaymentsAPI;
 
 namespace CoreBankDemo.LoadTestSupport.Endpoints;
 
@@ -9,7 +11,7 @@ public static class ResetEndpoints
     public static void MapResetEndpoints(this IEndpointRouteBuilder app)
     {
         // Reset database to clean state for load testing
-        app.MapPost("/reset", async (CoreBankReadDbContext coreBankDb, PaymentsReadDbContext paymentsDb, CancellationToken ct) =>
+        app.MapPost("/reset", async (CoreBankDbContext coreBankDb, PaymentsDbContext paymentsDb, CancellationToken ct) =>
         {
             // Truncate all inbox/outbox tables in both databases
             await paymentsDb.Database.ExecuteSqlRawAsync("TRUNCATE TABLE \"OutboxMessages\" RESTART IDENTITY CASCADE", ct);
