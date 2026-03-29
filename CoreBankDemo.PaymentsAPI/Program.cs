@@ -42,7 +42,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 builder.Services.AddHttpClient<ICoreBankApiClient, HttpCoreBankApiClient>(client =>
     {
-        client.BaseAddress = new Uri("https+http://corebank-api");
+        client.BaseAddress = new Uri("http://corebank-api");
     })
     .AddServiceDiscovery();
 

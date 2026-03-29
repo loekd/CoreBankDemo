@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using CommunityToolkit.Aspire.Hosting.Dapr;
+using DevProxy.Hosting;
+using Microsoft.Extensions.Configuration;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
@@ -45,13 +47,24 @@ var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComp
     LocalPath = Path.Combine(daprComponentsPath, "lockstore-redis.yaml")
 }).WaitFor(redis);
 
+IResourceBuilder<DevProxyExecutableResource>? devProxy = null;
+var useDevProxy = builder.Configuration.GetValue<bool>("Features:UseDevProxy");
+if (useDevProxy)
+{
+    var devProxyConfigFolder = Path.Combine(builder.AppHostDirectory, "devproxy", "config");
+    var devProxyConfigFile = Path.Combine(devProxyConfigFolder, "devproxyrc.json");
+
+    devProxy = builder.AddDevProxyExecutable("devproxy")
+        .WithConfigFile(devProxyConfigFile)
+        .WithUrlsToWatch(() => ["http://127.0.0.1:5032/*"]);
+}
+
 // ---------------------------------------------------------------------------
 // Core Bank API
 // ---------------------------------------------------------------------------
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
-    .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
     .WithDaprSidecar(opt =>
     {
@@ -74,8 +87,6 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
-    .WithReference(coreBankApi)
-    .WithEnvironment("Features__UseDapr", "true")
     .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
     .WithHttpEndpoint(name: "load-test", port: 5295)
@@ -92,6 +103,23 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
         opt.WithReference(pubsub);
         opt.WithReference(lockStore);
     });
+
+if (devProxy is not null)
+{
+    paymentsApi
+        .WithReference(coreBankApi)
+        .WithEnvironment("Features__UseDapr", "false")
+        .WithEnvironment("HTTP_PROXY", "http://127.0.0.1:8001")
+        .WithEnvironment("HTTPS_PROXY", "http://127.0.0.1:8001")
+        .WithEnvironment("NO_PROXY", "localhost")
+        .WaitFor(devProxy);
+}
+else
+{
+    paymentsApi
+        .WithReference(coreBankApi)
+        .WithEnvironment("Features__UseDapr", "true");
+}
 
 // ---------------------------------------------------------------------------
 // LoadTestSupport API — minimal API for post-run assertions, reads both DBs

@@ -17,13 +17,13 @@ The k6 load tests (`k6/script.js`) use LoadTestSupport endpoints to orchestrate 
 
 1. **Setup phase**: Calls `/reset` to truncate inbox/outbox tables and reset all load test accounts to their initial balance
 2. **Load phase**: Generates payment traffic against the Payments API (not LoadTestSupport)
-3. **Teardown phase**: Polls `/assert/drain` until all messages are processed, then calls `/assert/results` to verify exactly-once semantics, balance conservation, and correctness
+3. **Teardown phase**: Polls `/assert/drain` until all messages are processed, then calls `/assert/results` (optionally with `?expectedUnique=<n>`) to verify exactly-once semantics, balance conservation, and correctness
 
 ## Available Endpoints
 
 - `/reset` - Reset database to clean state
 - `/assert/drain` - Poll until inbox/outbox are fully drained
-- `/assert/results` - Run full assertion suite
+- `/assert/results` - Run full assertion suite (supports optional `expectedUnique` query parameter)
 - `/corebank/inbox` - View CoreBank inbox messages
 - `/corebank/outbox` - View CoreBank outbox messages
 - `/payments/inbox` - View Payments inbox messages

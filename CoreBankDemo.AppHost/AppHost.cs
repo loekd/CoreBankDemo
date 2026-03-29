@@ -128,8 +128,8 @@ if (devProxy is not null)
     paymentsApi
         .WithReference(coreBankApi)
         .WithEnvironment("Features__UseDapr", "false")  //override any other config because Dapr sidecar circumvents proxy
-        .WithEnvironment("HTTP_PROXY", devProxy.GetEndpoint(DevProxyResource.ProxyEndpointName))
-        .WithEnvironment("HTTPS_PROXY", devProxy.GetEndpoint(DevProxyResource.ProxyEndpointName))
+        .WithEnvironment("HTTP_PROXY", "http://127.0.0.1:8000")
+        .WithEnvironment("HTTPS_PROXY", "http://127.0.0.1:8000")
         .WithEnvironment("NO_PROXY", "localhost") // Exclude Dapr sidecar gRPC (localhost:50001) from proxy
         .WaitFor(devProxy);
 }

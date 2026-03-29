@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/dev-proxy/main/schemas/v2.1.0/genericrandomerrorplugin.errorsfile.schema.json",
+  "errors": [
+    {
+      "request": {
+        "url": "http://127.0.0.1:5032/api/accounts/validate",
+        "method": "POST"
+      },
+      "responses": [
+        {
+          "statusCode": 503,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Service temporarily unavailable"
+          }
+        },
+        {
+          "statusCode": 429,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Retry-After",
+              "value": "5"
+            }
+          ],
+          "body": {
+            "error": "Too many requests"
+          }
+        },
+        {
+          "statusCode": 500,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Internal server error"
+          }
+        }
+      ]
+    }
+  ]
+}

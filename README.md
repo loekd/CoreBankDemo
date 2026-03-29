@@ -4,7 +4,7 @@ A demonstration project showing resilience patterns for mission-critical banking
 
 ## What's Special
 
-- **One-Command Start** - `./start-aspire.sh` launches everything
+- **One-Command Start** - `dotnet run --project CoreBankDemo.AppHost` launches everything
 - **.NET Aspire** - Modern orchestration with built-in observability
 - **Real-World Patterns** - Retry, Circuit Breaker, Outbox, Inbox, Ordering
 - **Shared Libraries** - Reusable inbox/outbox base classes eliminate duplication
@@ -23,9 +23,9 @@ A demonstration project showing resilience patterns for mission-critical banking
         │                                                      │
         │ Outbox Pattern                                      │ Inbox Pattern
         ▼                                                      ▼
-   ┌─────────┐                                           ┌─────────┐
-   │ SQLite  │                                           │ SQLite  │
-   └─────────┘                                           └─────────┘
+   ┌────────────┐                                     ┌────────────┐
+   │ PostgreSQL │                                     │ PostgreSQL │
+   └────────────┘                                     └────────────┘
         │                                                      │
         └──────────────────────────────────────────────────────┘
                           Both send traces to
@@ -47,8 +47,8 @@ aspire run
 ```
 
 This will launch:
-- Payments API (http://localhost:5294)
-- Core Bank API (http://localhost:5032)
+- Payments API (http://127.0.0.1:5294)
+- Core Bank API (http://127.0.0.1:5032)
 - Dev Proxy (http://localhost:8000) - Chaos engineering proxy
 - PostgreSQL databases (paymentsdb, corebankdb)
 - Jaeger (http://localhost:16686)
@@ -61,11 +61,11 @@ This will launch:
 
 - **Aspire Dashboard:** http://localhost:15888 (when using Aspire)
 - **Jaeger Tracing:** http://localhost:16686
-- **Payments API OpenAPI:** http://localhost:5294/openapi/v1.json
-- **Core Bank API OpenAPI:** http://localhost:5032/openapi/v1.json
+- **Payments API OpenAPI:** http://127.0.0.1:5294/openapi/v1.json
+- **Core Bank API OpenAPI:** http://127.0.0.1:5032/openapi/v1.json
 - **Health Checks:** 
-  - Payments API: http://localhost:5294/health
-  - Core Bank API: http://localhost:5032/health
+  - Payments API: http://127.0.0.1:5294/health
+  - Core Bank API: http://127.0.0.1:5032/health
 
 ## Demo Flow
 
@@ -91,7 +91,7 @@ This will launch:
 **Goal:** Handle transient failures.
 
 **Setup:**
-1. Enable DevProxy: Set `"enabled": true` in `devproxy.json` for `GenericRandomErrorPlugin`
+1. Enable DevProxy: set `"enabled": true` in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json` for `GenericRandomErrorPlugin`
 2. Restart Aspire (Ctrl+C and `dotnet run` again)
    - Aspire will automatically restart DevProxy with new configuration
 
@@ -131,7 +131,7 @@ Already enabled in `appsettings.Development.json`:
 1. Keep DevProxy error rate high or stop Core Bank API in Aspire Dashboard
 2. Send payment requests
 3. Show 202 Accepted response with "Pending" status
-4. Query outbox: `GET http://localhost:5294/api/outbox`
+4. Query outbox: `GET http://127.0.0.1:5294/api/outbox`
 5. Show messages stored in PostgreSQL (paymentsdb)
 6. Restart Core Bank API in Aspire Dashboard or reduce DevProxy errors
 7. Watch OutboxProcessor logs in Aspire Dashboard - see automatic retry
@@ -172,7 +172,7 @@ Enable Inbox in Core Bank API `appsettings.Development.json`:
 1. Show idempotency key in transaction request
 2. Manually send same transaction twice:
    ```http
-   POST http://localhost:5032/api/transactions/process
+   POST http://127.0.0.1:5032/api/transactions/process
    {
      "fromAccount": "NL91ABNA0417164300",
      "toAccount": "NL20INGB0001234567",
@@ -181,7 +181,7 @@ Enable Inbox in Core Bank API `appsettings.Development.json`:
      "idempotencyKey": "test-123"
    }
    ```
-3. Query inbox: `GET http://localhost:5032/api/inbox`
+3. Query inbox: `GET http://127.0.0.1:5032/api/inbox`
 4. Show same `transactionId` returned for duplicate
 5. Explain: first request creates transaction, second returns cached result
 
@@ -239,7 +239,7 @@ Already enabled in `appsettings.Development.json`:
 ### Stage 5: Wrap-up (5 min)
 
 **Tools that help:**
-- **.NET Aspire:** Orchestration and observability (see [ASPIRE.md](ASPIRE.md))
+- **.NET Aspire:** Orchestration and observability (see [Aspire docs](https://learn.microsoft.com/en-us/dotnet/aspire/))
 - **Dev Proxy:** Chaos testing in development
 - **Jaeger:** Distributed tracing and observability
 - **DevContainer:** Consistent development environment
@@ -280,7 +280,7 @@ Valid accounts in Core Bank API:
 ## DevProxy Configuration
 
 ### Enable Random Errors
-Edit `devproxy.json`:
+Edit `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`:
 ```json
 {
   "name": "GenericRandomErrorPlugin",
@@ -328,7 +328,7 @@ This is intentional — the Redis instance is **disposable and local-only**, spu
 ```bash
 # Ensure the devproxy executable is in the project root
 ./devproxy --help
-# Or check the devproxy.json configuration file
+# Or check the devproxyrc.json configuration file
 ```
 
 **Port already in use?**

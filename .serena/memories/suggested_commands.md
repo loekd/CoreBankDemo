@@ -25,9 +25,8 @@ dotnet run --project CoreBankDemo.LoadTests
 
 ## Database
 ```bash
-# EF migrations (run from service project directory)
-dotnet ef migrations add <MigrationName> --project CoreBankDemo.PaymentsAPI
-dotnet ef database update --project CoreBankDemo.PaymentsAPI
+# No EF migrations in this repo (EnsureCreated() only)
+# Recreate state by restarting disposable infrastructure via Aspire
 ```
 
 ## Troubleshooting ports

@@ -65,7 +65,7 @@ Always inject and use `TimeProvider` (registered as `TimeProvider.System`). Neve
 
 ### Feature flags
 - `Features:UseDapr` — switches PaymentsAPI between `DaprCoreBankApiClient` and `HttpCoreBankApiClient`.
-- `Features:UseDevProxy` — AppHost conditionally starts Dev Proxy and routes HTTP through it; also forces `UseDapr=false` because Dapr bypasses the proxy.
+- `Features:UseDevProxy` — AppHost conditionally starts Dev Proxy and forces `UseDapr=false` because Dapr bypasses the proxy.
 
 ### HTTP vs business logic
 Controller actions must stay thin. Business logic lives in handler/executor classes that return domain types (`Task`, `Task<T>`), not `IActionResult`.
@@ -85,4 +85,3 @@ Return all validation errors in one response: `return BadRequest(new { Errors = 
 | `CoreBankDemo.AppHost/AppHost.cs` | Full infrastructure topology |
 | `CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs` | Reference implementation of inbox pattern |
 | `CoreBankDemo.PaymentsAPI/Outbox/OutboxProcessor.cs` | Reference implementation of outbox pattern |
-

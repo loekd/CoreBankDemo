@@ -51,7 +51,7 @@ This document provides technical architecture details. For demo instructions and
 │  │  • Random Errors (503, 429, 500)                          │  │
 │  │  • Latency Injection (200-2000ms)                         │  │
 │  │  • Rate Limiting                                           │  │
-│  │  • Configured via devproxy.json                           │  │
+│  │  • Configured via devproxyrc.json                         │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │                              │                                   │
 │                              │ HTTP                              │
@@ -590,12 +590,12 @@ The `CoreBankDemo.LoadTests` project is a complete Aspire-orchestrated load test
    - Total iterations = unique count + retry count
 
 3. **Drain Phase**
-   - k6 polls `GET /assert/drain` every 3 seconds
+   - k6 polls `GET /assert/drain` every 500ms
    - Waits for all inbox messages to complete processing
    - 5-minute timeout to prevent infinite wait
 
 4. **Assert Phase**
-   - k6 calls `GET /assert/results` for validation
+   - k6 calls `GET /assert/results?expectedUnique=<transactionCount>` for validation
    - Runs comprehensive checks on processing results
 
 ### Validation Checks
@@ -605,6 +605,7 @@ The `CoreBankDemo.LoadTests` project is a complete Aspire-orchestrated load test
 | `no failed inbox messages` | Zero `Failed` inbox messages | Error handling works correctly |
 | `no pending inbox messages` | Zero `Pending`/`Processing` messages | All messages processed to completion |
 | `no duplicate processing` | Each idempotency key processed exactly once | Idempotency guarantees hold |
+| `expected unique count processed` | Completed unique idempotency keys == configured transaction count | Intended workload actually ran |
 | `all submitted transactions processed` | Inbox completed count == outbox submitted count | No message loss |
 
 ### Configuration
