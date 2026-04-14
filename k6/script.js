@@ -9,6 +9,8 @@ const PAYMENTS_URL      = __ENV.PAYMENTS_API_URL      || 'http://localhost:5294'
 const SUPPORT_URL       = __ENV.LOAD_TEST_SUPPORT_URL  || 'http://localhost:5180';
 const TRANSACTION_COUNT = parseInt(__ENV.TRANSACTION_COUNT || '1000', 10);
 const VU_COUNT          = parseInt(__ENV.VU_COUNT          || '10', 10);
+const DRAIN_TIMEOUT_MS  = parseInt(__ENV.DRAIN_TIMEOUT_MS  || `${5 * 60 * 1000}`, 10);
+const TEARDOWN_TIMEOUT_SECONDS = Math.ceil((DRAIN_TIMEOUT_MS + 60_000) / 1000);
 
 // Fixed load-test accounts seeded by k6/seed/01_corebank_seed.sql
 const ACCOUNTS = [
@@ -39,7 +41,7 @@ export const options = {
     vus: VU_COUNT,
     iterations: TRANSACTION_COUNT + RETRY_COUNT, // unique + deliberate retries
     setupTimeout: '2m',
-    teardownTimeout: '1m',
+    teardownTimeout: `${TEARDOWN_TIMEOUT_SECONDS}s`,
     thresholds: {
         // All requests must complete without unexpected HTTP errors
         'http_req_failed': ['rate<0.01'],
@@ -181,7 +183,7 @@ export function teardown(data) {
     }
 
     // Poll /assert/drain until all messages are processed (max 5 minutes)
-    const maxWaitMs  = 5 * 60 * 1000;
+    const maxWaitMs  = DRAIN_TIMEOUT_MS;
     const pollMs     = 500; // Poll every 500ms
     const deadline   = Date.now() + maxWaitMs;
     let drained      = false;
@@ -199,7 +201,10 @@ export function teardown(data) {
             }
 
             if (body.isDrained) {
-                console.log(`  Drained after ${pollCount} polls (${((Date.now() - data.startTime) / 1000).toFixed(1)}s total)`);
+                console.log(
+                    `  Fully Drained after ${pollCount} polls (${((Date.now() - data.startTime) / 1000).toFixed(1)}s total). ` +
+                    `Final status — outboxPending: ${body.outboxPending}, inboxPending: ${body.inboxPending}, completed: ${body.completed}, failed: ${body.failed}`
+                );
                 drained = true;
                 break;
             }
@@ -238,7 +243,7 @@ export function teardown(data) {
     });
 
     if (!drained) {
-        console.error('Inbox did not drain within 5 minutes — aborting assertions');
+        console.error(`Inbox did not drain within ${(maxWaitMs / 1000).toFixed(0)}s — aborting assertions`);
         return;
     }
 
@@ -284,7 +289,5 @@ export function teardown(data) {
         console.log('✓ All exactly-once guarantees and balance correctness verified successfully');
     }
 }
-
-
 
 

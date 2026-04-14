@@ -15,7 +15,7 @@
   "record": false,
   "errorsCoreBank": {
     "errorsFile": "devproxy-errors.json",
-    "rate": 2
+    "rate": 10
   },
   "urlsToWatch": [
     "http://127.0.0.1:5032/api/*"
