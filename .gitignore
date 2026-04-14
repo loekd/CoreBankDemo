@@ -10,3 +10,4 @@ riderModule.iml
 *.db-wal
 
 /.idea
+.DS_Store

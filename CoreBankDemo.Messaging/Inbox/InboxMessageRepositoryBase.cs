@@ -90,7 +90,7 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
             .ExecuteUpdateAsync(s => s.SetProperty(m => m.Status, Status.Processing), cancellationToken);
     }
 
-    public virtual async Task MarkMessageAsFailedWithRetryAsync(
+    public virtual async Task MarkAsFailedWithRetryAsync(
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken)

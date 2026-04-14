@@ -96,8 +96,8 @@ public class PaymentsController(
     {
         return new PaymentResponse(
             paymentId,
-            "pending",
-            "Pending",
+            paymentId,
+            Status.Pending,
             request.Amount,
             request.Currency,
             timeProvider.GetUtcNow()

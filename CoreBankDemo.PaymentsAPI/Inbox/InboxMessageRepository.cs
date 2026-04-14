@@ -29,7 +29,7 @@ public interface IInboxMessageRepository
         Func<CancellationToken, Task> work,
         CancellationToken cancellationToken);
 
-    Task MarkMessageAsFailedWithRetryAsync(
+    Task MarkAsFailedWithRetryAsync(
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken);

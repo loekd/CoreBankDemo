@@ -149,6 +149,7 @@ public abstract class OutboxProcessorBase<TMessage, TDbContext> : BackgroundServ
             : _activitySource.StartActivity("ProcessOutboxMessage", ActivityKind.Producer);
 
         activity?.SetTag("outbox.id", message.Id);
+        activity?.SetTag("idempotency.key", message.IdempotencyKey);
         activity?.SetTag("queue_duration_ms", (long)(TimeProvider.GetUtcNow().UtcDateTime - message.CreatedAt).TotalMilliseconds);
 
         return activity;

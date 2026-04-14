@@ -18,8 +18,9 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage, CoreBankDbContext
         ILogger<InboxProcessor> logger,
         IDistributedLockService lockService,
         TransactionValidator transactionValidator,
-        IOptions<InboxProcessingOptions> options)
-        : base(serviceProvider, logger, lockService, options, "InboxProcessor")
+        IOptions<InboxProcessingOptions> options,
+        TimeProvider timeProvider)
+        : base(serviceProvider, logger, lockService, options, timeProvider, "InboxProcessor")
     {
         _transactionValidator = transactionValidator;
     }
@@ -104,7 +105,7 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage, CoreBankDbContext
         CancellationToken cancellationToken)
     {
         await transaction.RollbackAsync(cancellationToken);
-        await repository.MarkMessageAsFailedWithRetryAsync(messageId, ex.Message, cancellationToken);
+        await repository.MarkAsFailedWithRetryAsync(messageId, ex.Message, cancellationToken);
     }
 
     private void LogTransactionSuccess(InboxMessage message, IServiceProvider scopedServiceProvider)

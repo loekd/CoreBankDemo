@@ -5,7 +5,7 @@ public class MessagingOutboxMessage
     public Guid Id { get; set; }
     public int PartitionId { get; set; }
     public required string TransactionId { get; set; }
-    public required string Status { get; set; } // Pending, Processing, Completed, Failed
+    public required string Status { get; set; }
     public required string EventType { get; set; }
     public required string EventSource { get; set; }
     
@@ -15,7 +15,7 @@ public class MessagingOutboxMessage
     public decimal Amount { get; set; }
     public decimal? NewBalance { get; set; }
     public required string Currency { get; set; }
-    public required string TransactionStatus { get; set; } // Completed, Failed
+    public required string TransactionStatus { get; set; }
     public string? ErrorReason { get; set; }
     
     public DateTime CreatedAt { get; set; }

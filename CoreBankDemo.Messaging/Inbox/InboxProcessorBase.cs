@@ -22,18 +22,21 @@ public abstract class InboxProcessorBase<TMessage, TDbContext> : BackgroundServi
     private readonly IDistributedLockService _lockService;
     private readonly InboxProcessingOptions _options;
     private readonly ActivitySource _activitySource;
+    private readonly TimeProvider _timeProvider;
 
     protected InboxProcessorBase(
         IServiceProvider serviceProvider,
         ILogger logger,
         IDistributedLockService lockService,
         IOptions<InboxProcessingOptions> options,
+        TimeProvider timeProvider,
         string activitySourceName)
     {
         _serviceProvider = serviceProvider;
         _logger = logger;
         _lockService = lockService;
         _options = options.Value;
+        _timeProvider = timeProvider;
         _activitySource = new ActivitySource(activitySourceName);
     }
 
@@ -129,7 +132,7 @@ public abstract class InboxProcessorBase<TMessage, TDbContext> : BackgroundServi
         }
         catch (Exception ex)
         {
-            await repository.MarkMessageAsFailedWithRetryAsync(
+            await repository.MarkAsFailedWithRetryAsync(
                 messageId, ex.Message, cancellationToken);
 
             _logger.LogWarning(ex, "Failed to process inbox message {MessageId}, retry count: {RetryCount}",
@@ -148,7 +151,7 @@ public abstract class InboxProcessorBase<TMessage, TDbContext> : BackgroundServi
 
         activity?.SetTag("inbox.id", message.Id);
         activity?.SetTag("idempotency.key", message.IdempotencyKey);
-        activity?.SetTag("queue_duration_ms", (long)(DateTime.UtcNow - message.ReceivedAt).TotalMilliseconds);
+        activity?.SetTag("queue_duration_ms", (long)(_timeProvider.GetUtcNow().UtcDateTime - message.ReceivedAt).TotalMilliseconds);
 
         return activity;
     }

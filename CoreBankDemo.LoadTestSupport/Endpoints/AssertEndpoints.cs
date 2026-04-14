@@ -1,13 +1,16 @@
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.LoadTestSupport;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
+using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.LoadTestSupport.Endpoints;
 
 public static class AssertEndpoints
 {
-    private const decimal InitialBalance = 10_000_000.00m;
-    private const int LoadTestAccountCount = 10;
+    private const decimal InitialBalance = LoadTestConstants.InitialBalance;
+    private const int LoadTestAccountCount = LoadTestConstants.AccountCount;
 
     public static void MapAssertEndpoints(this IEndpointRouteBuilder app)
     {
@@ -16,17 +19,17 @@ public static class AssertEndpoints
         {
             // Payments outbox: messages still waiting to be published via Dapr
             var outboxPending = await paymentsDb.OutboxMessages
-                .CountAsync(m => m.Status == "Pending" || m.Status == "Processing", ct);
+                .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
 
             // CoreBank inbox: messages received but not yet processed
             var inboxPending = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == "Pending" || m.Status == "Processing", ct);
+                .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
 
             var inboxFailed = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == "Failed", ct);
+                .CountAsync(m => m.Status == Status.Failed, ct);
 
             var inboxCompleted = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == "Completed", ct);
+                .CountAsync(m => m.Status == Status.Completed, ct);
 
             return Results.Ok(new
             {
@@ -47,34 +50,34 @@ public static class AssertEndpoints
             PaymentsDbContext paymentsDb,
             CancellationToken ct) =>
         {
-            // Inbox stats from CoreBank
-            var allInbox = await coreBankDb.InboxMessages.ToListAsync(ct);
-            var completedCount = allInbox.Count(m => m.Status == "Completed");
-            var failedCount = allInbox.Count(m => m.Status == "Failed");
-            var pendingCount = allInbox.Count(m => m.Status == "Pending" || m.Status == "Processing");
+            // Inbox stats from CoreBank — use DB-level queries instead of loading all rows
+            var completedCount = await coreBankDb.InboxMessages.CountAsync(m => m.Status == Status.Completed, ct);
+            var failedCount = await coreBankDb.InboxMessages.CountAsync(m => m.Status == Status.Failed, ct);
+            var pendingCount = await coreBankDb.InboxMessages
+                .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
 
-            // Debug: Log all completed transactions for analysis
-            var completedInbox = allInbox.Where(m => m.Status == "Completed")
-                .Select(m => new { m.FromAccount, m.ToAccount, m.Amount, m.IdempotencyKey })
-                .ToList();
+            // Only load completed transactions (needed for balance verification)
+            var completedInbox = await coreBankDb.InboxMessages
+                .Where(m => m.Status == Status.Completed)
+                .Select(m => new CompletedTransaction(m.FromAccount, m.ToAccount, m.Amount, m.IdempotencyKey))
+                .ToListAsync(ct);
 
             // Duplicate detection: same idempotency key appearing more than once
-            var duplicateKeys = allInbox
+            var duplicateKeys = await coreBankDb.InboxMessages
                 .GroupBy(m => m.IdempotencyKey)
                 .Where(g => g.Count() > 1)
                 .Select(g => new { Key = g.Key, Count = g.Count() })
-                .ToList();
+                .ToListAsync(ct);
 
             // Outbox stats from Payments — each row is one unique payment submission
             var totalOutbox = await paymentsDb.OutboxMessages.CountAsync(ct);
-            var outboxCompleted = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == "Completed", ct);
-            var outboxPending = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == "Pending" || m.Status == "Processing", ct);
+            var outboxCompleted = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == Status.Completed, ct);
+            var outboxPending = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
             var outboxUniqueKeys = await paymentsDb.OutboxMessages
                 .Select(m => m.IdempotencyKey)
                 .Distinct()
                 .CountAsync(ct);
-            var completedUniqueKeys = allInbox
-                .Where(m => m.Status == "Completed")
+            var completedUniqueKeys = completedInbox
                 .Select(m => m.IdempotencyKey)
                 .Distinct()
                 .Count();
@@ -90,8 +93,7 @@ public static class AssertEndpoints
             var balanceConserved = totalBalance == expectedTotalBalance;
 
             // Calculate expected balances based on completed transactions
-            // Pattern: account i sends to account (i+1) mod 10
-            var expectedBalances = CalculateExpectedBalances(allInbox.Where(m => m.Status == "Completed").ToList());
+            var expectedBalances = CalculateExpectedBalances(completedInbox);
 
             var balanceDiscrepancies = new List<object>();
             foreach (var account in loadTestAccounts)
@@ -197,7 +199,9 @@ public static class AssertEndpoints
         .WithSummary("Full assertion suite: exactly-once, no duplicates, no failures, correct balances");
     }
 
-    private static Dictionary<string, decimal> CalculateExpectedBalances(List<CoreBankAPI.Inbox.InboxMessage> completedTransactions)
+    private record CompletedTransaction(string FromAccount, string ToAccount, decimal Amount, string IdempotencyKey);
+
+    private static Dictionary<string, decimal> CalculateExpectedBalances(List<CompletedTransaction> completedTransactions)
     {
         var balances = new Dictionary<string, decimal>();
 
