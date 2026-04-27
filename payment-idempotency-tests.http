@@ -1,0 +1,403 @@
+### ===================================
+### PAYMENT IDEMPOTENCY TEST SUITE
+### ===================================
+### This file demonstrates payment processing and idempotency handling
+### in the CoreBankDemo system using HTTP requests.
+
+### Configuration Variables
+@paymentsApiUrl = http://localhost:5294
+@coreBankApiUrl = http://localhost:5032
+@contentType = application/json
+
+### Test Account Numbers (Valid IBAN format)
+@account1 = NL91ABNA0417164300
+@account2 = NL20INGB0001234567
+@account3 = NL39RABO0300065264
+@invalidAccount = INVALID-ACCOUNT-123
+
+### ===================================
+### SECTION 1: BASIC PAYMENT PROCESSING
+### ===================================
+
+### 1.1 Process Payment - Without Idempotency Key
+### This payment will get a system-generated payment ID
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 150.00,
+  "currency": "EUR"
+}
+
+### 1.2 Process Payment - With Custom Idempotency Key
+### Using a client-provided idempotency key for duplicate prevention
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: payment-2024-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account3}}",
+  "amount": 250.00,
+  "currency": "EUR"
+}
+
+### 1.3 Retry Same Payment - Demonstrates Idempotency
+### This should return the same response without processing twice
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: payment-2024-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account3}}",
+  "amount": 250.00,
+  "currency": "EUR"
+}
+
+### ===================================
+### SECTION 2: IDEMPOTENCY EDGE CASES
+### ===================================
+
+### 2.1 Same Idempotency Key, Different Amount
+### This should still return the original payment (idempotency wins)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: payment-2024-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account3}}",
+  "amount": 999.99,
+  "currency": "EUR"
+}
+
+### 2.2 Different Idempotency Key, Same Details
+### This creates a new payment (different idempotency key)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: payment-2024-002
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account3}}",
+  "amount": 250.00,
+  "currency": "EUR"
+}
+
+### ===================================
+### SECTION 3: BATCH IDEMPOTENT PAYMENTS
+### ===================================
+
+### 3.1 Batch Payment 1
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: batch-payment-001
+
+{
+  "fromAccount": "{{account2}}",
+  "toAccount": "{{account1}}",
+  "amount": 50.00,
+  "currency": "EUR"
+}
+
+### 3.2 Batch Payment 2
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: batch-payment-002
+
+{
+  "fromAccount": "{{account2}}",
+  "toAccount": "{{account1}}",
+  "amount": 75.00,
+  "currency": "EUR"
+}
+
+### 3.3 Batch Payment 3
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: batch-payment-003
+
+{
+  "fromAccount": "{{account2}}",
+  "toAccount": "{{account1}}",
+  "amount": 100.00,
+  "currency": "EUR"
+}
+
+### 3.4 Retry Batch Payment 2 (Should be idempotent)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: batch-payment-002
+
+{
+  "fromAccount": "{{account2}}",
+  "toAccount": "{{account1}}",
+  "amount": 75.00,
+  "currency": "EUR"
+}
+
+### ===================================
+### SECTION 4: ERROR CASES & VALIDATION
+### ===================================
+
+### 4.1 Invalid Account - With Idempotency Key
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: error-payment-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{invalidAccount}}",
+  "amount": 100.00,
+  "currency": "EUR"
+}
+
+### 4.2 Invalid Amount (Negative)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: error-payment-002
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": -50.00,
+  "currency": "EUR"
+}
+
+### 4.3 Invalid Currency Format
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: error-payment-003
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 100.00,
+  "currency": "EURO"
+}
+
+### 4.4 Amount Exceeds Limit
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: error-payment-004
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 1000001.00,
+  "currency": "EUR"
+}
+
+### ===================================
+### SECTION 5: CURRENCY VARIATIONS
+### ===================================
+
+### 5.1 USD Payment
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: usd-payment-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 500.00,
+  "currency": "USD"
+}
+
+### 5.2 GBP Payment
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: gbp-payment-001
+
+{
+  "fromAccount": "{{account3}}",
+  "toAccount": "{{account1}}",
+  "amount": 325.50,
+  "currency": "GBP"
+}
+
+### 5.3 CHF Payment
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: chf-payment-001
+
+{
+  "fromAccount": "{{account2}}",
+  "toAccount": "{{account3}}",
+  "amount": 1250.75,
+  "currency": "CHF"
+}
+
+### ===================================
+### SECTION 6: MONITORING & VERIFICATION
+### ===================================
+
+### 6.1 Check Outbox Messages (PaymentsAPI)
+GET {{paymentsApiUrl}}/api/outbox
+
+### 6.2 Check Transaction Events (if available)
+GET {{paymentsApiUrl}}/api/transactionevents
+
+### ===================================
+### SECTION 7: CORE BANK API DIRECT TESTS
+### ===================================
+
+### 7.1 Process Transaction with Idempotency (CoreBank)
+POST {{coreBankApiUrl}}/api/transactions/process
+Content-Type: {{contentType}}
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 200.00,
+  "currency": "EUR",
+  "idempotencyKey": "corebank-txn-001"
+}
+
+### 7.2 Retry Same Transaction (Should be idempotent)
+POST {{coreBankApiUrl}}/api/transactions/process
+Content-Type: {{contentType}}
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 200.00,
+  "currency": "EUR",
+  "idempotencyKey": "corebank-txn-001"
+}
+
+### 7.3 Validate Account (CoreBank)
+POST {{coreBankApiUrl}}/api/accounts/validate
+Content-Type: {{contentType}}
+
+{
+  "accountNumber": "{{account1}}"
+}
+
+### 7.4 Check Inbox Messages (CoreBank)
+GET {{coreBankApiUrl}}/api/inbox
+
+### ===================================
+### SECTION 8: STRESS TEST IDEMPOTENCY
+### ===================================
+
+### 8.1-8.5 Rapid Fire Same Request (Test concurrent idempotency)
+### Run these requests quickly in succession
+
+### Request 1
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: stress-test-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 111.11,
+  "currency": "EUR"
+}
+
+### Request 2 (Same idempotency key)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: stress-test-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 111.11,
+  "currency": "EUR"
+}
+
+### Request 3 (Same idempotency key)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: stress-test-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 111.11,
+  "currency": "EUR"
+}
+
+### Request 4 (Same idempotency key)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: stress-test-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 111.11,
+  "currency": "EUR"
+}
+
+### Request 5 (Same idempotency key)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: stress-test-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 111.11,
+  "currency": "EUR"
+}
+
+### ===================================
+### SECTION 9: DECIMAL PRECISION TESTS
+### ===================================
+
+### 9.1 Minimum Amount (0.01)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: precision-test-001
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 0.01,
+  "currency": "EUR"
+}
+
+### 9.2 Two Decimal Places
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: precision-test-002
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 123.45,
+  "currency": "EUR"
+}
+
+### 9.3 Large Amount (Near Limit)
+POST {{paymentsApiUrl}}/api/payments
+Content-Type: {{contentType}}
+Idempotency-Key: precision-test-003
+
+{
+  "fromAccount": "{{account1}}",
+  "toAccount": "{{account2}}",
+  "amount": 999999.99,
+  "currency": "EUR"
+}
+
+### ===================================
+### NOTES:
+### ===================================
+### 1. Idempotency Keys should be unique per logical operation
+### 2. The system will return the same response for duplicate idempotency keys
+### 3. Idempotency keys prevent duplicate payments even with network retries
+### 4. Valid IBAN format is required for account numbers
+### 5. Currency must be 3 uppercase letters (ISO 4217)
+### 6. Amount must be between 0.01 and 1,000,000
+###
+### To test idempotency:
+### - Run the same request multiple times with the same Idempotency-Key
+### - Observe that the response is identical each time
+### - Check the outbox/inbox to confirm only one transaction was processed
