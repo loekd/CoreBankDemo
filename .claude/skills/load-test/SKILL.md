@@ -18,7 +18,7 @@ description: |
 
 - You are not allowed to create or run arbitrary bash commands. You must restrict yourself to running the 'aspire' cli and 'curl' for HTTP calls. No other tools are allowed.
 - Never reset the database unless explicitly asked to do so, as this is a destructive operation!
-- **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run 1000 transactions, pass `TransactionCount=1000` via command-line config.
+- **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run a different number of transactions or VUs, use `--` to pass .NET configuration overrides to the AppHost (see below).
 
 ## 1. Start the load-test AppHost
 
@@ -28,11 +28,13 @@ See **aspire-launch** skill:
 aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
 ```
 
-To override transaction count (e.g., for 1000 transactions):
+To override transaction count and/or VU count (e.g., for 1000 transactions with 8 VUs):
 
 ```bash
-aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive -- --load-test-parameter "TransactionCount=1000"
+aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive -- --LoadTest:TransactionCount=1000 --LoadTest:VuCount=8
 ```
+
+Arguments after `--` are forwarded to the AppHost as .NET configuration overrides and take precedence over `appsettings.json`. Both keys are optional — omit either to use the `appsettings.json` default.
 
 Wait for `loadtest-support` to be healthy:
 
@@ -128,12 +130,14 @@ data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCou
 
 Runs the full assertion suite once drained. Call only after `poll_until_drained` returns `isDrained: true`.
 
+Pass `expectedUnique` equal to the `TransactionCount` that was used (default: 100).
+
 ```bash
 curl -s -X POST http://localhost:5181/ \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_assertion_results","arguments":{"expectedUnique":1000}}}'
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_assertion_results","arguments":{"expectedUnique":100}}}'
 ```
 
 Assert that the response content contains `"allPassed":true`. Inspect individual checks on failure.
