@@ -1,6 +1,16 @@
 ---
 name: observability
-description: "OpenTelemetry tracing rules for CoreBankDemo: ActivitySource registration, span creation, and trace context propagation."
+description: |
+  OpenTelemetry tracing rules for CoreBankDemo: ActivitySource registration, span creation, and trace context propagation.
+  
+  **When to use:**
+  - When adding or reviewing tracing, ActivitySource, or span logic in CoreBankDemo.
+  - When ensuring trace context propagation and distributed tracing best practices are followed.
+  
+  **When NOT to use:**
+  - Do NOT use for tracing unrelated to CoreBankDemo or for non-OpenTelemetry tracing systems.
+  - Do NOT use for runtime log inspection or debugging—use the aspire-mcp skill for those tasks.
+---
 ---
 
 ## Register ActivitySource

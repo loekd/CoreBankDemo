@@ -1,21 +1,21 @@
 ---
 name: aspire-mcp
-description: "Use Aspire MCP tools to inspect resource state, logs, and traces in CoreBankDemo."
+description: |
+  Use Aspire MCP tools to inspect resource state, logs, and traces in CoreBankDemo.
+  
+  **When to use:**
+  - When an AppHost is already running.
+  - When you need to inspect the state, logs, or distributed traces of resources managed by an Aspire AppHost in CoreBankDemo.
+  - When you want to use Aspire CLI or MCP tools to diagnose, monitor, or interact with running services.
+  
+  **When NOT to use:**
+  - Do NOT use if no AppHost is running (start one with the aspire-launch skill first).
+  - Do NOT use for direct database inspection, application-level debugging, or for actions outside the scope of Aspire-managed resources.
+  - Do NOT use for running or stopping AppHosts themselves—use the aspire-launch skill for that purpose.
+---
 ---
 
 Requires an AppHost to be running. See **aspire-launch** skill.
-
-## CLI inspection
-
-```bash
-aspire ps --non-interactive
-aspire describe --non-interactive
-aspire logs <resource> --non-interactive
-aspire otel logs <resource> --non-interactive
-aspire otel traces <resource> --non-interactive
-aspire mcp tools --non-interactive
-aspire mcp call <resource> <tool> --input '{}' --non-interactive
-```
 
 ## MCP tools (via MCP client)
 

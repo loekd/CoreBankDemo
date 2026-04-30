@@ -1,6 +1,17 @@
 ---
 name: aspire-launch
-description: "Start and stop CoreBankDemo AppHosts using the Aspire CLI."
+description: |
+  Start and stop CoreBankDemo AppHosts using the Aspire CLI.
+  
+  **When to use:**
+  - When you need to start, stop, or wait for health of CoreBankDemo AppHosts using the Aspire CLI.
+  - When you want to ensure services are running and healthy before interacting with APIs or running tests.
+  
+  **When NOT to use:**
+  - Do NOT use for starting individual services outside of AppHosts.
+  - Do NOT use `dotnet run` or `sleep` for orchestration or health checks—always use the Aspire CLI commands as described.
+  - Do NOT use for inspecting logs, traces, or resource state—use the aspire-mcp skill for those tasks.
+---
 ---
 
 ## AppHosts

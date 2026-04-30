@@ -1,6 +1,16 @@
 ---
 name: messaging-patterns
-description: "Inbox/Outbox implementation rules, MessageConstants usage, and partition assignment for CoreBankDemo."
+description: |
+  Inbox/Outbox implementation rules, MessageConstants usage, and partition assignment for CoreBankDemo.
+  
+  **When to use:**
+  - When implementing or reviewing Inbox/Outbox processors in CoreBankDemo.
+  - When you need to ensure correct usage of MessageConstants or partition assignment logic.
+  
+  **When NOT to use:**
+  - Do NOT use for messaging patterns outside CoreBankDemo or for unrelated architectures.
+  - Do NOT use for ad-hoc message handling that does not use the provided base classes.
+---
 ---
 
 ## Inbox and Outbox processors

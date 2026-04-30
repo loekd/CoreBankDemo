@@ -1,6 +1,16 @@
 ---
 name: conventions
-description: "Coding conventions for CoreBankDemo: database, time, HTTP/business logic separation, and validation."
+description: |
+  Coding conventions for CoreBankDemo: database, time, HTTP/business logic separation, validation, and logging.
+  
+  **When to use:**
+  - When writing or reviewing code for CoreBankDemo to ensure consistency in database usage, time handling, controller/business logic separation, validation, and logging.
+  - When you need to check or enforce project-wide coding standards.
+  
+  **When NOT to use:**
+  - Do NOT use for framework-agnostic or non-CoreBankDemo projects.
+  - Do NOT use for runtime troubleshooting or debugging—use the relevant skills for those tasks.
+---
 ---
 
 ## Database

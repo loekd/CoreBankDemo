@@ -1,6 +1,17 @@
 ---
 name: load-test
-description: "Run a full CoreBankDemo load test, wait for drain, and assert results via the LoadTestSupport API."
+description: |
+  Run a full CoreBankDemo load test, wait for drain, and assert results via the LoadTestSupport API.
+  
+  **When to use:**
+  - When you want to run a complete end-to-end load test of CoreBankDemo, including reset, execution, drain, and assertion, via the LoadTestSupport MCP API.
+  - When you need to validate system resilience, idempotency, and correctness under load.
+  
+  **When NOT to use:**
+  - Do NOT use for unit testing, manual, ad-hoc, or partial testing of individual services.
+  - Do NOT use if you only want to run k6 or inspect a single component—use the relevant skill or tool instead.
+  - Do NOT use the Aspire MCP CLI for these endpoints (see warning below).
+---
 ---
 
 ## 1. Start the load-test AppHost
