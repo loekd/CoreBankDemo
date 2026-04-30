@@ -13,6 +13,7 @@ Read the load-test skill in full before executing any step. Do not skip ahead.
 - **The MCP endpoint is `http://localhost:5181/` (root path).** Not `/mcp`, not `/tools`. Root.
 - **Every MCP session requires initialization.** If `$SESSION_ID` is empty after the init step, stop immediately and report it. Do not proceed with empty session ID — all subsequent calls will silently fail.
 - **You may only use `aspire` CLI and `curl`.** No other bash commands.
+- **Default transaction count is 100.** If the test completes with 100 transactions, that's correct per `CoreBankDemo.LoadTests/appsettings.json`. To run more (e.g., 1000), pass `TransactionCount=1000` as a command-line parameter to aspire start.
 
 ## Verify session ID before continuing
 
@@ -44,7 +45,15 @@ After starting the AppHost, wait for `loadtest-support` to report healthy before
 
 ## After poll_until_drained
 
-The `poll_until_drained` tool streams progress notifications as SSE events during polling. Always pass `minimumExpectedCompleted` (typically 1000) to prevent false drain detection while k6 is still submitting payments. When using curl, you will see intermediate `notifications/progress` events before the final result. Look for the last `event: message` line containing `isDrained` for the final result — ignore intermediate progress events.
+The `poll_until_drained` tool streams progress notifications as SSE events during polling. Always pass `minimumExpectedCompleted` (typically 100 for default config, 1000 for larger runs) to prevent false drain detection while k6 is still submitting payments. 
+
+**To display progress to the user:**
+- Use `tee` to capture full response while parsing progress messages
+- Use grep/sed to extract progress message strings from SSE events
+- Display each progress line with formatting (e.g., "  ▶ Poll 1: 42/1000 processed...")
+- Save full response to temp file for later extraction of final `isDrained` status
+
+See the load-test skill SKILL.md for the complete helper function pattern.
 
 Only call `get_assertion_results` if `isDrained` is `true` in the drain response. If `isDrained` is `false` or the call timed out, report:
 > "Drain did not complete within the timeout. Do not assert — results would be incomplete."

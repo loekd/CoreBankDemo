@@ -18,6 +18,7 @@ description: |
 
 - You are not allowed to create or run arbitrary bash commands. You must restrict yourself to running the 'aspire' cli and 'curl' for HTTP calls. No other tools are allowed.
 - Never reset the database unless explicitly asked to do so, as this is a destructive operation!
+- **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run 1000 transactions, pass `TransactionCount=1000` via command-line config.
 
 ## 1. Start the load-test AppHost
 
@@ -25,6 +26,12 @@ See **aspire-launch** skill:
 
 ```bash
 aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
+```
+
+To override transaction count (e.g., for 1000 transactions):
+
+```bash
+aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive -- --load-test-parameter "TransactionCount=1000"
 ```
 
 Wait for `loadtest-support` to be healthy:
@@ -77,22 +84,33 @@ Polls the inbox/outbox every 2 seconds until all messages are processed or timeo
 **Streams progress notifications** via SSE during polling — each poll emits a `notifications/progress`
 event with percentage complete and message counts.
 
-To receive progress notifications, include `_meta.progressToken` in the request:
+To receive and display progress notifications in real-time:
 
 ```bash
-curl -sN --max-time 180 -X POST http://localhost:5181/ \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120,"minimumExpectedCompleted":1000},"_meta":{"progressToken":"drain-1"}}}'
+# Helper function to parse and display progress
+parse_drain_progress() {
+  local session_id="$1"
+  curl -sN --max-time 180 -X POST http://localhost:5181/ \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Mcp-Session-Id: $session_id" \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120,"minimumExpectedCompleted":100},"_meta":{"progressToken":"drain-1"}}}' | \
+  tee /tmp/drain_response.txt | \
+  grep -o '"message":"[^"]*"' | \
+  sed 's/"message":"\(.*\)"/\1/' | \
+  while read line; do echo "  ▶ $line"; done
+}
+
+# Call it with session ID
+DRAIN_RESPONSE=$(cat /tmp/drain_response.txt)
+parse_drain_progress "$SESSION_ID"
 ```
 
-**Note:** The `-N` (`--no-buffer`) flag is required so curl streams SSE events as they arrive.
-Without it, curl buffers all output until the connection closes, making the call appear to block.
-
-**IMPORTANT:** Always pass `minimumExpectedCompleted` (typically 1000) to prevent false drain
-detection while k6 is still submitting payments. Without it, the tool may see a momentary gap
-between k6 submissions and falsely report `isDrained: true` after only a few messages.
+**Key points:**
+- The `-N` (`--no-buffer`) flag is required so curl streams SSE events as they arrive
+- `tee /tmp/drain_response.txt` captures the full response while displaying progress
+- The grep/sed pipeline extracts progress messages and displays them with formatting
+- **Always pass `minimumExpectedCompleted`** (typically 100 for default, 1000 for large runs) to prevent false drain detection while k6 is still submitting
 
 Intermediate progress notifications (SSE events during polling):
 ```
