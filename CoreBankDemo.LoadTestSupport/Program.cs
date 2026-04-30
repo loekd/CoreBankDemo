@@ -1,6 +1,7 @@
 using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.LoadTestSupport;
 using CoreBankDemo.LoadTestSupport.Endpoints;
+using CoreBankDemo.LoadTestSupport.McpTools;
 using CoreBankDemo.PaymentsAPI;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -16,6 +17,11 @@ builder.Services.AddHealthChecks()
 builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 
+// MCP server — exposes load test tools to AI agents via Streamable HTTP
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<LoadTestTools>();
+
 var app = builder.Build();
 
 // Seed the 10 load test accounts into the CoreBank database.
@@ -24,6 +30,7 @@ var app = builder.Build();
 SeedLoadTestAccounts(app);
 
 app.MapDefaultEndpoints();
+app.MapMcp();
 app.MapResetEndpoints();
 app.MapAssertEndpoints();
 app.MapInboxEndpoints();
