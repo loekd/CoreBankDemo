@@ -14,6 +14,11 @@ description: |
 ---
 ---
 
+## Important!
+
+- You are not allowed to create or run arbitrary bash commands. You must restrict yourself to running the 'aspire' cli and 'curl' for HTTP calls. No other tools are allowed.
+- Never reset the database unless explicitly asked to do so, as this is a destructive operation!
+
 ## 1. Start the load-test AppHost
 
 See **aspire-launch** skill:
@@ -43,13 +48,13 @@ All requests use JSON-RPC 2.0 over HTTP POST. Responses use SSE format (`event: 
 Every MCP session requires initialization before calling tools:
 
 ```bash
-# 1. Initialize — save the Mcp-Session-Id from response headers
-curl -s -D /tmp/mcp_headers.txt -X POST http://localhost:5181/ \
+# 1. Initialize — capture the Mcp-Session-Id directly into a variable (no temp file)
+INIT_RESPONSE=$(curl -s -i -X POST http://localhost:5181/ \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"copilot-cli","version":"1.0"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"copilot-cli","version":"1.0"}}}')
 
-SESSION_ID=$(grep -i "mcp-session-id" /tmp/mcp_headers.txt | tr -d '\r' | awk '{print $2}')
+SESSION_ID=$(echo "$INIT_RESPONSE" | grep -i "mcp-session-id" | tr -d '\r' | awk '{print $2}')
 
 # 2. Send initialized notification
 curl -s -X POST http://localhost:5181/ \
@@ -61,29 +66,12 @@ curl -s -X POST http://localhost:5181/ \
 
 All subsequent tool calls must include the `Mcp-Session-Id` header.
 
-## 2. Reset state (MCP tool: `reset_database`)
 
-Truncates all inbox/outbox tables and resets the 10 test accounts to 10,000,000 each.
+## 2. Run k6 load test
 
-```bash
-curl -s -X POST http://localhost:5181/ \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reset_database","arguments":{}}}'
-```
+The k6 container runs automatically when the LoadTests AppHost starts. DO NOT RUN IT MANUALLY.
 
-Response (SSE format):
-```
-event: message
-data: {"result":{"content":[{"type":"text","text":"{\"success\":true,\"accountsReset\":10,\"initialBalancePerAccount\":10000000.00,\"totalBalance\":100000000.00}"}]},"id":2,"jsonrpc":"2.0"}
-```
-
-## 3. Run k6 load test
-
-The k6 container runs automatically when the LoadTests AppHost starts. Do NOT run it manually.
-
-## 4. Wait for drain (MCP tool: `poll_until_drained`)
+## 3. Wait for drain (MCP tool: `poll_until_drained`)
 
 Polls the inbox/outbox every 2 seconds until all messages are processed or timeout is reached.
 
@@ -101,7 +89,7 @@ event: message
 data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCount\":15,\"outboxPending\":0,\"inboxPending\":0,\"completed\":1000,\"failed\":0}"}]},"id":3,"jsonrpc":"2.0"}
 ```
 
-## 5. Assert results (MCP tool: `get_assertion_results`)
+## 4. Assert results (MCP tool: `get_assertion_results`)
 
 Runs the full assertion suite once drained. Call only after `poll_until_drained` returns `isDrained: true`.
 
@@ -115,7 +103,7 @@ curl -s -X POST http://localhost:5181/ \
 
 Assert that the response content contains `"allPassed":true`. Inspect individual checks on failure.
 
-## 6. Inspect on failure (MCP tools: `get_*_inbox`, `get_*_outbox`)
+## 5. Inspect on failure (MCP tools: `get_*_inbox`, `get_*_outbox`)
 
 If assertions fail, use these tools to inspect message state:
 
@@ -135,7 +123,7 @@ curl -s -X POST http://localhost:5181/ \
 
 All `get_*` tools accept `limit` (1–100, default 20) and optional `status` filter (Pending/Processing/Completed/Failed).
 
-## 7. Stop
+## 6. Stop
 
 See **aspire-launch** skill:
 
