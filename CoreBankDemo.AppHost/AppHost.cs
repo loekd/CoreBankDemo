@@ -14,14 +14,16 @@ var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0"
     .WithEndpoint(port: 4317, targetPort: 4317, name: "otlp-grpc")
     .WithEndpoint(port: 4318, targetPort: 4318, name: "otlp-http")
     .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true")
-    .WithEndpointProxySupport(false);
+    .WithEndpointProxySupport(false)
+    .WithLifetime(ContainerLifetime.Persistent);
 
 // Resolve the host-visible Jaeger OTLP endpoint from Aspire.
 // This avoids hardcoding localhost:4317, which can be remapped to a dynamic host port.
 var jaegerOtlpGrpcEndpoint = jaeger.GetEndpoint("otlp-grpc");
 
-// Add PostgreSQL for Payments API and Core Bank API
-var postgres = builder.AddPostgres("postgres")
+// Add PostgreSQL for Payments API and Core Bank API with fixed connection string and persistent lifetime
+var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
+var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5432)
     .WithLifetime(ContainerLifetime.Persistent)
     .WithPgAdmin();
 
@@ -103,7 +105,9 @@ if (useDevProxy)
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
+    .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
+    .WithHttpEndpoint(name: "load-test", port: 5295)
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(coreBankApi)

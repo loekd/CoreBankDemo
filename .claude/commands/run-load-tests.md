@@ -8,12 +8,42 @@ Read the load-test skill in full before executing any step. Do not skip ahead.
 
 ## Critical rules — read before touching anything
 
-- **Never run k6 manually.** It starts automatically with the AppHost. If you don't see k6 output, wait — do not intervene.
+- **Never run k6 manually.** It starts automatically with the LoadTests AppHost. If you don't see k6 output, wait — do not intervene.
 - **Never call `/reset` unless the user explicitly asked for a database reset.** It is destructive and cannot be undone.
 - **The MCP endpoint is `http://localhost:5181/` (root path).** Not `/mcp`, not `/tools`. Root.
 - **Every MCP session requires initialization.** If `$SESSION_ID` is empty after the init step, stop immediately and report it. Do not proceed with empty session ID — all subsequent calls will silently fail.
 - **You may only use `aspire` CLI and `curl`.** No other bash commands.
 - **Default transaction count is 100.** If the test completes with 100 transactions, that's correct per `CoreBankDemo.LoadTests/appsettings.json`. To run more (e.g., 1000), pass `TransactionCount=1000` as a command-line parameter to aspire start.
+- **Two AppHosts are required.** Start the regular AppHost first (services + Jaeger), then the LoadTests AppHost (k6 + load-test-support). Stop them in reverse order.
+- **Disable DevProxy for load tests.** Always start the regular AppHost with `-- --Features:UseDevProxy=false` unless the user explicitly asks for chaos/resilience testing with DevProxy enabled.
+
+## Waiting for healthy status
+
+Start the regular AppHost with DevProxy disabled (default for load tests):
+
+```bash
+aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive -- --Features:UseDevProxy=false
+```
+
+To run a **chaos/resilience test** with DevProxy (user must explicitly request this):
+
+```bash
+aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive -- --Features:UseDevProxy=true
+```
+
+Wait for `payments-api` to report healthy:
+
+```bash
+aspire wait payments-api --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive
+```
+
+Then start the LoadTests AppHost and wait for `loadtest-support` to report healthy:
+
+```bash
+aspire wait loadtest-support --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
+```
+
+If `aspire wait` times out, report it — do not proceed.
 
 ## Verify session ID before continuing
 
@@ -38,10 +68,6 @@ data: {"result":{"content":[{"type":"text","text":"..."}]},"id":3,"jsonrpc":"2.0
 ```
 
 An empty response body, a 404, or a non-SSE response means the service is not ready or the endpoint is wrong. Do not interpret silence as success.
-
-## Waiting for healthy status
-
-After starting the AppHost, wait for `loadtest-support` to report healthy before initializing the MCP session. If `aspire wait` times out, report it — do not proceed.
 
 ## After poll_until_drained
 
@@ -69,7 +95,7 @@ Do not just report the raw JSON. Explain what it means.
 
 ## After assertions — analyze traces
 
-Once `get_assertion_results` has returned (pass or fail), invoke the **corebank-trace-analysis** skill. Pass the test start and end timestamps so it can scope its Jaeger queries correctly. Do this before stopping the AppHost.
+Once `get_assertion_results` has returned (pass or fail), invoke the **corebank-trace-analysis** skill. Pass the test start and end timestamps so it can scope its Jaeger queries correctly. Do this before stopping the AppHosts.
 
 ## When you are done
 
@@ -78,4 +104,4 @@ Report a summary with:
 2. How many unique payments were processed
 3. Any failed checks and their likely cause
 4. Key findings from trace analysis (errors, slowest spans, bottleneck)
-5. Whether the AppHost was stopped cleanly
+5. Whether both AppHosts were stopped cleanly

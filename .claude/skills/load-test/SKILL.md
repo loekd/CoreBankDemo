@@ -20,9 +20,31 @@ description: |
 - Never reset the database unless explicitly asked to do so, as this is a destructive operation!
 - **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run a different number of transactions or VUs, use `--` to pass .NET configuration overrides to the AppHost (see below).
 
-## 1. Start the load-test AppHost
+## 1. Start both AppHosts
 
-See **aspire-launch** skill:
+The load test requires **two AppHosts**: the regular AppHost (services + Jaeger) and the LoadTests AppHost (k6 + load-test-support).
+
+First, start the regular AppHost **with DevProxy disabled** (default for load tests):
+
+```bash
+aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive -- --Features:UseDevProxy=false
+```
+
+To run a **chaos/resilience test** with DevProxy fault injection enabled:
+
+```bash
+aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive -- --Features:UseDevProxy=true
+```
+
+DevProxy injects random HTTP errors (5% rate) and latency (20–200ms) on calls from PaymentsAPI to CoreBankAPI. This is useful for testing retry/resilience behavior but significantly slows throughput.
+
+Wait for `payments-api` to be healthy:
+
+```bash
+aspire wait payments-api --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive
+```
+
+Then start the LoadTests AppHost:
 
 ```bash
 aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
@@ -39,10 +61,10 @@ Arguments after `--` are forwarded to the AppHost as .NET configuration override
 Wait for `loadtest-support` to be healthy:
 
 ```bash
-aspire wait loadtest-support --non-interactive
+aspire wait loadtest-support --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
 ```
 
-The AppHost automatically starts LoadTestSupport (MCP server on port 5181) and k6 (load generator). Do NOT run k6 manually.
+The LoadTests AppHost automatically starts LoadTestSupport (MCP server on port 5181) and k6 (load generator). Do NOT run k6 manually.
 
 ## MCP Protocol
 
@@ -168,10 +190,11 @@ After assertions complete (pass or fail), invoke the **corebank-trace-analysis**
 
 ## 7. Stop
 
-See **aspire-launch** skill:
+See **aspire-launch** skill. Stop both AppHosts (LoadTests first, then regular):
 
 ```bash
 aspire stop --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
+aspire stop --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive
 ```
 
 ## MCP Server Implementation
