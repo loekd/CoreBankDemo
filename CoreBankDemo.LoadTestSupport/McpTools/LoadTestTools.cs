@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.PaymentsAPI;
@@ -57,17 +58,26 @@ public sealed class LoadTestTools
     [Description(
         "Polls the inbox/outbox until all messages are fully processed (drained) or the timeout " +
         "is reached. Call this AFTER the load test run completes. The tool handles internal " +
-        "polling every 2 seconds — do NOT call repeatedly. Returns the final drain status.")]
+        "polling every 2 seconds — do NOT call repeatedly. Streams progress notifications with " +
+        "percentage and message counts. Returns the final drain status. " +
+        "IMPORTANT: pass minimumExpectedCompleted (e.g. 1000) to avoid false 'drained' results " +
+        "when k6 is still submitting payments.")]
     public static async Task<string> PollUntilDrained(
         CoreBankDbContext coreBankDb,
         PaymentsDbContext paymentsDb,
-        [Description("Maximum seconds to wait for drain (default 60, max 300)")]
-        int timeoutSeconds = 60,
+        IProgress<ProgressNotificationValue> progress,
+        [Description("Minimum number of completed inbox messages required before the system can be " +
+                     "considered drained. Use this to prevent false positives when k6 is still " +
+                     "submitting payments. Set to the expected unique transaction count (e.g. 1000).")]
+        int minimumExpectedCompleted = 0,
+        [Description("Maximum seconds to wait for drain (default 120, max 300)")]
+        int timeoutSeconds = 120,
         CancellationToken ct = default)
     {
         timeoutSeconds = Math.Clamp(timeoutSeconds, 5, 300);
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
         int pollCount = 0;
+        int totalMessages = 0;
 
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
@@ -82,7 +92,32 @@ public sealed class LoadTestTools
             var inboxFailed = await coreBankDb.InboxMessages
                 .CountAsync(m => m.Status == Status.Failed, ct);
 
-            if (outboxPending == 0 && inboxPending == 0)
+            int processed = inboxCompleted + inboxFailed;
+            int currentTotal = processed + outboxPending + inboxPending;
+
+            // Use the higher of observed total or minimumExpectedCompleted for percentage
+            if (currentTotal > totalMessages)
+                totalMessages = currentTotal;
+            int effectiveTotal = Math.Max(totalMessages, minimumExpectedCompleted);
+
+            float percentage = effectiveTotal > 0
+                ? Math.Min(processed * 100f / effectiveTotal, 100f)
+                : 0f;
+
+            bool meetsMinimum = processed >= minimumExpectedCompleted;
+
+            progress.Report(new ProgressNotificationValue
+            {
+                Progress = percentage,
+                Total = 100,
+                Message = $"Poll {pollCount}: {processed}/{effectiveTotal} processed ({percentage:F0}%), " +
+                          $"outbox pending: {outboxPending}, inbox pending: {inboxPending}" +
+                          (minimumExpectedCompleted > 0 && !meetsMinimum
+                              ? $" [waiting for {minimumExpectedCompleted - processed} more]"
+                              : "")
+            });
+
+            if (outboxPending == 0 && inboxPending == 0 && meetsMinimum)
             {
                 return JsonSerializer.Serialize(new
                 {

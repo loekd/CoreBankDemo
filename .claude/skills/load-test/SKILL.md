@@ -74,16 +74,33 @@ The k6 container runs automatically when the LoadTests AppHost starts. DO NOT RU
 ## 3. Wait for drain (MCP tool: `poll_until_drained`)
 
 Polls the inbox/outbox every 2 seconds until all messages are processed or timeout is reached.
+**Streams progress notifications** via SSE during polling — each poll emits a `notifications/progress`
+event with percentage complete and message counts.
+
+To receive progress notifications, include `_meta.progressToken` in the request:
 
 ```bash
-curl -s --max-time 130 -X POST http://localhost:5181/ \
+curl -sN --max-time 180 -X POST http://localhost:5181/ \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120}}}'
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120,"minimumExpectedCompleted":1000},"_meta":{"progressToken":"drain-1"}}}'
 ```
 
-Response when drained:
+**Note:** The `-N` (`--no-buffer`) flag is required so curl streams SSE events as they arrive.
+Without it, curl buffers all output until the connection closes, making the call appear to block.
+
+**IMPORTANT:** Always pass `minimumExpectedCompleted` (typically 1000) to prevent false drain
+detection while k6 is still submitting payments. Without it, the tool may see a momentary gap
+between k6 submissions and falsely report `isDrained: true` after only a few messages.
+
+Intermediate progress notifications (SSE events during polling):
+```
+event: message
+data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"drain-1","progress":45,"total":100,"message":"Poll 3: 450/1000 processed (45%), outbox pending: 50, inbox pending: 500 [waiting for 550 more]"}}
+```
+
+Final response when drained:
 ```
 event: message
 data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCount\":15,\"outboxPending\":0,\"inboxPending\":0,\"completed\":1000,\"failed\":0}"}]},"id":3,"jsonrpc":"2.0"}

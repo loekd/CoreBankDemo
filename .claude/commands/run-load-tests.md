@@ -44,6 +44,8 @@ After starting the AppHost, wait for `loadtest-support` to report healthy before
 
 ## After poll_until_drained
 
+The `poll_until_drained` tool streams progress notifications as SSE events during polling. Always pass `minimumExpectedCompleted` (typically 1000) to prevent false drain detection while k6 is still submitting payments. When using curl, you will see intermediate `notifications/progress` events before the final result. Look for the last `event: message` line containing `isDrained` for the final result — ignore intermediate progress events.
+
 Only call `get_assertion_results` if `isDrained` is `true` in the drain response. If `isDrained` is `false` or the call timed out, report:
 > "Drain did not complete within the timeout. Do not assert — results would be incomplete."
 
