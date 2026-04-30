@@ -42,7 +42,7 @@ static void SeedLoadTestAccounts(WebApplication app)
 {
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger>();
 
     // CoreBankAPI has already initialized the schema (verified by health check in AppHost)
     var strategy = db.Database.CreateExecutionStrategy();

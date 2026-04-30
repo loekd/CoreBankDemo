@@ -8,87 +8,121 @@ description: "Run a full CoreBankDemo load test, wait for drain, and assert resu
 See **aspire-launch** skill:
 
 ```bash
-aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --no-build --non-interactive
+aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
 ```
 
-Wait for `loadtest-support` to be healthy before calling its endpoints:
+Wait for `loadtest-support` to be healthy:
 
 ```bash
 aspire wait loadtest-support --non-interactive
 ```
 
+The AppHost automatically starts LoadTestSupport (MCP server on port 5181) and k6 (load generator). Do NOT run k6 manually.
+
+## MCP Protocol
+
+LoadTestSupport exposes a **Streamable HTTP MCP server** at the **root path** (`http://localhost:5181/`).
+
+**Important**: The endpoint is `/` (root), NOT `/mcp`.
+
+All requests use JSON-RPC 2.0 over HTTP POST. Responses use SSE format (`event: message\ndata: {json}`).
+
+### Session lifecycle
+
+Every MCP session requires initialization before calling tools:
+
+```bash
+# 1. Initialize — save the Mcp-Session-Id from response headers
+curl -s -D /tmp/mcp_headers.txt -X POST http://localhost:5181/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"copilot-cli","version":"1.0"}}}'
+
+SESSION_ID=$(grep -i "mcp-session-id" /tmp/mcp_headers.txt | tr -d '\r' | awk '{print $2}')
+
+# 2. Send initialized notification
+curl -s -X POST http://localhost:5181/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+```
+
+All subsequent tool calls must include the `Mcp-Session-Id` header.
+
 ## 2. Reset state (MCP tool: `reset_database`)
 
 Truncates all inbox/outbox tables and resets the 10 test accounts to 10,000,000 each.
 
-**Via MCP tool** (preferred when connected to `http://localhost:5181/mcp`):
-Call the `reset_database` tool — no parameters needed.
-
-**Via REST** (fallback):
+```bash
+curl -s -X POST http://localhost:5181/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"reset_database","arguments":{}}}'
 ```
-POST http://localhost:5181/reset
+
+Response (SSE format):
+```
+event: message
+data: {"result":{"content":[{"type":"text","text":"{\"success\":true,\"accountsReset\":10,\"initialBalancePerAccount\":10000000.00,\"totalBalance\":100000000.00}"}]},"id":2,"jsonrpc":"2.0"}
 ```
 
 ## 3. Run k6 load test
 
-The k6 container runs automatically when started via AppHost. If running manually:
-
-```bash
-k6 run --env TRANSACTION_COUNT=1000 --env VU_COUNT=10 \
-       --env PAYMENTS_API_URL=http://localhost:5295 \
-       --env LOAD_TEST_SUPPORT_URL=http://localhost:5181 \
-       k6/script.js
-```
+The k6 container runs automatically when the LoadTests AppHost starts. Do NOT run it manually.
 
 ## 4. Wait for drain (MCP tool: `poll_until_drained`)
 
-**Via MCP tool** (preferred): Call `poll_until_drained` with `timeoutSeconds: 120`.
-The tool polls internally every 2 seconds and returns only when drained or timed out. Do NOT call repeatedly.
+Polls the inbox/outbox every 2 seconds until all messages are processed or timeout is reached.
 
-**Via REST** (fallback): Poll every 2–5 seconds until `isDrained == true`:
-```
-GET http://localhost:5181/assert/drain
+```bash
+curl -s --max-time 130 -X POST http://localhost:5181/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120}}}'
 ```
 
-```json
-{ "isDrained": true, "outboxPending": 0, "inboxPending": 0, "completed": 1000, "failed": 0 }
+Response when drained:
+```
+event: message
+data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCount\":15,\"outboxPending\":0,\"inboxPending\":0,\"completed\":1000,\"failed\":0}"}]},"id":3,"jsonrpc":"2.0"}
 ```
 
 ## 5. Assert results (MCP tool: `get_assertion_results`)
 
-**Via MCP tool** (preferred): Call `get_assertion_results` with `expectedUnique` = number of unique payments submitted.
+Runs the full assertion suite once drained. Call only after `poll_until_drained` returns `isDrained: true`.
 
-**Via REST** (fallback):
-```
-GET http://localhost:5181/assert/results?expectedUnique=1000
+```bash
+curl -s -X POST http://localhost:5181/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_assertion_results","arguments":{"expectedUnique":1000}}}'
 ```
 
-Assert `allPassed == true`. Inspect individual checks and their `detail` field on failure.
-
-```json
-{
-  "allPassed": true,
-  "checks": {
-    "noFailedMessages":        { "passed": true },
-    "noPendingMessages":       { "passed": true },
-    "noDuplicateProcessing":   { "passed": true },
-    "expectedUniqueProcessed": { "passed": true },
-    "allSubmittedProcessed":   { "passed": true },
-    "balanceConservation":     { "passed": true },
-    "balancesCorrect":         { "passed": true }
-  }
-}
-```
+Assert that the response content contains `"allPassed":true`. Inspect individual checks on failure.
 
 ## 6. Inspect on failure (MCP tools: `get_*_inbox`, `get_*_outbox`)
 
-If assertions fail, inspect message state:
+If assertions fail, use these tools to inspect message state:
 
-- `get_corebank_inbox` — filter by `status: "Failed"` to see errors
-- `get_payments_outbox` — check for stuck outbox messages
-- `get_corebank_outbox` / `get_payments_inbox` — trace event flow
+- `get_corebank_inbox` — CoreBank inbox messages (received transactions)
+- `get_corebank_outbox` — CoreBank outbox messages (domain events published)
+- `get_payments_inbox` — Payments inbox messages (received domain events)
+- `get_payments_outbox` — Payments outbox messages (sent payment requests)
 
-Each tool supports `limit` (default 20) and `status` filter (Pending/Processing/Completed/Failed).
+Example:
+```bash
+curl -s -X POST http://localhost:5181/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_corebank_inbox","arguments":{"limit":20,"status":"Failed"}}}'
+```
+
+All `get_*` tools accept `limit` (1–100, default 20) and optional `status` filter (Pending/Processing/Completed/Failed).
 
 ## 7. Stop
 
@@ -98,7 +132,15 @@ See **aspire-launch** skill:
 aspire stop --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
 ```
 
-## MCP Server Connection
+## MCP Server Implementation
 
-LoadTestSupport exposes an MCP server at `http://localhost:5181/mcp` (Streamable HTTP).
-Connect your MCP client to this URL after the AppHost is running and `loadtest-support` is healthy.
+LoadTestSupport implements a **Streamable HTTP MCP server** using `ModelContextProtocol.AspNetCore` v1.2:
+- Registered in Program.cs with `.AddMcpServer().WithHttpTransport().WithTools<LoadTestTools>()`
+- Mapped at root path via `app.MapMcp()` — the endpoint is `http://localhost:5181/`
+- Available only when LoadTestSupport is running (started automatically by the LoadTests AppHost)
+- Responses use SSE format: `event: message\ndata: {json-rpc response}`
+- Requires session: send `initialize` first, then include `Mcp-Session-Id` header on all calls
+
+### Why NOT to use Aspire MCP CLI
+
+The `aspire mcp` CLI command interacts with the Aspire control plane's MCP server, NOT with individual service endpoints like LoadTestSupport. Commands like `aspire mcp call loadtest-support reset_database` will fail. Always use HTTP POST to `http://localhost:5181/` as shown above.

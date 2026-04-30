@@ -37,13 +37,23 @@ LoadTestSupport embeds an MCP (Model Context Protocol) server that exposes the s
 
 The MCP endpoint is available at `{LoadTestSupport_URL}/mcp`. When running via the Load Test AppHost, the URL is typically `http://localhost:5181/mcp`.
 
-**Claude Code / VS Code / Visual Studio** — add to your MCP configuration:
+**To connect your MCP client** (Claude Code, VS Code, Visual Studio):
+
+1. Copy the example config from the repo root:
+   ```bash
+   cp mcp-config.example.json mcp-config.json
+   ```
+
+2. Update your MCP client's configuration to point to `http://localhost:5181/` (adjust port if different).
+
+**Example config block** for Claude Code / VS Code:
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "corebank-loadtest": {
-      "url": "http://localhost:5181/mcp"
+      "url": "http://localhost:5181/",
+      "transport": "http"
     }
   }
 }

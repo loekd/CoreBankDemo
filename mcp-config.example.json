@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "corebank-loadtest": {
+      "url": "http://localhost:5181/",
+      "transport": "http"
+    }
+  }
+}
