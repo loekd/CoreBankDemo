@@ -162,7 +162,11 @@ curl -s -X POST http://localhost:5181/ \
 
 All `get_*` tools accept `limit` (1–100, default 20) and optional `status` filter (Pending/Processing/Completed/Failed).
 
-## 6. Stop
+## 6. Analyze traces
+
+After assertions complete (pass or fail), invoke the **corebank-trace-analysis** skill to analyze OpenTelemetry traces from this run. Pass the test start/end timestamps so the skill can scope its queries correctly.
+
+## 7. Stop
 
 See **aspire-launch** skill:
 

@@ -67,10 +67,15 @@ If `allPassed` is not `true`, inspect inbox/outbox before drawing conclusions. R
 
 Do not just report the raw JSON. Explain what it means.
 
+## After assertions — analyze traces
+
+Once `get_assertion_results` has returned (pass or fail), invoke the **corebank-trace-analysis** skill. Pass the test start and end timestamps so it can scope its Jaeger queries correctly. Do this before stopping the AppHost.
+
 ## When you are done
 
 Report a summary with:
 1. Whether the test passed or failed
 2. How many unique payments were processed
 3. Any failed checks and their likely cause
-4. Whether the AppHost was stopped cleanly
+4. Key findings from trace analysis (errors, slowest spans, bottleneck)
+5. Whether the AppHost was stopped cleanly
