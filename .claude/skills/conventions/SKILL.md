@@ -13,6 +13,19 @@ description: |
 ---
 ---
 
+## Code Navigation and Editing
+
+Use **Serena** tools for all symbol-based work. Prefer them over `grep`/`glob`/`bash` for:
+
+- Finding symbols: `serena-find_symbol`, `serena-get_symbols_overview`
+- Finding references and implementations: `serena-find_referencing_symbols`, `serena-find_implementations`
+- Editing: `serena-replace_symbol_body`, `serena-insert_before_symbol`, `serena-insert_after_symbol`, `serena-rename_symbol`
+- Diagnostics: `serena-get_diagnostics_for_file`
+
+Fall back to `grep`/`glob` only for non-code files (YAML, JSON, `.http`, etc.) or pattern matching that isn't symbol-based.
+
+Always call `serena-check_onboarding_performed` at the start of a coding session.
+
 ## Database
 
 Use `EnsureCreated()` only — no EF migrations, ever. Aspire recreates the database from scratch when needed.
