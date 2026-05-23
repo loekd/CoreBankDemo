@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging;
 using CoreBankDemo.Messaging.Inbox;
 
 namespace CoreBankDemo.PaymentsAPI.Inbox;
@@ -8,7 +9,7 @@ public class InboxMessage : IInboxMessage
     public Guid Id { get; set; }
     public required string IdempotencyKey { get; set; }
     public int PartitionId { get; set; }
-    public string Status { get; set; } = "Pending"; // Pending, Processing, Completed, Failed
+    public string Status { get; set; } = MessageConstants.Status.Pending;
     public DateTime ReceivedAt { get; set; }
     public DateTime? ProcessedAt { get; set; }
     public int RetryCount { get; set; }

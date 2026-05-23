@@ -375,6 +375,8 @@ dotnet run --project CoreBankDemo.LoadTests
 
 The load test uses disposable PostgreSQL and Redis instances, seeded with 10 test accounts (€10M each). See [CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md) for details.
 
+**MCP Integration:** The LoadTestSupport service exposes an MCP server at `http://localhost:5181/` for agent-based orchestration. See `mcp-config.example.json` and [CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md) for connection instructions.
+
 ## Architecture & Technical Details
 
 For detailed architecture information, database schemas, and implementation details, see:

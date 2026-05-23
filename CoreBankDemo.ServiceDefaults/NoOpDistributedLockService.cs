@@ -12,4 +12,3 @@ internal sealed class NoOpDistributedLockService : IDistributedLockService
         CancellationToken cancellationToken = default)
         => Task.FromResult(false);
 }
-

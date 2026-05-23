@@ -14,8 +14,9 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage, PaymentsDbContext
         IServiceProvider serviceProvider,
         ILogger<InboxProcessor> logger,
         IDistributedLockService lockService,
-        IOptions<InboxProcessingOptions> options)
-        : base(serviceProvider, logger, lockService, options, nameof(InboxProcessor))
+        IOptions<InboxProcessingOptions> options,
+        TimeProvider timeProvider)
+        : base(serviceProvider, logger, lockService, options, timeProvider, nameof(InboxProcessor))
     {
     }
 
@@ -50,25 +51,23 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage, PaymentsDbContext
         switch (message.EventType)
         {
             case nameof(TransactionCompletedEvent):
-                var completed = JsonSerializer.Deserialize<TransactionCompletedEvent>(message.EventPayload)
-                                ?? throw new InvalidOperationException("Failed to deserialize TransactionCompletedEvent");
-                await handler.HandleAsync(completed, cancellationToken);
+                await handler.HandleAsync(Deserialize<TransactionCompletedEvent>(message), cancellationToken);
                 break;
 
             case nameof(TransactionFailedEvent):
-                var failed = JsonSerializer.Deserialize<TransactionFailedEvent>(message.EventPayload)
-                             ?? throw new InvalidOperationException("Failed to deserialize TransactionFailedEvent");
-                await handler.HandleAsync(failed, cancellationToken);
+                await handler.HandleAsync(Deserialize<TransactionFailedEvent>(message), cancellationToken);
                 break;
 
             case nameof(BalanceUpdatedEvent):
-                var balanceUpdated = JsonSerializer.Deserialize<BalanceUpdatedEvent>(message.EventPayload)
-                                     ?? throw new InvalidOperationException("Failed to deserialize BalanceUpdatedEvent");
-                await handler.HandleAsync(balanceUpdated, cancellationToken);
+                await handler.HandleAsync(Deserialize<BalanceUpdatedEvent>(message), cancellationToken);
                 break;
 
             default:
                 throw new InvalidOperationException($"Unknown event type: {message.EventType}");
         }
     }
+
+    private static T Deserialize<T>(InboxMessage message) =>
+        JsonSerializer.Deserialize<T>(message.EventPayload)
+        ?? throw new InvalidOperationException($"Failed to deserialize {typeof(T).Name} from inbox message {message.Id}");
 }

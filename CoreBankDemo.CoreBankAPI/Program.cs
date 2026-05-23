@@ -13,20 +13,9 @@ public static class Program
         // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
         builder.AddServiceDefaults("CoreBank.CoreBankAPI", new[] { nameof(InboxProcessor), nameof(MessagingOutboxProcessor) });
 
-        // Explicit DB health check so Aspire's WaitFor blocks until the schema is ready
+        // DB health check so Aspire's WaitFor blocks until the schema is ready
         builder.Services.AddHealthChecks()
-            .AddDbContextCheck<CoreBankDbContext>("corebank-db")
-            .AddCheck("corebank-schema", () =>
-            {
-                // Check will run after InitializeDatabaseWithSeedAccounts() completes
-                // This ensures dependent services only start after schema is ready
-                using var scope = builder.Services.BuildServiceProvider().CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-
-                // Verify critical tables exist by attempting a simple query
-                var accountExists = db.Accounts.Any();
-                return Microsoft.Extensions.Diagnostics.HealthChecks.HealthCheckResult.Healthy("Schema initialized");
-            });
+            .AddDbContextCheck<CoreBankDbContext>("corebank-db");
 
         // Add configuration options with validation
         builder.AddInboxProcessingOptions();

@@ -25,6 +25,32 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
     /// </summary>
     protected abstract DbSet<TMessage> OutboxMessages { get; }
 
+    public virtual async Task<TMessage?> FindByIdempotencyKeyAsync(
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        return await OutboxMessages
+            .FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
+    }
+
+    public virtual async Task<bool> StoreIfNewAsync(
+        TMessage message,
+        CancellationToken cancellationToken)
+    {
+        OutboxMessages.Add(message);
+        try
+        {
+            await DbContext.SaveChangesAsync(cancellationToken);
+            return true;
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation })
+        {
+            // Concurrent insert race — already stored by another instance
+            DbContext.Entry(message).State = EntityState.Detached;
+            return false;
+        }
+    }
+
     public virtual async Task<TMessage?> LoadMessageAsync(
         Guid messageId,
         CancellationToken cancellationToken)
@@ -54,9 +80,12 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
         TMessage message,
         CancellationToken cancellationToken)
     {
-        message.Status = Status.Completed;
-        message.ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime;
-        await DbContext.SaveChangesAsync(cancellationToken);
+        var processedAt = TimeProvider.GetUtcNow().UtcDateTime;
+        await OutboxMessages
+            .Where(m => m.Id == message.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.Status, Status.Completed)
+                .SetProperty(m => m.ProcessedAt, processedAt), cancellationToken);
     }
 
     public virtual async Task MarkAsFailedWithRetryAsync(
@@ -64,9 +93,24 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
         string errorMessage,
         CancellationToken cancellationToken)
     {
-        message.Status = Status.Pending;
-        message.RetryCount++;
-        message.LastError = errorMessage;
-        await DbContext.SaveChangesAsync(cancellationToken);
+        await OutboxMessages
+            .Where(m => m.Id == message.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(m => m.Status, Status.Pending)
+                .SetProperty(m => m.RetryCount, m => m.RetryCount + 1)
+                .SetProperty(m => m.LastError, errorMessage), cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets recent outbox messages for monitoring purposes.
+    /// </summary>
+    public virtual async Task<List<TMessage>> GetRecentMessagesAsync(
+        int count = 50,
+        CancellationToken cancellationToken = default)
+    {
+        return await OutboxMessages
+            .OrderByDescending(m => m.CreatedAt)
+            .Take(count)
+            .ToListAsync(cancellationToken);
     }
 }

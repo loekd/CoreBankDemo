@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
@@ -17,7 +18,7 @@ public class MessagingOutboxProcessor(
     : BackgroundService
 {
     private readonly ActivitySource _activitySource = new("MessagingOutboxProcessor");
-    private static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan ProcessingTimeout = MessageConstants.Defaults.ProcessingTimeout;
     private readonly MessagingOutboxProcessingOptions _options = options.Value;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -184,7 +185,7 @@ public class MessagingOutboxProcessor(
         MessagingOutboxMessage message,
         CancellationToken cancellationToken)
     {
-        message.Status = "Completed";
+        message.Status = MessageConstants.Status.Completed;
         message.ProcessedAt = timeProvider.GetUtcNow().UtcDateTime;
         await dbContext.SaveChangesAsync(cancellationToken);
     }
@@ -195,7 +196,7 @@ public class MessagingOutboxProcessor(
         Exception ex,
         CancellationToken cancellationToken)
     {
-        message.Status = "Pending";
+        message.Status = MessageConstants.Status.Pending;
         message.RetryCount++;
         message.LastError = ex.Message;
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -222,11 +223,11 @@ public class MessagingOutboxProcessor(
 
         return await dbContext.MessagingOutboxMessages
             .Where(m => m.PartitionId == partitionId &&
-                       m.RetryCount < 5 &&
-                       (m.Status == "Pending" ||
-                        (m.Status == "Processing" && m.CreatedAt < staleThreshold)))
+                       m.RetryCount < MessageConstants.Defaults.MaxRetryCount &&
+                       (m.Status == MessageConstants.Status.Pending ||
+                        (m.Status == MessageConstants.Status.Processing && m.CreatedAt < staleThreshold)))
             .OrderBy(m => m.CreatedAt)
-            .Take(10)
+            .Take(MessageConstants.Defaults.BatchSize)
             .Select(m => m.Id)
             .ToListAsync(cancellationToken);
     }

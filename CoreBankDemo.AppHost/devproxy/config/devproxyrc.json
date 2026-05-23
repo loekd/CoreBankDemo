@@ -15,7 +15,7 @@
   "record": false,
   "errorsCoreBank": {
     "errorsFile": "devproxy-errors.json",
-    "rate": 50    
+    "rate": 5
   },
   "rateLimiting": {
     "costPerRequest": 1,
@@ -23,8 +23,8 @@
     "resetTimeWindowSeconds": 60
   },
   "latency": {
-    "minMs": 200,
-    "maxMs": 2000
+    "minMs": 20,
+    "maxMs": 200
   },
   "urlsToWatch": [
     "http://127.0.0.1:5032/api/*"

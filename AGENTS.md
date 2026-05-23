@@ -1,87 +1,30 @@
-# AGENTS.md — CoreBankDemo
+# CoreBankDemo
 
-## Architecture
+Mission-critical banking demo for a conference talk. Shows resilient, observable, exactly-once payment processing using .NET 10, Aspire, Dapr, and PostgreSQL.
 
-Five projects talk to each other in a fixed topology:
+## Projects
 
-```
-PaymentsAPI → (HTTP via Dev Proxy) → CoreBankAPI
-CoreBankAPI → (Dapr pub/sub) → PaymentsAPI (events back)
-```
+- **PaymentsAPI** — accepts payments; Outbox for reliable forwarding, Inbox for event consumption
+- **CoreBankAPI** — processes transactions; Inbox for idempotent handling, Messaging Outbox for domain events
+- **AppHost** — Aspire orchestration: Postgres, Redis, Jaeger, Dapr sidecars, optional Dev Proxy for fault injection
+- **ServiceDefaults** — shared OpenTelemetry, health checks, distributed locking
+- **Messaging** — Inbox/Outbox base classes, MessageConstants, PartitionHelper
 
-- **PaymentsAPI** (`CoreBankDemo.PaymentsAPI`) — accepts payments, stores to Outbox, consumes transaction events via Inbox.
-- **CoreBankAPI** (`CoreBankDemo.CoreBankAPI`) — processes transactions via Inbox, publishes domain events via Messaging Outbox.
-- **AppHost** (`CoreBankDemo.AppHost`) — Aspire orchestration: Postgres, Redis, Jaeger, Dapr sidecars, optional Dev Proxy.
-- **ServiceDefaults** (`CoreBankDemo.ServiceDefaults`) — shared OpenTelemetry, health checks, `IDistributedLockService`, processing options.
-- **Messaging** (`CoreBankDemo.Messaging`) — base classes for Inbox/Outbox patterns, `MessageConstants`, `PartitionHelper`.
+## AppHosts
 
-## Developer Commands
+| AppHost | Use for |
+|---|---|
+| `CoreBankDemo.AppHost` | Regular development; Dev Proxy for fault injection |
+| `CoreBankDemo.LoadTests` | Automated load testing; disposable infra, k6, LoadTestSupport API |
 
-```bash
-# Start everything (Aspire + all infrastructure)
-cd CoreBankDemo.AppHost && dotnet run
+→ **aspire-launch** skill: start and stop AppHosts via Aspire CLI.
+→ **aspire-mcp** skill: inspect resource state, logs, and traces via Aspire MCP.
+→ **load-test** skill: run a full load test and assert results via the LoadTestSupport API.
 
-# Run load tests (disposable Postgres + Redis, k6 container)
-dotnet run --project CoreBankDemo.LoadTests
+## Design Patterns
 
-# Send sample requests
-# Use demo-requests.http in the repo root
-```
+Uses Inbox/Outbox with partitioned ordering, distributed locking, exactly-once processing, and end-to-end distributed tracing.
 
-No manual Dapr, Redis, or Dev Proxy setup — Aspire manages all of it.
-
-## Key Patterns
-
-### Inbox / Outbox base classes
-Always inherit from `InboxProcessorBase<TMessage, TDbContext>` and `OutboxProcessorBase<TMessage, TDbContext>` in `CoreBankDemo.Messaging`. Override `LockNamePrefix` and `ProcessMessageAsync`. See `CoreBankAPI/Inbox/InboxProcessor.cs` for a concrete example.
-
-### Constants — never use magic strings
-```csharp
-// Status
-MessageConstants.Status.Pending / Processing / Completed / Failed
-
-// Defaults
-MessageConstants.Defaults.MaxRetryCount   // 5
-MessageConstants.Defaults.BatchSize       // 10
-MessageConstants.Defaults.PollingInterval // 5 s
-MessageConstants.Defaults.ProcessingTimeout // 5 min
-```
-
-### Partition assignment — always use the shared helper
-```csharp
-int partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
-```
-
-### Database
-Use `EnsureCreated()` only — no EF migrations, ever. CoreBankAPI seeds accounts on startup if the table is empty (`Program.cs → InitializeDatabaseWithSeedAccounts`).
-
-### Tracing
-- Register every new `ActivitySource` name in `AddServiceDefaults(serviceName, new[] { nameof(MyProcessor), ... })`.
-- Persist `TraceParent`/`TraceState` on outbox/inbox rows and restore them when processing to maintain the distributed trace chain.
-- Use `ActivitySource.StartActivity(...)` for custom spans; never swallow or break the trace.
-
-### Time
-Always inject and use `TimeProvider` (registered as `TimeProvider.System`). Never call `DateTime.Now` or `DateTimeOffset.UtcNow` directly.
-
-### Feature flags
-- `Features:UseDapr` — switches PaymentsAPI between `DaprCoreBankApiClient` and `HttpCoreBankApiClient`.
-- `Features:UseDevProxy` — AppHost conditionally starts Dev Proxy and forces `UseDapr=false` because Dapr bypasses the proxy.
-
-### HTTP vs business logic
-Controller actions must stay thin. Business logic lives in handler/executor classes that return domain types (`Task`, `Task<T>`), not `IActionResult`.
-
-### Validation responses
-Return all validation errors in one response: `return BadRequest(new { Errors = errors });`
-
-## Critical Files
-
-| File | Purpose |
-|------|---------|
-| `CoreBankDemo.Messaging/MessageConstants.cs` | All status strings and default values |
-| `CoreBankDemo.Messaging/PartitionHelper.cs` | FNV-1a partition hashing |
-| `CoreBankDemo.Messaging/Inbox/InboxProcessorBase.cs` | Base inbox background service |
-| `CoreBankDemo.Messaging/Outbox/OutboxProcessorBase.cs` | Base outbox background service |
-| `CoreBankDemo.ServiceDefaults/Extensions.cs` | `AddServiceDefaults`, OTEL config, lock service wiring |
-| `CoreBankDemo.AppHost/AppHost.cs` | Full infrastructure topology |
-| `CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs` | Reference implementation of inbox pattern |
-| `CoreBankDemo.PaymentsAPI/Outbox/OutboxProcessor.cs` | Reference implementation of outbox pattern |
+→ **messaging-patterns** skill: Inbox/Outbox base classes, MessageConstants, PartitionHelper.
+→ **observability** skill: ActivitySource registration, span creation, trace context propagation.
+→ **conventions** skill: database, TimeProvider, HTTP/business logic separation, validation.

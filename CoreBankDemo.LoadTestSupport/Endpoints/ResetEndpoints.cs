@@ -1,12 +1,13 @@
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.LoadTestSupport;
 using CoreBankDemo.PaymentsAPI;
 
 namespace CoreBankDemo.LoadTestSupport.Endpoints;
 
 public static class ResetEndpoints
 {
-    private const decimal InitialBalance = 10_000_000.00m;
+    private const decimal InitialBalance = LoadTestConstants.InitialBalance;
 
     public static void MapResetEndpoints(this IEndpointRouteBuilder app)
     {
@@ -20,21 +21,10 @@ public static class ResetEndpoints
             await coreBankDb.Database.ExecuteSqlRawAsync("TRUNCATE TABLE \"MessagingOutboxMessages\" RESTART IDENTITY CASCADE", ct);
 
             // Reset all load test accounts to initial balance
-            var loadTestAccounts = await coreBankDb.Accounts
-                .Where(a => a.AccountNumber.StartsWith("NL") && a.AccountNumber.Contains("LOAD"))
-                .ToListAsync(ct);
-
-            foreach (var account in loadTestAccounts)
-            {
-                account.Balance = InitialBalance;
-                account.UpdatedAt = null;
-            }
-
-            await coreBankDb.Database.ExecuteSqlRawAsync(
+            var accountCount = await coreBankDb.Database.ExecuteSqlRawAsync(
                 "UPDATE \"Accounts\" SET \"Balance\" = {0}, \"UpdatedAt\" = NULL WHERE \"AccountNumber\" LIKE '%LOAD%'",
                 InitialBalance);
 
-            var accountCount = loadTestAccounts.Count;
             var totalBalance = accountCount * InitialBalance;
 
             return Results.Ok(new

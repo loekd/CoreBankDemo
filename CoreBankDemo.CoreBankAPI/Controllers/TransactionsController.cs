@@ -69,7 +69,7 @@ public class TransactionsController(
         return Accepted($"/api/transactions/{request.TransactionId}", new
         {
             IdempotencyKey = request.TransactionId,
-            Status = "Pending",
+            Status = MessageConstants.Status.Pending,
             Message = "Transaction accepted for processing"
         });
     }
@@ -99,7 +99,7 @@ public class TransactionsController(
             Amount = request.Amount,
             Currency = request.Currency,
             ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
-            Status = "Pending",
+            Status = MessageConstants.Status.Pending,
             TransactionId = request.TransactionId,
             TraceParent = Activity.Current?.Id,
             TraceState = Activity.Current?.TraceStateString
@@ -110,19 +110,21 @@ public class TransactionsController(
     {
         switch (existing.Status)
         {
-            case "Completed" when !string.IsNullOrEmpty(existing.ResponsePayload):
+            case MessageConstants.Status.Completed when !string.IsNullOrEmpty(existing.ResponsePayload):
             {
                 var cachedResponse = JsonSerializer.Deserialize<TransactionResponse>(existing.ResponsePayload);
-                return Ok(cachedResponse);
+                return cachedResponse is not null
+                    ? Ok(cachedResponse)
+                    : StatusCode(500, new { Errors = new[] { "Failed to deserialize cached response" } });
             }
-            case "Pending" or "Processing":
+            case MessageConstants.Status.Pending or MessageConstants.Status.Processing:
                 return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
                 {
                     IdempotencyKey = existing.IdempotencyKey,
                     Status = existing.Status,
                     Message = "Transaction is being processed"
                 });
-            case "Failed":
+            case MessageConstants.Status.Failed:
                 return BadRequest(new { Errors = new[] { existing.LastError ?? "Transaction failed" } });
             default:
                 return StatusCode(500, new { Errors = new[] { "Unknown transaction status" } });
@@ -145,10 +147,11 @@ public class TransactionsController(
         if (message == null)
             return NotFound(new { Errors = new[] { "Transaction not found" } });
 
-        if (message.Status == "Completed" && !string.IsNullOrEmpty(message.ResponsePayload))
+        if (message.Status == MessageConstants.Status.Completed && !string.IsNullOrEmpty(message.ResponsePayload))
         {
             var response = JsonSerializer.Deserialize<TransactionResponse>(message.ResponsePayload);
-            return Ok(response);
+            if (response is not null)
+                return Ok(response);
         }
 
         return Ok(new

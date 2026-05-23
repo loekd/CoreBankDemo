@@ -1,146 +1,33 @@
-using System.Collections.Immutable;
-using CommunityToolkit.Aspire.Hosting.Dapr;
-using DevProxy.Hosting;
 using Microsoft.Extensions.Configuration;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
-string daprComponentsPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "dapr", "components-loadtest"));
-string k6ScriptPath       = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "k6"));
+string k6ScriptPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "k6"));
 
 // ---------------------------------------------------------------------------
-// Disposable Postgres — Aspire creates both databases via AddDatabase();
-// EnsureCreated() in each API creates the schema and seeds initial data.
+// Connect to the persistent Postgres from the regular AppHost using fixed connection strings
 // ---------------------------------------------------------------------------
-var postgres = builder.AddPostgres("postgres")
-    .WithPgAdmin();
-
-var paymentsDb = postgres.AddDatabase("paymentsdb");
-var coreBankDb = postgres.AddDatabase("corebankdb");
-
-// ---------------------------------------------------------------------------
-// Disposable Redis — different host port to avoid clashing with the main AppHost.
-// Password must match the value hardcoded in dapr/components-loadtest/*.yaml
-// ---------------------------------------------------------------------------
-var redisPassword = builder.AddParameter("redis-password", "myredispassword123", secret: true);
-#pragma warning disable ASPIRECERTIFICATES001
-var redis = builder
-    .AddRedis("redis", password: redisPassword)
-    .WithHostPort(6381)
-    .WithEndpointProxySupport(false)
-    .WithoutHttpsCertificate()
-    .WithImageTag("7.4-alpine");
-#pragma warning restore ASPIRECERTIFICATES001
-
-// ---------------------------------------------------------------------------
-// Dapr
-// ---------------------------------------------------------------------------
-builder.AddDapr();
-
-var pubsub = builder.AddDaprPubSub("pubsub", new DaprComponentOptions
-{
-    LocalPath = Path.Combine(daprComponentsPath, "pubsub-redis.yaml")
-}).WaitFor(redis);
-
-var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComponentOptions
-{
-    LocalPath = Path.Combine(daprComponentsPath, "lockstore-redis.yaml")
-}).WaitFor(redis);
-
-IResourceBuilder<DevProxyExecutableResource>? devProxy = null;
-var useDevProxy = builder.Configuration.GetValue<bool>("Features:UseDevProxy");
-if (useDevProxy)
-{
-    var devProxyConfigFolder = Path.Combine(builder.AppHostDirectory, "devproxy", "config");
-    var devProxyConfigFile = Path.Combine(devProxyConfigFolder, "devproxyrc.json");
-
-    devProxy = builder.AddDevProxyExecutable("devproxy")
-        .WithConfigFile(devProxyConfigFile)
-        .WithUrlsToWatch(() => ["http://127.0.0.1:5032/*"]);
-}
-
-// ---------------------------------------------------------------------------
-// Core Bank API
-// ---------------------------------------------------------------------------
-var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
-    .WithReference(coreBankDb)
-    .WaitFor(coreBankDb)
-    .WithHttpHealthCheck("/health")
-    .WithDaprSidecar(opt =>
-    {
-        opt.WithOptions(new DaprSidecarOptions
-        {
-            AppId = "corebank-api",
-            ResourcesPaths = ImmutableHashSet.Create(daprComponentsPath),
-            SchedulerHostAddress = "",
-            PlacementHostAddress = "",
-        });
-        opt.WithReference(pubsub);
-        opt.WithReference(lockStore);
-    })
-    .WaitFor(pubsub)
-    .WaitFor(lockStore);
-
-// ---------------------------------------------------------------------------
-// Payments API
-// ---------------------------------------------------------------------------
-var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
-    .WithReference(paymentsDb)
-    .WaitFor(paymentsDb)
-    .WithExternalHttpEndpoints()
-    .WithHttpHealthCheck("/health")
-    .WithHttpEndpoint(name: "load-test", port: 5295)
-    .WaitFor(coreBankApi)
-    .WithDaprSidecar(opt =>
-    {
-        opt.WithOptions(new DaprSidecarOptions
-        {
-            AppId = "payments-api",
-            ResourcesPaths = ImmutableHashSet.Create(daprComponentsPath),
-            SchedulerHostAddress = "",
-            PlacementHostAddress = "",
-        });
-        opt.WithReference(pubsub);
-        opt.WithReference(lockStore);
-    });
-
-if (devProxy is not null)
-{
-    paymentsApi
-        .WithReference(coreBankApi)
-        .WithEnvironment("Features__UseDapr", "false")
-        .WithEnvironment("HTTP_PROXY", "http://127.0.0.1:8001")
-        .WithEnvironment("HTTPS_PROXY", "http://127.0.0.1:8001")
-        .WithEnvironment("NO_PROXY", "localhost")
-        .WaitFor(devProxy);
-}
-else
-{
-    paymentsApi
-        .WithReference(coreBankApi)
-        .WithEnvironment("Features__UseDapr", "true");
-}
+var postgresPassword = "postgres-dev-load-test";
+var paymentsConnectionString = $"Host=localhost;Port=5432;Username=postgres;Password={postgresPassword};Database=paymentsdb";
+var coreBankConnectionString = $"Host=localhost;Port=5432;Username=postgres;Password={postgresPassword};Database=corebankdb";
 
 // ---------------------------------------------------------------------------
 // LoadTestSupport API — minimal API for post-run assertions, reads both DBs
 // ---------------------------------------------------------------------------
 var loadTestSupport = builder.AddProject<Projects.CoreBankDemo_LoadTestSupport>("loadtest-support")
-    .WithReference(paymentsDb)
-    .WithReference(coreBankDb)
+    .WithEnvironment("ConnectionStrings__paymentsdb", paymentsConnectionString)
+    .WithEnvironment("ConnectionStrings__corebankdb", coreBankConnectionString)
     .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
-    .WithHttpEndpoint(name: "load-test", port: 5181)
-    .WaitFor(coreBankApi)
-    .WaitFor(paymentsApi);
+    .WithHttpEndpoint(name: "load-test", port: 5181);
 
 // ---------------------------------------------------------------------------
 // k6 container
-// APIs run on the host, so k6 (in Docker) reaches them via host.docker.internal.
-// Ports match launchSettings.json: PaymentsAPI=5294, LoadTestSupport=5180
+// The regular AppHost exposes payments-api on port 5295, so k6 targets that.
 // Override TRANSACTION_COUNT and VU_COUNT via appsettings.json "LoadTest" section:
 //   "LoadTest": { "TransactionCount": "10000", "VuCount": "50" }
 // ---------------------------------------------------------------------------
-var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "1000";
+var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "100";
 var vuCount          = builder.Configuration["LoadTest:VuCount"]          ?? "10";
 
 builder.AddContainer("k6", "grafana/k6")
@@ -152,7 +39,6 @@ builder.AddContainer("k6", "grafana/k6")
         "--env", "LOAD_TEST_SUPPORT_URL=http://host.docker.internal:5181",
         "/scripts/script.js")
     .WithBindMount(k6ScriptPath, "/scripts", isReadOnly: true)
-    .WaitFor(loadTestSupport)
-    .WaitFor(paymentsApi);
+    .WaitFor(loadTestSupport);
 
 builder.Build().Run();

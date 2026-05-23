@@ -39,7 +39,7 @@ public class OutboxPublisher(
         InboxMessage message,
         CancellationToken cancellationToken)
     {
-        return CreateOutboxMessageAsync(dbContext, message, "Completed", null, cancellationToken);
+        return CreateOutboxMessageAsync(dbContext, message, MessageConstants.Status.Completed, null, cancellationToken);
     }
 
     public Task PublishTransactionFailedAsync(
@@ -48,7 +48,7 @@ public class OutboxPublisher(
         string? errorReason,
         CancellationToken cancellationToken)
     {
-        return CreateOutboxMessageAsync(dbContext, message, "Failed", errorReason, cancellationToken);
+        return CreateOutboxMessageAsync(dbContext, message, MessageConstants.Status.Failed, errorReason, cancellationToken);
     }
 
     public Task PublishBalanceUpdatedAsync(
@@ -67,7 +67,7 @@ public class OutboxPublisher(
             Id = Guid.NewGuid(),
             PartitionId = outboxPartitionId,
             TransactionId = message.TransactionId!,
-            Status = "Pending",
+            Status = MessageConstants.Status.Pending,
             EventType = Constants.BalanceUpdated,
             EventSource = "https://corebank-api/accounts",
             FromAccount = accountNumber,
@@ -75,7 +75,7 @@ public class OutboxPublisher(
             Amount = delta,
             NewBalance = newBalance,
             Currency = message.Currency,
-            TransactionStatus = "Completed",
+            TransactionStatus = MessageConstants.Status.Completed,
             CreatedAt = timestamp.UtcDateTime,
             TraceParent = message.TraceParent ?? Activity.Current?.Id,
             TraceState = message.TraceState ?? Activity.Current?.TraceStateString
@@ -95,7 +95,7 @@ public class OutboxPublisher(
         var timestamp = timeProvider.GetUtcNow();
         var outboxPartitionId = PartitionHelper.GetPartitionId(message.TransactionId!, _options.PartitionCount);
 
-        var eventType = transactionStatus == "Completed"
+        var eventType = transactionStatus == MessageConstants.Status.Completed
             ? Constants.TransactionCompleted
             : Constants.TransactionFailed;
 
@@ -104,7 +104,7 @@ public class OutboxPublisher(
             Id = Guid.NewGuid(),
             PartitionId = outboxPartitionId,
             TransactionId = message.TransactionId!,
-            Status = "Pending",
+            Status = MessageConstants.Status.Pending,
             EventType = eventType,
             EventSource = "https://corebank-api/transactions",
             FromAccount = message.FromAccount,

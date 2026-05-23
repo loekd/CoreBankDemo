@@ -21,7 +21,7 @@ public interface IInboxMessageRepository
         int partitionId,
         CancellationToken cancellationToken);
 
-    Task MarkMessageAsFailedWithRetryAsync(
+    Task MarkAsFailedWithRetryAsync(
         Guid messageId,
         string errorMessage,
         CancellationToken cancellationToken);

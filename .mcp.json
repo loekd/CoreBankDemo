@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "aspire": {
+      "command": "aspire",
+      "args": ["agent", "mcp"]
+    },
+    "corebank-loadtest": {
+      "type": "http",
+      "url": "http://localhost:5181/"
+    },
+    "opentelemetry-mcp": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["opentelemetry-mcp"],
+      "env": {
+        "BACKEND_TYPE": "jaeger",
+        "BACKEND_URL": "http://localhost:16686"
+      }
+    }
+  }
+}

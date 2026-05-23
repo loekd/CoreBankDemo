@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using CoreBankDemo.Messaging.Outbox;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
@@ -9,7 +8,6 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 
 public class OutboxProcessor : OutboxProcessorBase<OutboxMessage, PaymentsDbContext>
 {
-    private readonly IServiceProvider _serviceProvider;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<OutboxProcessor> _logger;
 
@@ -21,7 +19,6 @@ public class OutboxProcessor : OutboxProcessorBase<OutboxMessage, PaymentsDbCont
         IOptions<OutboxProcessingOptions> options)
         : base(serviceProvider, logger, lockService, timeProvider, options, nameof(OutboxProcessor))
     {
-        _serviceProvider = serviceProvider;
         _timeProvider = timeProvider;
         _logger = logger;
     }

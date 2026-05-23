@@ -1,0 +1,1 @@
+See /.claude/commands/run-load-test.md for the full prompt.

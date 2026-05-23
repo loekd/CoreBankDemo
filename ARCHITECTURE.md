@@ -2,6 +2,57 @@
 
 This document provides technical architecture details. For demo instructions and quick start, see [README.md](README.md).
 
+## System Description
+
+CoreBankDemo is a distributed banking system consisting of a **Payments API** (accepts and forwards payments), a **Core Bank API** (executes transactions and maintains account balances), and an **.NET Aspire AppHost** that orchestrates all infrastructure — PostgreSQL, Redis, Dapr sidecars, Jaeger, and optionally DevProxy for fault injection. The system demonstrates how to achieve exactly-once payment processing in the face of network failures, retries, and concurrent load.
+
+## Technology Stack
+
+| Technology | Role |
+|---|---|
+| C# / .NET 10 | Application runtime |
+| .NET Aspire | Orchestration, service defaults, health checks |
+| PostgreSQL | Persistent storage (Outbox, Inbox, Accounts) |
+| Dapr | Pub/sub messaging, distributed locking (Redis-backed) |
+| Redis | Lock store and pub/sub broker |
+| OpenTelemetry + Jaeger | Distributed tracing, metrics, structured logs |
+| Microsoft DevProxy | Fault injection (503, 429, 500 errors) |
+| K6 | Automated load and resilience testing |
+| Microsoft.Extensions.Http.Resilience | Retry, circuit breaker, timeout on HTTP clients |
+
+## Architecture Decisions
+
+Formal decision records are maintained in [`docs/adr/`](docs/adr/).
+
+| ADR | Title | Status | Key takeaway |
+|-----|-------|--------|--------------|
+| [ADR-001](docs/adr/ADR-001-idempotent-inbox.md) | Idempotent command receivers using the Inbox pattern | Accepted | Every command must be stored and de-duplicated by idempotency key before any business logic executes. |
+| [ADR-002](docs/adr/ADR-002-transactional-outbox.md) | Transactional Outbox for guaranteed message delivery | Accepted | Never send a message outside of the transaction that creates the state it represents — use the Outbox. |
+| [ADR-003](docs/adr/ADR-003-distributed-tracing-opentelemetry.md) | Distributed tracing and observability with OpenTelemetry | Accepted | Every asynchronous hop must propagate and restore trace context so the full payment journey is visible in one trace. |
+| [ADR-004](docs/adr/ADR-004-leader-election-partitioning.md) | Leader election and partitioning for scalable message processing | Accepted | Partitioning by idempotency key + distributed locking gives you ordered, exactly-once processing that scales horizontally. |
+| [ADR-005](docs/adr/ADR-005-resilience-testing-devproxy-k6.md) | Resilience testing with DevProxy and K6 | Accepted | If you haven't tested your resilience patterns under injected failures and concurrent load, you don't know if they work. |
+| [ADR-006](docs/adr/ADR-006-retry-exponential-backoff.md) | Retry with exponential backoff using Polly | Accepted | Retry at the HTTP layer handles seconds-scale blips; the Outbox handles minutes-scale outages — both layers are needed. |
+| [ADR-007](docs/adr/ADR-007-circuit-breaker.md) | Circuit breaker to prevent cascading failures | Accepted | The circuit breaker protects both the caller and the callee — fail fast, let the downstream recover, and retry from the Outbox later. |
+
+## Running the Demo
+
+**Prerequisites:** .NET 10 SDK, Docker (for PostgreSQL, Redis, Jaeger containers).
+
+```bash
+# Option 1: Development mode (with Aspire CLI)
+aspire run --project CoreBankDemo.AppHost
+
+# Option 2: Development mode with fault injection
+aspire run --project CoreBankDemo.AppHost -- --Features:UseDevProxy=true
+
+# Option 3: Load testing (disposable infrastructure, runs K6 automatically)
+aspire run --project CoreBankDemo.LoadTests
+```
+
+The Aspire Dashboard is available at `http://localhost:15888` and Jaeger UI at `http://localhost:16686`.
+
+A devcontainer configuration is provided in `.devcontainer/` for GitHub Codespaces or VS Code Remote Containers with all tools pre-installed.
+
 ## Component Diagram
 
 ```

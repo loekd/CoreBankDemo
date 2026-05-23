@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
+using CoreBankDemo.Messaging;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
@@ -87,16 +88,16 @@ public class TransactionExecutor(TimeProvider timeProvider) : ITransactionExecut
     private static void UpdateMessageForSuccess(InboxMessage message, string transactionId, DateTimeOffset processedAt)
     {
         message.TransactionId = transactionId;
-        message.Status = "Completed";
+        message.Status = MessageConstants.Status.Completed;
         message.ProcessedAt = processedAt.UtcDateTime;
         message.ResponsePayload = JsonSerializer.Serialize(
-            new TransactionResponse(transactionId, "Completed", processedAt));
+            new TransactionResponse(transactionId, MessageConstants.Status.Completed, processedAt));
     }
 
     private static void UpdateMessageForFailure(InboxMessage message, string transactionId, DateTimeOffset failedAt, string? error)
     {
         message.TransactionId = transactionId;
-        message.Status = "Failed";
+        message.Status = MessageConstants.Status.Failed;
         message.LastError = error;
         message.ProcessedAt = failedAt.UtcDateTime;
     }

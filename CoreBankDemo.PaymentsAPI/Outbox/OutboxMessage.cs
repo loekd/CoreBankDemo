@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging;
 using CoreBankDemo.Messaging.Outbox;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
@@ -16,7 +17,7 @@ public class OutboxMessage : IOutboxMessage
     public DateTime? ProcessedAt { get; set; }
     public int RetryCount { get; set; }
     public string? LastError { get; set; }
-    public string Status { get; set; } = "Pending"; // Pending, Processing, Completed, Failed
+    public string Status { get; set; } = MessageConstants.Status.Pending;
     public string? TraceParent { get; set; }
     public string? TraceState { get; set; }
 }
