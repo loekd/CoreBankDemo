@@ -4,17 +4,41 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "version": "lts"
-    }
+    },
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "enableNonRootDocker": true,
+      "moby": true
+    },
+    "ghcr.io/grafana/devcontainer-features/k6:1": {}
   },
   "customizations": {
     "vscode": {
       "extensions": [
-        "ms-dotnettools.csdevkit",
-        "ms-dotnettools.csharp"
+        "ms-dotnettools.csdevkit"
       ]
     }
   },
-  "forwardPorts": [5032, 5294, 8000, 16686, 4317],
-  "postCreateCommand": "dotnet restore && dotnet tool restore",
+  "forwardPorts": [
+    5032,
+    5294,
+    8000,
+    15888,
+    16686,
+    4317,
+    5432,
+    6379
+  ],
+  "portsAttributes": {
+    "5032":  { "label": "CoreBank API" },
+    "5294":  { "label": "Payments API" },
+    "8000":  { "label": "DevProxy" },
+    "15888": { "label": "Aspire Dashboard" },
+    "16686": { "label": "Jaeger UI" },
+    "4317":  { "label": "OTEL Collector (gRPC)" },
+    "5432":  { "label": "PostgreSQL" },
+    "6379":  { "label": "Redis" }
+  },
+  "postCreateCommand": "curl -sSL https://aspire.dev/install.sh | bash && curl -fsSL https://aka.ms/install-devproxy.sh | bash && dotnet restore && dotnet tool restore",
   "remoteUser": "vscode"
 }
