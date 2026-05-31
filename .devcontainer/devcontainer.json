@@ -1,6 +1,6 @@
 {
   "name": "CoreBank Demo",
-  "image": "mcr.microsoft.com/devcontainers/dotnet:1-10.0-bookworm",
+  "image": "mcr.microsoft.com/devcontainers/dotnet:dev-10.0",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "version": "lts"
