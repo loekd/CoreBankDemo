@@ -8,10 +8,9 @@
 
   <ItemGroup>
     <!-- Aspire Packages -->
-    <PackageVersion Include="Aspire.Hosting.PostgreSQL" Version="13.2.4" />
-    <PackageVersion Include="Aspire.Hosting.Redis" Version="13.2.4" />
-    <PackageVersion Include="Aspire.Hosting.AppHost" Version="13.2.4" />
-    <PackageVersion Include="Aspire.Npgsql.EntityFrameworkCore.PostgreSQL" Version="13.2.4" />
+    <PackageVersion Include="Aspire.Hosting.PostgreSQL" Version="13.3.5" />
+    <PackageVersion Include="Aspire.Hosting.Redis" Version="13.3.5" />
+    <PackageVersion Include="Aspire.Npgsql.EntityFrameworkCore.PostgreSQL" Version="13.3.5" />
     
     <!-- Dapr & Community Toolkit -->
     <PackageVersion Include="CommunityToolkit.Aspire.Hosting.Dapr" Version="13.0.0" />
@@ -27,8 +26,8 @@
     
     <!-- Microsoft & ASP.NET Core -->
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.7" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.5" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.5" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.7" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.7" />
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.5.0" />
     <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.5.0" />
     

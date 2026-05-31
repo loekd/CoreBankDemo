@@ -1,10 +1,5 @@
 @CoreBankDemo_HostAddress = http://localhost:5294
 
-GET {{CoreBankDemo_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###
-
 # Test payment with fixed idempotency key - run multiple times to test deduplication
 POST {{CoreBankDemo_HostAddress}}/api/payments
 Content-Type: application/json
