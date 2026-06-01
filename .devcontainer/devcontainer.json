@@ -12,23 +12,18 @@
     },
     "ghcr.io/grafana/devcontainer-features/k6:1": {}
   },
+  "mounts": [
+    "source=${localEnv:HOME}/.aspnet/https,target=/home/vscode/.aspnet/https-host,type=bind,consistency=cached,readonly"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [
+        "ms-dotnettools.csharp",
         "ms-dotnettools.csdevkit"
-      ]
+    ]
     }
   },
-  "forwardPorts": [
-    5032,
-    5294,
-    8000,
-    15888,
-    16686,
-    4317,
-    5432,
-    6379
-  ],
+  "forwardPorts": [5032, 5294, 8000, 15888, 16686, 4317, 5432, 6379],
   "portsAttributes": {
     "5032":  { "label": "CoreBank API" },
     "5294":  { "label": "Payments API" },
@@ -39,6 +34,11 @@
     "5432":  { "label": "PostgreSQL" },
     "6379":  { "label": "Redis" }
   },
-  "postCreateCommand": "curl -sSL https://aspire.dev/install.sh | bash && curl -fsSL https://aka.ms/install-devproxy.sh | bash && dotnet restore && dotnet tool restore",
+"containerEnv": {
+  "SSL_CERT_DIR": "/home/vscode/.aspnet/dev-certs/trust:/usr/lib/ssl/certs",
+  "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+  "ASPIRE_CLI_TELEMETRY_OPTOUT": "1"
+  },
+  "postCreateCommand": "bash .devcontainer/postCreate.sh",
   "remoteUser": "vscode"
 }
