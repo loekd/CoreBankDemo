@@ -17,15 +17,19 @@ description: |
 
 ## Services in CoreBankDemo
 
-Always use these exact service names when filtering:
+**Always call `list_services` first** to confirm the exact service names registered in the OTel backend. If `list_services` returns a connection error, report:
+> "Trace analysis skipped: OTel backend unavailable (Jaeger may have crashed)."
+Then proceed directly to stopping the AppHosts. Do not spend turns troubleshooting an unavailable backend.
+
+The expected service names are:
 
 | Service | Jaeger name | Role |
 |---|---|---|
-| Payments API | `payments-api` | Receives payment requests from k6 |
-| CoreBank API | `corebank-api` | Processes transactions, updates balances |
+| Payments API | `CoreBank.PaymentsAPI` | Receives payment requests from k6 |
+| CoreBank API | `CoreBank.CoreBankAPI` | Processes transactions, updates balances |
 | LoadTestSupport | `loadtest-support` | Orchestration only, ignore in trace analysis |
 
-If unsure of exact service names, call `list_services` first.
+If `list_services` returns different names, use those instead.
 
 ## Step 1 — Establish the time window
 
@@ -44,8 +48,8 @@ Always pass explicit time windows to every tool call. Never rely on defaults.
 Call `find_errors` for each service separately. Do not combine services in one call.
 
 ```json
-{ "service_name": "payments-api", "start_time": "...", "end_time": "...", "limit": 50 }
-{ "service_name": "corebank-api", "start_time": "...", "end_time": "...", "limit": 50 }
+{ "service_name": "CoreBank.PaymentsAPI", "start_time": "...", "end_time": "...", "limit": 50 }
+{ "service_name": "CoreBank.CoreBankAPI", "start_time": "...", "end_time": "...", "limit": 50 }
 ```
 
 For each error found, report:
@@ -67,7 +71,7 @@ Call `search_traces` with duration filters. Use these thresholds for CoreBankDem
 
 ```json
 {
-  "service_name": "payments-api",
+  "service_name": "CoreBank.PaymentsAPI",
   "min_duration_ms": 2000,
   "start_time": "...",
   "end_time": "...",
@@ -75,7 +79,7 @@ Call `search_traces` with duration filters. Use these thresholds for CoreBankDem
 }
 ```
 
-Repeat for `corebank-api`. Report the slowest 5 traces per service with their duration.
+Repeat for `CoreBank.CoreBankAPI`. Report the slowest 5 traces per service with their duration.
 
 ## Step 4 — Deep dive on suspect traces
 
@@ -110,7 +114,7 @@ Always end with a structured summary:
 ## Trace Analysis Summary
 
 **Time window:** <start> to <end>
-**Services analyzed:** payments-api, corebank-api
+**Services analyzed:** CoreBank.PaymentsAPI, CoreBank.CoreBankAPI
 
 ### Errors
 - <count> errors found

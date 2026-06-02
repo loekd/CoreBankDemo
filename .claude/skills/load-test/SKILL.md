@@ -44,6 +44,10 @@ Wait for `payments-api` to be healthy:
 aspire wait payments-api --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive
 ```
 
+> **Note:** Do NOT add `&` to `aspire start`. The `--non-interactive` flag self-daemonizes the process. Adding `&` runs it in a subshell that may not register the AppHost with the Aspire process registry in time, causing the next `aspire wait` to fail.
+>
+> If `aspire wait` immediately returns "No AppHost is currently running", wait 5 seconds and retry once — the AppHost may still be registering. Only troubleshoot after a second consecutive failure.
+
 Then start the LoadTests AppHost:
 
 ```bash
