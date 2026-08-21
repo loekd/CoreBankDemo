@@ -8,7 +8,7 @@ public interface IMessage
     /// <summary>Row identity.</summary>
     Guid Id { get; set; }
 
-    /// <summary>Partition assignment: <c>PartitionHelper.GetPartitionId(IdempotencyKey, PartitionCount)</c> (AD-4).</summary>
+    /// <summary>Partition assignment (AD-4): derived via <c>PartitionHelper.GetPartitionId</c> from the message's dedupe identity (see the derived interfaces) and the configured partition count.</summary>
     int PartitionId { get; set; }
 
     /// <summary>Transport state; values come from <see cref="MessageConstants.Status"/> only (AD-11).</summary>

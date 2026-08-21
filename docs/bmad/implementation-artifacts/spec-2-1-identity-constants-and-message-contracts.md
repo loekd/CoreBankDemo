@@ -2,7 +2,7 @@
 title: 'Story 2.1: Identity, constants, and message contracts'
 type: 'feature'
 created: '2026-08-21'
-status: 'in-progress'
+status: 'done'
 baseline_commit: 'b8cea0875050e386f56307ec32761a18ba3e8d3d'
 review_loop_iteration: 0
 context:
@@ -63,3 +63,7 @@ context:
 **Commands:**
 - `dotnet test CoreBankDemo.Rebuild.slnf` — expected: green, Messaging coverage ≥90 enforced (no Threshold override in csproj)
 - `git status --short CoreBankDemo.Messaging/` — expected: only deletions of legacy files + new listed sources
+
+## Spec Change Log
+
+- 2026-08-21 (step-04): review patches: int.MinValue hash mapped to partition 0 via internal MapHashToPartition seam (Math.Abs overflow repair; legacy crashed on such keys so no row depends on other mapping); null-key ArgumentNullException documented as sanctioned refinement; IMessage.PartitionId doc fixed; status-distinctness test added. Vector-count note: 12 pinned vectors + the empty-string legacy-throw observation were misreported as "13 vectors" in the 2.1 commit message. Provenance: vectors captured by executing the legacy PartitionHelper via throwaway harness at partitionCount 4 pre-demolition (keys listed in PartitionHelperTests TheoryData). Rejected: ADR path staleness (story 8.2 owns), AD-4 store-dedupe marker (story 2.2 owns), interface-shape guard (over-testing).

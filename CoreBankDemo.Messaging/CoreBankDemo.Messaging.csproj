@@ -17,4 +17,7 @@
     <ProjectReference Include="..\CoreBankDemo.ServiceDefaults\CoreBankDemo.ServiceDefaults.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CoreBankDemo.Messaging.Tests" />
+  </ItemGroup>
 </Project>

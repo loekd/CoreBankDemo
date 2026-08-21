@@ -26,4 +26,19 @@ public class MessageConstantsTests
         MessageConstants.Defaults.ProcessingTimeout.Should().Be(TimeSpan.FromMinutes(5));
         MessageConstants.Defaults.PollingInterval.Should().Be(TimeSpan.FromSeconds(5));
     }
+
+    [Fact]
+    public void Status_values_are_distinct_and_non_empty()
+    {
+        var statuses = new[]
+        {
+            MessageConstants.Status.Pending,
+            MessageConstants.Status.Processing,
+            MessageConstants.Status.Completed,
+            MessageConstants.Status.Failed,
+        };
+
+        statuses.Should().OnlyHaveUniqueItems("a duplicated status literal would corrupt every state machine");
+        statuses.Should().NotContainNulls().And.NotContain(string.Empty);
+    }
 }

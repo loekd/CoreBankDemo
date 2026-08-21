@@ -12,17 +12,29 @@ public static class PartitionHelper
     /// Computes a deterministic partition id for <paramref name="key"/>,
     /// in the range [0, <paramref name="partitionCount"/>).
     /// </summary>
-    /// <param name="key">The idempotency key to hash. Casing is significant.</param>
+    /// <param name="key">The idempotency key to hash. Casing is significant. Never throws for any non-null key.</param>
     /// <param name="partitionCount">Total number of partitions; must be positive.</param>
     /// <exception cref="ArgumentNullException"><paramref name="key"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is not positive.</exception>
     public static int GetPartitionId(string key, int partitionCount)
     {
+        // Legacy threw ArgumentException for null; ArgumentNullException is an
+        // intentional, spec-sanctioned refinement (no compatible caller relies
+        // on the legacy type — legacy rejected such keys before storing rows).
         ArgumentNullException.ThrowIfNull(key);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitionCount);
 
-        return Math.Abs(ComputeFnv1aHash(key)) % partitionCount;
+        return MapHashToPartition(ComputeFnv1aHash(key), partitionCount);
     }
+
+    /// <summary>
+    /// <c>Math.Abs(hash) % partitionCount</c> — exact legacy mapping — with one
+    /// repair: <see cref="int.MinValue"/> (where Math.Abs overflows) maps to 0.
+    /// Legacy would have crashed on such a key, so no stored row can depend on
+    /// a different mapping for it.
+    /// </summary>
+    internal static int MapHashToPartition(int hash, int partitionCount) =>
+        hash == int.MinValue ? 0 : Math.Abs(hash) % partitionCount;
 
     /// <summary>
     /// 32-bit FNV-1a over the chars of the string (not UTF-8 bytes), in

@@ -42,7 +42,7 @@ development_status:
   epic-1-retrospective: done
 
   epic-2: in-progress
-  2-1-identity-constants-and-message-contracts: in-progress
+  2-1-identity-constants-and-message-contracts: done
   2-2-idempotent-store: backlog
   2-3-claiming-retry-and-poison-state-machine: backlog
   2-4-outboxprocessorbase-and-delivery-strategy-port: backlog

@@ -123,4 +123,23 @@ public class PartitionHelperTests
         PartitionHelper.GetPartitionId("3f2504e0-4f89-11d3-9a0c-0305e82c3301", 1).Should().Be(0);
         PartitionHelper.GetPartitionId("NL91ABNA0417164300", 1).Should().Be(0);
     }
+
+    [Fact]
+    public void Hash_of_int_min_value_maps_to_partition_zero_instead_of_overflowing()
+    {
+        // Math.Abs(int.MinValue) throws OverflowException; the mapper repairs
+        // that single case to 0 (legacy would have crashed, so no stored row
+        // can depend on a different mapping). Tested via the internal seam
+        // because no practical key is known to hash to int.MinValue.
+        PartitionHelper.MapHashToPartition(int.MinValue, 4).Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData(-7, 4)]
+    [InlineData(7, 4)]
+    [InlineData(int.MaxValue, 4)]
+    public void Hash_mapping_preserves_legacy_abs_mod_semantics(int hash, int count)
+    {
+        PartitionHelper.MapHashToPartition(hash, count).Should().Be(Math.Abs(hash) % count);
+    }
 }
