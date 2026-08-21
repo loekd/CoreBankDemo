@@ -1,0 +1,522 @@
+---
+stepsCompleted: [1, 2, 3, 4]
+inputDocuments:
+  - docs/bmad/planning-artifacts/prds/prd-CoreBankDemo-2026-08-21/prd.md
+  - docs/bmad/planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md
+  - docs/bmad/constraints.md
+  - docs/bmad/planning-artifacts/briefs/brief-CoreBankDemo-2026-08-21/addendum.md
+status: final
+created: 2026-08-21
+---
+
+# CoreBankDemo - Epic Breakdown
+
+## Overview
+
+Complete epic and story breakdown for the CoreBankDemo rebuild, decomposing the PRD (FR-1..FR-29, NFR-1..NFR-5) and the architecture spine (AD-1..AD-12) into implementable, TDD-ready stories. Epic order is fixed (brief addendum): each epic enters `CoreBankDemo.Rebuild.slnf` at its start after demolition of the old sources (AD-10). Every story: failing tests first, then implementation; gate = `dotnet test CoreBankDemo.Rebuild.slnf` with the ≥90% coverlet threshold.
+
+## Requirements Inventory
+
+### Functional Requirements
+
+FR-1..FR-29 as defined in the PRD §4 (payment intake 1–4; reliable forwarding 5–8; idempotent processing 9–12; account services 13–14; event publishing 15–16; event consumption 17–18; messaging kernel 19–20; orchestration 21–23; load harness 24–26; test suite 27–29). The PRD is the authoritative text; stories cite FR IDs.
+
+### Non-Functional Requirements
+
+NFR-1 invariants under load · NFR-2 one payment = one trace · NFR-3 constraints.md conventions binding · NFR-4 story/commit traceability · NFR-5 one-command demo ergonomics.
+
+### Additional Requirements (Architecture)
+
+- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy`; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set; AD-7 no lock renewal; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below.
+- No starter template — brownfield rebuild in an existing solution.
+
+### UX Design Requirements
+
+None — no UI (API/demo product).
+
+## Wire Contracts (frozen per AD-12, extracted from `main` before demolition)
+
+Event payload records (live once in ServiceDefaults `CloudEventTypes`; CloudEvent types `com.corebank.transaction.completed` / `com.corebank.transaction.failed` / `com.corebank.account.balance.updated`):
+
+```csharp
+public record TransactionCompletedEvent(string TransactionId, string Status, DateTimeOffset ProcessedAt);
+public record TransactionFailedEvent(string TransactionId, string Status, DateTimeOffset ProcessedAt, string? ErrorReason);
+public record BalanceUpdatedEvent(string TransactionId, string AccountNumber, decimal Delta, decimal NewBalance, string Currency);
+```
+
+PaymentsAPI DTOs:
+
+```csharp
+public record PaymentRequest(string FromAccount, string ToAccount, decimal Amount, string Currency);
+// validation: accounts 15–34 chars; amount 0.01–1,000,000; currency ^[A-Z]{3}$; all Required
+public record PaymentResponse(string PaymentId, string TransactionId, string Status, decimal Amount, string Currency, DateTimeOffset ProcessedAt);
+public record TransactionResponse(string TransactionId, string Status, DateTimeOffset ProcessedAt);
+public record AccountValidationResponse(string AccountNumber, bool IsValid, string? AccountHolderName = null, decimal? Balance = null);
+```
+
+CoreBankAPI DTOs:
+
+```csharp
+public record TransactionRequest(string FromAccount, string ToAccount, decimal Amount, string Currency, string TransactionId);
+// validation: as PaymentRequest + TransactionId Required, 1–100 chars
+public record TransactionResponse(string TransactionId, string Status, DateTimeOffset ProcessedAt);
+public record AccountValidationRequest(string AccountNumber); // Required, 15–34 chars
+public record AccountValidationResponse(string AccountNumber, bool IsValid, string? AccountHolderName = null, decimal? Balance = null);
+public record AccountDetailsResponse(string AccountNumber, string AccountHolderName, decimal Balance, string Currency, bool IsActive, DateTimeOffset CreatedAt, DateTimeOffset? UpdatedAt);
+public record BalanceUpdatedResponse(string TransactionId, string AccountNumber, decimal Delta, decimal NewBalance, string Currency);
+```
+
+### FR Coverage Map
+
+| FR | Stories | FR | Stories |
+|---|---|---|---|
+| FR-1 | 5.2 | FR-16 | 4.7 |
+| FR-2 | 5.1, 5.2 | FR-17 | 5.5 |
+| FR-3 | 5.1, 5.2 | FR-18 | 5.6 |
+| FR-4 | 5.1, 2.1 | FR-19 | 2.1–2.6 |
+| FR-5 | 5.4 | FR-20 | 2.4, 2.5, 3.2, 3.3 |
+| FR-6 | 2.4, 5.4 | FR-21 | 6.1 |
+| FR-7 | 2.3, 2.6 | FR-22 | 6.2 |
+| FR-8 | 2.4, 5.3 | FR-23 | 6.1, 3.1 |
+| FR-9 | 4.4 | FR-24 | 7.3 |
+| FR-10 | 4.4 | FR-25 | 7.1, 7.2 |
+| FR-11 | 4.3, 4.6 | FR-26 | 7.1–7.3 |
+| FR-12 | 4.2, 4.6 | FR-27 | 1.2, all |
+| FR-13 | 4.5 | FR-28 | 1.1, 1.3 |
+| FR-14 | 4.1, 7.1 | FR-29 | all test stories |
+| FR-15 | 4.6 | | |
+
+## Epic List
+
+1. **Epic 1 (E0): Test Infrastructure & Scaffolding** — the gate exists before any production code
+2. **Epic 2 (E1): Messaging Kernel** — the shared Inbox/Outbox machinery, highest test density
+3. **Epic 3 (E2): ServiceDefaults** — options, locking, events, telemetry wiring
+4. **Epic 4 (E3): CoreBankAPI** — the ledger: idempotent intake, atomic execution, event publishing
+5. **Epic 5 (E4): PaymentsAPI** — intake, reliable forwarding, event consumption
+6. **Epic 6 (E5): AppHost & Orchestration** — Aspire graph, config alignment, boot smoke
+7. **Epic 7 (E6): Load Harness Realignment** — LoadTestSupport + k6 conform to the rebuilt system
+8. **Epic 8 (E7): Documentation Refresh** — ARCHITECTURE.md from code, ADRs for the rulings
+
+---
+
+## Epic 1: E0 — Test Infrastructure & Scaffolding
+
+The coverage gate and rebuild solution filter exist and demonstrably enforce before any production code is rebuilt (FR-27, FR-28; AD-9, AD-10).
+
+### Story 1.1: Test package versions and coverage gate
+
+As the rebuild developer, I want the test stack pinned centrally and a coverage gate that plain `dotnet test` enforces, so that every later story inherits the same gate without per-project setup.
+
+**Acceptance Criteria:**
+
+**Given** `Directory.Packages.props`
+**When** test packages are added
+**Then** it pins xunit.v3 4.0.0, xunit.runner.visualstudio 4.0.0, Microsoft.NET.Test.Sdk 18.9.0, AwesomeAssertions 9.6.0, Moq 4.20.72, coverlet.collector + coverlet.msbuild 10.0.1, Microsoft.EntityFrameworkCore.Sqlite 10.0.8
+**And** `tests/Directory.Build.props` sets `CollectCoverage=true`, `Threshold=90`, `ThresholdType=line`, excludes `[*]*.Program`, AppHost assemblies, and `ExcludeByAttribute=ExcludeFromCodeCoverage`
+**And** VSTest runner mode is in effect (no Microsoft.Testing.Platform opt-in anywhere).
+
+### Story 1.2: Test projects and rebuild solution filter
+
+As the rebuild developer, I want four scaffolded test projects and `CoreBankDemo.Rebuild.slnf`, so that the strangler gate has a home.
+
+**Acceptance Criteria:**
+
+**Given** the solution
+**When** scaffolding completes
+**Then** `tests/CoreBankDemo.{Messaging,ServiceDefaults,CoreBankAPI,PaymentsAPI}.Tests` exist, referencing their targets and the pinned packages, each with one passing smoke test
+**And** `CoreBankDemo.Rebuild.slnf` contains ServiceDefaults, Messaging + the four test projects
+**And** `dotnet test CoreBankDemo.Rebuild.slnf` passes. *(Note: Messaging and ServiceDefaults enter the filter here but their rebuild starts in their own epics; their old sources stay until then.)*
+
+### Story 1.3: Gate proof
+
+As the rebuild developer, I want proof the threshold actually fails builds, so that the gate is trusted for the whole rebuild.
+
+**Acceptance Criteria:**
+
+**Given** a temporary class with an uncovered branch in a filtered project
+**When** `dotnet test CoreBankDemo.Rebuild.slnf` runs
+**Then** the run fails on the coverage threshold
+**And** after removing the canary the run passes — both outcomes captured in the story record.
+
+---
+
+## Epic 2: E1 — Messaging Kernel
+
+Rebuild `CoreBankDemo.Messaging` as the single implementation of Inbox/Outbox machinery (FR-19, FR-20; AD-3, AD-4, AD-7, AD-8, AD-9, AD-11). Old Messaging sources are demolished at epic start; every class returns test-first.
+
+### Story 2.1: Identity, constants, and message contracts
+
+As a processor implementer, I want partition assignment, statuses, and message contracts defined once, so that every store agrees on identity and state names (FR-4, FR-19; AD-4).
+
+**Acceptance Criteria:**
+
+**Given** any idempotency key string
+**When** `PartitionHelper.GetPartitionId(key, 4)` is called repeatedly anywhere
+**Then** it returns the same FNV-1a-derived partition in [0,4) — property-tested for determinism, distribution, and known vectors
+**And** `MessageConstants` defines Pending/Processing/Completed/Failed, MaxRetryCount=5, BatchSize=10, ProcessingTimeout=5min, PollingInterval defaults — no other status/limit literals exist in the kernel
+**And** `IMessage`/`IInboxMessage`/`IOutboxMessage` expose id, idempotency/dedupe identity, PartitionId, Status, RetryCount, timestamps, TraceParent/TraceState, LastError.
+
+### Story 2.2: Idempotent store
+
+As a message producer, I want `StoreIfNewAsync` to be race-safe, so that duplicates never create second rows (FR-3, FR-19; AD-4).
+
+**Acceptance Criteria:**
+
+**Given** two concurrent stores with the same dedupe identity (SQLite-in-memory tier)
+**When** both call `StoreIfNewAsync`
+**Then** exactly one row exists; the loser reports "already exists" without throwing
+**And** uniqueness violation detection goes through one provider-aware helper (SQLite + Postgres codes), never string matching at call sites
+**And** command stores dedupe on key alone; event stores on composite identity (AD-4) — enforced by the repository base's unique-index definition hooks.
+
+### Story 2.3: Claiming, retry, and poison state machine
+
+As a processor, I want batch claiming and failure handling in the base repository, so that retry semantics are identical everywhere (FR-7; AD-3, AD-11).
+
+**Acceptance Criteria:**
+
+**Given** pending messages across partitions
+**When** a batch is claimed for one partition
+**Then** at most BatchSize ids return, oldest-first, only rows with RetryCount < MaxRetryCount, and claimed rows become Processing
+**And** Processing rows older than ProcessingTimeout are reclaimed as claimable
+**When** processing fails
+**Then** the row returns to Pending with RetryCount+1 and LastError recorded; at MaxRetryCount it becomes terminal Failed
+**And** `ExecuteInTransactionAsync` wraps multi-row updates atomically.
+
+### Story 2.4: OutboxProcessorBase and delivery strategy port
+
+As a service, I want the outbox poll/lock/dispatch loop implemented once with delivery pluggable, so that HTTP-forward and Dapr-publish are strategies, not loops (FR-5, FR-6, FR-8; AD-3, AD-8).
+
+**Acceptance Criteria:**
+
+**Given** a mocked `IDistributedLockService`, repository, and `IOutboxDeliveryStrategy`
+**When** the processor ticks
+**Then** it fans out over all 4 partitions in parallel, processes a partition only while holding `<prefix>-partition-<id>`, honors cancellation, and dispatches each message to the strategy inside a span restored from the stored TraceParent
+**And** strategy success → Completed; strategy failure → the 2.3 retry path (never handled inside the strategy)
+**And** no partition is processed concurrently by two ticks (lock contention test).
+
+### Story 2.5: InboxProcessorBase and handler dispatch
+
+As a consuming service, I want the same loop shape for inboxes with a handler port, so that consumption follows identical ordering/locking rules (FR-19; AD-3).
+
+**Acceptance Criteria:**
+
+**Given** mocked lock service, repository, and message handler
+**When** the processor ticks
+**Then** behavior mirrors 2.4 (partitions, locks, ordering, trace restoration, retry on handler failure)
+**And** handler resolution happens per message in a fresh DI scope.
+
+### Story 2.6: Kernel failure-path hardening
+
+As the demo owner, I want the ugly paths proven, so that the kernel's guarantees are tests, not claims (FR-7, FR-29; AD-7, AD-11).
+
+**Acceptance Criteria:**
+
+**Given** lock acquisition failure, lock expiry mid-batch, strategy timeout, repository exception, and cancellation during dispatch
+**When** each occurs
+**Then** no message is lost or double-completed; work cancels cooperatively at the 5/6 lock-lifetime point; the tick survives and the next tick proceeds
+**And** kernel line coverage ≥90%.
+
+---
+
+## Epic 3: E2 — ServiceDefaults
+
+Rebuild options, locking, event types, and telemetry wiring (FR-20, FR-23; AD-6, AD-7). Demolition of old ServiceDefaults sources at epic start.
+
+### Story 3.1: Validated processing options
+
+As an operator, I want every processor option validated at startup, so that misconfiguration fails fast and dead options cannot exist (FR-23; AD-7, ruling A3/A4).
+
+**Acceptance Criteria:**
+
+**Given** options classes (`ProcessingOptionsBase` + Inbox/Outbox/MessagingOutbox variants with PubSub/Topic)
+**When** binding runs with invalid values (PartitionCount ≠ 4, non-positive intervals, missing topic)
+**Then** startup fails with all violations reported
+**And** no `LockRenewIntervalSeconds` member exists; every member is read by kernel or wiring code (dead-option test via reflection against known consumers list)
+**And** `Features:UseDapr` appears nowhere in code or config.
+
+### Story 3.2: Distributed lock port and Dapr implementation
+
+As the kernel, I want `IDistributedLockService` with a Dapr Redis implementation, so that partition exclusivity works in-process-mocked and live (FR-20; AD-6, AD-7).
+
+**Acceptance Criteria:**
+
+**Given** a mocked `DaprClient` (via its abstract surface or a thin adapter)
+**When** a lock is acquired
+**Then** the handle exposes a CancellationToken that fires at 5/6 of expiry; disposal unlocks; acquisition failure returns a non-throwing "not acquired" result
+**And** a `NoOpDistributedLockService` exists for lock-free hosting (LoadTestSupport)
+**And** logic (expiry fraction math, handle lifecycle) is unit-tested; only the Dapr call itself is adapter code.
+
+### Story 3.3: CloudEvent types and publisher port
+
+As CoreBankAPI, I want event records and an `IEventPublisher` port, so that event shapes live once and publishing is mockable (FR-15, FR-16; AD-6, AD-12).
+
+**Acceptance Criteria:**
+
+**Given** the frozen wire contracts
+**When** the records are implemented
+**Then** they match the AD-12 shapes byte-for-byte in JSON serialization (snapshot tests)
+**And** `IEventPublisher.PublishAsync(type, source, subject, payload, traceParent)` maps to Dapr `PublishEventAsync` with CloudEvent metadata (`cloudevent.type/source/subject/traceparent`) in the adapter — metadata mapping unit-tested against a mocked publish call.
+
+### Story 3.4: Service wiring defaults
+
+As every service, I want `AddServiceDefaults` rebuilt thin, so that OTel, resilience, health, and lock registration are consistent (NFR-2, NFR-3).
+
+**Acceptance Criteria:**
+
+**Given** a test `WebApplicationBuilder`
+**When** `AddServiceDefaults(serviceName, activitySources)` runs
+**Then** OTel tracing/metrics/logging, OTLP export override via `JAEGER_OTLP_ENDPOINT`, `/health` + `/alive`, service discovery, and `AddStandardResilienceHandler` are registered (asserted via DI container inspection)
+**And** hosting-only members carry `[ExcludeFromCodeCoverage]`; option-binding helpers are covered.
+
+---
+
+## Epic 4: E3 — CoreBankAPI
+
+Rebuild the ledger service (FR-9..FR-16; AD-2, AD-4, AD-5, AD-11). Demolition at epic start; wire DTOs must match the frozen contracts.
+
+### Story 4.1: Domain model, DbContext, and seeding
+
+As the ledger, I want accounts and message stores defined with correct indexes, so that identity rules are enforced by the schema (FR-14; AD-4).
+
+**Acceptance Criteria:**
+
+**Given** `CoreBankDbContext`
+**When** the model builds
+**Then** `Accounts` (PK AccountNumber), `InboxMessages` (unique on TransactionId; partition/status/receivedAt index), `MessagingOutboxMessages` (unique on (TransactionId, EventType, AccountNumber); partition/status/createdAt index) exist — verified on SQLite
+**And** startup seeding creates exactly the 3 demo accounts idempotently (second run adds nothing).
+
+### Story 4.2: Transaction validation
+
+As the ledger, I want pure validation logic, so that business rejection is deterministic and fully covered (FR-12).
+
+**Acceptance Criteria:**
+
+**Given** combinations of unknown/inactive accounts, insufficient funds, same-account transfer, invalid amounts
+**When** `TransactionValidator.Validate` runs
+**Then** each yields the specific failure reason; valid input yields success — table-driven tests, no mocks needed beyond account snapshots.
+
+### Story 4.3: Account repository and transaction executor
+
+As the ledger, I want money movement isolated and deterministic, so that balance arithmetic is provably correct (FR-11; AD-5, AD-9).
+
+**Acceptance Criteria:**
+
+**Given** an `IAccountRepository` port with a `FOR UPDATE` pass-through (logic-free, individually coverage-excluded per AD-9) and a provider-agnostic load path used in tests
+**When** `TransactionExecutor.Execute` runs with mocked/SQLite accounts
+**Then** accounts lock in alphabetical order, debit and credit apply exactly once, the cached `ResponsePayload` (frozen `TransactionResponse` shape) is produced, and validation failure produces a failure payload without touching balances
+**And** executor logic reaches ≥90% coverage without Postgres.
+
+### Story 4.4: Idempotent transaction intake
+
+As PaymentsAPI, I want `/api/transactions/process` to dedupe before logic, so that duplicates never execute twice (FR-9, FR-10; AD-4, AD-11).
+
+**Acceptance Criteria:**
+
+**Given** a valid `TransactionRequest`
+**When** POSTed
+**Then** the inbox row is stored via `StoreIfNewAsync` and `202` returns the frozen `TransactionResponse` with Pending status
+**When** the same TransactionId is POSTed again
+**Then** completed → cached ResponsePayload replayed verbatim; in-flight → `202` with current status (AD-11)
+**And** `GET /api/transactions/{id}` reports status; validation errors return `BadRequest(new { Errors })` with all errors
+**And** the controller contains no business logic (handler-tested; controller mapping-tested).
+
+### Story 4.5: Account endpoints
+
+As PaymentsAPI, I want validate/get endpoints, so that forwarding can pre-check destinations (FR-13).
+
+**Acceptance Criteria:**
+
+**Given** existing, inactive, and unknown accounts
+**When** `POST /api/accounts/validate` / `GET /api/accounts/{number}` run
+**Then** responses match the frozen `AccountValidationResponse`/`AccountDetailsResponse` shapes and semantics (unknown → IsValid=false / 404).
+
+### Story 4.6: Atomic inbox execution with event enqueue
+
+As the system, I want execution, completion, and events in one transaction, so that AD-5 holds (FR-11, FR-12, FR-15).
+
+**Acceptance Criteria:**
+
+**Given** the InboxProcessor built on `InboxProcessorBase` with an execution handler
+**When** a pending transaction processes successfully
+**Then** one DB transaction commits: balances changed, inbox row Completed with cached response, and exactly 3 outbox events enqueued (TransactionCompleted + 2× BalanceUpdated with correct deltas/new balances)
+**When** validation rejects
+**Then** the same single transaction commits: no balance change, inbox Completed with failure payload, TransactionFailed event enqueued — never status Failed (AD-11)
+**When** the transaction throws mid-way
+**Then** nothing commits and the kernel retry path takes over — proven with a failing-commit test.
+
+### Story 4.7: Event publishing processor
+
+As downstream consumers, I want enqueued events published as CloudEvents, so that the Dapr hop works on the kernel loop (FR-16; AD-3, AD-8).
+
+**Acceptance Criteria:**
+
+**Given** `MessagingOutboxProcessor` derived from `OutboxProcessorBase` with a Dapr-publish `IOutboxDeliveryStrategy`
+**When** events process
+**Then** each publishes via `IEventPublisher` with correct CloudEvent type constant, source, subject=TransactionId, and stored traceparent; publish failure follows the kernel retry path
+**And** no polling/locking/retry code exists in this class beyond base-class configuration (asserted by review + no overrides of loop methods).
+
+---
+
+## Epic 5: E4 — PaymentsAPI
+
+Rebuild the intake service (FR-1..FR-8, FR-17, FR-18). Demolition at epic start.
+
+### Story 5.1: Payment store and idempotency-key handling
+
+As a client, I want payments stored idempotently with my key, so that retries are safe (FR-2, FR-3, FR-4).
+
+**Acceptance Criteria:**
+
+**Given** `PaymentsDbContext` (OutboxMessages unique on IdempotencyKey; InboxMessages composite dedupe; partition/status indexes — SQLite-verified)
+**When** a payment handler processes a request with/without `Idempotency-Key`
+**Then** provided keys are used verbatim, absent keys become GUIDs, PartitionId = FNV-1a(key) % 4, and TraceParent/TraceState are captured on the row.
+
+### Story 5.2: Payment intake endpoint
+
+As a client, I want `POST /api/payments` to accept-and-acknowledge, so that my request survives downstream outages (FR-1, FR-2, FR-3).
+
+**Acceptance Criteria:**
+
+**Given** a valid `PaymentRequest`
+**When** POSTed
+**Then** `202` returns the frozen `PaymentResponse` (PaymentId, TransactionId=key, Pending) after `StoreIfNewAsync`
+**When** a duplicate key arrives
+**Then** `202` references the existing record without a second row
+**And** invalid requests return all validation errors at once; the controller stays logic-free.
+
+### Story 5.3: CoreBank HTTP client
+
+As the forwarder, I want one `ICoreBankApiClient`, so that the HTTP hop is mockable and traced (FR-8; AD-6, ruling A1).
+
+**Acceptance Criteria:**
+
+**Given** a mocked HTTP handler
+**When** validate/process calls run
+**Then** requests match the frozen CoreBank DTO shapes, `traceparent`/`tracestate` headers propagate from the ambient activity, and responses map to domain results including non-2xx classification for AD-11
+**And** no `Features:UseDapr` or alternative client exists.
+
+### Story 5.4: Forwarding processor
+
+As the system, I want the outbox forwarded on the kernel loop, so that ordering and retry semantics hold (FR-5, FR-6, FR-7; AD-3, AD-11).
+
+**Acceptance Criteria:**
+
+**Given** `OutboxProcessor` on `OutboxProcessorBase` with an HTTP-forward strategy using `ICoreBankApiClient`
+**When** a message processes
+**Then** destination account is validated, the transaction submitted, 2xx (incl. duplicate-accept) → Completed, anything else → kernel retry path, Failed after MaxRetryCount
+**And** per-partition ordering under concurrent partitions is proven with an interleaving test.
+
+### Story 5.5: Event subscription intake
+
+As PaymentsAPI, I want Dapr events stored idempotently, so that duplicate deliveries are harmless (FR-17; AD-4).
+
+**Acceptance Criteria:**
+
+**Given** the four subscription endpoints (completed/failed/balance-updated/unknown)
+**When** CloudEvents arrive (including duplicates and unknown types)
+**Then** each stores an inbox row with composite dedupe identity `TransactionId-EventType[-AccountNumber]`, duplicates are dropped with a log (200, not error), unknown types land in the unknown handler
+**And** the declarative subscription YAML routes by event type exactly as on `main`.
+
+### Story 5.6: Event handling processor
+
+As the demo, I want consumed events processed on the kernel loop, so that the full round-trip is visible in traces (FR-18; AD-3, AD-8).
+
+**Acceptance Criteria:**
+
+**Given** `InboxProcessor` on `InboxProcessorBase` with `TransactionEventHandler`
+**When** events process
+**Then** dispatch by EventType deserializes the frozen event records, logs structured entries, tags the restored span — and mutates no local state
+**And** PaymentsAPI logic coverage ≥90%.
+
+---
+
+## Epic 6: E5 — AppHost & Orchestration
+
+Rebuild the Aspire graph; the full `.sln` returns to green here (FR-21, FR-22, FR-23; AD-10).
+
+### Story 6.1: Aspire application graph
+
+As the demo owner, I want one-command startup, so that the talk demo boots reliably (FR-21, FR-23, NFR-5).
+
+**Acceptance Criteria:**
+
+**Given** `aspire run` (per `aspire-launch` skill)
+**When** the AppHost starts
+**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr components (pubsub, lockstore, subscription), and both APIs with sidecars come up healthy
+**And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
+
+### Story 6.2: Chaos opt-in and demo smoke
+
+As the speaker, I want DevProxy and the demo flows verified, so that talk stages 0–4 work (FR-22, NFR-5).
+
+**Acceptance Criteria:**
+
+**Given** the running AppHost
+**When** `demo-requests.http` and `payment-idempotency-tests.http` flows run
+**Then** all behave as on `main` (202s, duplicate replay, outbox/inbox visibility via LoadTestSupport endpoints once E6 lands — until then via DB)
+**And** enabling DevProxy injects faults and the Polly layer retries visibly in Jaeger; one payment renders as one trace (NFR-2).
+
+---
+
+## Epic 7: E6 — Load Harness Realignment
+
+LoadTestSupport and k6 conform to the rebuilt system (FR-24, FR-25, FR-26; harness adapts to code).
+
+### Story 7.1: Assertion API realignment
+
+As the acceptance tier, I want reset/drain/assert working against the new schemas, so that the five invariants are machine-checked (FR-25, FR-26).
+
+**Acceptance Criteria:**
+
+**Given** the rebuilt DbContexts
+**When** `/reset`, `/assert/drain`, `/assert/results?expectedUnique=N`, and the inbox/outbox inspection endpoints run
+**Then** semantics match `main`: truncate stores + reset the 10 LOAD accounts (sole owner of that dataset); drain = zero non-terminal; results assert exactly-once, all-submitted-processed, balance conservation, zero failed, balances-correct-by-replay
+**And** assertion logic is unit-tested against seeded SQLite data.
+
+### Story 7.2: MCP server tools
+
+As the agent harness, I want the MCP tools back, so that `/run-load-tests` automation works (FR-25).
+
+**Acceptance Criteria:**
+
+**Given** the MCP server at port 5181 root
+**When** `reset_database`, `poll_until_drained`, `get_assertion_results`, `get_*_inbox/outbox` are invoked
+**Then** they wrap the 7.1 endpoints with identical semantics and structured outputs.
+
+### Story 7.3: k6 run and first full acceptance gate
+
+As the demo owner, I want the end-to-end load test green, so that the rebuild is proven equivalent (FR-24, FR-26, NFR-1).
+
+**Acceptance Criteria:**
+
+**Given** the LoadTests AppHost (disposable infra, k6 container, 10% duplicate ratio)
+**When** a full run executes (reset → k6 → drain → assertions)
+**Then** all five invariants pass; failures are triaged as code-bug vs harness-mismatch (harness adapts unless an invariant is genuinely violated)
+**And** a trace analysis (`corebank-trace-analysis` skill) shows intact traces across both hops.
+
+---
+
+## Epic 8: E7 — Documentation Refresh
+
+Docs describe only what exists (ruling A5; NFR-3, NFR-4).
+
+### Story 8.1: Regenerate ARCHITECTURE.md
+
+As a repo visitor, I want the architecture doc generated from the rebuilt code, so that no phantom components remain.
+
+**Acceptance Criteria:**
+
+**Given** the rebuilt solution
+**When** ARCHITECTURE.md is regenerated
+**Then** every referenced class/endpoint/table exists in code; schemas match the DbContexts; config values match appsettings; the doc links the ADR set.
+
+### Story 8.2: ADRs and skill updates
+
+As the process record, I want the rulings written as ADRs, so that decisions outlive the chat (rulings A1–A4, A7/A9-tiering; NFR-4).
+
+**Acceptance Criteria:**
+
+**Given** the spine memlog
+**When** ADR-008..ADR-012 are written (UseDapr deletion; kernel delivery strategy; PartitionCount=4 alignment; lock expiry over renewal; test-tier strategy + coverage gate)
+**Then** each follows the existing ADR format with Context/Decision/Implementation references to real files
+**And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where kernel surfaces changed; AGENTS.md rebuild section flips to "completed".
