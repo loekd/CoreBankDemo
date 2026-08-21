@@ -41,8 +41,8 @@ development_status:
   1-3-gate-proof: done
   epic-1-retrospective: done
 
-  epic-2: backlog
-  2-1-identity-constants-and-message-contracts: backlog
+  epic-2: in-progress
+  2-1-identity-constants-and-message-contracts: in-progress
   2-2-idempotent-store: backlog
   2-3-claiming-retry-and-poison-state-machine: backlog
   2-4-outboxprocessorbase-and-delivery-strategy-port: backlog

@@ -1,18 +1,23 @@
 namespace CoreBankDemo.Messaging;
 
 /// <summary>
-/// Constants for message processing across inbox and outbox patterns.
+/// The single home for message statuses and processing limits (consistency
+/// convention: no status/limit literal exists outside this class). Values are
+/// verbatim from the legacy kernel — existing rows carry these strings.
 /// </summary>
 public static class MessageConstants
 {
     /// <summary>
-    /// Message status values.
+    /// Message transport states (AD-11: transport states only — business
+    /// rejection is a successfully processed message, never <see cref="Failed"/>).
     /// </summary>
     public static class Status
     {
         public const string Pending = "Pending";
         public const string Processing = "Processing";
         public const string Completed = "Completed";
+
+        /// <summary>Terminal: transport gave up after <see cref="Defaults.MaxRetryCount"/>.</summary>
         public const string Failed = "Failed";
     }
 
@@ -21,24 +26,16 @@ public static class MessageConstants
     /// </summary>
     public static class Defaults
     {
-        /// <summary>
-        /// Maximum number of retry attempts before giving up.
-        /// </summary>
+        /// <summary>Maximum number of retry attempts before terminal <see cref="Status.Failed"/>.</summary>
         public const int MaxRetryCount = 5;
 
-        /// <summary>
-        /// Number of messages to process in a single batch.
-        /// </summary>
+        /// <summary>Number of messages claimed in a single batch.</summary>
         public const int BatchSize = 10;
 
-        /// <summary>
-        /// Timeout after which a message in "Processing" status is considered stale.
-        /// </summary>
+        /// <summary>Timeout after which a "Processing" row is considered stale and reclaimable.</summary>
         public static readonly TimeSpan ProcessingTimeout = TimeSpan.FromMinutes(5);
 
-        /// <summary>
-        /// Interval between polling for new messages to process.
-        /// </summary>
+        /// <summary>Interval between polling ticks.</summary>
         public static readonly TimeSpan PollingInterval = TimeSpan.FromSeconds(5);
     }
 }

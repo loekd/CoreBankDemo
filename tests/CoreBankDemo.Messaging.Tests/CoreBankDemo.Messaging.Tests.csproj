@@ -3,9 +3,6 @@
   <PropertyGroup>
     <!-- Coverage scoped to the target assembly only (gate lives in tests/Directory.Build.props) -->
     <Include>[CoreBankDemo.Messaging]*</Include>
-    <!-- TODO(story-2.1): remove this override so the 90% gate from tests/Directory.Build.props
-         applies. Smoke-test-only state covers 0% of the target assembly and would trip it. -->
-    <Threshold>0</Threshold>
   </PropertyGroup>
 
   <ItemGroup>
