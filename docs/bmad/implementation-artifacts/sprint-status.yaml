@@ -35,8 +35,8 @@ project_key: NOKEY
 tracking_system: file-system
 story_location: docs/bmad/implementation-artifacts
 development_status:
-  epic-1: backlog
-  1-1-test-package-versions-and-coverage-gate: backlog
+  epic-1: in-progress
+  1-1-test-package-versions-and-coverage-gate: done
   1-2-test-projects-and-rebuild-solution-filter: backlog
   1-3-gate-proof: backlog
   epic-1-retrospective: optional

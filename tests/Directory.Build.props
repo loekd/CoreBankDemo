@@ -1,0 +1,51 @@
+<Project>
+  <!-- Chain to a repo-root Directory.Build.props if one ever exists (none today) -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../'))" Condition="Exists($([MSBuild]::GetPathOfFileAbove('Directory.Build.props', '$(MSBuildThisFileDirectory)../')))" />
+
+  <!-- Shared settings for all projects under tests/.
+       Coverage gate: coverlet.msbuild fails plain `dotnet test` below 90% line coverage.
+       Runner mode: VSTest (xunit.runner.visualstudio + Microsoft.NET.Test.Sdk).
+       Never enable Microsoft.Testing.Platform here — coverlet.msbuild enforcement
+       does not run under MTP and the gate would silently vanish. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Runner + gate apply only to test projects (name ends in "Tests");
+       helper libraries under tests/ stay plain class libraries. -->
+  <PropertyGroup Condition="$(MSBuildProjectName.EndsWith('Tests'))">
+    <!-- Keep MTP disabled: xunit.v3 4.x defaults this to true, and on .NET 10 SDK
+         the MTP MSBuild targets then hard-error under the VSTest target.
+         false = stay on VSTest; this is a disable, not an MTP opt-in. -->
+    <IsTestingPlatformApplication>false</IsTestingPlatformApplication>
+    <UseMicrosoftTestingPlatformRunner>false</UseMicrosoftTestingPlatformRunner>
+    <!-- coverlet.msbuild enforcement -->
+    <CollectCoverage>true</CollectCoverage>
+    <Threshold>90</Threshold>
+    <ThresholdType>line</ThresholdType>
+    <ThresholdStat>minimum</ThresholdStat>
+    <ExcludeByAttribute>ExcludeFromCodeCoverage</ExcludeByAttribute>
+    <Exclude>[*]*.Program,[*]Program</Exclude>
+    <!-- Each test project must set <Include> filters scoped to its target assembly
+         (story 1.2 does this) so transitive assemblies don't fail the gate. -->
+  </PropertyGroup>
+
+  <ItemGroup Condition="$(MSBuildProjectName.EndsWith('Tests'))">
+    <!-- Versions pinned centrally in Directory.Packages.props -->
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="AwesomeAssertions" />
+    <PackageReference Include="Moq" />
+    <!-- coverlet.msbuild alone owns the gate; coverlet.collector stays pinned centrally
+         and is opt-in per project (avoids double instrumentation when the VSTest
+         "XPlat Code Coverage" data collector is also requested). -->
+    <PackageReference Include="coverlet.msbuild">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>
