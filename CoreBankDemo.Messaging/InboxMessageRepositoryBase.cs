@@ -24,4 +24,19 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext> : Message
     protected abstract DbSet<TMessage> InboxMessages { get; }
 
     protected override DbSet<TMessage> Messages => InboxMessages;
+
+    /// <inheritdoc/>
+    protected override IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold) =>
+        InboxMessages
+            .Where(m =>
+                m.PartitionId == partitionId &&
+                m.RetryCount < MessageConstants.Defaults.MaxRetryCount &&
+                (m.Status == MessageConstants.Status.Pending ||
+                 (m.Status == MessageConstants.Status.Processing && m.ReceivedAt < staleThreshold)))
+            .OrderBy(m => m.ReceivedAt)
+            .ThenBy(m => m.Id);
+
+    /// <inheritdoc/>
+    protected override void SetOrderingTimestamp(TMessage message, DateTime claimedAt) =>
+        message.ReceivedAt = claimedAt;
 }

@@ -44,7 +44,7 @@ development_status:
   epic-2: in-progress
   2-1-identity-constants-and-message-contracts: done
   2-2-idempotent-store: done
-  2-3-claiming-retry-and-poison-state-machine: backlog
+  2-3-claiming-retry-and-poison-state-machine: done
   2-4-outboxprocessorbase-and-delivery-strategy-port: backlog
   2-5-inboxprocessorbase-and-handler-dispatch: backlog
   2-6-kernel-failure-path-hardening: backlog

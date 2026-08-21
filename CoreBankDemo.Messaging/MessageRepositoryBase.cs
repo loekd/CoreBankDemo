@@ -125,4 +125,262 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
         builder.HasIndex(dedupePropertyNames).IsUnique();
     }
+
+    /// <summary>
+    /// Entity-configuration hook (story 2.3): marks <see cref="IMessage.Status"/>
+    /// as an EF Core concurrency token so <see cref="DbContext.SaveChangesAsync(CancellationToken)"/>
+    /// includes the row's last-known <c>Status</c> in its generated
+    /// <c>UPDATE ... WHERE</c> clause. This is what makes
+    /// <see cref="ClaimBatchForPartitionAsync"/> safe under concurrent callers:
+    /// two callers that both load the same Pending row cannot both flip it to
+    /// Processing — the loser's save affects zero rows and EF reports it as a
+    /// <see cref="DbUpdateConcurrencyException"/> rather than a silent double
+    /// claim. Call this from the concrete <typeparamref name="TDbContext"/>'s
+    /// <c>OnModelCreating</c> alongside <see cref="ConfigureDedupeIndex"/>.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="builder"/> is <see langword="null"/>.</exception>
+    public static void ConfigureConcurrencyToken(EntityTypeBuilder<TMessage> builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+
+        builder.Property(m => m.Status).IsConcurrencyToken();
+    }
+
+    /// <summary>
+    /// Query for this store's claimable rows in <paramref name="partitionId"/>,
+    /// ordered oldest-first by the store's ordering timestamp (<c>ReceivedAt</c>
+    /// for inbox, <c>CreatedAt</c> for outbox): rows that are <c>Pending</c>, or
+    /// <c>Processing</c> rows whose ordering timestamp is older than
+    /// <paramref name="staleThreshold"/> (stale-claim reclaim, AD-3), excluding
+    /// poisoned rows (<c>RetryCount &gt;= MaxRetryCount</c>). Implemented by the
+    /// inbox/outbox base — this base class does not know the concrete ordering
+    /// timestamp property.
+    /// </summary>
+    protected abstract IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold);
+
+    /// <summary>
+    /// Sets <paramref name="message"/>'s ordering timestamp
+    /// (<c>ReceivedAt</c>/<c>CreatedAt</c>) to <paramref name="claimedAt"/>.
+    /// Called by <see cref="ClaimBatchForPartitionAsync"/> ONLY for rows that
+    /// were already <c>Processing</c> before this claim call — i.e. a true
+    /// stale-claim reclaim — never for rows claimed fresh from <c>Pending</c>
+    /// (the story 2.3 fix for the legacy staleness-basis violation: the old
+    /// kernel measured staleness from the row's creation/receipt time, so a
+    /// message that merely took a while to be picked up looked "stale" the
+    /// instant it was legitimately claimed). Stamping the ordering timestamp
+    /// forward only on reclaim makes the next staleness check measure from when
+    /// the row actually got stuck, not from when it first arrived, while still
+    /// preserving a row's true arrival order (relative to every other row) the
+    /// first time it is ever claimed — matching
+    /// <see cref="IInboxMessage.ReceivedAt"/>'s documented dual role as
+    /// "ordering timestamp for claims". Stamping forward on every claim
+    /// (including fresh-from-Pending ones) would destroy a message's true
+    /// arrival timestamp on its very first claim and, if it is later reclaimed
+    /// after crashing, permanently lose its place in the arrival-order queue
+    /// relative to messages that arrived later — violating the per-partition
+    /// oldest-first FIFO guarantee (AD-4) across separate claim calls.
+    /// </summary>
+    protected abstract void SetOrderingTimestamp(TMessage message, DateTime claimedAt);
+
+    /// <summary>
+    /// Claims up to <paramref name="batchSize"/> claimable rows (see
+    /// <see cref="GetClaimableMessagesQuery"/>) in <paramref name="partitionId"/>,
+    /// oldest first, atomically transitioning them to <c>Processing</c> — no row
+    /// can be claimed by two concurrent callers (see
+    /// <see cref="ConfigureConcurrencyToken"/>). A caller that loses the race for
+    /// some of its candidate rows simply keeps whatever it did win; losing a row
+    /// to a concurrent claimer is a normal outcome, never an exception. Only
+    /// rows that were already <c>Processing</c> before this call (true
+    /// stale-claim reclaims) get their ordering timestamp stamped forward — see
+    /// <see cref="SetOrderingTimestamp"/> — so a row's true arrival order is
+    /// preserved across its very first claim and survives being reclaimed later.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="partitionId"/> is negative, or <paramref name="batchSize"/> is not positive.
+    /// </exception>
+    public virtual async Task<IReadOnlyList<TMessage>> ClaimBatchForPartitionAsync(
+        int partitionId, int batchSize, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(partitionId);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(batchSize);
+
+        var claimedAt = TimeProvider.GetUtcNow().UtcDateTime;
+        var staleThreshold = claimedAt - MessageConstants.Defaults.ProcessingTimeout;
+
+        var claimed = await GetClaimableMessagesQuery(partitionId, staleThreshold)
+            .Take(batchSize)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        // Captured once, before any mutation: only rows that were ALREADY
+        // Processing before this call are true stale reclaims. Rows claimed
+        // fresh from Pending must never have their ordering timestamp touched.
+        // This must be captured outside the retry loop below — by the second
+        // iteration every remaining row's in-memory Status has already been
+        // flipped to Processing by the first iteration's mutation, so checking
+        // message.Status inside the loop would misclassify fresh claims as
+        // reclaims on retry.
+        var wasAlreadyProcessing = claimed
+            .Where(m => m.Status == MessageConstants.Status.Processing)
+            .Select(m => m.Id)
+            .ToHashSet();
+
+        while (claimed.Count > 0)
+        {
+            foreach (var message in claimed)
+            {
+                message.Status = MessageConstants.Status.Processing;
+                if (wasAlreadyProcessing.Contains(message.Id))
+                {
+                    SetOrderingTimestamp(message, claimedAt);
+                }
+            }
+
+            try
+            {
+                await ExecuteInTransactionAsync(
+                    () => DbContext.SaveChangesAsync(cancellationToken),
+                    cancellationToken).ConfigureAwait(false);
+                return claimed;
+            }
+            catch (DbUpdateConcurrencyException ex)
+            {
+                // Lost the claim race for these specific rows — a concurrent
+                // caller already flipped them to Processing first. Drop them
+                // (detaching so the tracker doesn't try to resend a stale
+                // update) and keep whatever this call still legitimately owns.
+                // Guard the cast (ex.Entries is EF's generic change-tracker
+                // surface, not typed to TMessage) and don't assume Remove finds
+                // a match — a defensive no-op is correct either way rather than
+                // risking an InvalidCastException here.
+                foreach (var entry in ex.Entries)
+                {
+                    if (entry.Entity is TMessage message)
+                    {
+                        claimed.Remove(message);
+                    }
+
+                    entry.State = EntityState.Detached;
+                }
+            }
+        }
+
+        return claimed;
+    }
+
+    /// <summary>
+    /// Transport-failure retry/poison transition (AD-11: the ONLY path that
+    /// ever writes terminal <see cref="MessageConstants.Status.Failed"/> —
+    /// business rejections never call this method; they store a Completed row
+    /// with a cached failure payload instead, per stories 4.x). Increments
+    /// <paramref name="message"/>'s <c>RetryCount</c> and sets
+    /// <paramref name="errorMessage"/> as <c>LastError</c>; below
+    /// <see cref="MessageConstants.Defaults.MaxRetryCount"/> the row goes back
+    /// to <c>Pending</c> for another attempt, at the limit it becomes terminal
+    /// <c>Failed</c>. A <paramref name="message"/> that is already terminal
+    /// <c>Failed</c> is left untouched (no-op) — otherwise a repeat call on the
+    /// same poisoned row would keep incrementing <c>RetryCount</c> past
+    /// <see cref="MessageConstants.Defaults.MaxRetryCount"/> forever. A
+    /// <paramref name="message"/> not currently tracked by this repository's
+    /// <see cref="DbContext"/> (e.g. loaded via a different context instance)
+    /// is attached first — otherwise <c>SaveChangesAsync</c> would silently
+    /// persist nothing. <c>Status</c> is a concurrency token (see
+    /// <see cref="ConfigureConcurrencyToken"/>); a conflicting concurrent
+    /// change (e.g. a concurrent claim) is retried exactly once against the
+    /// row's current database values before giving up.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="message"/> or <paramref name="errorMessage"/> is <see langword="null"/>.</exception>
+    /// <exception cref="DbUpdateConcurrencyException">
+    /// The retried save still conflicted with a second concurrent change to
+    /// <paramref name="message"/>'s row; propagates unchanged.
+    /// </exception>
+    public virtual async Task MarkAsFailedWithRetryAsync(
+        TMessage message, string errorMessage, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(errorMessage);
+
+        if (message.Status == MessageConstants.Status.Failed)
+        {
+            // Already terminal — a repeat report of failure for a row that has
+            // already been given up on must be a no-op, not another
+            // RetryCount increment past MaxRetryCount.
+            return;
+        }
+
+        if (DbContext.Entry(message).State == EntityState.Detached)
+        {
+            // A message obtained from a different DbContext instance has no
+            // tracked entry here; without attaching it, SaveChangesAsync below
+            // would have nothing to write.
+            DbContext.Attach(message);
+        }
+
+        ApplyFailureTransition(message, errorMessage);
+
+        try
+        {
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // Lost the race against a concurrent change to this row's Status
+            // (e.g. a concurrent claim). Reload the row's current database
+            // values — this overwrites our speculative, now-stale mutation —
+            // and retry the transition exactly once against them. A second
+            // conflict is treated as a genuine anomaly and propagates.
+            await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+
+            if (message.Status == MessageConstants.Status.Failed)
+            {
+                // The concurrent change already drove this row to terminal
+                // Failed (e.g. another caller's retry hit MaxRetryCount) —
+                // nothing further for this call to do.
+                return;
+            }
+
+            ApplyFailureTransition(message, errorMessage);
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static void ApplyFailureTransition(TMessage message, string errorMessage)
+    {
+        message.RetryCount += 1;
+        message.LastError = errorMessage;
+        message.Status = message.RetryCount >= MessageConstants.Defaults.MaxRetryCount
+            ? MessageConstants.Status.Failed
+            : MessageConstants.Status.Pending;
+    }
+
+    /// <summary>
+    /// Wraps <paramref name="operation"/> in an explicit database transaction:
+    /// commits on success, rolls back (and rethrows) if it throws — so a
+    /// multi-row operation that fails partway leaves no partial state. Runs
+    /// through the context's execution strategy so the transaction composes
+    /// correctly with providers that configure retry-on-failure (SQLite, the
+    /// store test tier, does not retry).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="operation"/> is <see langword="null"/>.</exception>
+    public virtual async Task ExecuteInTransactionAsync(Func<Task> operation, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(operation);
+
+        var strategy = DbContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            await using var transaction = await DbContext.Database
+                .BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await operation().ConfigureAwait(false);
+                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                throw;
+            }
+        }).ConfigureAwait(false);
+    }
 }

@@ -24,4 +24,19 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext> : Messag
     protected abstract DbSet<TMessage> OutboxMessages { get; }
 
     protected override DbSet<TMessage> Messages => OutboxMessages;
+
+    /// <inheritdoc/>
+    protected override IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold) =>
+        OutboxMessages
+            .Where(m =>
+                m.PartitionId == partitionId &&
+                m.RetryCount < MessageConstants.Defaults.MaxRetryCount &&
+                (m.Status == MessageConstants.Status.Pending ||
+                 (m.Status == MessageConstants.Status.Processing && m.CreatedAt < staleThreshold)))
+            .OrderBy(m => m.CreatedAt)
+            .ThenBy(m => m.Id);
+
+    /// <inheritdoc/>
+    protected override void SetOrderingTimestamp(TMessage message, DateTime claimedAt) =>
+        message.CreatedAt = claimedAt;
 }

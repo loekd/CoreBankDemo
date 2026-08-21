@@ -60,6 +60,7 @@ public sealed class TestMessagingDbContext(DbContextOptions<TestMessagingDbConte
             builder.HasKey(m => m.Id);
             InboxMessageRepositoryBase<TestInboxMessage, TestMessagingDbContext>.ConfigureDedupeIndex(
                 builder, nameof(TestInboxMessage.IdempotencyKey));
+            InboxMessageRepositoryBase<TestInboxMessage, TestMessagingDbContext>.ConfigureConcurrencyToken(builder);
 
             // Exists only so tests can trigger a real, non-unique-violation
             // DbUpdateException on SQLite (spec: such failures must propagate).
@@ -72,6 +73,7 @@ public sealed class TestMessagingDbContext(DbContextOptions<TestMessagingDbConte
             builder.HasKey(m => m.Id);
             OutboxMessageRepositoryBase<TestOutboxEventMessage, TestMessagingDbContext>.ConfigureDedupeIndex(
                 builder, nameof(TestOutboxEventMessage.IdempotencyKey), nameof(TestOutboxEventMessage.EventType));
+            OutboxMessageRepositoryBase<TestOutboxEventMessage, TestMessagingDbContext>.ConfigureConcurrencyToken(builder);
         });
     }
 }
