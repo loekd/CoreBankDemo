@@ -68,7 +68,7 @@ public class TransactionsController(
         Activity.Current?.SetTag("outcome", "accepted");
         return Accepted($"/api/transactions/{request.TransactionId}", new
         {
-            IdempotencyKey = request.TransactionId,
+            TransactionId = request.TransactionId,
             Status = MessageConstants.Status.Pending,
             Message = "Transaction accepted for processing"
         });
@@ -120,7 +120,7 @@ public class TransactionsController(
             case MessageConstants.Status.Pending or MessageConstants.Status.Processing:
                 return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
                 {
-                    IdempotencyKey = existing.IdempotencyKey,
+                    TransactionId = existing.IdempotencyKey,
                     Status = existing.Status,
                     Message = "Transaction is being processed"
                 });
