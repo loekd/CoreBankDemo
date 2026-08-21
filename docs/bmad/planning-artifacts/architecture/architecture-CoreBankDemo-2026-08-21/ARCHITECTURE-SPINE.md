@@ -131,7 +131,7 @@ Arrows are the only permitted project references. `Messaging` and `ServiceDefaul
 | Validation | DataAnnotations-validated options bound fail-fast at startup; request validation returns all errors as `BadRequest(new { Errors })` |
 | Logging | `ILogger<T>` structured, always including `IdempotencyKey` and `PartitionId` where applicable |
 | Packages | Central package management via `Directory.Packages.props` only |
-| Lock names | `{prefix}-partition-{id}` with per-store prefixes: `payments-outbox`, `payments-inbox`, `corebank-inbox`, `corebank-messaging-outbox` — never shared between stores |
+| Lock names | `<prefix>-partition-<id>` with per-store prefixes: `payments-outbox`, `payments-inbox`, `corebank-inbox`, `corebank-messaging-outbox` — never shared between stores |
 | Seed data | One owner per dataset: CoreBankAPI startup seeds the 3 demo accounts; LoadTestSupport owns the 10 `NL..LOAD` accounts (seed + reset) |
 | Tests | xUnit `[Fact]`/`[Theory]`, AwesomeAssertions `Should()` syntax, Moq for ports; test names state the pattern contract being proven |
 
