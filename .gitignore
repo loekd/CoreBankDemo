@@ -14,3 +14,6 @@ riderModule.iml
 
 # BMAD personal (user-scope) config
 _bmad/config.user.toml
+
+# Coverlet output (tests/Directory.Build.props gate)
+tests/**/coverage.json

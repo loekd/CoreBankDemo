@@ -2,7 +2,8 @@
 title: 'Story 1.2: Test projects and rebuild solution filter'
 type: 'chore'
 created: '2026-08-21'
-status: 'draft'
+status: 'done'
+baseline_commit: 'beb6f2b0f6caf83ecafc4f66ea7ce58d98c551ac'
 review_loop_iteration: 0
 context:
   - '{project-root}/docs/bmad/constraints.md'
@@ -45,10 +46,10 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `tests/CoreBankDemo.{Messaging,ServiceDefaults,CoreBankAPI,PaymentsAPI}.Tests/*.csproj` — create (net10.0, ProjectReference to target, coverlet `Include` filter for its target assembly only) — minimal csprojs; shared props does the rest
-- [ ] `tests/*/SmokeTests.cs` — one `[Fact]` per project asserting a trivially true statement via AwesomeAssertions — proves runner + assertions wired
-- [ ] `CoreBankDemo.sln` — add the 4 projects — keeps IDE experience whole
-- [ ] `CoreBankDemo.Rebuild.slnf` — create with the 6-project set — the strangler gate (AD-10)
+- [x] `tests/CoreBankDemo.{Messaging,ServiceDefaults,CoreBankAPI,PaymentsAPI}.Tests/*.csproj` — create (net10.0, ProjectReference to target, coverlet `Include` filter for its target assembly only) — minimal csprojs; shared props does the rest
+- [x] `tests/*/SmokeTests.cs` — one `[Fact]` per project asserting a trivially true statement via AwesomeAssertions — proves runner + assertions wired
+- [x] `CoreBankDemo.sln` — add the 4 projects — keeps IDE experience whole
+- [x] `CoreBankDemo.Rebuild.slnf` — create with the 6-project set — the strangler gate (AD-10)
 
 **Acceptance Criteria:**
 - Given the repo, when `dotnet test CoreBankDemo.Rebuild.slnf` runs, then all four smoke tests pass and coverlet reports per-project coverage (smoke tests → no threshold failure since no covered assembly lines yet or filters scope to target)
@@ -63,3 +64,8 @@ Coverage note: with `Include=[Target]*` and zero tests touching the target, cove
 **Commands:**
 - `dotnet test CoreBankDemo.Rebuild.slnf` — expected: 4/4 projects pass
 - `dotnet build CoreBankDemo.sln` — expected: green
+
+## Spec Change Log (amendments)
+
+- 2026-08-21 (step-04, bad_spec): Code Map wrongly mandated ProjectReferences from CoreBankAPI.Tests/PaymentsAPI.Tests to their unmigrated targets — MSBuild builds ProjectReferences transitively regardless of slnf membership, so the gate would break the moment those APIs go red (defeats AD-10). Amended: API test projects carry NO ProjectReference/Include until their epics (4/5) add them when the target enters the filter; smoke tests stay standalone. KEEP: minimal csprojs, per-target Include filters where a reference exists, Threshold=0 TODO tripwires. Applied as targeted fix (not full re-derive; re-derivation would be byte-identical otherwise).
+- 2026-08-21 (step-04 close): patches applied; AD-10 empirically proven (gate exit 0 with #error in PaymentsAPI). Deviation kept: Threshold=0 stays on API test projects (zero instrumented modules otherwise fails inherited 90 gate); removal tied to stories 4.1/5.1.

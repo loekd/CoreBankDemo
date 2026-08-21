@@ -1,0 +1,13 @@
+{
+  "solution": {
+    "path": "CoreBankDemo.sln",
+    "projects": [
+      "CoreBankDemo.Messaging\\CoreBankDemo.Messaging.csproj",
+      "CoreBankDemo.ServiceDefaults\\CoreBankDemo.ServiceDefaults.csproj",
+      "tests\\CoreBankDemo.CoreBankAPI.Tests\\CoreBankDemo.CoreBankAPI.Tests.csproj",
+      "tests\\CoreBankDemo.Messaging.Tests\\CoreBankDemo.Messaging.Tests.csproj",
+      "tests\\CoreBankDemo.PaymentsAPI.Tests\\CoreBankDemo.PaymentsAPI.Tests.csproj",
+      "tests\\CoreBankDemo.ServiceDefaults.Tests\\CoreBankDemo.ServiceDefaults.Tests.csproj"
+    ]
+  }
+}
