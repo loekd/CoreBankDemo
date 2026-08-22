@@ -354,6 +354,93 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     }
 
     /// <summary>
+    /// Transport-success transition (story 2.4; AD-11): the ONLY path that
+    /// writes <see cref="MessageConstants.Status.Completed"/> from a delivery
+    /// strategy's success — never called for a business rejection cached as a
+    /// Completed row by application code elsewhere, but that's still the same
+    /// terminal state. Sets <c>Status = Completed</c> and stamps
+    /// <c>ProcessedAt</c> from <see cref="TimeProvider"/>. Mirrors
+    /// <see cref="MarkAsFailedWithRetryAsync"/>'s detach/attach handling (a
+    /// <paramref name="message"/> loaded via a different
+    /// <see cref="DbContext"/> instance is attached before saving), its
+    /// single-retry response to <see cref="DbUpdateConcurrencyException"/>
+    /// (<c>Status</c> is a concurrency token — see
+    /// <see cref="ConfigureConcurrencyToken"/> — so a conflicting concurrent
+    /// change is retried exactly once against the row's current database
+    /// values before giving up), AND its terminal-status guard: a
+    /// <paramref name="message"/> whose current <c>Status</c> is already
+    /// terminal (<c>Completed</c> or <c>Failed</c>) is left untouched
+    /// (no-op) rather than re-stamping <c>ProcessedAt</c> or, worse, reviving
+    /// a row a concurrent caller already drove to terminal <c>Failed</c> (e.g.
+    /// its retries were exhausted) back to <c>Completed</c>. Checked both
+    /// before the first save attempt and again after a reload in the
+    /// concurrency-conflict retry branch, since a concurrent change observed
+    /// only via that reload could itself have been the one that made the row
+    /// terminal.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="message"/> is <see langword="null"/>.</exception>
+    /// <exception cref="DbUpdateConcurrencyException">
+    /// The retried save still conflicted with a second concurrent change to
+    /// <paramref name="message"/>'s row; propagates unchanged.
+    /// </exception>
+    public virtual async Task MarkAsCompletedAsync(TMessage message, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        if (IsTerminal(message))
+        {
+            // Already Completed or already Failed — a repeat completion
+            // report for a row that is already in a terminal state must be a
+            // no-op, never re-stamping ProcessedAt or reviving a row that a
+            // concurrent caller already drove to terminal Failed.
+            return;
+        }
+
+        if (DbContext.Entry(message).State == EntityState.Detached)
+        {
+            DbContext.Attach(message);
+        }
+
+        ApplyCompletionTransition(message);
+
+        try
+        {
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+
+            if (IsTerminal(message))
+            {
+                // The concurrent change already drove this row to a terminal
+                // state (Completed by another caller, or Failed via retry
+                // exhaustion) — nothing further for this call to do.
+                return;
+            }
+
+            ApplyCompletionTransition(message);
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static bool IsTerminal(TMessage message) =>
+        message.Status is MessageConstants.Status.Completed or MessageConstants.Status.Failed;
+
+    private void ApplyCompletionTransition(TMessage message)
+    {
+        message.Status = MessageConstants.Status.Completed;
+        message.ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime;
+    }
+
+    /// <summary>
+    /// Looks up a single row by <paramref name="id"/>, or <see langword="null"/>
+    /// if none exists.
+    /// </summary>
+    public virtual Task<TMessage?> FindByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Messages.FirstOrDefaultAsync(m => m.Id == id, cancellationToken);
+
+    /// <summary>
     /// Wraps <paramref name="operation"/> in an explicit database transaction:
     /// commits on success, rolls back (and rethrows) if it throws — so a
     /// multi-row operation that fails partway leaves no partial state. Runs

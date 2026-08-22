@@ -8,10 +8,14 @@ namespace CoreBankDemo.Messaging;
 /// their <c>DbContext.OnModelCreating</c>, call
 /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.ConfigureDedupeIndex"/>
 /// to declare whether the store dedupes on the idempotency key alone (command
-/// store) or a composite event identity (event store — AD-4). Claiming,
-/// retry/poison handling, and processor-facing queries land in story 2.3.
+/// store) or a composite event identity (event store — AD-4). Claiming and
+/// retry/poison handling land in story 2.3; implements
+/// <see cref="IOutboxMessageStore{TMessage}"/> (story 2.4) — the narrow port
+/// <see cref="OutboxProcessorBase{TMessage}"/> depends on — via the members
+/// already inherited from <see cref="MessageRepositoryBase{TMessage,TDbContext}"/>.
 /// </summary>
-public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext> : MessageRepositoryBase<TMessage, TDbContext>
+public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
+    : MessageRepositoryBase<TMessage, TDbContext>, IOutboxMessageStore<TMessage>
     where TMessage : class, IOutboxMessage
     where TDbContext : DbContext
 {
