@@ -1,0 +1,704 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using AwesomeAssertions;
+using CoreBankDemo.ServiceDefaults;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Moq;
+using Xunit;
+
+namespace CoreBankDemo.Messaging.Tests;
+
+/// <summary>
+/// Moq-tier unit tests for <see cref="InboxProcessorBase{TMessage}"/> (story
+/// 2.5), covering the full I/O matrix off mocks/fakes of all five dependencies
+/// (<see cref="IInboxMessageStore{TMessage}"/>, <see cref="IDistributedLockService"/>,
+/// <see cref="IServiceScopeFactory"/>, plus a real
+/// <see cref="ActivitySource"/>/<see cref="TimeProvider"/>/<see cref="ILogger"/>)
+/// — no database, no hosted-service lifecycle. Mirrors
+/// <c>OutboxProcessorBaseTests</c> (story 2.4) exactly; the one real
+/// difference is per-message handler resolution via a fake
+/// <see cref="IServiceScopeFactory"/> instead of a ctor-injected singleton
+/// strategy.
+///
+/// <para>
+/// Test-seam choice: <see cref="InboxProcessorBase{TMessage}"/> exposes its
+/// per-tick logic as <c>internal Task RunTickAsync(CancellationToken)</c>
+/// (visible here via <c>InternalsVisibleTo</c> on the production project)
+/// rather than only through the <see cref="Microsoft.Extensions.Hosting.BackgroundService"/>
+/// base's <c>ExecuteAsync</c>/<c>StartAsync</c>/<c>StopAsync</c> lifecycle.
+/// That lets every test below invoke exactly one tick, synchronously await it,
+/// and assert on it directly — no polling-interval delays, no starting/stopping
+/// a host, no racing a background loop to catch it mid-tick. The
+/// <see cref="Microsoft.Extensions.Hosting.BackgroundService"/> loop itself
+/// (poll → tick → delay → repeat, cancel to stop) is exercised separately in
+/// <see cref="ExecuteAsync_runs_ticks_in_a_loop_until_cancelled"/> via the real
+/// hosted-service lifecycle, so that shape isn't left untested — it's just not
+/// how every scenario in the I/O matrix is verified.
+/// </para>
+/// </summary>
+public class InboxProcessorBaseTests
+{
+    private static readonly ActivitySource ActivitySource = new(nameof(InboxProcessorBaseTests));
+
+    private sealed class TestInboxProcessor : InboxProcessorBase<TestInboxMessage>
+    {
+        public TestInboxProcessor(
+            IInboxMessageStore<TestInboxMessage> store,
+            IDistributedLockService lockService,
+            IServiceScopeFactory scopeFactory,
+            ActivitySource activitySource,
+            TimeProvider timeProvider,
+            ILogger logger,
+            InboxProcessorOptions? options = null)
+            : base(store, lockService, scopeFactory, activitySource, timeProvider, logger, options)
+        {
+        }
+
+        protected override string LockNamePrefix => "test-inbox";
+    }
+
+    /// <summary>Passthrough fake: every lock is always acquired, workload runs inline.</summary>
+    private sealed class AlwaysAcquiringLockService : IDistributedLockService
+    {
+        public List<(string LockName, int LockExpirySeconds)> Calls { get; } = new();
+
+        public async Task<bool> ExecuteWithLockAsync(
+            string lockName, int lockExpirySeconds, Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add((lockName, lockExpirySeconds));
+            await workload(cancellationToken);
+            return true;
+        }
+    }
+
+    /// <summary>Fake that never acquires any lock — the workload must never run.</summary>
+    private sealed class NeverAcquiringLockService : IDistributedLockService
+    {
+        public Task<bool> ExecuteWithLockAsync(
+            string lockName, int lockExpirySeconds, Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default) => Task.FromResult(false);
+    }
+
+    /// <summary>
+    /// Real serialization by lock name: a lock already "held" is refused
+    /// (returns false) rather than queued, mirroring a real distributed lock
+    /// under contention. Tracks whether two callers were ever inside the same
+    /// lock name's workload simultaneously.
+    /// </summary>
+    private sealed class SerializingLockService : IDistributedLockService
+    {
+        private readonly ConcurrentDictionary<string, bool> _held = new();
+        public bool ConcurrentExecutionDetected { get; private set; }
+        public int WorkloadInvocations;
+
+        public async Task<bool> ExecuteWithLockAsync(
+            string lockName, int lockExpirySeconds, Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default)
+        {
+            if (!_held.TryAdd(lockName, true))
+            {
+                return false;
+            }
+
+            try
+            {
+                Interlocked.Increment(ref WorkloadInvocations);
+                await workload(cancellationToken);
+            }
+            finally
+            {
+                if (!_held.TryRemove(lockName, out _))
+                {
+                    ConcurrentExecutionDetected = true;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Fake <see cref="IServiceScope"/> resolving exactly one
+    /// <see cref="IInboxMessageHandler{TMessage}"/> instance (constructor-supplied),
+    /// tracking whether it was disposed.
+    /// </summary>
+    private sealed class FakeServiceScope : IServiceScope
+    {
+        private readonly IInboxMessageHandler<TestInboxMessage> _handler;
+
+        public FakeServiceScope(IInboxMessageHandler<TestInboxMessage> handler) => _handler = handler;
+
+        public bool Disposed { get; private set; }
+
+        public IServiceProvider ServiceProvider => new FakeServiceProvider(_handler);
+
+        public void Dispose() => Disposed = true;
+
+        private sealed class FakeServiceProvider(IInboxMessageHandler<TestInboxMessage> handler) : IServiceProvider
+        {
+            public object? GetService(Type serviceType) =>
+                serviceType == typeof(IInboxMessageHandler<TestInboxMessage>) ? handler : null;
+        }
+    }
+
+    /// <summary>
+    /// Fake <see cref="IServiceScopeFactory"/> that hands out a fresh
+    /// <see cref="FakeServiceScope"/> — wrapping a fresh handler instance from
+    /// <paramref name="handlerFactory"/> — on every <see cref="CreateScope"/>
+    /// call, and records every scope it created, so tests can assert one scope
+    /// (and, via <paramref name="handlerFactory"/>, one handler instance) per
+    /// message rather than a shared singleton.
+    /// </summary>
+    private sealed class FakeServiceScopeFactory : IServiceScopeFactory
+    {
+        private readonly Func<IInboxMessageHandler<TestInboxMessage>> _handlerFactory;
+
+        public FakeServiceScopeFactory(Func<IInboxMessageHandler<TestInboxMessage>> handlerFactory) =>
+            _handlerFactory = handlerFactory;
+
+        public List<FakeServiceScope> CreatedScopes { get; } = new();
+
+        public IServiceScope CreateScope()
+        {
+            var scope = new FakeServiceScope(_handlerFactory());
+            CreatedScopes.Add(scope);
+            return scope;
+        }
+    }
+
+    private static TestInboxMessage NewMessage(string key = "msg", int partitionId = 0) => new()
+    {
+        IdempotencyKey = key,
+        PartitionId = partitionId,
+        Status = MessageConstants.Status.Processing,
+        ReceivedAt = new DateTime(2026, 8, 22, 0, 0, 0, DateTimeKind.Utc),
+    };
+
+    [Fact]
+    public async Task Tick_fans_out_over_every_partition_under_its_own_lock_name()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var lockService = new AlwaysAcquiringLockService();
+        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var options = new InboxProcessorOptions { PartitionCount = 3 };
+        var processor = new TestInboxProcessor(
+            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), options);
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        lockService.Calls.Select(c => c.LockName).Should().BeEquivalentTo(
+            "test-inbox-partition-0", "test-inbox-partition-1", "test-inbox-partition-2");
+        store.Verify(s => s.ClaimBatchForPartitionAsync(0, MessageConstants.Defaults.BatchSize, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(1, MessageConstants.Defaults.BatchSize, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(2, MessageConstants.Defaults.BatchSize, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Lock_not_acquired_skips_the_partition_silently_without_throwing()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        var lockService = new NeverAcquiringLockService();
+        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var processor = new TestInboxProcessor(
+            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        store.Verify(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handler_success_marks_the_message_completed()
+    {
+        var message = NewMessage();
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        store.Verify(s => s.MarkAsCompletedAsync(message, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<TestInboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handler_failure_marks_the_message_failed_with_retry_and_does_not_escape_the_tick()
+    {
+        var message = NewMessage();
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("downstream refused it"));
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a handler exception must never escape the tick");
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(message, "downstream refused it", It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Completion_persistence_failure_after_successful_handling_is_not_misclassified_as_a_handler_failure()
+    {
+        // The real bug this guards: HandleAsync succeeding and then
+        // MarkAsCompletedAsync throwing (e.g. a DbUpdateConcurrencyException)
+        // must NOT be reported as a handler failure and must NOT burn a
+        // RetryCount via MarkAsFailedWithRetryAsync — that would flip an
+        // already-handled message back to Pending and reprocess it.
+        var message = NewMessage();
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        store.Setup(s => s.MarkAsCompletedAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("concurrency conflict persisting completion"));
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a completion-persistence exception must never escape the tick either");
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<TestInboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "a bookkeeping failure after successful handling must never burn a RetryCount or flip the message back to Pending");
+        handler.Verify(h => h.HandleAsync(message, It.IsAny<CancellationToken>()), Times.Once,
+            "handling itself succeeded and must not be retried/re-invoked for a completion-persistence failure");
+
+        // Handler-failure and completion-failure must produce observably
+        // different outcomes: handler failures log at Warning with "Inbox
+        // handling failed" (see Handler_failure_logs_a_warning); this path
+        // must log a distinct message that does not claim handling failed.
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Inbox handling failed")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "a completion-persistence failure must not be logged as a handler failure");
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("after successful handling")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once,
+            "the completion-persistence failure must be logged distinctly from a handler failure");
+    }
+
+    [Fact]
+    public async Task Null_claim_batch_from_the_store_is_treated_as_empty_rather_than_throwing()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)null!);
+        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a misbehaving store returning null must degrade to an empty batch, not NRE");
+        scopeFactory.CreatedScopes.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Null_element_in_a_non_null_claimed_list_is_skipped_rather_than_throwing()
+    {
+        // Defensive, mirroring the null-batch guard: a misbehaving
+        // IInboxMessageStore implementation could return a non-null batch
+        // that itself contains a null entry — that must not NRE its way
+        // into a masked, generic tick-level error log line, and the valid
+        // messages around it must still be processed.
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, null!, second });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a null entry in an otherwise non-null claimed batch must not NRE");
+        store.Verify(s => s.MarkAsCompletedAsync(first, It.IsAny<CancellationToken>()), Times.Once,
+            "valid messages before the null entry must still be processed");
+        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once,
+            "valid messages after the null entry must still be processed");
+    }
+
+    [Fact]
+    public async Task Handler_failure_on_one_message_still_lets_the_tick_continue_to_the_next_message()
+    {
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
+        handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(first, "boom", It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Handler_failure_followed_by_a_MarkAsFailedWithRetryAsync_failure_does_not_escape_the_tick_and_the_next_message_still_dispatches()
+    {
+        // The real bug this guards: a transient DB conflict while persisting
+        // the retry (MarkAsFailedWithRetryAsync itself throwing) must not
+        // escape ProcessMessageAsync — that would abort the rest of this
+        // partition's batch for the tick, leaving later claimed messages
+        // never dispatched.
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        store.Setup(s => s.MarkAsFailedWithRetryAsync(first, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transient DB conflict persisting retry"));
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync(
+            "a MarkAsFailedWithRetryAsync failure after a handler failure must never escape the tick");
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(first, "boom", It.IsAny<CancellationToken>()), Times.Once);
+        handler.Verify(h => h.HandleAsync(second, It.IsAny<CancellationToken>()), Times.Once,
+            "the tick must continue to the next message in the batch despite the retry-persistence failure");
+        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to record retry")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once,
+            "the secondary retry-persistence failure must be logged distinctly");
+    }
+
+    [Fact]
+    public async Task Each_message_in_a_batch_gets_its_own_di_scope_and_scopes_do_not_leak()
+    {
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var seenHandlerInstances = new List<IInboxMessageHandler<TestInboxMessage>>();
+        var scopeFactory = new FakeServiceScopeFactory(() =>
+        {
+            var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+            handler.Setup(h => h.HandleAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+            seenHandlerInstances.Add(handler.Object);
+            return handler.Object;
+        });
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        scopeFactory.CreatedScopes.Should().HaveCount(2, "each message must be dispatched from its own fresh DI scope");
+        seenHandlerInstances.Should().HaveCount(2).And.OnlyHaveUniqueItems(
+            "a distinct handler instance must be resolved per message, never a shared/leaked instance");
+        scopeFactory.CreatedScopes.Should().OnlyContain(s => s.Disposed,
+            "every per-message scope must be disposed once that message's handler call returns");
+    }
+
+    [Fact]
+    public async Task The_per_message_scope_is_already_disposed_at_the_moment_MarkAsCompletedAsync_is_called_for_that_message()
+    {
+        // Guards against a future refactor accidentally widening the
+        // `using var scope = ...` to enclose the store call too: the scope
+        // for a given message must already be disposed by the time
+        // MarkAsCompletedAsync is invoked for that message — not merely by
+        // the end of the tick (which the existing "scopes do not leak" test
+        // only checks).
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var scopeFactory = new FakeServiceScopeFactory(() =>
+        {
+            var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+            handler.Setup(h => h.HandleAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+            return handler.Object;
+        });
+        var disposedAtCompletionTime = new Dictionary<string, bool>();
+        store.Setup(s => s.MarkAsCompletedAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>()))
+            .Returns<TestInboxMessage, CancellationToken>((message, _) =>
+            {
+                // Messages are dispatched sequentially, oldest-first (see
+                // ProcessPartitionAsync), so the most recently created scope
+                // at this point is the one that was resolved for this
+                // message.
+                var scope = scopeFactory.CreatedScopes[^1];
+                disposedAtCompletionTime[message.IdempotencyKey] = scope.Disposed;
+                return Task.CompletedTask;
+            });
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        disposedAtCompletionTime.Should().ContainKey("first");
+        disposedAtCompletionTime["first"].Should().BeTrue(
+            "the per-message DI scope must already be disposed before MarkAsCompletedAsync is called for that message");
+        disposedAtCompletionTime.Should().ContainKey("second");
+        disposedAtCompletionTime["second"].Should().BeTrue(
+            "the per-message DI scope must already be disposed before MarkAsCompletedAsync is called for that message");
+    }
+
+    [Fact]
+    public async Task Cancellation_mid_dispatch_stops_promptly_without_completing_or_retrying_the_in_flight_message()
+    {
+        using var cts = new CancellationTokenSource();
+        var inFlight = NewMessage("in-flight");
+        var neverReached = NewMessage("never-reached");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { inFlight, neverReached });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(inFlight, It.IsAny<CancellationToken>()))
+            .Returns<TestInboxMessage, CancellationToken>((_, ct) =>
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(ct);
+            });
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(cts.Token);
+
+        await act.Should().NotThrowAsync("cancellation is swallowed at the tick boundary like any other tick-level exception");
+        handler.Verify(h => h.HandleAsync(neverReached, It.IsAny<CancellationToken>()), Times.Never,
+            "dispatch must stop promptly on cancellation rather than continuing to the next message");
+        store.Verify(s => s.MarkAsCompletedAsync(inFlight, It.IsAny<CancellationToken>()), Times.Never);
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(inFlight, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "a cancelled in-flight handler call is not a transport failure and must not consume a retry");
+    }
+
+    [Fact]
+    public async Task Tick_level_exception_from_the_store_is_logged_and_swallowed_so_the_tick_survives()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("database unreachable"));
+        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync();
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task Handler_failure_logs_a_warning()
+    {
+        var message = NewMessage();
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("nope"));
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        logger.Verify(l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce);
+    }
+
+    [Fact]
+    public async Task Two_concurrent_ticks_never_run_the_same_partitions_workload_at_the_same_time()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Returns(async () =>
+            {
+                // Hold the "workload" open briefly so overlapping ticks have a
+                // real chance to collide if the processor ever bypassed the lock.
+                await Task.Delay(20);
+                return (IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>();
+            });
+        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var lockService = new SerializingLockService();
+        var processor = new TestInboxProcessor(
+            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 4 });
+
+        await Task.WhenAll(
+            processor.RunTickAsync(CancellationToken.None),
+            processor.RunTickAsync(CancellationToken.None));
+
+        lockService.ConcurrentExecutionDetected.Should().BeFalse(
+            "no partition's workload may run concurrently across two overlapping ticks");
+        lockService.WorkloadInvocations.Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task Dispatch_activity_carries_idempotency_key_and_partition_id_tags()
+    {
+        var message = NewMessage("tagged-message", partitionId: 2);
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(2, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 2), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+
+        var capturedTags = new List<KeyValuePair<string, object?>>();
+        var capturedKinds = new List<ActivityKind>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == ActivitySource.Name,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = activity =>
+            {
+                capturedTags.AddRange(activity.TagObjects);
+                capturedKinds.Add(activity.Kind);
+            },
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 4 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        capturedTags.Should().ContainSingle(t => t.Key == "IdempotencyKey" && Equals(t.Value, "tagged-message"));
+        capturedTags.Should().ContainSingle(t => t.Key == "PartitionId" && Equals(t.Value, 2));
+        capturedKinds.Should().ContainSingle(k => k == ActivityKind.Consumer,
+            "an inbox message being handled is consuming work handed off by the trace that sent it (AD-8)");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_runs_ticks_in_a_loop_until_cancelled()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        var tickCount = 0;
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                Interlocked.Increment(ref tickCount);
+                return (IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>();
+            });
+        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var processor = new TestInboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(),
+            new InboxProcessorOptions { PartitionCount = 1, PollingInterval = TimeSpan.FromMilliseconds(10) });
+
+        var testCancellationToken = TestContext.Current.CancellationToken;
+        using var cts = new CancellationTokenSource();
+        await processor.StartAsync(cts.Token);
+
+        // Give the loop enough real time to complete at least a couple of
+        // ticks (poll interval 10ms) before stopping it.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (tickCount < 2 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10, testCancellationToken);
+        }
+
+        await processor.StopAsync(CancellationToken.None);
+
+        tickCount.Should().BeGreaterThanOrEqualTo(2);
+    }
+
+    /// <summary>
+    /// A minimal non-mocked <see cref="ILogger"/> for tests that need a valid
+    /// logger but don't assert on log calls — avoids Moq's strict-by-default
+    /// unexpected-call noise for the members that matter to those tests.
+    /// </summary>
+    private static ILogger NullLoggerLike() => Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
+}

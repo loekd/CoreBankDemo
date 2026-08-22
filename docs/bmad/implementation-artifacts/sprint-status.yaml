@@ -46,7 +46,7 @@ development_status:
   2-2-idempotent-store: done
   2-3-claiming-retry-and-poison-state-machine: done
   2-4-outboxprocessorbase-and-delivery-strategy-port: done
-  2-5-inboxprocessorbase-and-handler-dispatch: backlog
+  2-5-inboxprocessorbase-and-handler-dispatch: done
   2-6-kernel-failure-path-hardening: backlog
   epic-2-retrospective: optional
 

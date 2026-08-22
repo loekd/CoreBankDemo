@@ -299,6 +299,50 @@ public class OutboxProcessorBaseTests
     }
 
     [Fact]
+    public async Task Delivery_failure_followed_by_a_MarkAsFailedWithRetryAsync_failure_does_not_escape_the_tick_and_the_next_message_still_dispatches()
+    {
+        // The real bug this guards: a transient DB conflict while persisting
+        // the retry (MarkAsFailedWithRetryAsync itself throwing) must not
+        // escape ProcessMessageAsync — that would abort the rest of this
+        // partition's batch for the tick, leaving later claimed messages
+        // never delivered.
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { first, second });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        store.Setup(s => s.MarkAsFailedWithRetryAsync(first, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transient DB conflict persisting retry"));
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(first, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        strategy.Setup(s => s.DeliverAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var logger = new Mock<ILogger>();
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync(
+            "a MarkAsFailedWithRetryAsync failure after a delivery failure must never escape the tick");
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(first, "boom", It.IsAny<CancellationToken>()), Times.Once);
+        strategy.Verify(s => s.DeliverAsync(second, It.IsAny<CancellationToken>()), Times.Once,
+            "the tick must continue to the next message in the batch despite the retry-persistence failure");
+        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to record retry")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once,
+            "the secondary retry-persistence failure must be logged distinctly");
+    }
+
+    [Fact]
     public async Task Cancellation_mid_dispatch_stops_promptly_without_completing_or_retrying_the_in_flight_message()
     {
         using var cts = new CancellationTokenSource();
