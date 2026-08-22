@@ -114,6 +114,93 @@ public class OutboxProcessorBaseTests
         }
     }
 
+    /// <summary>
+    /// Fake that throws for one designated partition — either synchronously
+    /// (before returning any <see cref="Task"/> at all, e.g. mimicking eager
+    /// argument validation a real lock-service implementation might do) or
+    /// asynchronously (a properly awaited throw, e.g. mimicking a failed
+    /// remote call) depending on <c>throwSynchronously</c> — and behaves like
+    /// <see cref="AlwaysAcquiringLockService"/> (lock always acquired,
+    /// workload runs inline) for every other partition. Proves
+    /// partition-level isolation holds for both flavors of "the lock service
+    /// throws instead of just returning false" (story 2.6): a naive
+    /// <c>Task.WhenAll</c>-based fan-out that eagerly enumerates a
+    /// <c>Select(...).ToArray()</c> of per-partition calls would have a
+    /// synchronous throw from one partition abort the enumeration itself,
+    /// silently skipping every partition after it — the synchronous variant
+    /// exists specifically to catch that class of bug.
+    /// </summary>
+    private sealed class SelectivelyThrowingLockService : IDistributedLockService
+    {
+        private readonly int _throwingPartitionId;
+        private readonly Exception _exception;
+        private readonly bool _throwSynchronously;
+        private readonly ConcurrentBag<int> _attemptedPartitions = new();
+
+        public SelectivelyThrowingLockService(int throwingPartitionId, Exception exception, bool throwSynchronously)
+        {
+            _throwingPartitionId = throwingPartitionId;
+            _exception = exception;
+            _throwSynchronously = throwSynchronously;
+        }
+
+        public IReadOnlyCollection<int> AttemptedPartitions => _attemptedPartitions;
+
+        public Task<bool> ExecuteWithLockAsync(
+            string lockName, int lockExpirySeconds, Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default)
+        {
+            var partitionId = int.Parse(lockName[(lockName.LastIndexOf('-') + 1)..]);
+            _attemptedPartitions.Add(partitionId);
+
+            if (partitionId == _throwingPartitionId && _throwSynchronously)
+            {
+                throw _exception;
+            }
+
+            return RunAsync(partitionId, workload, cancellationToken);
+        }
+
+        private async Task<bool> RunAsync(int partitionId, Func<CancellationToken, Task> workload, CancellationToken cancellationToken)
+        {
+            if (partitionId == _throwingPartitionId)
+            {
+                throw _exception;
+            }
+
+            await workload(cancellationToken);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Fake mirroring the real lock service's shape (see
+    /// <c>DaprDistributedLockService</c>'s 5/6-lock-lifetime <c>workCts</c>):
+    /// it hands the workload a <see cref="CancellationToken"/> it owns and
+    /// controls itself — distinct from, and cancelled independently of, the
+    /// ambient token the caller passed to <see cref="ExecuteWithLockAsync"/>.
+    /// Lets a test prove the dispatch loop stops promptly on whichever token
+    /// the lock workload was actually handed — the seam epic 3's real
+    /// 5/6-lifetime cancellation will drive — rather than only ever being
+    /// exercised via the ambient <c>stoppingToken</c>.
+    /// </summary>
+    private sealed class LockSuppliedCancellationLockService : IDistributedLockService
+    {
+        private readonly CancellationTokenSource _lockOwnedCts = new();
+
+        public void CancelLockOwnedToken() => _lockOwnedCts.Cancel();
+
+        public Task<bool> ExecuteWithLockAsync(
+            string lockName, int lockExpirySeconds, Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default) => RunAsync(workload);
+
+        private async Task<bool> RunAsync(Func<CancellationToken, Task> workload)
+        {
+            await workload(_lockOwnedCts.Token);
+            return true;
+        }
+    }
+
     private static TestOutboxEventMessage NewMessage(string key = "msg", int partitionId = 0) => new()
     {
         IdempotencyKey = key,
@@ -159,6 +246,28 @@ public class OutboxProcessorBaseTests
 
         await act.Should().NotThrowAsync();
         store.Verify(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Full_tick_where_every_partition_fails_to_acquire_its_lock_completes_with_zero_dispatch_and_no_throw()
+    {
+        // Story 2.6: the whole tick, not just a single partition, must
+        // survive a lock service that never grants any of the four
+        // partitions its lock — no work happens anywhere, and no exception
+        // escapes the tick.
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        var lockService = new NeverAcquiringLockService();
+        var processor = new TestOutboxProcessor(
+            store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 4 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a full tick where every partition fails to acquire its lock must not throw");
+        store.Verify(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never,
+            "no partition acquired its lock, so no claim/dispatch work may happen anywhere in the tick");
+        strategy.Verify(s => s.DeliverAsync(It.IsAny<TestOutboxEventMessage>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -372,6 +481,160 @@ public class OutboxProcessorBaseTests
         store.Verify(s => s.MarkAsCompletedAsync(inFlight, It.IsAny<CancellationToken>()), Times.Never);
         store.Verify(s => s.MarkAsFailedWithRetryAsync(inFlight, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
             "a cancelled in-flight delivery is not a transport failure and must not consume a retry");
+    }
+
+    [Fact]
+    public async Task Cancellation_via_a_token_supplied_by_the_lock_workload_itself_stops_dispatch_promptly_without_touching_the_ambient_token()
+    {
+        // Story 2.6: the real lock service (DaprDistributedLockService) hands
+        // the workload a token IT derives and owns (5/6-lock-lifetime cutoff)
+        // — distinct from the ambient stoppingToken. This proves the
+        // dispatch loop honors that lock-supplied token specifically, not
+        // merely the ambient token it happens to equal in every other test.
+        var inFlight = NewMessage("in-flight");
+        var neverReached = NewMessage("never-reached");
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { inFlight, neverReached });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        var lockService = new LockSuppliedCancellationLockService();
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(inFlight, It.IsAny<CancellationToken>()))
+            .Returns<TestOutboxEventMessage, CancellationToken>((_, ct) =>
+            {
+                lockService.CancelLockOwnedToken();
+                throw new OperationCanceledException(ct);
+            });
+        var processor = new TestOutboxProcessor(
+            store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+
+        using var ambientCts = new CancellationTokenSource();
+        var act = async () => await processor.RunTickAsync(ambientCts.Token);
+
+        await act.Should().NotThrowAsync("cancellation via the lock-supplied token is swallowed at the tick boundary like any other tick-level exception");
+        ambientCts.IsCancellationRequested.Should().BeFalse(
+            "the ambient token must never be cancelled by this scenario — only the lock-owned token is");
+        strategy.Verify(s => s.DeliverAsync(neverReached, It.IsAny<CancellationToken>()), Times.Never,
+            "dispatch must stop promptly once the lock-supplied token is cancelled, not continue to the next message");
+        store.Verify(s => s.MarkAsCompletedAsync(inFlight, It.IsAny<CancellationToken>()), Times.Never);
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(inFlight, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "a cancellation via the lock-owned token is not a delivery failure and must not consume a retry");
+    }
+
+    [Fact]
+    public async Task Cancellation_via_a_token_supplied_by_the_lock_workload_itself_is_never_logged_as_a_lock_service_failure()
+    {
+        // Story 2.6 review patch: ProcessPartitionUnderLockAsync's catch must
+        // not mislabel ordinary cancellation propagating up from
+        // ProcessMessageAsync's deliberate rethrow as a distributed-lock
+        // backend failure — that would misdirect on-call diagnosis during a
+        // real incident. Same scenario as
+        // Cancellation_via_a_token_supplied_by_the_lock_workload_itself_stops_dispatch_promptly_without_touching_the_ambient_token,
+        // but with a real Mock<ILogger>() so the absence of the "Lock service
+        // failed" Error-level log can be asserted directly.
+        var inFlight = NewMessage("in-flight");
+        var neverReached = NewMessage("never-reached");
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { inFlight, neverReached });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        var lockService = new LockSuppliedCancellationLockService();
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(inFlight, It.IsAny<CancellationToken>()))
+            .Returns<TestOutboxEventMessage, CancellationToken>((_, ct) =>
+            {
+                lockService.CancelLockOwnedToken();
+                throw new OperationCanceledException(ct);
+            });
+        var logger = new Mock<ILogger>();
+        var processor = new TestOutboxProcessor(
+            store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
+            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        using var ambientCts = new CancellationTokenSource();
+        var act = async () => await processor.RunTickAsync(ambientCts.Token);
+
+        await act.Should().NotThrowAsync("cancellation via the lock-supplied token is swallowed at the tick boundary like any other tick-level exception");
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Lock service failed")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "cancellation via the lock-supplied token must never be mislabeled as a lock service failure");
+    }
+
+    [Fact]
+    public async Task Lock_service_throwing_asynchronously_for_one_partition_still_lets_the_other_three_process_and_logs_the_exception()
+    {
+        // Acceptance criterion: given a lock service that throws for one
+        // partition among four, the other three still process normally and
+        // the exception is logged, not rethrown.
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        var lockService = new SelectivelyThrowingLockService(
+            throwingPartitionId: 1, new InvalidOperationException("lock backend unreachable"), throwSynchronously: false);
+        var logger = new Mock<ILogger>();
+        var processor = new TestOutboxProcessor(
+            store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
+            logger.Object, new OutboxProcessorOptions { PartitionCount = 4 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a lock-service exception for one partition must never crash the tick");
+        store.Verify(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(2, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(3, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(1, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never,
+            "the throwing partition's own claim never runs since the lock service failed before the workload could");
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce, "the lock-service exception must be logged");
+    }
+
+    [Fact]
+    public async Task Lock_service_throwing_synchronously_for_one_partition_still_lets_every_partition_be_attempted()
+    {
+        // Hardening variant of the acceptance criterion above: even a
+        // badly-behaved lock-service implementation that throws BEFORE
+        // returning any Task (e.g. eager argument validation) must not
+        // short-circuit the fan-out over the other partitions.
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        var lockService = new SelectivelyThrowingLockService(
+            throwingPartitionId: 1, new InvalidOperationException("lock backend unreachable"), throwSynchronously: true);
+        var logger = new Mock<ILogger>();
+        var processor = new TestOutboxProcessor(
+            store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
+            logger.Object, new OutboxProcessorOptions { PartitionCount = 4 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("a synchronous lock-service exception for one partition must never crash the tick");
+        lockService.AttemptedPartitions.Should().BeEquivalentTo(new[] { 0, 1, 2, 3 },
+            "every partition must still be attempted even when an earlier partition's lock call throws synchronously");
+        store.Verify(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(2, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ClaimBatchForPartitionAsync(3, It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.IsAny<It.IsAnyType>(),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.AtLeastOnce, "the lock-service exception must be logged");
     }
 
     [Fact]

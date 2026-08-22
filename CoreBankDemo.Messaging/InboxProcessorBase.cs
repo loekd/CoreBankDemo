@@ -137,18 +137,64 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         await Task.WhenAll(tasks).ConfigureAwait(false);
     }
 
-    private Task ProcessPartitionUnderLockAsync(int partitionId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs one partition under its lock, isolated from every other
+    /// partition's fan-out task. Deliberately wraps the
+    /// <see cref="IDistributedLockService.ExecuteWithLockAsync"/> call itself
+    /// in try/catch — not just relying on <see cref="RunTickAsync"/>'s
+    /// tick-level catch — for two reasons: (1) the story 2.6 I/O matrix
+    /// requires a lock-service exception be "caught at partition level" so
+    /// the other partitions demonstrably still run rather than merely
+    /// racing to finish before <see cref="Task.WhenAll(Task[])"/> observes
+    /// the fault; (2) a lock-service implementation is free to throw
+    /// <em>synchronously</em>, before ever returning a <see cref="Task"/>
+    /// (e.g. eager argument validation) — since <see cref="ProcessPartitionsAsync"/>
+    /// builds its fan-out via an eager <c>Select(...).ToArray()</c>, a
+    /// synchronous throw from one partition's call would otherwise abort
+    /// that enumeration outright and silently skip every partition after it.
+    /// Making this method <c>async</c> guarantees such a throw is always
+    /// captured into the returned <see cref="Task"/> instead, so every
+    /// partition is always attempted regardless of how an earlier one fails.
+    /// </summary>
+    private async Task ProcessPartitionUnderLockAsync(int partitionId, CancellationToken cancellationToken)
     {
         var lockName = $"{LockNamePrefix}-partition-{partitionId}";
 
-        // ExecuteWithLockAsync returning false (lock not acquired) is a
-        // normal, silent skip — not a failure — so its result is intentionally
-        // discarded here.
-        return _lockService.ExecuteWithLockAsync(
-            lockName,
-            _options.LockExpirySeconds,
-            lockedCancellationToken => ProcessPartitionAsync(partitionId, lockedCancellationToken),
-            cancellationToken);
+        try
+        {
+            // ExecuteWithLockAsync returning false (lock not acquired) is a
+            // normal, silent skip — not a failure — so its result is
+            // intentionally discarded here.
+            await _lockService.ExecuteWithLockAsync(
+                lockName,
+                _options.LockExpirySeconds,
+                lockedCancellationToken => ProcessPartitionAsync(partitionId, lockedCancellationToken),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation, not a lock-service failure: an OperationCanceledException
+            // reaching this catch can legitimately be ProcessMessageAsync's own
+            // deliberate rethrow (see its catch (OperationCanceledException) when
+            // (...) { throw; }) propagating through ExecuteWithLockAsync — either
+            // because the ambient stoppingToken fired (normal host shutdown) or
+            // because the lock service supplied the workload its own token (e.g.
+            // a real IDistributedLockService's 5/6-lock-lifetime cutoff, epic 3),
+            // which this method never observes directly and so cannot filter on
+            // via the ambient cancellationToken alone. Either way this is ordinary
+            // cancellation, not a distributed-lock backend failure, so it must not
+            // be logged as "Lock service failed" — doing so would misdirect
+            // on-call diagnosis during a real incident. Rethrown unconditionally
+            // so the tick-level catch still swallows it, same as before.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Lock service failed for inbox partition {PartitionId} (lock {LockName})",
+                partitionId, lockName);
+        }
     }
 
     private async Task ProcessPartitionAsync(int partitionId, CancellationToken cancellationToken)
