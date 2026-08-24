@@ -3,15 +3,6 @@
   <PropertyGroup>
     <!-- Coverage scoped to the target assembly only (gate lives in tests/Directory.Build.props) -->
     <Include>[CoreBankDemo.ServiceDefaults]*</Include>
-    <!-- TODO(story-3.4): remove this override. Story 3.1's Configuration/*.cs types are
-         100% auto-properties (compiler-generated, excluded from coverage by design), so
-         they contribute zero coverable lines on their own. Story 3.2 brings its own tests
-         for IDistributedLockService/NoOpDistributedLockService/DaprDistributedLockService/
-         CooperativeLockCancellation. The module's remaining uncovered surface is
-         Extensions.cs/CloudEventTypes - off-limits until stories 3.3-3.4 land and bring
-         their own tests. Removing this override is 3.4's job once the whole epic's code
-         exists and is covered. -->
-    <Threshold>0</Threshold>
   </PropertyGroup>
 
   <ItemGroup>

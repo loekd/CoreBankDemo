@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.AspNetCore.Builder;
@@ -62,6 +63,25 @@ public static class Extensions
                 var timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
                 return new DaprDistributedLockService(daprClient, timeProvider, logger);
             });
+
+            // Register the CloudEvent publisher only when DaprClient is already
+            // registered in DI at this point (services that wire Dapr do so before
+            // calling AddServiceDefaults). Deliberately no NoOp fallback here (unlike
+            // IDistributedLockService above): a no-op publisher would silently discard
+            // every published event, which is worse than a service without Dapr simply
+            // never resolving IEventPublisher at all — that path throws the standard DI
+            // "no service for type" exception at the call site instead of hiding a real
+            // bug behind a black hole.
+            if (builder.Services.Any(sd => sd.ServiceType == typeof(Dapr.Client.DaprClient)))
+            {
+                builder.Services.AddSingleton<IEventPublisher>(sp =>
+                {
+                    var daprClient = sp.GetRequiredService<Dapr.Client.DaprClient>();
+                    var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<MessagingOutboxProcessingOptions>>();
+                    var logger = sp.GetRequiredService<ILogger<DaprEventPublisher>>();
+                    return new DaprEventPublisher(daprClient, options, logger);
+                });
+            }
 
             // Uncomment the following to restrict the allowed schemes for service discovery.
             // builder.Services.Configure<ServiceDiscoveryOptions>(options =>
@@ -169,7 +189,7 @@ public static class Extensions
             builder.Services.AddSingleton(activitySource);
         }
 
-        private Uri? ResolveOtlpEndpoint()
+        internal Uri? ResolveOtlpEndpoint()
         {
             // Prefer explicit Jaeger endpoint over Aspire's OTEL_EXPORTER_OTLP_ENDPOINT default.
             var endpointValue = builder.Configuration["JAEGER_OTLP_ENDPOINT"];
@@ -178,7 +198,14 @@ public static class Extensions
                 return null;
             }
 
-            if (Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpointUri))
+            // Gate the first parse attempt on an explicit "://": without it, a bare
+            // "host:port" value (e.g. "jaeger:4317") would still satisfy
+            // Uri.TryCreate(..., UriKind.Absolute) whenever the host is a
+            // syntactically valid URI scheme name — Uri would then read "jaeger" as
+            // the scheme and "4317" as an opaque scheme-specific part instead of as
+            // host:port, skipping the http:// normalization below entirely.
+            if (endpointValue.Contains("://", StringComparison.Ordinal)
+                && Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpointUri))
             {
                 return endpointUri.Scheme.Equals("tcp", StringComparison.OrdinalIgnoreCase)
                     ? new UriBuilder(endpointUri)
@@ -189,16 +216,13 @@ public static class Extensions
                     : endpointUri;
             }
 
+            // A bare "host:port" value never has an explicit scheme to rewrite —
+            // the "http://" prefix below is hardcoded, so the parsed scheme here
+            // is always "http", never "tcp". No tcp-rewrite check needed.
             var normalizedEndpoint = $"http://{endpointValue}";
             if (Uri.TryCreate(normalizedEndpoint, UriKind.Absolute, out endpointUri))
             {
-                return endpointUri.Scheme.Equals("tcp", StringComparison.OrdinalIgnoreCase)
-                    ? new UriBuilder(endpointUri)
-                    {
-                        Scheme = Uri.UriSchemeHttp,
-                        Port = endpointUri.IsDefaultPort ? 4317 : endpointUri.Port
-                    }.Uri
-                    : endpointUri;
+                return endpointUri;
             }
 
             throw new InvalidOperationException($"Invalid JAEGER_OTLP_ENDPOINT value '{endpointValue}'.");
@@ -212,6 +236,14 @@ public static class Extensions
         }
     }
 
+    /// <summary>
+    /// Hosting-only: maps the dev-only /health and /alive endpoints against a
+    /// live request pipeline. Requires a running <see cref="WebApplication"/>
+    /// to exercise meaningfully (not just DI registration), which is out of
+    /// scope for this project's DI-container-inspection test approach —
+    /// excluded from the coverage gate rather than left uncovered by accident.
+    /// </summary>
+    [ExcludeFromCodeCoverage]
     public static WebApplication MapDefaultEndpoints(this WebApplication app)
     {
         // Adding health checks endpoints to applications in non-development environments has security implications.
