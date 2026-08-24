@@ -50,12 +50,12 @@ development_status:
   2-6-kernel-failure-path-hardening: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-validated-processing-options: done
   3-2-distributed-lock-port-and-dapr-implementation: done
   3-3-cloudevent-types-and-publisher-port: done
   3-4-service-wiring-defaults: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
   epic-4: backlog
   4-1-domain-model-dbcontext-and-seeding: backlog
