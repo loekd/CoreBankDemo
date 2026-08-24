@@ -56,7 +56,11 @@ public static class Extensions
                 if (daprClient is null)
                     return new NoOpDistributedLockService();
                 var logger = sp.GetRequiredService<ILogger<DaprDistributedLockService>>();
-                return new DaprDistributedLockService(daprClient, logger);
+                // No TimeProvider is registered by AddServiceDefaults itself (story 3.2's
+                // scope is the lock port, not DI-wide time wiring); fall back to the real
+                // clock when nothing else in the host has registered one.
+                var timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
+                return new DaprDistributedLockService(daprClient, timeProvider, logger);
             });
 
             // Uncomment the following to restrict the allowed schemes for service discovery.
