@@ -1,115 +1,38 @@
-using CoreBankDemo.CoreBankAPI.Inbox;
-using CoreBankDemo.CoreBankAPI.Outbox;
-using CoreBankDemo.Messaging.Inbox;
+using CoreBankDemo.CoreBankAPI;
 
-namespace CoreBankDemo.CoreBankAPI;
+var builder = WebApplication.CreateBuilder(args);
 
-public static class Program
+// Dapr must be registered before AddServiceDefaults(): ServiceDefaults only
+// registers IEventPublisher when a DaprClient is already present in DI at
+// that point (epic 3's retrospective flagged the reverse order as a silent
+// registration failure). Nothing in this story consumes IEventPublisher yet
+// (that's story 4.7), but the ordering is set correctly here so later
+// stories don't inherit the landmine.
+builder.Services.AddDaprClient();
+
+builder.AddServiceDefaults("CoreBank.CoreBankAPI");
+
+builder.Services.AddSingleton(TimeProvider.System);
+
+// Database for the ledger, inbox, and outbox tables (connection string name
+// matches the legacy service).
+builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
+
+builder.Services.AddScoped<DemoAccountSeeder>();
+
+var app = builder.Build();
+
+// Ensure schema exists and demo accounts are seeded (idempotent — safe on
+// every startup). No EF migrations, ever (this repo's convention).
+using (var scope = app.Services.CreateScope())
 {
-    public static void Main(string[] args)
-    {
-        var builder = WebApplication.CreateBuilder(args);
+    var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
+    await dbContext.Database.EnsureCreatedAsync();
 
-        // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-        builder.AddServiceDefaults("CoreBank.CoreBankAPI", new[] { nameof(InboxProcessor), nameof(MessagingOutboxProcessor) });
-
-        // DB health check so Aspire's WaitFor blocks until the schema is ready
-        builder.Services.AddHealthChecks()
-            .AddDbContextCheck<CoreBankDbContext>("corebank-db");
-
-        // Add configuration options with validation
-        builder.AddInboxProcessingOptions();
-        builder.AddMessagingOutboxProcessingOptions();
-
-        // Add Dapr
-        builder.Services.AddControllers().AddDapr();
-        builder.Services.AddDaprClient();
-        builder.Services.AddOpenApi();
-        builder.Services.AddEndpointsApiExplorer();
-        builder.Services.AddSwaggerGen();
-
-        // Add TimeProvider
-        builder.Services.AddSingleton(TimeProvider.System);
-
-        // Database for Inbox pattern
-        builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
-        
-        //Register all services
-        builder.Services.AddHostedService<InboxProcessor>();
-        builder.Services.AddHostedService<MessagingOutboxProcessor>();
-        
-        builder.Services.AddScoped<InboxMessageRepositoryBase<InboxMessage, CoreBankDbContext>, InboxMessageRepository>();
-        builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
-        builder.Services.AddScoped<IAccountRepository, AccountRepository>();
-        builder.Services.AddTransient<ITransactionExecutor, TransactionExecutor>();
-        builder.Services.AddTransient<IOutboxPublisher, OutboxPublisher>();
-        builder.Services.AddTransient<TransactionValidator>();
-
-        var app = builder.Build();
-        
-        // Ensure database is created and seeded
-        InitializeDatabaseWithSeedAccounts(app);
-
-        // Map default endpoints (health checks, etc.)
-        app.MapDefaultEndpoints();
-
-        if (app.Environment.IsDevelopment())
-        {
-            app.MapOpenApi();
-            app.UseSwagger();
-            app.UseSwaggerUI();
-        }
-
-        app.MapControllers();
-
-        app.Run();
-    }
-
-    private static void InitializeDatabaseWithSeedAccounts(WebApplication app)
-    {
-        using var scope = app.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-        db.Database.EnsureCreated();
-
-        // Seed accounts if empty
-        if (db.Accounts.Any())
-            return;
-
-        var now = TimeProvider.System.GetUtcNow().UtcDateTime;
-
-        var accounts = new List<Account>
-        {
-            new Account
-            {
-                AccountNumber = "NL91ABNA0417164300",
-                AccountHolderName = "John Doe",
-                Balance = 5000.00m,
-                Currency = "EUR",
-                IsActive = true,
-                CreatedAt = now
-            },
-            new Account
-            {
-                AccountNumber = "NL20INGB0001234567",
-                AccountHolderName = "Jane Smith",
-                Balance = 10000.00m,
-                Currency = "EUR",
-                IsActive = true,
-                CreatedAt = now
-            },
-            new Account
-            {
-                AccountNumber = "NL39RABO0300065264",
-                AccountHolderName = "Bob Johnson",
-                Balance = 2500.00m,
-                Currency = "EUR",
-                IsActive = true,
-                CreatedAt = now
-            }
-        };
-
-
-        db.Accounts.AddRange(accounts);
-        db.SaveChanges();
-    }
+    var seeder = scope.ServiceProvider.GetRequiredService<DemoAccountSeeder>();
+    await seeder.SeedAsync();
 }
+
+app.MapDefaultEndpoints();
+
+app.Run();

@@ -105,6 +105,29 @@ public class DeadOptionMembersTests
     /// equivalently-named options today and are the future rebuild's direct
     /// pattern source, so they stand in as the named reader until epic 4/5
     /// wires the rebuilt processors up to these exact types.
+    /// <para>
+    /// Updated by story 4.1: demolishing legacy
+    /// <c>CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs</c> (epic
+    /// 4's "demolition at epic start") removed the file the
+    /// <see cref="MessagingOutboxProcessingOptions"/> entries pointed at.
+    /// <c>PubSubName</c>/<c>TopicName</c> now point at
+    /// <c>DaprEventPublisher.cs</c>, a real, verified reader since story 3.3
+    /// (<c>options.Value.PubSubName</c>/<c>TopicName</c>, same type, same member
+    /// names). <c>PartitionCount</c>/<c>LockExpirySeconds</c>/<c>PollingIntervalMs</c>
+    /// still have <b>no real reader</b> — pointed at <c>OutboxProcessorBase.cs</c>
+    /// as the closest existing file, but that class reads its own decoupled
+    /// kernel-local <c>OutboxProcessorOptions</c> (epic-3 context: "InboxProcessorOptions/
+    /// OutboxProcessorOptions there are already locally-defined, decoupled
+    /// records"), not this DI-bound type — and even the member names only
+    /// partially match (<c>PartitionCount</c>/<c>LockExpirySeconds</c> line up;
+    /// the kernel's is <c>PollingInterval</c>, a <see cref="TimeSpan"/>, not
+    /// <c>PollingIntervalMs</c>). This is a known, acknowledged gap, not a
+    /// verified consumer — <see cref="Every_known_consumer_path_exists_on_disk"/>
+    /// only proves the path exists (its own documented limitation), so this
+    /// still passes. Story 4.7 must replace these three with the real rebuilt
+    /// <c>MessagingOutboxProcessor</c> path once it maps this options type into
+    /// the kernel's options for real.
+    /// </para>
     /// </summary>
     private static class KnownConsumers
     {
@@ -125,11 +148,11 @@ public class DeadOptionMembersTests
                 },
                 [typeof(MessagingOutboxProcessingOptions)] = new Dictionary<string, string>
                 {
-                    ["PartitionCount"] = "CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs",
-                    ["LockExpirySeconds"] = "CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs",
-                    ["PollingIntervalMs"] = "CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs",
-                    ["PubSubName"] = "CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs",
-                    ["TopicName"] = "CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs",
+                    ["PartitionCount"] = "CoreBankDemo.Messaging/OutboxProcessorBase.cs",
+                    ["LockExpirySeconds"] = "CoreBankDemo.Messaging/OutboxProcessorBase.cs",
+                    ["PollingIntervalMs"] = "CoreBankDemo.Messaging/OutboxProcessorBase.cs",
+                    ["PubSubName"] = "CoreBankDemo.ServiceDefaults/DaprEventPublisher.cs",
+                    ["TopicName"] = "CoreBankDemo.ServiceDefaults/DaprEventPublisher.cs",
                 },
             };
     }

@@ -1,16 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- No ProjectReference to CoreBankDemo.CoreBankAPI yet: MSBuild builds ProjectReferences
-       transitively regardless of slnf membership, so referencing the unmigrated API would
-       break the rebuild gate when it goes red (AD-10).
-       TODO(epic-4 story 4.1): add ProjectReference + <Include>[CoreBankDemo.CoreBankAPI]*</Include>
-       and remove this comment when the target enters the rebuild filter. -->
-
   <PropertyGroup>
-    <!-- TODO(epic-4 story 4.1): remove with the comment above so the 90% gate from
-         tests/Directory.Build.props applies. With no instrumented modules coverlet
-         reports Total 0% and would trip the threshold. -->
-    <Threshold>0</Threshold>
+    <!-- Coverage scoped to the target assembly only (gate lives in tests/Directory.Build.props) -->
+    <Include>[CoreBankDemo.CoreBankAPI]*</Include>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.CoreBankAPI\CoreBankDemo.CoreBankAPI.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- SQLite in-memory is the store test tier (AD-9); version pinned centrally. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+  </ItemGroup>
 
 </Project>

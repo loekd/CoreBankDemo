@@ -1,11 +1,19 @@
 using CoreBankDemo.Messaging;
-using CoreBankDemo.Messaging.Inbox;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
 
+/// <summary>
+/// Incoming transaction-intake message (kernel inbox pattern, AD-4).
+/// <see cref="IdempotencyKey"/> and <see cref="TransactionId"/> are separate
+/// settable properties: the kernel's <see cref="IInboxMessage"/> requires the
+/// former (dedupe identity, unique-indexed), while <see cref="TransactionId"/>
+/// is this service's domain identity. Callers always populate both with the
+/// same value; the entity itself does not enforce that equality — it is a
+/// caller convention, not a runtime invariant (epic-4-context.md).
+/// </summary>
 public class InboxMessage : IInboxMessage
 {
-    // IInboxMessage properties
+    // IInboxMessage / IMessage properties
     public Guid Id { get; set; }
     public required string IdempotencyKey { get; set; }
     public int PartitionId { get; set; }

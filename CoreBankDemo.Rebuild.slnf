@@ -2,6 +2,7 @@
   "solution": {
     "path": "CoreBankDemo.sln",
     "projects": [
+      "CoreBankDemo.CoreBankAPI\\CoreBankDemo.CoreBankAPI.csproj",
       "CoreBankDemo.Messaging\\CoreBankDemo.Messaging.csproj",
       "CoreBankDemo.ServiceDefaults\\CoreBankDemo.ServiceDefaults.csproj",
       "tests\\CoreBankDemo.CoreBankAPI.Tests\\CoreBankDemo.CoreBankAPI.Tests.csproj",
