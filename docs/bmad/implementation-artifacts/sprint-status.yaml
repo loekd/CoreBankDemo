@@ -53,7 +53,7 @@ development_status:
   epic-3: in-progress
   3-1-validated-processing-options: done
   3-2-distributed-lock-port-and-dapr-implementation: done
-  3-3-cloudevent-types-and-publisher-port: backlog
+  3-3-cloudevent-types-and-publisher-port: done
   3-4-service-wiring-defaults: backlog
   epic-3-retrospective: optional
 
