@@ -10,7 +10,20 @@ followup_review_recommended: false
 context:
   - '{project-root}/docs/bmad/implementation-artifacts/epic-4-context.md'
 warnings: ['oversized']
-deferred: []
+deferred:
+  - summary: >-
+      TransactionExecutor's decimal balance arithmetic has no overflow guard
+      when a destination balance nears decimal.MaxValue.
+    evidence: |-
+      Edge Case Hunter flagged CoreBankDemo.CoreBankAPI/Inbox/TransactionExecutor.cs:48-50
+      (`toAccount.Balance += amount`) as unguarded against decimal overflow.
+      This is a pre-existing class of risk inherited from the legacy executor's
+      identical unguarded arithmetic (git show 121e3b3^:CoreBankDemo.CoreBankAPI/Inbox/TransactionExecutor.cs),
+      not a regression introduced by this story, and unreachable at the demo's
+      realistic balance ranges.
+    location: >-
+      CoreBankDemo.CoreBankAPI/Inbox/TransactionExecutor.cs:48-50
+    severity: low
 ---
 
 <intent-contract>
@@ -68,6 +81,15 @@ deferred: []
 
 ## Review Triage Log
 
+### 2026-08-25 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 0
+- defer: 1: (high 0, medium 0, low 1)
+- reject: 14: (high 0, medium 0, low 14)
+- addressed_findings:
+  - none
+
 ## Design Notes
 
 Lock-order tie-break: "alphabetical order" is by account number string (ordinal comparison), independent of which side is `from`/`to` — this matches the legacy executor's own comment ("lock accounts in consistent alphabetical order to prevent deadlocks") and story 4.2's ordinal same-account check. For a same-account transfer, only one `LockForUpdateAsync` call happens (deduping by account number) since locking the same row twice is redundant, not incorrect, but the test matrix asserts the call count to guard against an accidental double-lock regression.
@@ -79,6 +101,28 @@ The result type `TransactionExecutionResult` is intentionally not a wire contrac
 **Commands:**
 - `dotnet build CoreBankDemo.Messaging/CoreBankDemo.Messaging.csproj --no-restore` -- passed
 - `dotnet test CoreBankDemo.Rebuild.slnf --no-restore` -- passed; `CoreBankDemo.CoreBankAPI.Tests` reached 98.19% line coverage
+
+## Auto Run Result
+
+**Summary:** Implemented `IAccountRepository`/`AccountRepository` (row-lock port + provider-agnostic lookup) and `ITransactionExecutor`/`TransactionExecutor` (ordered locking, validation dispatch, balance mutation, frozen response construction), plus the recreated frozen `TransactionResponse` wire contract. No `SaveChangesAsync` or `InboxMessage` mutation is performed here, per AD-5/AD-11 — that lands in story 4.6.
+
+**Files changed:**
+- `CoreBankDemo.CoreBankAPI/Inbox/AccountRepository.cs` — new port + adapter; `LockForUpdateAsync` (excluded raw-SQL pass-through) and `FindByAccountNumberAsync` (SQLite-tested).
+- `CoreBankDemo.CoreBankAPI/Inbox/TransactionExecutor.cs` — new executor: alphabetical lock order, `TransactionValidator` dispatch, in-memory balance mutation, `TransactionExecutionResult` construction.
+- `CoreBankDemo.CoreBankAPI/Models/TransactionResponse.cs` — new frozen record, recreated verbatim from pre-demolition `main`.
+- `CoreBankDemo.CoreBankAPI/CoreBankDemo.CoreBankAPI.csproj` — added `InternalsVisibleTo` for the test project and Moq's `DynamicProxyGenAssembly2`.
+- `tests/CoreBankDemo.CoreBankAPI.Tests/AccountRepositoryTests.cs` — new SQLite-backed repository tests.
+- `tests/CoreBankDemo.CoreBankAPI.Tests/TransactionExecutorTests.cs` — new Moq-based executor tests (lock order, same-account dedup, 6 validator-failure scenarios).
+
+**Review findings breakdown:** 0 patched, 1 deferred (low), 14 rejected (low) — see `## Review Triage Log` above for detail.
+
+**Follow-up review recommendation:** `false`. This pass triaged 0 findings as `patch`, so the score is `3 × 0 + 1 × 0 = 0`, below the threshold, and no patched finding was `high`.
+
+**Verification performed:**
+- `dotnet build CoreBankDemo.Messaging/CoreBankDemo.Messaging.csproj --no-restore` — passed.
+- `dotnet test CoreBankDemo.Rebuild.slnf --no-restore` — passed; `CoreBankDemo.CoreBankAPI.Tests` 39/39 at 98.19% line / 100% branch / 100% method coverage; no regressions in `Messaging.Tests` (153/153), `ServiceDefaults.Tests` (117/117), or `PaymentsAPI.Tests` (1/1).
+
+**Residual risks:** The deferred decimal-overflow class of risk on ledger balance arithmetic (pre-existing, inherited from legacy code, out of this story's scope) remains unaddressed and tracked in frontmatter `deferred`.
 
 ## Suggested Review Order
 
