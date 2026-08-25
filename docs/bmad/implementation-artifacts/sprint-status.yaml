@@ -59,8 +59,8 @@ development_status:
 
   epic-4: in-progress
   4-1-domain-model-dbcontext-and-seeding: done
-  4-2-transaction-validation: review
-  4-3-account-repository-and-transaction-executor: review
+  4-2-transaction-validation: done
+  4-3-account-repository-and-transaction-executor: done
   4-4-idempotent-transaction-intake: backlog
   4-5-account-endpoints: backlog
   4-6-atomic-inbox-execution-with-event-enqueue: backlog
