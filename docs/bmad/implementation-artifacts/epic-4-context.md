@@ -1,8 +1,10 @@
-# Epic 4 (E3) Context — CoreBankAPI
+# Epic 4 Context: CoreBankAPI
+
+<!-- Generated from planning artifacts. Regenerate with compile-epic-context if planning docs change. -->
 
 ## Goal
 
-Rebuild `CoreBankDemo.CoreBankAPI` (the ledger service) from scratch, test-first: domain model + DbContext + seeding, pure transaction validation, account repository + transaction executor, idempotent transaction intake, account endpoints, atomic inbox execution with event enqueue, and an event-publishing processor on the epic-2 kernel. Demolition at epic start (FR-9..FR-16; AD-2, AD-4, AD-5, AD-11).
+Rebuild CoreBankAPI as the ledger service that accepts idempotent transaction requests, executes money movement exactly once, exposes account-validation and account-details endpoints, and publishes transaction outcome events without changing the demo’s external behavior. This epic matters because it is where the system’s core guarantees are enforced: balance conservation, per-key ordering, replay-safe processing, and transactional coupling between ledger state and emitted events.
 
 ## Stories
 
@@ -16,115 +18,28 @@ Rebuild `CoreBankDemo.CoreBankAPI` (the ledger service) from scratch, test-first
 
 ## Requirements & Constraints
 
-- Controllers contain no business logic (AD-2): bind → call handler → map. Application classes depend only on ports + `TimeProvider` + `ILogger<T>`.
-- Idempotency key equals `TransactionId` at CoreBankAPI (AD-4); `PartitionId = FNV-1a(key) % PartitionCount`, `PartitionCount = 4`.
-- Ledger mutation, inbox completion (with cached response), and domain-event enqueue commit in **one** DB transaction; no network I/O inside a DB transaction (AD-5).
-- Message `Status` values are transport states only; a business rejection (invalid account, insufficient funds) is a **successfully processed** message — inbox row completes with a cached failure `ResponsePayload` and a `TransactionFailed` event, never `Failed` (AD-11).
-- Repository implementations are provider-agnostic (LINQ, shared unique-violation helper) except minimal `[ExcludeFromCodeCoverage]` pass-throughs for provider-specific SQL (`FOR UPDATE`) (AD-9).
-- Coverage gate (line, 90%) applies once the project enters `CoreBankDemo.Rebuild.slnf`; the test csproj's own `TODO(epic-4 story 4.1)` comment explicitly reserves removing the `Threshold=0` override for **this story**, not a later one (unlike epic 3's ServiceDefaults, which deferred it to its last story).
-- One owner per seed dataset: CoreBankAPI startup seeds exactly the 3 demo accounts; the 10 `NL..LOAD` load-test accounts belong to `LoadTestSupport` (epic 7), out of scope here.
-- All work targets `CoreBankDemo.Rebuild.slnf`, not the full solution.
+CoreBankAPI must keep the frozen external contract intact: transaction intake still accepts a transaction request and returns `202` on accepted work, duplicate requests never re-run business logic, completed duplicates replay the cached response, and in-flight duplicates report current status. The status endpoint must report transaction state by idempotency key, while account endpoints must support destination validation and account-detail lookup with unchanged response semantics.
+
+Transaction processing must be exactly-once at the business level. Each request is deduped by transaction id, which is also the idempotency key in this service. Validation failures are terminal business outcomes, not transport failures: they must cache a failure response, avoid balance changes, enqueue a failure event, and complete processing without retrying. Success must update balances once, cache the success response, and enqueue the related domain events.
+
+Execution must preserve the system invariants that drive the overall demo: exactly-once processing, zero message loss, balance conservation, terminal completeness, and per-key ordering. Trace context must survive intake, processing, and event publication. Request validation must return all detected input errors together. The epic also inherits rebuild constraints: no new external behavior, no EF migrations, and all work should stay green through the rebuild solution filter with the existing coverage expectations for logic-heavy code.
+
+Startup data ownership is fixed. CoreBankAPI is responsible only for idempotently seeding the three demo accounts; the load-test account set belongs to LoadTestSupport and must not be duplicated here.
 
 ## Technical Decisions
 
-- **Demolition at epic start:** all existing `CoreBankDemo.CoreBankAPI/*.cs` legacy sources (Account, Controllers, CoreBankDbContext, Inbox/, Models/, Outbox/, Program.cs) are deleted; the project is rebuilt story-by-story on top of the epic-2/epic-3 kernel and ports. `CoreBankDemo.CoreBankAPI.csproj` itself (not yet in the rebuild filter) enters `CoreBankDemo.Rebuild.slnf` at story 4.1.
-- **Field rename `FromAccount` → `AccountNumber` on the messaging-outbox row:** legacy `MessagingOutboxMessage.FromAccount` was a misnomer — the field identifies *which account this particular outbox row's event concerns* (from-account or to-account, depending on which of the two `BalanceUpdated` events the row represents), not literally the transaction's source account. AD-4's own text names the composite dedupe key as `(TransactionId, EventType, AccountNumber?)` — the rebuild adopts that name.
-- **`IdempotencyKey` vs `TransactionId` on `InboxMessage`:** the kernel's `IInboxMessage` interface requires an `IdempotencyKey` property; CoreBankAPI's domain-specific `TransactionId` is a separate property always populated with the same value (confirmed in legacy `TransactionsController.BuildInboxMessage`: `IdempotencyKey = request.TransactionId`). The DB unique index therefore lives on `IdempotencyKey` (the kernel-required column `StoreIfNewAsync` dedupes on), which is functionally equivalent to "unique on TransactionId" per epics.md's story 4.1 AC.
-- **Seeding must be unit-testable:** Program.cs stays hosting-only/thin; the idempotent seed-3-demo-accounts logic is a separate, directly-testable component (SQLite in-memory, tier 2 per AD-9), not inlined into `Main`.
+CoreBankAPI is built on the shared messaging kernel and ServiceDefaults abstractions instead of custom polling or transport code. Idempotent stores must rely on schema-enforced uniqueness plus shared store helpers rather than check-then-insert logic. Partitioning and ordering use a single rule everywhere: `PartitionId` is derived from the idempotency key with FNV-1a hashing and a partition count of four.
 
-## Legacy Behavioral Reference
+The ledger’s critical write path is atomic by design. Ledger mutation, inbox completion with cached response, and domain-event enqueue must commit in one database transaction, and no network I/O is allowed inside that transaction. Event publication happens only after commit through a messaging outbox processor using the same partition, locking, retry, and trace-restoration patterns as the other processors in the system.
 
-Old `CoreBankDemo.CoreBankAPI` sources are deleted at epic start; this is what existed and must be preserved (with the `AccountNumber` rename) or explicitly superseded.
+Infrastructure access stays behind explicit ports and thin repositories. Distributed locking, event publishing, time, and persistence dependencies should be injected through the established interfaces, while provider-specific SQL is confined to minimal repository pass-throughs. Repositories are otherwise expected to stay provider-agnostic so logic can be proven in unit tests and store behavior can be exercised on SQLite.
 
-**`Account`** (plain EF entity, no interface):
-```csharp
-public class Account
-{
-    public required string AccountNumber { get; set; }
-    public required string AccountHolderName { get; set; }
-    public decimal Balance { get; set; }
-    public required string Currency { get; set; }
-    public bool IsActive { get; set; }
-    public DateTime CreatedAt { get; set; }
-    public DateTime? UpdatedAt { get; set; }
-}
-```
+Message status values are transport states, not business outcomes. Business rejection still results in a completed inbox item with a cached failure response and a `TransactionFailed` event. Event identities are also deliberate: the transaction intake store dedupes on the idempotency key alone, while the messaging outbox dedupes per emitted event so one transaction can legitimately produce multiple records. Published events must use the fixed CloudEvent type constants, Dapr pubsub/topic, and propagated trace context already defined for the demo.
 
-**`InboxMessage`** implements the kernel's `IInboxMessage` (from `CoreBankDemo.Messaging`) plus domain-specific fields:
-```csharp
-public class InboxMessage : IInboxMessage
-{
-    public Guid Id { get; set; }
-    public required string IdempotencyKey { get; set; }
-    public int PartitionId { get; set; }
-    public string Status { get; set; } = MessageConstants.Status.Pending;
-    public DateTime ReceivedAt { get; set; }
-    public DateTime? ProcessedAt { get; set; }
-    public int RetryCount { get; set; }
-    public string? LastError { get; set; }
-    public string? TraceParent { get; set; }
-    public string? TraceState { get; set; }
-    // Domain-specific
-    public required string FromAccount { get; set; }
-    public required string ToAccount { get; set; }
-    public decimal Amount { get; set; }
-    public required string Currency { get; set; }
-    public required string TransactionId { get; set; }
-    public string? ResponsePayload { get; set; }
-}
-```
-
-**`MessagingOutboxMessage`** — implements the kernel's `IOutboxMessage`; legacy `FromAccount` renamed to `AccountNumber` per the ruling above:
-```csharp
-public class MessagingOutboxMessage : IOutboxMessage
-{
-    public Guid Id { get; set; }
-    public int PartitionId { get; set; }
-    public required string IdempotencyKey { get; set; } // = TransactionId, kernel-required
-    public required string TransactionId { get; set; }
-    public required string Status { get; set; }
-    public required string EventType { get; set; }
-    public required string EventSource { get; set; }
-    public required string AccountNumber { get; set; } // renamed from legacy FromAccount
-    public required string ToAccount { get; set; }
-    public decimal Amount { get; set; }
-    public decimal? NewBalance { get; set; }
-    public required string Currency { get; set; }
-    public required string TransactionStatus { get; set; }
-    public string? ErrorReason { get; set; }
-    public DateTime CreatedAt { get; set; }
-    public DateTime? ProcessedAt { get; set; }
-    public int RetryCount { get; set; }
-    public string? LastError { get; set; }
-    public string? TraceParent { get; set; }
-    public string? TraceState { get; set; }
-}
-```
-(Story 4.1 writes the entity shape and DbContext mapping; whether `IOutboxMessage` requires an explicit `IdempotencyKey` member distinct from `TransactionId` is confirmed against the kernel's actual interface — see Boundaries.)
-
-**`CoreBankDbContext.OnModelCreating`** (target shape, `AccountNumber` renamed as above):
-- `InboxMessage`: PK `Id`; unique index on `IdempotencyKey`; composite index on `(PartitionId, Status, ReceivedAt)`; index on `Status`; index on `ReceivedAt`; `MaxLength` constraints (`IdempotencyKey` 100, `FromAccount`/`ToAccount` 50, `Currency` 3, `TransactionId` 100, `Status` 20, `TraceParent` 55, `TraceState` 512).
-- `Account`: PK `AccountNumber` (MaxLength 50); `AccountHolderName` required (MaxLength 200); `Currency` required (MaxLength 3); index on `IsActive`.
-- `MessagingOutboxMessage`: PK `Id`; composite index on `(PartitionId, Status, CreatedAt)`; **unique** composite index on `(TransactionId, EventType, AccountNumber)`; index on `Status`; `MaxLength` constraints (`TransactionId` 100, `Status` 20, `EventType` 100, `EventSource` 200, `TraceParent` 55, `TraceState` 512).
-
-**Startup seeding** (legacy `Program.InitializeDatabaseWithSeedAccounts`, target behavior — component extracted for testability, not inlined in `Main`):
-```csharp
-if (db.Accounts.Any()) return; // idempotent: second run adds nothing
-
-var accounts = new[] {
-    new Account { AccountNumber = "NL91ABNA0417164300", AccountHolderName = "John Doe",     Balance = 5000.00m,  Currency = "EUR", IsActive = true, CreatedAt = now },
-    new Account { AccountNumber = "NL20INGB0001234567", AccountHolderName = "Jane Smith",   Balance = 10000.00m, Currency = "EUR", IsActive = true, CreatedAt = now },
-    new Account { AccountNumber = "NL39RABO0300065264", AccountHolderName = "Bob Johnson",  Balance = 2500.00m,  Currency = "EUR", IsActive = true, CreatedAt = now },
-};
-db.Accounts.AddRange(accounts);
-db.SaveChanges();
-```
-Exact account numbers, holder names, balances, and currency must be preserved byte-for-byte (external demo narrative depends on these).
+Service conventions in this epic remain strict: controllers stay thin and avoid business logic, request validation surfaces aggregated errors, `TimeProvider` is used instead of direct clock access, structured logging includes idempotency and partition context where applicable, persistence uses EF Core with `EnsureCreated()`, and rebuild validation runs through `CoreBankDemo.Rebuild.slnf`.
 
 ## Cross-Story Dependencies
 
-- Story 4.1 is a hard dependency for the rest of the epic: `CoreBankDbContext`, `Account`, `InboxMessage`, `MessagingOutboxMessage` are the shapes every later story's repository/executor/controller/processor builds on.
-- Story 4.1 also does the one-time project-filter admission work (`CoreBankDemo.Rebuild.slnf`, test csproj `ProjectReference`+`Include`, `Threshold=0` removal) that the rest of the epic depends on for its coverage gate to mean anything.
-- Story 4.3 (account repository + transaction executor) is the first consumer of `IAccountRepository`'s `FOR UPDATE` pass-through pattern (AD-9) — story 4.1 does not need to anticipate that repository, only the entity shapes it will operate on.
-- Story 4.6 (atomic inbox execution) is where `MessagingOutboxMessage` rows actually get created inside the same transaction as the ledger mutation (AD-5) — story 4.1 only owns the schema, not the write path.
-- Story 4.7 depends on epic 3's `IEventPublisher`/`DaprEventPublisher` (done) — and inherits epic 3's carry-forward obligation that `CoreBankAPI/Program.cs` must register `AddDaprClient()` **before** `AddServiceDefaults()`, or `IEventPublisher` will silently never register (see epic-3-retrospective.md and `deferred-work.md`). Story 4.1's minimal `Program.cs` should get this ordering right from the start even though `IEventPublisher` isn't consumed until 4.7, so later stories don't inherit the landmine.
+This epic depends on the messaging kernel and ServiceDefaults epics being in place first, because CoreBankAPI reuses their message contracts, processors, locking, event publisher port, CloudEvent constants, and trace-handling rules. Within the epic, the data model and store shape underpin every later story; validation and execution behavior then feed both intake semantics and atomic inbox processing; and event publication only makes sense after transactional event enqueue exists.
+
+CoreBankAPI also provides capabilities used outside the epic: PaymentsAPI depends on the account-validation endpoint for forwarding checks, on transaction intake for reliable handoff, and later on the published transaction events for downstream status handling. That makes API compatibility and event semantics a cross-epic contract, not an implementation detail.
