@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-21-2026 16:00
-last_updated: 08-25-2026 13:35
+last_updated: 08-25-2026 13:45
 project: CoreBankDemo
 project_key: NOKEY
 tracking_system: file-system
@@ -60,7 +60,7 @@ development_status:
   epic-4: in-progress
   4-1-domain-model-dbcontext-and-seeding: done
   4-2-transaction-validation: review
-  4-3-account-repository-and-transaction-executor: backlog
+  4-3-account-repository-and-transaction-executor: review
   4-4-idempotent-transaction-intake: backlog
   4-5-account-endpoints: backlog
   4-6-atomic-inbox-execution-with-event-enqueue: backlog
