@@ -42,6 +42,12 @@ builder.AddInboxProcessingOptions();
 builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
 builder.Services.AddScoped<ITransactionIntakeHandler, TransactionIntakeHandler>();
 
+// Account read surface (story 4.5): IAccountRepository was built in story 4.3
+// but never registered in DI until now (only this story's controller-facing
+// wiring was deferred, not the repository's own registration).
+builder.Services.AddScoped<IAccountRepository, AccountRepository>();
+builder.Services.AddScoped<IAccountQueryHandler, AccountQueryHandler>();
+
 var app = builder.Build();
 
 // Ensure schema exists and demo accounts are seeded (idempotent — safe on
