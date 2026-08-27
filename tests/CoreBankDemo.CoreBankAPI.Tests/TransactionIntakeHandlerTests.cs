@@ -1,0 +1,334 @@
+using System.Text.Json;
+using AwesomeAssertions;
+using CoreBankDemo.CoreBankAPI.Inbox;
+using CoreBankDemo.CoreBankAPI.Models;
+using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Moq;
+using Xunit;
+
+namespace CoreBankDemo.CoreBankAPI.Tests;
+
+/// <summary>
+/// Tier 1 (Moq against <see cref="IInboxMessageRepository"/>, no real
+/// database) — covers every row of spec-4-4's I/O &amp; Edge-Case Matrix for
+/// <see cref="TransactionIntakeHandler.ProcessAsync"/>.
+/// </summary>
+public class TransactionIntakeHandlerTests
+{
+    private const string FromAccount = "NL91ABNA0417164300";
+    private const string ToAccount = "NL20INGB0001234567";
+    private const string TransactionId = "txn-123";
+
+    private readonly FakeTimeProvider _timeProvider = new();
+    private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
+
+    private TransactionIntakeHandler CreateHandler(int partitionCount = 4) =>
+        new(_repository.Object,
+            Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
+            _timeProvider,
+            NullLogger<TransactionIntakeHandler>.Instance);
+
+    private static TransactionRequest ValidRequest(string transactionId = TransactionId) =>
+        new(FromAccount, ToAccount, 50m, "EUR", transactionId);
+
+    [Fact]
+    public async Task ProcessAsync_stores_a_pending_row_and_returns_accepted_for_a_fresh_transaction_id()
+    {
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+
+        var handler = CreateHandler(partitionCount: 4);
+        var request = ValidRequest();
+
+        var result = await handler.ProcessAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        result.Errors.Should().BeNull();
+        result.Response.Should().Be(new TransactionResponse(TransactionId, MessageConstants.Status.Pending, _timeProvider.GetUtcNow()));
+
+        stored.Should().NotBeNull();
+        stored!.IdempotencyKey.Should().Be(TransactionId);
+        stored.TransactionId.Should().Be(TransactionId);
+        stored.FromAccount.Should().Be(FromAccount);
+        stored.ToAccount.Should().Be(ToAccount);
+        stored.Amount.Should().Be(50m);
+        stored.Currency.Should().Be("EUR");
+        stored.Status.Should().Be(MessageConstants.Status.Pending);
+        stored.ReceivedAt.Should().Be(_timeProvider.GetUtcNow().UtcDateTime);
+        stored.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 4));
+
+        _repository.Verify(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()), Times.Once);
+        _repository.Verify(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Once);
+        _repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_uses_the_configured_partition_count_when_computing_the_partition_id()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+
+        var handler = CreateHandler(partitionCount: 7);
+
+        await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        stored!.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 7));
+    }
+
+    [Fact]
+    public async Task ProcessAsync_replays_the_cached_response_verbatim_for_a_completed_duplicate()
+    {
+        var cachedResponse = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow().AddMinutes(-5));
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: JsonSerializer.Serialize(cachedResponse));
+
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Replayed);
+        result.Response.Should().Be(cachedResponse);
+        result.Errors.Should().BeNull();
+
+        _repository.Verify(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()), Times.Once);
+        _repository.VerifyNoOtherCalls();
+    }
+
+    [Theory]
+    [InlineData(MessageConstants.Status.Pending)]
+    [InlineData(MessageConstants.Status.Processing)]
+    public async Task ProcessAsync_returns_in_flight_with_current_status_for_a_pending_or_processing_duplicate(string status)
+    {
+        var existing = ExistingMessage(status);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
+        result.Errors.Should().BeNull();
+        result.Response.Should().Be(new TransactionResponse(TransactionId, status, new DateTimeOffset(existing.ReceivedAt, TimeSpan.Zero)));
+    }
+
+    [Fact]
+    public async Task ProcessAsync_returns_transport_failed_with_the_last_error_for_a_failed_duplicate()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Failed, lastError: "boom");
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.TransportFailed);
+        result.Response.Should().BeNull();
+        result.Errors.Should().Equal("boom");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_back_to_a_default_error_message_when_a_failed_duplicate_has_no_last_error()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Failed, lastError: null);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.TransportFailed);
+        result.Errors.Should().Equal("Transaction failed");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_re_queries_and_branches_as_found_when_it_loses_the_store_race()
+    {
+        var winner = ExistingMessage(MessageConstants.Status.Pending);
+        _repository.SetupSequence(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null)
+            .ReturnsAsync(winner);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
+        result.Response.Should().Be(new TransactionResponse(TransactionId, MessageConstants.Status.Pending, new DateTimeOffset(winner.ReceivedAt, TimeSpan.Zero)));
+
+        _repository.Verify(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _repository.Verify(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Once);
+        _repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_never_crashes_when_the_store_race_loser_finds_nothing_on_re_query()
+    {
+        _repository.SetupSequence(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null)
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.TransportFailed);
+        result.Response.Should().BeNull();
+        result.Errors.Should().NotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_through_to_in_flight_when_a_completed_duplicates_response_payload_is_null_or_empty()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: null);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        // Defensive edge case (spec-4-4 matrix): a Completed row with a
+        // null/empty payload must not crash on deserialize. There is no
+        // dedicated "corrupt data" outcome for POST, so it is reported the
+        // same way any other non-terminal-looking status would be.
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Completed);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_through_to_in_flight_when_a_completed_duplicates_response_payload_is_corrupt()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: "{not-valid-json");
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        // Same defensive fallback as a null/empty payload: malformed JSON must
+        // never crash the request (AD-5 guarantees this "should not happen").
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Completed);
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_returns_not_found_when_no_row_exists()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+
+        var handler = CreateHandler();
+
+        var result = await handler.GetStatusAsync(TransactionId, TestContext.Current.CancellationToken);
+
+        result.Found.Should().BeFalse();
+        result.CachedResponse.Should().BeNull();
+        result.StatusResponse.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_returns_the_deserialized_cached_response_for_a_completed_row()
+    {
+        var cachedResponse = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow());
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: JsonSerializer.Serialize(cachedResponse));
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.GetStatusAsync(TransactionId, TestContext.Current.CancellationToken);
+
+        result.Found.Should().BeTrue();
+        result.CachedResponse.Should().Be(cachedResponse);
+        result.StatusResponse.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(MessageConstants.Status.Pending)]
+    [InlineData(MessageConstants.Status.Processing)]
+    [InlineData(MessageConstants.Status.Failed)]
+    public async Task GetStatusAsync_returns_a_status_response_for_any_other_status_including_failed(string status)
+    {
+        var existing = ExistingMessage(status, lastError: status == MessageConstants.Status.Failed ? "boom" : null);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.GetStatusAsync(TransactionId, TestContext.Current.CancellationToken);
+
+        result.Found.Should().BeTrue();
+        result.CachedResponse.Should().BeNull();
+        result.StatusResponse.Should().Be(new TransactionStatusResponse(TransactionId, status, existing.ReceivedAt, existing.ProcessedAt));
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_falls_through_to_a_status_response_when_a_completed_rows_payload_is_null_or_empty()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: "");
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.GetStatusAsync(TransactionId, TestContext.Current.CancellationToken);
+
+        result.Found.Should().BeTrue();
+        result.CachedResponse.Should().BeNull();
+        result.StatusResponse.Should().Be(new TransactionStatusResponse(TransactionId, MessageConstants.Status.Completed, existing.ReceivedAt, existing.ProcessedAt));
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_falls_through_to_a_status_response_when_a_completed_rows_payload_is_corrupt()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: "{not-valid-json");
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.GetStatusAsync(TransactionId, TestContext.Current.CancellationToken);
+
+        result.Found.Should().BeTrue();
+        result.CachedResponse.Should().BeNull();
+        result.StatusResponse.Should().Be(new TransactionStatusResponse(TransactionId, MessageConstants.Status.Completed, existing.ReceivedAt, existing.ProcessedAt));
+    }
+
+    private InboxMessage ExistingMessage(string status, string? responsePayload = null, string? lastError = null) => new()
+    {
+        Id = Guid.NewGuid(),
+        IdempotencyKey = TransactionId,
+        TransactionId = TransactionId,
+        FromAccount = FromAccount,
+        ToAccount = ToAccount,
+        Amount = 50m,
+        Currency = "EUR",
+        PartitionId = 0,
+        Status = status,
+        ReceivedAt = _timeProvider.GetUtcNow().AddMinutes(-1).UtcDateTime,
+        ProcessedAt = status == MessageConstants.Status.Completed ? _timeProvider.GetUtcNow().UtcDateTime : null,
+        ResponsePayload = responsePayload,
+        LastError = lastError
+    };
+}

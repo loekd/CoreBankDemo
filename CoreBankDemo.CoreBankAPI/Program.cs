@@ -1,4 +1,6 @@
 using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.CoreBankAPI.Inbox;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,6 +22,26 @@ builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
 
 builder.Services.AddScoped<DemoAccountSeeder>();
 
+// Transaction intake (story 4.4): controllers, the manual-ModelState fix
+// (see below), inbox partitioning options, and the intake port/handler pair.
+// No hosted service, IAccountRepository, ITransactionExecutor, or
+// IEventPublisher registration yet — those are stories 4.6/4.7.
+builder.Services.AddControllers();
+
+// [ApiController]'s default automatic-400 behavior would otherwise return a
+// framework ValidationProblemDetails shape and short-circuit before the
+// controller action ever runs, making its manual ModelState.IsValid check
+// unreachable dead code (legacy's brownfield defect — spec-4-4's fix).
+builder.Services.Configure<ApiBehaviorOptions>(options =>
+{
+    options.SuppressModelStateInvalidFilter = true;
+});
+
+builder.AddInboxProcessingOptions();
+
+builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
+builder.Services.AddScoped<ITransactionIntakeHandler, TransactionIntakeHandler>();
+
 var app = builder.Build();
 
 // Ensure schema exists and demo accounts are seeded (idempotent — safe on
@@ -34,5 +56,6 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapDefaultEndpoints();
+app.MapControllers();
 
 app.Run();
