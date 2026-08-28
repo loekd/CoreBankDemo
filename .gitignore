@@ -17,3 +17,4 @@ _bmad/config.user.toml
 
 # Coverlet output (tests/Directory.Build.props gate)
 tests/**/coverage.json
+dotnet/runfile-discovery/CoreBankDemo-28ffb55a5460842cf50353e2d7ceb84e595d4bd536a9f289175b85dab0fde9ba/cache.staging.json
