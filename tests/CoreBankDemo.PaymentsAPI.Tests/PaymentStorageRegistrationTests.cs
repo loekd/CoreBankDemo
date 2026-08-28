@@ -2,6 +2,10 @@ using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http.Metadata;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -69,6 +73,34 @@ public class PaymentStorageRegistrationTests
         var act = startupValidator.Validate;
 
         act.Should().Throw<OptionsValidationException>();
+    }
+
+    [Fact]
+    public void Deployed_mvc_options_suppress_the_automatic_model_state_invalid_filter()
+    {
+        var services = new ServiceCollection();
+        services.AddPaymentIntake();
+        using var provider = services.BuildServiceProvider();
+
+        provider.GetRequiredService<IOptions<ApiBehaviorOptions>>()
+            .Value.SuppressModelStateInvalidFilter.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Deployed_endpoint_mapping_exposes_post_payments_route()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Services.AddPaymentIntake();
+        await using var app = builder.Build();
+
+        app.MapPaymentIntake();
+
+        var endpoint = ((IEndpointRouteBuilder)app).DataSources
+            .SelectMany(source => source.Endpoints)
+            .OfType<RouteEndpoint>()
+            .Single(candidate => candidate.RoutePattern.RawText == "api/Payments");
+        endpoint.Metadata.GetMetadata<HttpMethodMetadata>()!.HttpMethods
+            .Should().Equal(HttpMethods.Post);
     }
 
     [Fact]

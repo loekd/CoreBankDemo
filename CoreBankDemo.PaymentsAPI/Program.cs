@@ -1,5 +1,4 @@
 using CoreBankDemo.PaymentsAPI;
-
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults("CoreBank.PaymentsAPI");
@@ -10,6 +9,8 @@ builder.Services.AddHealthChecks()
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 builder.Services.AddPaymentStorage(builder.Configuration);
 
+builder.Services.AddPaymentIntake();
+
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
@@ -19,5 +20,6 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapDefaultEndpoints();
+app.MapPaymentIntake();
 
 app.Run();

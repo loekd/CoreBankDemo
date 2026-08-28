@@ -69,7 +69,7 @@ development_status:
 
   epic-5: in-progress
   5-1-payment-store-and-idempotency-key-handling: review
-  5-2-payment-intake-endpoint: backlog
+  5-2-payment-intake-endpoint: review
   5-3-contract-generated-kiota-corebank-client: backlog
   5-4-forwarding-processor: backlog
   5-5-event-subscription-intake: backlog

@@ -34,7 +34,7 @@ public sealed record PaymentStorageResult(
     PaymentSnapshot? Payment,
     IReadOnlyList<string> Errors);
 
-internal interface IPaymentStorageHandler
+public interface IPaymentStorageHandler
 {
     Task<PaymentStorageResult> StoreAsync(
         PaymentRequest request,
