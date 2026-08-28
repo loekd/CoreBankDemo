@@ -53,11 +53,6 @@ builder.Services.AddScoped<ITransactionExecutor, TransactionExecutor>();
 builder.Services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
 builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionExecutionHandler>();
 builder.Services.AddHostedService<InboxProcessor>();
-builder.Services.AddScoped<MessagingOutboxRepository>();
-builder.Services.AddScoped<IOutboxMessageStore<MessagingOutboxMessage>>(
-    sp => sp.GetRequiredService<MessagingOutboxRepository>());
-builder.Services.AddScoped<IOutboxDeliveryStrategy<MessagingOutboxMessage>, DaprOutboxDeliveryStrategy>();
-builder.Services.AddHostedService<MessagingOutboxProcessor>();
 
 // Account read surface (story 4.5): IAccountRepository was built in story 4.3
 // but never registered in DI until now (only this story's controller-facing
