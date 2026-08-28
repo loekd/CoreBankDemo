@@ -16,7 +16,7 @@
     "ghcr.io/microsoft/aspire-devcontainer-feature/aspire:2": {}
   },
   "mounts": [
-    "source=${localEnv:HOME}/.aspnet/https,target=/home/vscode/.aspnet/https-host,type=bind,consistency=cached,readonly"
+    "source=/Users/loekd/.aspnet/https,target=/home/vscode/.aspnet/https-host,type=bind,readonly"
   ],
   "customizations": {
     "vscode": {
