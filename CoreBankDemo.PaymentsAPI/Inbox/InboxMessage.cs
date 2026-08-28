@@ -1,9 +1,11 @@
 using CoreBankDemo.Messaging;
+using CoreBankDemo.Messaging.Inbox;
 
 namespace CoreBankDemo.PaymentsAPI.Inbox;
 
 public class InboxMessage : IInboxMessage
 {
+    // IInboxMessage properties
     public Guid Id { get; set; }
     public required string IdempotencyKey { get; set; }
     public int PartitionId { get; set; }
@@ -15,8 +17,8 @@ public class InboxMessage : IInboxMessage
     public string? TraceParent { get; set; }
     public string? TraceState { get; set; }
 
-    public required string TransactionId { get; set; }
+    // Domain-specific properties
     public required string EventType { get; set; }
-    public required string AccountNumber { get; set; }
     public required string EventPayload { get; set; }
 }
+

@@ -4,7 +4,6 @@
     "projects": [
       "CoreBankDemo.CoreBankAPI\\CoreBankDemo.CoreBankAPI.csproj",
       "CoreBankDemo.Messaging\\CoreBankDemo.Messaging.csproj",
-      "CoreBankDemo.PaymentsAPI\\CoreBankDemo.PaymentsAPI.csproj",
       "CoreBankDemo.ServiceDefaults\\CoreBankDemo.ServiceDefaults.csproj",
       "tests\\CoreBankDemo.CoreBankAPI.Tests\\CoreBankDemo.CoreBankAPI.Tests.csproj",
       "tests\\CoreBankDemo.Messaging.Tests\\CoreBankDemo.Messaging.Tests.csproj",
