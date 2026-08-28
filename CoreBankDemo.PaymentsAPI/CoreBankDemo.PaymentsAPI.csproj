@@ -25,4 +25,9 @@
         <ProjectReference Include="..\CoreBankDemo.Messaging\CoreBankDemo.Messaging.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+        <InternalsVisibleTo Include="CoreBankDemo.PaymentsAPI.Tests" />
+        <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+    </ItemGroup>
+
 </Project>

@@ -21,6 +21,15 @@ namespace CoreBankDemo.ServiceDefaults.Tests.Configuration;
 /// but proving the named file actually reads the member would require symbol
 /// analysis, which is out of scope here.
 /// </para>
+/// <para>
+/// Updated by story 5.1: PaymentsAPI's legacy inbox/outbox processors were
+/// demolished. <see cref="InboxProcessingOptions"/> now points at
+/// CoreBankAPI's rebuilt inbox processor. PaymentsAPI's storage handler is
+/// the real <see cref="OutboxProcessingOptions.PartitionCount"/> reader;
+/// the lock/poll entries temporarily point at that same Epic 5 boundary
+/// until story 5.4 adds the rebuilt forwarding processor that consumes
+/// them.
+/// </para>
 /// </summary>
 public class DeadOptionMembersTests
 {
@@ -136,15 +145,15 @@ public class DeadOptionMembersTests
             {
                 [typeof(InboxProcessingOptions)] = new Dictionary<string, string>
                 {
-                    ["PartitionCount"] = "CoreBankDemo.PaymentsAPI/Inbox/InboxProcessor.cs",
-                    ["LockExpirySeconds"] = "CoreBankDemo.PaymentsAPI/Inbox/InboxProcessor.cs",
-                    ["PollingIntervalMs"] = "CoreBankDemo.PaymentsAPI/Inbox/InboxProcessor.cs",
+                    ["PartitionCount"] = "CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs",
+                    ["LockExpirySeconds"] = "CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs",
+                    ["PollingIntervalMs"] = "CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs",
                 },
                 [typeof(OutboxProcessingOptions)] = new Dictionary<string, string>
                 {
-                    ["PartitionCount"] = "CoreBankDemo.PaymentsAPI/Outbox/OutboxProcessor.cs",
-                    ["LockExpirySeconds"] = "CoreBankDemo.PaymentsAPI/Outbox/OutboxProcessor.cs",
-                    ["PollingIntervalMs"] = "CoreBankDemo.PaymentsAPI/Outbox/OutboxProcessor.cs",
+                    ["PartitionCount"] = "CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs",
+                    ["LockExpirySeconds"] = "CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs",
+                    ["PollingIntervalMs"] = "CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs",
                 },
                 [typeof(MessagingOutboxProcessingOptions)] = new Dictionary<string, string>
                 {
