@@ -85,6 +85,7 @@ public class CoreBankDbContextTests : SqliteCoreBankApiTestBase
         entityType.FindProperty(nameof(MessagingOutboxMessage.Status))!.GetMaxLength().Should().Be(20);
         entityType.FindProperty(nameof(MessagingOutboxMessage.EventType))!.GetMaxLength().Should().Be(100);
         entityType.FindProperty(nameof(MessagingOutboxMessage.EventSource))!.GetMaxLength().Should().Be(200);
+        entityType.FindProperty(nameof(MessagingOutboxMessage.EventOccurredAt))!.IsNullable.Should().BeFalse();
         entityType.FindProperty(nameof(MessagingOutboxMessage.TraceParent))!.GetMaxLength().Should().Be(55);
         entityType.FindProperty(nameof(MessagingOutboxMessage.TraceState))!.GetMaxLength().Should().Be(512);
     }

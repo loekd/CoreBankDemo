@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CoreBankDemo.ServiceDefaults;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -16,15 +17,16 @@ namespace CoreBankDemo.Messaging;
 /// locking, claiming, or retry classification.
 ///
 /// <para>
-/// Depends only on the four seams needed to run and test the loop —
-/// <see cref="IOutboxMessageStore{TMessage}"/>, <see cref="IDistributedLockService"/>,
-/// <see cref="IOutboxDeliveryStrategy{TMessage}"/>, and a ctor-injected
+/// Depends only on the seams needed to run and test the loop —
+/// <see cref="IDistributedLockService"/>, <see cref="IServiceScopeFactory"/>,
+/// and a ctor-injected
 /// <see cref="ActivitySource"/> (never <c>new</c>'d here — the
 /// <c>observability</c> skill and AD-8 require a registered source) — plus
-/// <see cref="TimeProvider"/> and <see cref="ILogger"/>. Never a concrete
-/// <see cref="Microsoft.EntityFrameworkCore.DbContext"/>: that is exactly what
-/// <see cref="IOutboxMessageStore{TMessage}"/> exists to keep out of this
-/// class, so it stays Moq-testable (AD-2/AD-9).
+/// <see cref="TimeProvider"/> and <see cref="ILogger"/>. Each partition scope
+/// resolves its own <see cref="IOutboxMessageStore{TMessage}"/> and
+/// <see cref="IOutboxDeliveryStrategy{TMessage}"/>, so scoped persistence
+/// dependencies are never captured by the hosted singleton or shared across
+/// parallel partitions.
 /// </para>
 ///
 /// <para>
@@ -47,26 +49,23 @@ namespace CoreBankDemo.Messaging;
 public abstract class OutboxProcessorBase<TMessage> : BackgroundService
     where TMessage : class, IOutboxMessage
 {
-    private readonly IOutboxMessageStore<TMessage> _store;
     private readonly IDistributedLockService _lockService;
-    private readonly IOutboxDeliveryStrategy<TMessage> _deliveryStrategy;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ActivitySource _activitySource;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
     private readonly OutboxProcessorOptions _options;
 
     protected OutboxProcessorBase(
-        IOutboxMessageStore<TMessage> store,
         IDistributedLockService lockService,
-        IOutboxDeliveryStrategy<TMessage> deliveryStrategy,
+        IServiceScopeFactory scopeFactory,
         ActivitySource activitySource,
         TimeProvider timeProvider,
         ILogger logger,
         OutboxProcessorOptions? options = null)
     {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
         _lockService = lockService ?? throw new ArgumentNullException(nameof(lockService));
-        _deliveryStrategy = deliveryStrategy ?? throw new ArgumentNullException(nameof(deliveryStrategy));
+        _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _activitySource = activitySource ?? throw new ArgumentNullException(nameof(activitySource));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -154,47 +153,83 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
     private async Task ProcessPartitionUnderLockAsync(int partitionId, CancellationToken cancellationToken)
     {
         var lockName = $"{LockNamePrefix}-partition-{partitionId}";
+        IServiceScope scope;
 
         try
         {
-            // ExecuteWithLockAsync returning false (lock not acquired) is a
-            // normal, silent skip — not a failure — so its result is
-            // intentionally discarded here.
-            await _lockService.ExecuteWithLockAsync(
-                lockName,
-                _options.LockExpirySeconds,
-                lockedCancellationToken => ProcessPartitionAsync(partitionId, lockedCancellationToken),
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Cancellation, not a lock-service failure: an OperationCanceledException
-            // reaching this catch can legitimately be ProcessMessageAsync's own
-            // deliberate rethrow (see its catch (OperationCanceledException) when
-            // (...) { throw; }) propagating through ExecuteWithLockAsync — either
-            // because the ambient stoppingToken fired (normal host shutdown) or
-            // because the lock service supplied the workload its own token (e.g.
-            // a real IDistributedLockService's 5/6-lock-lifetime cutoff, epic 3),
-            // which this method never observes directly and so cannot filter on
-            // via the ambient cancellationToken alone. Either way this is ordinary
-            // cancellation, not a distributed-lock backend failure, so it must not
-            // be logged as "Lock service failed" — doing so would misdirect
-            // on-call diagnosis during a real incident. Rethrown unconditionally
-            // so the tick-level catch still swallows it, same as before.
-            throw;
+            scope = _scopeFactory.CreateScope();
         }
         catch (Exception ex)
         {
-            _logger.LogError(
-                ex,
-                "Lock service failed for outbox partition {PartitionId} (lock {LockName})",
-                partitionId, lockName);
+            _logger.LogError(ex, "Failed to create scope for outbox partition {PartitionId}", partitionId);
+            return;
+        }
+
+        using (scope)
+        {
+            IOutboxMessageStore<TMessage> store;
+            IOutboxDeliveryStrategy<TMessage> deliveryStrategy;
+
+            try
+            {
+                store = scope.ServiceProvider.GetRequiredService<IOutboxMessageStore<TMessage>>();
+                deliveryStrategy = scope.ServiceProvider.GetRequiredService<IOutboxDeliveryStrategy<TMessage>>();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to resolve scoped services for outbox partition {PartitionId}", partitionId);
+                return;
+            }
+
+            try
+            {
+                // ExecuteWithLockAsync returning false (lock not acquired) is a
+                // normal, silent skip — not a failure — so its result is
+                // intentionally discarded here.
+                await _lockService.ExecuteWithLockAsync(
+                    lockName,
+                    _options.LockExpirySeconds,
+                    lockedCancellationToken => ProcessPartitionAsync(
+                        partitionId,
+                        store,
+                        deliveryStrategy,
+                        lockedCancellationToken),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation, not a lock-service failure: an OperationCanceledException
+                // reaching this catch can legitimately be ProcessMessageAsync's own
+                // deliberate rethrow (see its catch (OperationCanceledException) when
+                // (...) { throw; }) propagating through ExecuteWithLockAsync — either
+                // because the ambient stoppingToken fired (normal host shutdown) or
+                // because the lock service supplied the workload its own token (e.g.
+                // a real IDistributedLockService's 5/6-lock-lifetime cutoff, epic 3),
+                // which this method never observes directly and so cannot filter on
+                // via the ambient cancellationToken alone. Either way this is ordinary
+                // cancellation, not a distributed-lock backend failure, so it must not
+                // be logged as "Lock service failed" — doing so would misdirect
+                // on-call diagnosis during a real incident. Rethrown unconditionally
+                // so the tick-level catch still swallows it, same as before.
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(
+                    ex,
+                    "Lock service failed for outbox partition {PartitionId} (lock {LockName})",
+                    partitionId, lockName);
+            }
         }
     }
 
-    private async Task ProcessPartitionAsync(int partitionId, CancellationToken cancellationToken)
+    private async Task ProcessPartitionAsync(
+        int partitionId,
+        IOutboxMessageStore<TMessage> store,
+        IOutboxDeliveryStrategy<TMessage> deliveryStrategy,
+        CancellationToken cancellationToken)
     {
-        var claimed = await _store
+        var claimed = await store
             .ClaimBatchForPartitionAsync(partitionId, MessageConstants.Defaults.BatchSize, cancellationToken)
             .ConfigureAwait(false);
 
@@ -211,7 +246,7 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
         // per-key ordering within a partition (AD-4).
         foreach (var message in claimed)
         {
-            await ProcessMessageAsync(message, cancellationToken).ConfigureAwait(false);
+            await ProcessMessageAsync(message, store, deliveryStrategy, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -235,13 +270,17 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
     /// what must never happen is reporting the wrong reason a message didn't
     /// reach <c>Completed</c>).
     /// </summary>
-    private async Task ProcessMessageAsync(TMessage message, CancellationToken cancellationToken)
+    private async Task ProcessMessageAsync(
+        TMessage message,
+        IOutboxMessageStore<TMessage> store,
+        IOutboxDeliveryStrategy<TMessage> deliveryStrategy,
+        CancellationToken cancellationToken)
     {
         using var activity = StartDeliveryActivity(message);
 
         try
         {
-            await _deliveryStrategy.DeliverAsync(message, cancellationToken).ConfigureAwait(false);
+            await deliveryStrategy.DeliverAsync(message, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -262,7 +301,7 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
 
             try
             {
-                await _store.MarkAsFailedWithRetryAsync(message, ex.Message, cancellationToken).ConfigureAwait(false);
+                await store.MarkAsFailedWithRetryAsync(message, ex.Message, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -293,7 +332,7 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
 
         try
         {
-            await _store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
+            await store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

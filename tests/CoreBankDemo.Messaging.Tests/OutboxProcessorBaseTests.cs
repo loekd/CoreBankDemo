@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using AwesomeAssertions;
 using CoreBankDemo.ServiceDefaults;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Xunit;
@@ -46,11 +47,96 @@ public class OutboxProcessorBaseTests
             TimeProvider timeProvider,
             ILogger logger,
             OutboxProcessorOptions? options = null)
-            : base(store, lockService, deliveryStrategy, activitySource, timeProvider, logger, options)
+            : this(
+                lockService,
+                new FixedScopeFactory(store, deliveryStrategy),
+                activitySource,
+                timeProvider,
+                logger,
+                options)
+        {
+        }
+
+        public TestOutboxProcessor(
+            IDistributedLockService lockService,
+            IServiceScopeFactory scopeFactory,
+            ActivitySource activitySource,
+            TimeProvider timeProvider,
+            ILogger logger,
+            OutboxProcessorOptions? options = null)
+            : base(lockService, scopeFactory, activitySource, timeProvider, logger, options)
         {
         }
 
         protected override string LockNamePrefix => "test-outbox";
+    }
+
+    private sealed class FixedScopeFactory(
+        IOutboxMessageStore<TestOutboxEventMessage> store,
+        IOutboxDeliveryStrategy<TestOutboxEventMessage> deliveryStrategy) : IServiceScopeFactory
+    {
+        public IServiceScope CreateScope() => new FixedScope(new FixedServiceProvider(store, deliveryStrategy));
+    }
+
+    private sealed class FixedScope(IServiceProvider serviceProvider) : IServiceScope
+    {
+        public IServiceProvider ServiceProvider { get; } = serviceProvider;
+        public void Dispose() { }
+    }
+
+    private sealed class FixedServiceProvider(
+        IOutboxMessageStore<TestOutboxEventMessage> store,
+        IOutboxDeliveryStrategy<TestOutboxEventMessage> deliveryStrategy) : IServiceProvider
+    {
+        public object? GetService(Type serviceType) =>
+            serviceType == typeof(IOutboxMessageStore<TestOutboxEventMessage>)
+                ? store
+                : serviceType == typeof(IOutboxDeliveryStrategy<TestOutboxEventMessage>)
+                    ? deliveryStrategy
+                    : null;
+    }
+
+    private sealed class ScopedStore : IOutboxMessageStore<TestOutboxEventMessage>, IDisposable
+    {
+        public static ConcurrentBag<ScopedStore> Instances { get; } = new();
+        public List<int> ClaimedPartitions { get; } = new();
+        public bool IsDisposed { get; private set; }
+
+        public ScopedStore() => Instances.Add(this);
+
+        public Task<IReadOnlyList<TestOutboxEventMessage>> ClaimBatchForPartitionAsync(
+            int partitionId,
+            int batchSize,
+            CancellationToken cancellationToken = default)
+        {
+            ClaimedPartitions.Add(partitionId);
+            return Task.FromResult<IReadOnlyList<TestOutboxEventMessage>>(Array.Empty<TestOutboxEventMessage>());
+        }
+
+        public Task MarkAsCompletedAsync(
+            TestOutboxEventMessage message,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task MarkAsFailedWithRetryAsync(
+            TestOutboxEventMessage message,
+            string errorMessage,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public void Dispose() => IsDisposed = true;
+    }
+
+    private sealed class ScopedStrategy : IOutboxDeliveryStrategy<TestOutboxEventMessage>, IDisposable
+    {
+        public static ConcurrentBag<ScopedStrategy> Instances { get; } = new();
+        public bool IsDisposed { get; private set; }
+
+        public ScopedStrategy() => Instances.Add(this);
+
+        public Task DeliverAsync(
+            TestOutboxEventMessage message,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public void Dispose() => IsDisposed = true;
     }
 
     /// <summary>Passthrough fake: every lock is always acquired, workload runs inline.</summary>
@@ -209,6 +295,36 @@ public class OutboxProcessorBaseTests
         Status = MessageConstants.Status.Processing,
         CreatedAt = new DateTime(2026, 8, 21, 0, 0, 0, DateTimeKind.Utc),
     };
+
+    [Fact]
+    public async Task Tick_resolves_and_disposes_a_distinct_store_and_strategy_scope_per_partition()
+    {
+        while (ScopedStore.Instances.TryTake(out _)) { }
+        while (ScopedStrategy.Instances.TryTake(out _)) { }
+
+        using var services = new ServiceCollection()
+            .AddScoped<IOutboxMessageStore<TestOutboxEventMessage>, ScopedStore>()
+            .AddScoped<IOutboxDeliveryStrategy<TestOutboxEventMessage>, ScopedStrategy>()
+            .BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
+        var processor = new TestOutboxProcessor(
+            new AlwaysAcquiringLockService(),
+            services.GetRequiredService<IServiceScopeFactory>(),
+            ActivitySource,
+            TimeProvider.System,
+            NullLoggerLike(),
+            new OutboxProcessorOptions { PartitionCount = 4 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        ScopedStore.Instances.Should().HaveCount(4);
+        ScopedStore.Instances.SelectMany(store => store.ClaimedPartitions)
+            .Should().BeEquivalentTo(new[] { 0, 1, 2, 3 });
+        ScopedStore.Instances.Should().OnlyHaveUniqueItems();
+        ScopedStore.Instances.Should().AllSatisfy(store => store.IsDisposed.Should().BeTrue());
+        ScopedStrategy.Instances.Should().HaveCount(4);
+        ScopedStrategy.Instances.Should().OnlyHaveUniqueItems();
+        ScopedStrategy.Instances.Should().AllSatisfy(strategy => strategy.IsDisposed.Should().BeTrue());
+    }
 
     [Fact]
     public async Task Tick_fans_out_over_every_partition_under_its_own_lock_name()

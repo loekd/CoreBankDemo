@@ -36,6 +36,7 @@ public class OutboxEventEnqueuerTests : SqliteCoreBankApiTestBase
         row.TransactionStatus.Should().Be(MessageConstants.Status.Completed);
         row.ErrorReason.Should().BeNull();
         row.CreatedAt.Should().Be(TimeProvider.GetUtcNow().UtcDateTime);
+        row.EventOccurredAt.Should().Be(message.ProcessedAt);
         row.TraceParent.Should().Be(message.TraceParent);
         row.TraceState.Should().Be(message.TraceState);
     }
@@ -54,6 +55,7 @@ public class OutboxEventEnqueuerTests : SqliteCoreBankApiTestBase
         row.EventType.Should().Be(Constants.TransactionFailed);
         row.TransactionStatus.Should().Be(MessageConstants.Status.Failed);
         row.ErrorReason.Should().Be("boom");
+        row.EventOccurredAt.Should().Be(message.ProcessedAt);
         row.AccountNumber.Should().Be(message.FromAccount);
         row.TraceParent.Should().Be(message.TraceParent);
         row.TraceState.Should().Be(message.TraceState);
@@ -83,9 +85,35 @@ public class OutboxEventEnqueuerTests : SqliteCoreBankApiTestBase
         rows.Select(r => r.NewBalance).Should().BeEquivalentTo(new decimal?[] { 50m, 75m });
         rows.Should().AllSatisfy(r =>
         {
+            r.EventOccurredAt.Should().Be(message.ProcessedAt);
             r.TraceParent.Should().Be(message.TraceParent);
             r.TraceState.Should().Be(message.TraceState);
         });
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_without_a_stamped_inbox_processed_time_fails_instead_of_inventing_one()
+    {
+        await using var context = CreateContext();
+        var enqueuer = new OutboxEventEnqueuer(
+            context,
+            Options.Create(new MessagingOutboxProcessingOptions
+            {
+                PartitionCount = 4,
+                LockExpirySeconds = 30,
+                PollingIntervalMs = 5000
+            }),
+            TimeProvider);
+        var message = NewMessage();
+        message.ProcessedAt = null;
+
+        var act = async () => await enqueuer.EnqueueTransactionCompletedAsync(
+            message,
+            TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*must have ProcessedAt stamped*");
+        context.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
     }
 
     private InboxMessage NewMessage() => new()
@@ -100,6 +128,7 @@ public class OutboxEventEnqueuerTests : SqliteCoreBankApiTestBase
         PartitionId = 0,
         Status = MessageConstants.Status.Pending,
         ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime,
         TraceParent = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
         TraceState = "congo=t61rcWkgMzE"
     };

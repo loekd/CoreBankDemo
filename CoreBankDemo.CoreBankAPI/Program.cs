@@ -9,9 +9,8 @@ var builder = WebApplication.CreateBuilder(args);
 // Dapr must be registered before AddServiceDefaults(): ServiceDefaults only
 // registers IEventPublisher when a DaprClient is already present in DI at
 // that point (epic 3's retrospective flagged the reverse order as a silent
-// registration failure). Nothing in this story consumes IEventPublisher yet
-// (that's story 4.7), but the ordering is set correctly here so later
-// stories don't inherit the landmine.
+// registration failure). The messaging outbox delivery strategy registered
+// below consumes IEventPublisher through this ordering-sensitive registration.
 builder.Services.AddDaprClient();
 
 builder.AddServiceDefaults("CoreBank.CoreBankAPI");
@@ -53,6 +52,11 @@ builder.Services.AddScoped<ITransactionExecutor, TransactionExecutor>();
 builder.Services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
 builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionExecutionHandler>();
 builder.Services.AddHostedService<InboxProcessor>();
+builder.Services.AddScoped<MessagingOutboxRepository>();
+builder.Services.AddScoped<IOutboxMessageStore<MessagingOutboxMessage>>(
+    sp => sp.GetRequiredService<MessagingOutboxRepository>());
+builder.Services.AddScoped<IOutboxDeliveryStrategy<MessagingOutboxMessage>, DaprOutboxDeliveryStrategy>();
+builder.Services.AddHostedService<MessagingOutboxProcessor>();
 
 // Account read surface (story 4.5): IAccountRepository was built in story 4.3
 // but never registered in DI until now (only this story's controller-facing

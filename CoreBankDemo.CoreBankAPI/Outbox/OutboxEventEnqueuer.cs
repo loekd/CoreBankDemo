@@ -20,6 +20,8 @@ internal sealed class OutboxEventEnqueuer(
 {
     public Task EnqueueTransactionCompletedAsync(InboxMessage message, CancellationToken ct)
     {
+        var eventOccurredAt = GetEventOccurredAt(message);
+
         dbContext.MessagingOutboxMessages.Add(new MessagingOutboxMessage
         {
             Id = Guid.NewGuid(),
@@ -36,6 +38,7 @@ internal sealed class OutboxEventEnqueuer(
             TransactionStatus = MessageConstants.Status.Completed,
             ErrorReason = null,
             CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
+            EventOccurredAt = eventOccurredAt,
             TraceParent = message.TraceParent,
             TraceState = message.TraceState
         });
@@ -45,6 +48,8 @@ internal sealed class OutboxEventEnqueuer(
 
     public Task EnqueueTransactionFailedAsync(InboxMessage message, string? errorReason, CancellationToken ct)
     {
+        var eventOccurredAt = GetEventOccurredAt(message);
+
         dbContext.MessagingOutboxMessages.Add(new MessagingOutboxMessage
         {
             Id = Guid.NewGuid(),
@@ -61,6 +66,7 @@ internal sealed class OutboxEventEnqueuer(
             TransactionStatus = MessageConstants.Status.Failed,
             ErrorReason = errorReason,
             CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
+            EventOccurredAt = eventOccurredAt,
             TraceParent = message.TraceParent,
             TraceState = message.TraceState
         });
@@ -70,6 +76,8 @@ internal sealed class OutboxEventEnqueuer(
 
     public Task EnqueueBalanceUpdatedAsync(InboxMessage message, string accountNumber, decimal delta, decimal newBalance, CancellationToken ct)
     {
+        var eventOccurredAt = GetEventOccurredAt(message);
+
         dbContext.MessagingOutboxMessages.Add(new MessagingOutboxMessage
         {
             Id = Guid.NewGuid(),
@@ -86,10 +94,16 @@ internal sealed class OutboxEventEnqueuer(
             Currency = message.Currency,
             TransactionStatus = MessageConstants.Status.Completed,
             CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
+            EventOccurredAt = eventOccurredAt,
             TraceParent = message.TraceParent,
             TraceState = message.TraceState
         });
 
         return Task.CompletedTask;
     }
+
+    private static DateTime GetEventOccurredAt(InboxMessage message) =>
+        message.ProcessedAt
+        ?? throw new InvalidOperationException(
+            $"Inbox message {message.Id} must have ProcessedAt stamped before domain events are enqueued.");
 }

@@ -63,6 +63,8 @@ public class InboxProcessorTests : SqliteCoreBankApiTestBase
         outboxRows.Should().HaveCount(3);
         outboxRows.Count(m => m.EventType == Constants.TransactionCompleted).Should().Be(1);
         outboxRows.Count(m => m.EventType == Constants.BalanceUpdated).Should().Be(2);
+        outboxRows.Should().AllSatisfy(row =>
+            row.EventOccurredAt.Should().Be(persistedMessage.ProcessedAt));
     }
 
     [Fact]
