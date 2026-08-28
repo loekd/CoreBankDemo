@@ -73,6 +73,10 @@ context:
 
 Review found singleton capture of a scoped EF store and unstable timestamps because claim/retry mutates `CreatedAt`. The human approved per-partition kernel scopes and immutable `EventOccurredAt`. Preserve the thin processor, publisher port, exact mappings, and kernel-owned outcomes.
 
+### 2026-08-28 — Second review patches
+
+Create and asynchronously dispose partition scopes only after lock acquisition; make `EventOccurredAt` compile-time required; convert local occurrence times to UTC; assert the concrete lock namespace; remove dead lock-renew settings. Deferred persistent-schema reset, production composition-root testing, and stale Story 4.6 sprint tracking.
+
 ## Design Notes
 
 The kernel owns scopes where partition fan-out begins: one scope per partition isolates its store/`DbContext` while preserving sequential processing.
@@ -81,36 +85,41 @@ The kernel owns scopes where partition fan-out begins: one scope per partition i
 
 **Commands:**
 - `dotnet test CoreBankDemo.Rebuild.slnf` -- expected: full suite green and CoreBankAPI line coverage at least 90%.
-- `git diff --stat HEAD` -- expected: changes limited to CoreBankAPI story 4.7 files, tests, wiring, and this spec.
+- `git diff --stat HEAD` -- expected: changes limited to Story 4.7 CoreBankAPI files, shared outbox kernel/tests, sprint status, and this spec.
 
 ## Suggested Review Order
 
 **Partition-scoped kernel**
 
-- Partition fan-out now owns scoped stores and strategies without singleton capture.
+- Acquire the distributed lock before creating an asynchronously disposed partition scope.
   [`OutboxProcessorBase.cs:153`](../../../CoreBankDemo.Messaging/OutboxProcessorBase.cs#L153)
 
-- Isolation test proves four distinct scopes are resolved and disposed.
-  [`OutboxProcessorBaseTests.cs:300`](../../../tests/CoreBankDemo.Messaging.Tests/OutboxProcessorBaseTests.cs#L300)
+- Resolve store and strategy together for sequential work within that partition.
+  [`OutboxProcessorBase.cs:194`](../../../CoreBankDemo.Messaging/OutboxProcessorBase.cs#L194)
 
 **Event mapping and stable time**
 
-- Strategy maps stored event types into exact frozen event records.
+- Persist the inbox processing stamp independently from mutable claim timestamps.
+  [`OutboxEventEnqueuer.cs:105`](../../../CoreBankDemo.CoreBankAPI/Outbox/OutboxEventEnqueuer.cs#L105)
+
+- Map stored event types and stable occurrence time through the publisher port.
   [`DaprOutboxDeliveryStrategy.cs:14`](../../../CoreBankDemo.CoreBankAPI/Outbox/DaprOutboxDeliveryStrategy.cs#L14)
 
-- Enqueue rejects missing occurrence time and persists the inbox stamp.
-  [`OutboxEventEnqueuer.cs:21`](../../../CoreBankDemo.CoreBankAPI/Outbox/OutboxEventEnqueuer.cs#L21)
+**Hosting**
 
-- Retry coverage proves payload occurrence time survives mutable claim timestamps.
-  [`DaprOutboxDeliveryStrategyTests.cs:132`](../../../tests/CoreBankDemo.CoreBankAPI.Tests/DaprOutboxDeliveryStrategyTests.cs#L132)
-
-**Hosting and outcomes**
-
-- Thin processor translates options and fixes the required lock prefix.
+- Keep the hosted processor limited to options and lock namespace.
   [`MessagingOutboxProcessor.cs:9`](../../../CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs#L9)
 
 - DI wires scoped repository, delivery strategy, and hosted processor.
-  [`Program.cs:56`](../../../CoreBankDemo.CoreBankAPI/Program.cs#L56)
+  [`Program.cs:55`](../../../CoreBankDemo.CoreBankAPI/Program.cs#L55)
 
-- Integration tests prove kernel-owned completion, retries, and thin inheritance.
-  [`MessagingOutboxProcessorTests.cs:21`](../../../tests/CoreBankDemo.CoreBankAPI.Tests/MessagingOutboxProcessorTests.cs#L21)
+**Verification**
+
+- Prove distinct async-disposed scopes and zero scopes when locks are unavailable.
+  [`OutboxProcessorBaseTests.cs:314`](../../../tests/CoreBankDemo.Messaging.Tests/OutboxProcessorBaseTests.cs#L314)
+
+- Prove stable retry payloads and exact CloudEvent mappings.
+  [`DaprOutboxDeliveryStrategyTests.cs:152`](../../../tests/CoreBankDemo.CoreBankAPI.Tests/DaprOutboxDeliveryStrategyTests.cs#L152)
+
+- Prove transport and mapping failures remain kernel-owned retry outcomes.
+  [`MessagingOutboxProcessorTests.cs:86`](../../../tests/CoreBankDemo.CoreBankAPI.Tests/MessagingOutboxProcessorTests.cs#L86)

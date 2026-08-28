@@ -20,7 +20,7 @@ public class MessagingOutboxMessage : IOutboxMessage
     public required string IdempotencyKey { get; set; }
     public required string Status { get; set; }
     public DateTime CreatedAt { get; set; }
-    public DateTime EventOccurredAt { get; set; }
+    public required DateTime EventOccurredAt { get; set; }
     public DateTime? ProcessedAt { get; set; }
     public int RetryCount { get; set; }
     public string? LastError { get; set; }

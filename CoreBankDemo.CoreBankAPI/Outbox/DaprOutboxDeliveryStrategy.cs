@@ -44,5 +44,7 @@ internal sealed class DaprOutboxDeliveryStrategy(IEventPublisher publisher)
     }
 
     private static DateTimeOffset AsUtcOffset(DateTime value) =>
-        new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
+        value.Kind == DateTimeKind.Local
+            ? new DateTimeOffset(value.ToUniversalTime())
+            : new DateTimeOffset(DateTime.SpecifyKind(value, DateTimeKind.Utc));
 }

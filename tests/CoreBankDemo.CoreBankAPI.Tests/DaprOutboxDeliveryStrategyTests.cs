@@ -35,6 +35,26 @@ public class DaprOutboxDeliveryStrategyTests
     }
 
     [Fact]
+    public async Task Completed_row_converts_a_local_occurrence_time_to_utc()
+    {
+        var publisher = new Mock<IEventPublisher>();
+        var message = NewMessage(Constants.TransactionCompleted);
+        message.EventOccurredAt = DateTime.SpecifyKind(OccurredAt, DateTimeKind.Local);
+        var strategy = new DaprOutboxDeliveryStrategy(publisher.Object);
+
+        await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
+
+        publisher.Verify(p => p.PublishAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            It.Is<TransactionCompletedEvent>(payload =>
+                payload.ProcessedAt == new DateTimeOffset(message.EventOccurredAt.ToUniversalTime())),
+            It.IsAny<string?>(),
+            TestContext.Current.CancellationToken), Times.Once);
+    }
+
+    [Fact]
     public async Task Failed_row_publishes_the_stored_occurrence_time_and_nullable_reason()
     {
         var publisher = new Mock<IEventPublisher>();

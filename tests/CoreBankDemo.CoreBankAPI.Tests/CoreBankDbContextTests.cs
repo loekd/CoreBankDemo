@@ -193,6 +193,7 @@ public class CoreBankDbContextTests : SqliteCoreBankApiTestBase
         Amount = 10m,
         Currency = "EUR",
         TransactionStatus = "Completed",
-        CreatedAt = new DateTime(2026, 8, 24, 0, 0, 0, DateTimeKind.Utc)
+        CreatedAt = new DateTime(2026, 8, 24, 0, 0, 0, DateTimeKind.Utc),
+        EventOccurredAt = new DateTime(2026, 8, 24, 0, 0, 0, DateTimeKind.Utc)
     };
 }

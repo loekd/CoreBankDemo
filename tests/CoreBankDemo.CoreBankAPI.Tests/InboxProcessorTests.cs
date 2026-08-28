@@ -251,7 +251,8 @@ public class InboxProcessorTests : SqliteCoreBankApiTestBase
                 Amount = message.Amount,
                 Currency = message.Currency,
                 TransactionStatus = MessageConstants.Status.Completed,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                EventOccurredAt = message.ProcessedAt!.Value
             });
 
             throw new InvalidOperationException("boom during enqueue");

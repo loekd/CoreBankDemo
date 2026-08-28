@@ -75,7 +75,13 @@ public class OutboxProcessorBaseTests
         IOutboxMessageStore<TestOutboxEventMessage> store,
         IOutboxDeliveryStrategy<TestOutboxEventMessage> deliveryStrategy) : IServiceScopeFactory
     {
-        public IServiceScope CreateScope() => new FixedScope(new FixedServiceProvider(store, deliveryStrategy));
+        public int CreateCount { get; private set; }
+
+        public IServiceScope CreateScope()
+        {
+            CreateCount++;
+            return new FixedScope(new FixedServiceProvider(store, deliveryStrategy));
+        }
     }
 
     private sealed class FixedScope(IServiceProvider serviceProvider) : IServiceScope
@@ -96,7 +102,7 @@ public class OutboxProcessorBaseTests
                     : null;
     }
 
-    private sealed class ScopedStore : IOutboxMessageStore<TestOutboxEventMessage>, IDisposable
+    private sealed class ScopedStore : IOutboxMessageStore<TestOutboxEventMessage>, IAsyncDisposable
     {
         public static ConcurrentBag<ScopedStore> Instances { get; } = new();
         public List<int> ClaimedPartitions { get; } = new();
@@ -122,10 +128,14 @@ public class OutboxProcessorBaseTests
             string errorMessage,
             CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-        public void Dispose() => IsDisposed = true;
+        public ValueTask DisposeAsync()
+        {
+            IsDisposed = true;
+            return ValueTask.CompletedTask;
+        }
     }
 
-    private sealed class ScopedStrategy : IOutboxDeliveryStrategy<TestOutboxEventMessage>, IDisposable
+    private sealed class ScopedStrategy : IOutboxDeliveryStrategy<TestOutboxEventMessage>, IAsyncDisposable
     {
         public static ConcurrentBag<ScopedStrategy> Instances { get; } = new();
         public bool IsDisposed { get; private set; }
@@ -136,7 +146,11 @@ public class OutboxProcessorBaseTests
             TestOutboxEventMessage message,
             CancellationToken cancellationToken = default) => Task.CompletedTask;
 
-        public void Dispose() => IsDisposed = true;
+        public ValueTask DisposeAsync()
+        {
+            IsDisposed = true;
+            return ValueTask.CompletedTask;
+        }
     }
 
     /// <summary>Passthrough fake: every lock is always acquired, workload runs inline.</summary>
@@ -354,13 +368,15 @@ public class OutboxProcessorBaseTests
         var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
         var lockService = new NeverAcquiringLockService();
         var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        var scopeFactory = new FixedScopeFactory(store.Object, strategy.Object);
         var processor = new TestOutboxProcessor(
-            store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
         await act.Should().NotThrowAsync();
+        scopeFactory.CreateCount.Should().Be(0);
         store.Verify(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

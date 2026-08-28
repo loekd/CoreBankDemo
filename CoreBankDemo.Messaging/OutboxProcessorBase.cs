@@ -153,11 +153,50 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
     private async Task ProcessPartitionUnderLockAsync(int partitionId, CancellationToken cancellationToken)
     {
         var lockName = $"{LockNamePrefix}-partition-{partitionId}";
-        IServiceScope scope;
 
         try
         {
-            scope = _scopeFactory.CreateScope();
+            // ExecuteWithLockAsync returning false (lock not acquired) is a
+            // normal, silent skip — not a failure — so its result is
+            // intentionally discarded here.
+            await _lockService.ExecuteWithLockAsync(
+                lockName,
+                _options.LockExpirySeconds,
+                lockedCancellationToken => ProcessPartitionInScopeAsync(partitionId, lockedCancellationToken),
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation, not a lock-service failure: an OperationCanceledException
+            // reaching this catch can legitimately be ProcessMessageAsync's own
+            // deliberate rethrow (see its catch (OperationCanceledException) when
+            // (...) { throw; }) propagating through ExecuteWithLockAsync — either
+            // because the ambient stoppingToken fired (normal host shutdown) or
+            // because the lock service supplied the workload its own token (e.g.
+            // a real IDistributedLockService's 5/6-lock-lifetime cutoff, epic 3),
+            // which this method never observes directly and so cannot filter on
+            // via the ambient cancellationToken alone. Either way this is ordinary
+            // cancellation, not a distributed-lock backend failure, so it must not
+            // be logged as "Lock service failed" — doing so would misdirect
+            // on-call diagnosis during a real incident. Rethrown unconditionally
+            // so the tick-level catch still swallows it, same as before.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Lock service failed for outbox partition {PartitionId} (lock {LockName})",
+                partitionId, lockName);
+        }
+    }
+
+    private async Task ProcessPartitionInScopeAsync(int partitionId, CancellationToken cancellationToken)
+    {
+        AsyncServiceScope scope;
+        try
+        {
+            scope = _scopeFactory.CreateAsyncScope();
         }
         catch (Exception ex)
         {
@@ -165,7 +204,7 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
             return;
         }
 
-        using (scope)
+        await using (scope)
         {
             IOutboxMessageStore<TMessage> store;
             IOutboxDeliveryStrategy<TMessage> deliveryStrategy;
@@ -181,45 +220,11 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
                 return;
             }
 
-            try
-            {
-                // ExecuteWithLockAsync returning false (lock not acquired) is a
-                // normal, silent skip — not a failure — so its result is
-                // intentionally discarded here.
-                await _lockService.ExecuteWithLockAsync(
-                    lockName,
-                    _options.LockExpirySeconds,
-                    lockedCancellationToken => ProcessPartitionAsync(
-                        partitionId,
-                        store,
-                        deliveryStrategy,
-                        lockedCancellationToken),
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                // Cancellation, not a lock-service failure: an OperationCanceledException
-                // reaching this catch can legitimately be ProcessMessageAsync's own
-                // deliberate rethrow (see its catch (OperationCanceledException) when
-                // (...) { throw; }) propagating through ExecuteWithLockAsync — either
-                // because the ambient stoppingToken fired (normal host shutdown) or
-                // because the lock service supplied the workload its own token (e.g.
-                // a real IDistributedLockService's 5/6-lock-lifetime cutoff, epic 3),
-                // which this method never observes directly and so cannot filter on
-                // via the ambient cancellationToken alone. Either way this is ordinary
-                // cancellation, not a distributed-lock backend failure, so it must not
-                // be logged as "Lock service failed" — doing so would misdirect
-                // on-call diagnosis during a real incident. Rethrown unconditionally
-                // so the tick-level catch still swallows it, same as before.
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(
-                    ex,
-                    "Lock service failed for outbox partition {PartitionId} (lock {LockName})",
-                    partitionId, lockName);
-            }
+            await ProcessPartitionAsync(
+                partitionId,
+                store,
+                deliveryStrategy,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 

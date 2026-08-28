@@ -24,7 +24,11 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
         var publisher = new Mock<IEventPublisher>();
         using var services = BuildServices(publisher.Object);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion);
+        var lockService = new SingleTickLockService(completion);
+        var processor = CreateProcessor(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            completion,
+            lockService);
 
         await processor.StartAsync(TestContext.Current.CancellationToken);
         await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -36,6 +40,7 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
             .SingleAsync(TestContext.Current.CancellationToken);
         row.Status.Should().Be(MessageConstants.Status.Completed);
         row.RetryCount.Should().Be(0);
+        lockService.LockName.Should().Be("messaging-outbox-partition-0");
         publisher.Verify(p => p.PublishAsync(
             row.EventType,
             row.EventSource,
@@ -75,6 +80,33 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
         row.LastError.Should().Be("transport unavailable");
     }
 
+    [Theory]
+    [InlineData("unsupported.event", "Unsupported messaging outbox event type 'unsupported.event'.")]
+    [InlineData(Constants.BalanceUpdated, "is missing NewBalance.")]
+    public async Task StartAsync_when_mapping_fails_applies_the_kernel_retry_transition(
+        string eventType,
+        string expectedError)
+    {
+        await SeedMessageAsync(eventType);
+        var publisher = new Mock<IEventPublisher>(MockBehavior.Strict);
+        using var services = BuildServices(publisher.Object);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion);
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        await using var verifyContext = CreateContext();
+        var row = await verifyContext.MessagingOutboxMessages
+            .AsNoTracking()
+            .SingleAsync(TestContext.Current.CancellationToken);
+        row.Status.Should().Be(MessageConstants.Status.Pending);
+        row.RetryCount.Should().Be(1);
+        row.LastError.Should().Contain(expectedError);
+        publisher.VerifyNoOtherCalls();
+    }
+
     [Fact]
     public void Concrete_processor_overrides_only_the_lock_name_prefix()
     {
@@ -100,9 +132,10 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
 
     private MessagingOutboxProcessor CreateProcessor(
         IServiceScopeFactory scopeFactory,
-        TaskCompletionSource completion) =>
+        TaskCompletionSource completion,
+        SingleTickLockService? lockService = null) =>
         new(
-            new SingleTickLockService(completion),
+            lockService ?? new SingleTickLockService(completion),
             scopeFactory,
             new ActivitySource(nameof(MessagingOutboxProcessorTests)),
             TimeProvider,
@@ -114,7 +147,7 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
                 PollingIntervalMs = 60000
             }));
 
-    private async Task SeedMessageAsync()
+    private async Task SeedMessageAsync(string eventType = Constants.TransactionCompleted)
     {
         await using var context = CreateContext();
         context.MessagingOutboxMessages.Add(new MessagingOutboxMessage
@@ -126,7 +159,7 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
             CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
             EventOccurredAt = TimeProvider.GetUtcNow().UtcDateTime,
             TransactionId = "txn-123",
-            EventType = Constants.TransactionCompleted,
+            EventType = eventType,
             EventSource = "https://corebank-api/transactions",
             AccountNumber = "NL91ABNA0417164300",
             ToAccount = "NL20INGB0001234567",
@@ -141,6 +174,7 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
     private sealed class SingleTickLockService(TaskCompletionSource completion) : IDistributedLockService
     {
         private int _executed;
+        public string? LockName { get; private set; }
 
         public async Task<bool> ExecuteWithLockAsync(
             string lockName,
@@ -148,6 +182,7 @@ public class MessagingOutboxProcessorTests : SqliteCoreBankApiTestBase
             Func<CancellationToken, Task> workload,
             CancellationToken cancellationToken = default)
         {
+            LockName = lockName;
             if (Interlocked.Exchange(ref _executed, 1) != 0)
             {
                 return false;
