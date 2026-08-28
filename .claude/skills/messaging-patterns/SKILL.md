@@ -51,4 +51,4 @@ Always use `PartitionHelper` — never write a second implementation.
 | `CoreBankDemo.Messaging/Inbox/InboxProcessorBase.cs` | Base inbox service |
 | `CoreBankDemo.Messaging/Outbox/OutboxProcessorBase.cs` | Base outbox service |
 | `CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs` | Reference inbox implementation |
-| `CoreBankDemo.PaymentsAPI/Outbox/OutboxProcessor.cs` | Reference outbox implementation |
+| `CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs` | Reference outbox implementation; PaymentsAPI forwarding lands in story 5.4 |
