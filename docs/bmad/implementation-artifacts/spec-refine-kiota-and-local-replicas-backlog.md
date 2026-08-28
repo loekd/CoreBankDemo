@@ -65,7 +65,9 @@ Kiota remains an outbound adapter behind the hexagonal port; generated transport
 
 **Commands:**
 - `git diff --check` -- expected: planning edits contain no whitespace errors.
-- `rg "Story 5\.3|Story 6\.[123]|5-3-|6-[123]-" docs/bmad` -- expected: names and keys agree across planning and sprint artifacts.
+- `test "$(grep -c '^### Story 5\.3:' docs/bmad/planning-artifacts/epics.md)" -eq 1 && test "$(grep -c '^### Story 6\.[123]:' docs/bmad/planning-artifacts/epics.md)" -eq 3` -- expected: revised story numbers are unique.
+- `grep -q '^  5-3-contract-generated-kiota-corebank-client: backlog$' docs/bmad/implementation-artifacts/sprint-status.yaml && grep -q '^  6-2-replicated-local-api-topology: backlog$' docs/bmad/implementation-artifacts/sprint-status.yaml && grep -q '^  6-3-chaos-opt-in-and-demo-smoke: backlog$' docs/bmad/implementation-artifacts/sprint-status.yaml` -- expected: sprint keys match the backlog.
+- `! grep -qE '^  5-3-corebank-http-client:|^  6-2-chaos-opt-in-and-demo-smoke:' docs/bmad/implementation-artifacts/sprint-status.yaml` -- expected: superseded sprint keys are absent.
 
 ## Suggested Review Order
 
@@ -75,7 +77,7 @@ Kiota remains an outbound adapter behind the hexagonal port; generated transport
   [`epics.md:387`](../planning-artifacts/epics.md#L387)
 
 - Review contract ownership, intermediate generation, adapter isolation, tracing, and response classification.
-  [`ARCHITECTURE-SPINE.md:69`](../planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md#L69)
+  [`ARCHITECTURE-SPINE.md:64`](../planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md#L64)
 
 - Confirm the product requirement covers generation, all public operations, and test expectations.
   [`prd.md:53`](../planning-artifacts/prds/prd-CoreBankDemo-2026-08-21/prd.md#L53)
@@ -83,13 +85,13 @@ Kiota remains an outbound adapter behind the hexagonal port; generated transport
 **Replicated local topology**
 
 - Review the new independently implementable replica story before the renumbered chaos story.
-  [`epics.md:463`](../planning-artifacts/epics.md#L463)
+  [`epics.md:466`](../planning-artifacts/epics.md#L466)
 
 - Inspect the stable-ingress topology decision and unchanged four-partition model.
   [`ARCHITECTURE-SPINE.md:107`](../planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md#L107)
 
 - Confirm cross-instance exclusivity, ordering, and parallel-partition proof requirements.
-  [`ARCHITECTURE-SPINE.md:87`](../planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md#L87)
+  [`ARCHITECTURE-SPINE.md:83`](../planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md#L83)
 
 - Verify regular and load-test topology requirements share one stable PaymentsAPI ingress.
   [`prd.md:84`](../planning-artifacts/prds/prd-CoreBankDemo-2026-08-21/prd.md#L84)
@@ -98,6 +100,9 @@ Kiota remains an outbound adapter behind the hexagonal port; generated transport
 
 - Check FR coverage moved chaos to 6.3 and added replica ownership.
   [`epics.md:78`](../planning-artifacts/epics.md#L78)
+
+- Confirm both architecture decisions are queued for permanent ADRs.
+  [`epics.md:559`](../planning-artifacts/epics.md#L559)
 
 - Finish with unique backlog keys for renamed and inserted stories.
   [`sprint-status.yaml:73`](sprint-status.yaml#L73)

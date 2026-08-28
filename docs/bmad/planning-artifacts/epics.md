@@ -393,22 +393,25 @@ As the forwarder, I want the CoreBank HTTP transport generated from its checked-
 **Given** CoreBankAPI's frozen HTTP surface
 **When** its checked-in OpenAPI document is inspected
 **Then** `CoreBankDemo.CoreBankAPI/OpenApi/corebank-api.json` describes all four public operations and their frozen request/response shapes: validate account, get account, process transaction, and get transaction status
+**And** operation ids, status codes, content types, nullability, and success/error schemas are explicit
 **And** changing a frozen HTTP shape remains ADR-gated.
 
 **Given** PaymentsAPI is built
 **When** Kiota generation runs
-**Then** an MSBuild target runs Kiota before compilation and generates the C# client from that checked-in document beneath `$(IntermediateOutputPath)`
-**And** generated sources are excluded from version control and coverage, with no generated source committed.
+**Then** an incremental MSBuild target runs a repository-pinned Kiota version before compilation and generates the C# client from that checked-in document beneath `$(IntermediateOutputPath)`
+**And** regeneration removes obsolete generated files before compiling the declared generated `Compile` items
+**And** generated sources are excluded from version control and coverage, with a build leaving the working tree clean.
 
 **Given** application forwarding code
 **When** it calls CoreBankAPI
 **Then** the generated client is wrapped by the single application-owned `ICoreBankApiClient` adapter; generated request/response types do not leak into handlers or delivery strategies
+**And** the adapter resolves Aspire's logical `corebank-api` endpoint rather than any replica address
 **And** the adapter propagates ambient `traceparent`/`tracestate`, maps generated models to application-owned domain results, and classifies every 2xx as delivery success and every non-2xx, timeout, or exception through the AD-11 retry outcome
 **And** `Features:UseDapr`, the hand-written HTTP implementation, and every alternative CoreBank client are absent.
 
 **Given** the rebuild test gate
 **When** PaymentsAPI tests run
-**Then** the generated client compiles from the checked-in document and adapter tests cover operation mapping, trace propagation, 2xx responses, non-2xx responses, timeouts, and exceptions without requiring a live CoreBankAPI contract-diff job.
+**Then** the generated client compiles from the checked-in document and adapter tests cover every operation, trace propagation, representative 2xx/4xx/5xx responses, malformed success bodies, cancellation, timeouts, and exceptions without requiring a live CoreBankAPI contract-diff job.
 
 ### Story 5.4: Forwarding processor
 
@@ -469,17 +472,24 @@ As the demo owner, I want competing local API instances by default, so that the 
 **Given** either the regular AppHost or the LoadTests AppHost
 **When** its default topology starts
 **Then** it runs two PaymentsAPI replicas and two CoreBankAPI replicas, each with a healthy Dapr sidecar connected to the shared pubsub and lock stores
+**And** replicas of each service share its database and logical Dapr app id while sidecar/runtime ports remain unique
+**And** both replicas start reliably against an empty database without racing schema initialization
 **And** the four-partition configuration and existing external HTTP shapes remain unchanged.
 
 **Given** demo clients or k6 need PaymentsAPI
 **When** they resolve the service
-**Then** they use one stable Aspire-proxied PaymentsAPI endpoint rather than a fixed replica address or a new gateway.
+**Then** they use one stable Aspire-proxied PaymentsAPI endpoint preserving the documented entry port (5294 regular, 5295 load test) rather than a replica address or a new gateway
+**And** PaymentsAPI resolves CoreBankAPI through Aspire's logical service endpoint.
 
 **Given** two service instances compete for work
 **When** messages from the same partition are processed
-**Then** tests prove at most one instance owns that store partition at a time and messages complete oldest-first without reordering
-**And** when messages belong to different partitions, tests prove they can progress concurrently across instances
+**Then** the Postgres acceptance tier with the real Redis-backed Dapr lock adapter proves at most one instance owns that store partition at a time and messages complete in durable enqueue order without reordering, including equal ordering timestamps
+**And** processor-instance evidence proves both replicas perform work while different partitions progress concurrently
 **And** lock-expiry takeover is not duplicated here because Story 2.6 owns that failure path.
+
+**Given** the LoadTests AppHost is preparing a run
+**When** reset executes
+**Then** reset completes before replicated processors accept work and cannot overlap in-flight processing.
 
 ### Story 6.3: Chaos opt-in and demo smoke
 
@@ -548,11 +558,11 @@ As a repo visitor, I want the architecture doc generated from the rebuilt code, 
 
 ### Story 8.2: ADRs and skill updates
 
-As the process record, I want the rulings written as ADRs, so that decisions outlive the chat (rulings A1–A4, A7/A9-tiering; NFR-4).
+As the process record, I want the rulings written as ADRs, so that decisions outlive the chat (rulings A1–A4, A7/A9-tiering, contract generation, replicated local topology; NFR-4).
 
 **Acceptance Criteria:**
 
 **Given** the spine memlog
-**When** ADR-008..ADR-012 are written (UseDapr deletion; kernel delivery strategy; PartitionCount=4 alignment; lock expiry over renewal; test-tier strategy + coverage gate)
+**When** ADR-008..ADR-014 are written (UseDapr deletion; kernel delivery strategy; PartitionCount=4 alignment; lock expiry over renewal; test-tier strategy + coverage gate; checked-in OpenAPI with build-time Kiota generation; replicated local topology behind Aspire ingress)
 **Then** each follows the existing ADR format with Context/Decision/Implementation references to real files
 **And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where kernel surfaces changed; AGENTS.md rebuild section flips to "completed".
