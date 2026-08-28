@@ -18,6 +18,8 @@ internal interface IInboxMessageRepository
     Task<bool> StoreIfNewAsync(InboxMessage message, CancellationToken cancellationToken);
 
     Task<InboxMessage?> FindByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken);
+
+    Task ExecuteInTransactionAsync(Func<Task> operation, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -39,4 +41,7 @@ internal sealed class InboxMessageRepository
 
     public Task<InboxMessage?> FindByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken) =>
         InboxMessages.FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);
+
+    public override Task ExecuteInTransactionAsync(Func<Task> operation, CancellationToken cancellationToken = default) =>
+        base.ExecuteInTransactionAsync(operation, cancellationToken);
 }

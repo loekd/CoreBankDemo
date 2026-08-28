@@ -1,5 +1,7 @@
 using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.CoreBankAPI.Inbox;
+using CoreBankDemo.CoreBankAPI.Outbox;
+using CoreBankDemo.Messaging;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -24,8 +26,6 @@ builder.Services.AddScoped<DemoAccountSeeder>();
 
 // Transaction intake (story 4.4): controllers, the manual-ModelState fix
 // (see below), inbox partitioning options, and the intake port/handler pair.
-// No hosted service, IAccountRepository, ITransactionExecutor, or
-// IEventPublisher registration yet — those are stories 4.6/4.7.
 builder.Services.AddControllers();
 
 // [ApiController]'s default automatic-400 behavior would otherwise return a
@@ -38,9 +38,21 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
 });
 
 builder.AddInboxProcessingOptions();
+builder.AddMessagingOutboxProcessingOptions();
 
-builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
+// The ActivitySource is already registered as a singleton by
+// AddServiceDefaults("CoreBank.CoreBankAPI") above and wired into the OTel
+// trace provider under that same name — reuse it rather than registering a
+// second, differently-named ActivitySource, which would silently produce
+// spans OpenTelemetry never exports.
+builder.Services.AddScoped<InboxMessageRepository>();
+builder.Services.AddScoped<IInboxMessageRepository>(sp => sp.GetRequiredService<InboxMessageRepository>());
+builder.Services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());
 builder.Services.AddScoped<ITransactionIntakeHandler, TransactionIntakeHandler>();
+builder.Services.AddScoped<ITransactionExecutor, TransactionExecutor>();
+builder.Services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
+builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionExecutionHandler>();
+builder.Services.AddHostedService<InboxProcessor>();
 
 // Account read surface (story 4.5): IAccountRepository was built in story 4.3
 // but never registered in DI until now (only this story's controller-facing
