@@ -1,16 +1,15 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- No ProjectReference to CoreBankDemo.PaymentsAPI yet: MSBuild builds ProjectReferences
-       transitively regardless of slnf membership, so referencing the unmigrated API would
-       break the rebuild gate when it goes red (AD-10).
-       TODO(epic-5 story 5.1): add ProjectReference + <Include>[CoreBankDemo.PaymentsAPI]*</Include>
-       and remove this comment when the target enters the rebuild filter. -->
-
   <PropertyGroup>
-    <!-- TODO(epic-5 story 5.1): remove with the comment above so the 90% gate from
-         tests/Directory.Build.props applies. With no instrumented modules coverlet
-         reports Total 0% and would trip the threshold. -->
-    <Threshold>0</Threshold>
+    <Include>[CoreBankDemo.PaymentsAPI]*</Include>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.PaymentsAPI\CoreBankDemo.PaymentsAPI.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+  </ItemGroup>
 
 </Project>
