@@ -52,3 +52,9 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-4-7-event-publishing-processor.md`
   summary: Sprint tracking still lists completed Story 4.6 as backlog.
   evidence: Story 4.6 is implemented and committed, while sprint-status.yaml retains 4-6-atomic-inbox-execution-with-event-enqueue: backlog; this pre-dates Story 4.7.
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-1-payment-store-and-idempotency-key-handling.md`
+  summary: Existing persistent Payments PostgreSQL databases must be recreated before the rebuilt schema is used.
+  evidence: Story 5.1 replaces required inbox columns and indexes, while the repository mandates EnsureCreatedAsync and forbids migrations; EnsureCreated does not upgrade existing tables.
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-1-payment-store-and-idempotency-key-handling.md`
+  summary: Replace the temporary OutboxProcessingOptions lock/poll consumer placeholders when Story 5.4 builds the forwarding processor.
+  evidence: Story 5.1 consumes PartitionCount only; LockExpirySeconds and PollingIntervalMs remain intentionally unread until the kernel-backed Payments outbox processor exists.

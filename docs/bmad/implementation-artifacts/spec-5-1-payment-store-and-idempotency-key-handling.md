@@ -75,6 +75,7 @@ context:
 
 - 2026-08-28 (review loop 1): resolved the approved intent's key-length contradiction. `null` still generates a canonical GUID; caller keys of length 1–100 remain verbatim; empty or longer values now return a domain validation result before storage. Also required real-store concurrent dedupe coverage, testable exact-four startup validation, explicit amount precision, immutable handler results, structured logs, and repair of the deleted skill reference. KEEP: legacy demolition, kernel repository/hash reuse, trace capture, composite event identity, minimal host, and later-story boundaries.
 - 2026-08-28 (review loop 2): resolved scale handling for values such as `1.005`: round exactly once to two decimals using `MidpointRounding.ToEven`, and return the normalized persisted value. Strengthened verification to use a synchronized independent-repository race, invoke `IStartupValidator`, assert every request field plus structured scope and cancellation propagation, cover distinct transaction/type/account inbox identities, and preserve existing later-story package references. KEEP all review-loop-1 decisions.
+- 2026-08-28 (final review): added deployed `appsettings.json` startup validation, complete duplicate-winner snapshot assertions, and required-property metadata checks. Deferred persistent schema recreation and temporary lock/poll consumer placeholders.
 
 ## Design Notes
 
@@ -119,3 +120,6 @@ The event inbox schema lands now because `PaymentsDbContext` is the Epic 5 stora
 
 - Exercises schema metadata and database-enforced composite event dedupe.
   [`PaymentsDbContextTests.cs:12`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsDbContextTests.cs#L12)
+
+- Loads deployed configuration through the real startup validator.
+  [`PaymentStorageRegistrationTests.cs:34`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageRegistrationTests.cs#L34)

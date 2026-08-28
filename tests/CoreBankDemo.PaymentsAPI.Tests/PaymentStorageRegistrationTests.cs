@@ -30,6 +30,24 @@ public class PaymentStorageRegistrationTests
         scope.ServiceProvider.GetRequiredService<IPaymentStorageHandler>().Should().BeOfType<PaymentStorageHandler>();
     }
 
+    [Fact]
+    public void Production_appsettings_passes_startup_validation_with_four_partitions()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddJsonFile(
+                Path.Combine(FindRepoRoot(), "CoreBankDemo.PaymentsAPI", "appsettings.json"),
+                optional: false)
+            .Build();
+        var services = new ServiceCollection();
+        services.AddPaymentStorage(configuration);
+        services.AddDbContext<PaymentsDbContext>(
+            options => options.UseSqlite("Data Source=:memory:"));
+        using var provider = services.BuildServiceProvider();
+
+        provider.GetRequiredService<IStartupValidator>().Validate();
+        provider.GetRequiredService<IOptions<OutboxProcessingOptions>>().Value.PartitionCount.Should().Be(4);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("3")]
@@ -76,6 +94,18 @@ public class PaymentStorageRegistrationTests
 
     private static IConfiguration Configuration(IEnumerable<KeyValuePair<string, string?>> values) =>
         new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+
+    private static string FindRepoRoot()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "CoreBankDemo.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        return directory?.FullName
+            ?? throw new InvalidOperationException("Could not locate the repository root.");
+    }
 
     private sealed class CustomTimeProvider : TimeProvider;
 }

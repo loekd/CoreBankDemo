@@ -208,8 +208,22 @@ public class PaymentStorageHandlerTests
         var result = await handler.StoreAsync(Request, "duplicate-key", cancellation.Token);
 
         result.Outcome.Should().Be(PaymentStorageOutcome.Duplicate);
-        result.Payment!.Id.Should().Be(winner.Id).And.NotBe(candidateId);
-        result.Payment.Amount.Should().Be(99m);
+        result.Payment.Should().BeEquivalentTo(new
+        {
+            winner.Id,
+            winner.IdempotencyKey,
+            winner.TransactionId,
+            winner.FromAccount,
+            winner.ToAccount,
+            winner.Amount,
+            winner.Currency,
+            winner.PartitionId,
+            winner.Status,
+            winner.CreatedAt,
+            winner.TraceParent,
+            winner.TraceState
+        });
+        result.Payment!.Id.Should().NotBe(candidateId);
         repository.VerifyAll();
     }
 

@@ -37,6 +37,14 @@ public class PaymentsDbContextTests
         AssertMaxLength(outbox, nameof(OutboxMessage.Status), 20);
         AssertMaxLength(outbox, nameof(OutboxMessage.TraceParent), 55);
         AssertMaxLength(outbox, nameof(OutboxMessage.TraceState), 512);
+        AssertRequired(
+            outbox,
+            nameof(OutboxMessage.IdempotencyKey),
+            nameof(OutboxMessage.TransactionId),
+            nameof(OutboxMessage.FromAccount),
+            nameof(OutboxMessage.ToAccount),
+            nameof(OutboxMessage.Currency),
+            nameof(OutboxMessage.Status));
 
         var inbox = context.Model.FindEntityType(typeof(InboxMessage))!;
         inbox.FindPrimaryKey()!.Properties.Select(property => property.Name)
@@ -63,8 +71,14 @@ public class PaymentsDbContextTests
         AssertMaxLength(inbox, nameof(InboxMessage.Status), 20);
         AssertMaxLength(inbox, nameof(InboxMessage.TraceParent), 55);
         AssertMaxLength(inbox, nameof(InboxMessage.TraceState), 512);
-        inbox.FindProperty(nameof(InboxMessage.AccountNumber))!.IsNullable.Should().BeFalse();
-        inbox.FindProperty(nameof(InboxMessage.Payload))!.IsNullable.Should().BeFalse();
+        AssertRequired(
+            inbox,
+            nameof(InboxMessage.IdempotencyKey),
+            nameof(InboxMessage.TransactionId),
+            nameof(InboxMessage.EventType),
+            nameof(InboxMessage.AccountNumber),
+            nameof(InboxMessage.Payload),
+            nameof(InboxMessage.Status));
     }
 
     [Fact]
@@ -146,4 +160,14 @@ public class PaymentsDbContextTests
         string property,
         int expected) =>
         entity.FindProperty(property)!.GetMaxLength().Should().Be(expected);
+
+    private static void AssertRequired(
+        Microsoft.EntityFrameworkCore.Metadata.IEntityType entity,
+        params string[] properties)
+    {
+        foreach (var property in properties)
+        {
+            entity.FindProperty(property)!.IsNullable.Should().BeFalse();
+        }
+    }
 }
