@@ -2,7 +2,7 @@
 title: 'Story 4.6: Atomic inbox execution with event enqueue'
 type: 'feature'
 created: '2026-08-27'
-status: 'done'
+status: 'blocked'
 baseline_revision: 'ea0d46f5f1f0c2e627e70ab75e1a6e9d23ec2217'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -197,8 +197,8 @@ Rejected (noise / disproven / already correct per frozen intent, not tracked fur
 
 ## Auto Run Result
 
-Status: done
-Blocking condition: none
+Status: blocked
+Blocking condition: finalization left repository dirty
 
 **Summary:** Finished story 4.6 (atomic inbox execution with event enqueue), which was already `in-progress` with most files drafted. Reviewed and hardened the existing draft, then ran the multi-layer review and applied its one actionable patch.
 
@@ -219,3 +219,5 @@ Blocking condition: none
 - Re-ran the full suite again after this pass's patch; results unchanged (still green, same coverage).
 
 **Residual risks:** see the six items recorded under frontmatter `deferred` — most notably the kernel `InboxProcessorBase`'s shared-DbContext-across-parallel-partitions design and the missing EF concurrency-token configuration on `InboxMessage.Status`/`MessagingOutboxMessage.Status`, both pre-existing and out of this story's scope.
+
+**Finalization note:** All of this story's own files (implementation, DI wiring, tests, and this spec) are committed (commit `b0e0659`) and none remain uncommitted. However, the working copy is not fully clean: it entered this run already dirty with unrelated, out-of-story changes — `.devcontainer/devcontainer-lock.json`, `.devcontainer/devcontainer.json`, `.claude/skills/bmad-brainstorming/assets/brain-methods.csv`, `CoreBankDemo.LoadTestSupport/Endpoints/InboxEndpoints.cs`, `CoreBankDemo.LoadTestSupport/Endpoints/OutboxEndpoints.cs`, `CoreBankDemo.LoadTests/Properties/launchSettings.json`, `CoreBankDemo.LoadTests/appsettings*.json`, `dapr/components/lockstore-redis.yaml`, `dapr/components/pubsub-redis.yaml`, and the untracked `.claude/settings.local.json` — none of which this story's Code Map, Boundaries, or diff touch. Per the workflow's finalize check, a non-clean working copy after committing the reviewed diff requires a `blocked` halt even though story 4.6 itself is fully implemented, reviewed, and verified green.
