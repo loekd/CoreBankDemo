@@ -2,7 +2,7 @@
 title: "PRD: CoreBankDemo Rebuild"
 status: final
 created: 2026-08-21
-updated: 2026-08-21
+updated: 2026-08-28
 ---
 
 # PRD: CoreBankDemo Rebuild
@@ -50,7 +50,7 @@ Accepts payments over HTTP and acknowledges them durably before any downstream w
 - **FR-5:** A background processor polls the Outbox and forwards each payment to CoreBankAPI over HTTP (destination-account validation, then transaction submission).
 - **FR-6:** Processing is partitioned: per-partition distributed lock, oldest-first within a partition, partitions processed concurrently — preserving per-key order while scaling out.
 - **FR-7:** A failed forward returns the message to pending with an incremented retry count and recorded error; after the retry limit the message is terminal `Failed`. Stuck `Processing` rows older than the processing timeout are reclaimed.
-- **FR-8:** Forwarding restores the stored trace context so one payment forms one distributed trace.
+- **FR-8:** Forwarding restores the stored trace context so one payment forms one distributed trace. The CoreBank HTTP integration is generated during build with Kiota from a checked-in OpenAPI document covering every public CoreBankAPI operation; generated sources are not committed and remain behind the application-owned `ICoreBankApiClient` port.
 
 ### 4.3 Idempotent transaction processing (CoreBankAPI)
 
@@ -81,13 +81,13 @@ Accepts payments over HTTP and acknowledges them durably before any downstream w
 
 ### 4.8 Orchestration & chaos (AppHost)
 
-- **FR-21:** One command boots the full system via Aspire: Postgres (`paymentsdb`, `corebankdb`), Redis, Dapr sidecars + components, Jaeger, both APIs, pgAdmin/RedisInsight.
+- **FR-21:** One command boots the full system via Aspire: Postgres (`paymentsdb`, `corebankdb`), Redis, Dapr sidecars + components, Jaeger, two PaymentsAPI replicas, two CoreBankAPI replicas, pgAdmin/RedisInsight. Both regular and load-test AppHosts use this replicated topology by default; every API replica has a healthy Dapr sidecar and PaymentsAPI remains reachable through one stable Aspire-proxied endpoint.
 - **FR-22:** DevProxy fault injection (errors, latency, rate limiting) is available opt-in for the resilience demo stages; the HTTP layer's retry/circuit-breaker/timeout policies handle transient faults.
-- **FR-23:** Configuration matches documentation: partition count 4, no dead feature flags (constraints rulings A1, A3).
+- **FR-23:** Configuration matches documentation: partition count 4, no dead feature flags (constraints rulings A1, A3). Competing API instances use the same distributed partition locks so no partition is processed concurrently or out of order, while different partitions remain eligible for parallel processing.
 
 ### 4.9 Load-test & assertion harness (LoadTestSupport + k6)
 
-- **FR-24:** A LoadTests AppHost runs k6 against the system (configurable transaction count / VUs, ~10% deliberate duplicate keys) using disposable infrastructure.
+- **FR-24:** A LoadTests AppHost runs k6 through the stable PaymentsAPI proxy endpoint against the default two-by-two API topology (configurable transaction count / VUs, ~10% deliberate duplicate keys) using disposable infrastructure.
 - **FR-25:** LoadTestSupport exposes reset, drain-polling, and assertion endpoints plus the equivalent MCP tools (`reset_database`, `poll_until_drained`, `get_assertion_results`, inbox/outbox inspection) validating all five invariants.
 - **FR-26:** The harness conforms to the rebuilt schemas (it adapts to the code, not vice versa) while preserving assertion semantics.
 
@@ -95,15 +95,15 @@ Accepts payments over HTTP and acknowledges them durably before any downstream w
 
 - **FR-27:** Every logic project has an xUnit test project (AwesomeAssertions, Moq); tests are written test-first per story.
 - **FR-28:** Plain `dotnet test` on the rebuild solution filter enforces ≥90% line coverage on logic projects via coverlet — locally, no CI required. Hosting boilerplate is excluded via attributes/filters.
-- **FR-29:** Pattern contracts (idempotent store, retry/poison state machine, partition assignment, ordering, dedupe/replay, balance arithmetic, validation rules) each have explicit, named unit tests — the suite reads as documentation of the patterns.
+- **FR-29:** Pattern contracts (idempotent store, retry/poison state machine, partition assignment, cross-instance exclusivity and ordering, dedupe/replay, balance arithmetic, validation rules) each have explicit, named tests — including generated-client compilation and adapter tests for the Kiota boundary — so the suite reads as documentation of the patterns.
 
 ## 5. Non-Functional Requirements
 
-- **NFR-1 Invariants:** the five constraints.md §1 invariants hold under concurrent load with fault injection; verified by the acceptance harness.
+- **NFR-1 Invariants:** the five constraints.md §1 invariants hold under concurrent load with fault injection and competing service replicas; verified by the acceptance harness.
 - **NFR-2 Traceability:** one payment = one trace across HTTP hop, message stores, and Dapr hop (Jaeger-verifiable).
 - **NFR-3 Conventions:** constraints.md §3 conventions are binding (EnsureCreated-only, TimeProvider, thin controllers, validated options, structured logging, central package management).
 - **NFR-4 Process traceability:** every production change traces to a BMAD story; one commit per story.
-- **NFR-5 Demo ergonomics:** cold start to healthy system with one command; existing `.http` demo flows work unchanged.
+- **NFR-5 Demo ergonomics:** cold start to a healthy replicated system with one command; existing `.http` demo flows use a stable PaymentsAPI ingress and work unchanged.
 
 ## 6. Non-Goals (Explicit)
 

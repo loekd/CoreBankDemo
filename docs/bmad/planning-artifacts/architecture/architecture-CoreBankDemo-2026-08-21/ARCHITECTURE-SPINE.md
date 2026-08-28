@@ -7,7 +7,7 @@ paradigm: 'Hexagonal (ports & adapters) per service over a shared messaging kern
 scope: 'Full rebuild of CoreBankDemo on feature/bmad — same external contract as main'
 status: final
 created: '2026-08-21'
-updated: '2026-08-21'
+updated: '2026-08-28'
 binds: [FR-1..FR-29, NFR-1..NFR-5]
 sources:
   - docs/bmad/constraints.md
@@ -47,6 +47,7 @@ companions: []
 - **Binds:** PaymentsAPI Outbox/Inbox, CoreBankAPI Inbox/MessagingOutbox
 - **Prevents:** divergent poll/lock/retry implementations (the `main` MessagingOutboxProcessor defect, ruling A2)
 - **Rule:** Every background processor derives from `InboxProcessorBase`/`OutboxProcessorBase` in `CoreBankDemo.Messaging`. Message delivery is a port (`IOutboxDeliveryStrategy`): HTTP-forward and Dapr-publish are strategies, not new processor loops. No processor re-implements polling, partition fan-out, locking, batching, claiming, **stale-claim reclaim** (Processing older than `ProcessingTimeout` returns to Pending), retry, or trace restoration — all of these are kernel-owned.
+- **Scale-out invariant:** The distributed lock store is shared by every replica. At most one service instance may process a given store partition at a time, preserving oldest-first order across competing instances; locks remain partition-scoped so different partitions can progress concurrently.
 
 ### AD-4 — Idempotency key is the single identity
 
@@ -64,7 +65,8 @@ companions: []
 
 - **Binds:** all production projects
 - **Prevents:** untestable seams; hidden infrastructure coupling (ruling A6)
-- **Rule:** Infrastructure is reached only through these ports: `IDistributedLockService`, `IEventPublisher` (wraps `DaprClient`), `ICoreBankApiClient` (single HTTP implementation — ruling A1: the `Features:UseDapr` flag and phantom Dapr client are deleted), repository interfaces per aggregate/store, and `TimeProvider`. Raw SQL (`SELECT … FOR UPDATE`) exists only inside repository implementations.
+- **Rule:** Infrastructure is reached only through these ports: `IDistributedLockService`, `IEventPublisher` (wraps `DaprClient`), `ICoreBankApiClient` (single Kiota-backed HTTP adapter — ruling A1: the `Features:UseDapr` flag, phantom Dapr client, and parallel hand-written HTTP implementation are deleted), repository interfaces per aggregate/store, and `TimeProvider`. Raw SQL (`SELECT … FOR UPDATE`) exists only inside repository implementations.
+- **Generated client boundary:** CoreBankAPI owns `CoreBankDemo.CoreBankAPI/OpenApi/corebank-api.json`, a checked-in OpenAPI document containing every public account and transaction operation. PaymentsAPI runs Kiota from an MSBuild target before compilation and writes the C# transport client beneath `$(IntermediateOutputPath)`; generated sources are never committed or exposed to handlers. The adapter maps generated models and transport outcomes to application-owned types, propagates `traceparent`/`tracestate`, and applies AD-11 response classification.
 
 ### AD-7 — Locking is expiry-based, not renewed
 
@@ -82,7 +84,7 @@ companions: []
 
 - **Binds:** all test projects; rulings A7/A8
 - **Prevents:** coverage theater; untestable-by-accident code; SQLite/Postgres semantic confusion
-- **Rule:** Three tiers: (1) pure logic tested with Moq against ports; (2) repository/store behavior tested on EF Core SQLite in-memory; (3) Postgres-only semantics covered solely by the k6/Postgres acceptance tier. To keep tiers 2 and 3 separable, repositories are written provider-agnostic (LINQ, EF unique-violation detection via a shared provider-aware helper) except **minimal pass-through methods** embedding provider-specific SQL (`FOR UPDATE`); those pass-throughs contain no logic and may carry individual `[ExcludeFromCodeCoverage]` with a justifying comment — never a blanket class-level exclusion. Coverage: coverlet.msbuild in `tests/Directory.Build.props`, `Threshold=90`, `ThresholdType=line`; hosting wiring carries `[ExcludeFromCodeCoverage]`. The gate must pass from plain `dotnet test` on the rebuild solution filter, running the **VSTest runner mode** — Microsoft.Testing.Platform must not be enabled (coverlet is incompatible with MTP; the gate would silently vanish).
+- **Rule:** Three tiers: (1) pure logic tested with Moq against ports, including Kiota generated-client compilation and adapter mapping/classification tests; (2) repository/store behavior tested on EF Core SQLite in-memory; (3) Postgres-only and replicated-topology semantics covered by the k6/Postgres acceptance tier. To keep tiers 2 and 3 separable, repositories are written provider-agnostic (LINQ, EF unique-violation detection via a shared provider-aware helper) except **minimal pass-through methods** embedding provider-specific SQL (`FOR UPDATE`); those pass-throughs contain no logic and may carry individual `[ExcludeFromCodeCoverage]` with a justifying comment — never a blanket class-level exclusion. Coverage: coverlet.msbuild in `tests/Directory.Build.props`, `Threshold=90`, `ThresholdType=line`; hosting wiring and generated code carry `[ExcludeFromCodeCoverage]`. The gate must pass from plain `dotnet test` on the rebuild solution filter, running the **VSTest runner mode** — Microsoft.Testing.Platform must not be enabled (coverlet is incompatible with MTP; the gate would silently vanish). Replicated acceptance tests must prove same-partition exclusion and ordering across competing instances, plus concurrent progress for different partitions; lock-expiry takeover remains kernel failure-path coverage.
 
 ### AD-10 — Rebuild gate is the solution filter
 
@@ -100,7 +102,13 @@ companions: []
 
 - **Binds:** both APIs, ServiceDefaults, LoadTestSupport
 - **Prevents:** silently diverging request/response/event shapes once `main`'s code is deleted mid-rebuild
-- **Rule:** Event payload records (`TransactionCompletedEvent`, `TransactionFailedEvent`, `BalanceUpdatedEvent`) live **once** in ServiceDefaults `CloudEventTypes` and are the only event shapes on the wire. HTTP request/response DTO classes stay per-service (services never share an API contract assembly), but their JSON shapes are fixed verbatim in the epics tech-spec (extracted from `main` before demolition); a DTO change is a contract change requiring an ADR (AD-1).
+- **Rule:** Event payload records (`TransactionCompletedEvent`, `TransactionFailedEvent`, `BalanceUpdatedEvent`) live **once** in ServiceDefaults `CloudEventTypes` and are the only event shapes on the wire. HTTP request/response DTO classes stay per-service (services never share an API contract assembly), but their JSON shapes are fixed verbatim in the epics tech-spec (extracted from `main` before demolition); a DTO change is a contract change requiring an ADR (AD-1). CoreBankAPI's checked-in OpenAPI document is the written machine-readable owner for those HTTP operations and must describe all public endpoints without changing the frozen shapes. Generated-client compilation and adapter tests replace any CI live-contract-diff requirement.
+
+### AD-13 — Local topology is replicated behind stable ingress `[ADOPTED]`
+
+- **Binds:** regular AppHost, LoadTests AppHost, both APIs, Dapr sidecars
+- **Prevents:** single-instance-only ordering proof; clients binding to ephemeral replica endpoints
+- **Rule:** Both AppHosts run two PaymentsAPI replicas and two CoreBankAPI replicas by default. Aspire's proxy exposes one stable PaymentsAPI endpoint to demo clients and k6; no gateway is introduced. Every replica has its own healthy Dapr sidecar and shares the configured pubsub and lock stores. The four-partition model is unchanged.
 
 ### Dependency direction
 
@@ -193,14 +201,14 @@ graph LR
 | Capability (PRD) | Lives in | Governed by |
 | --- | --- | --- |
 | 4.1 Payment intake | PaymentsAPI Controllers + Handlers | AD-1, AD-2, AD-4 |
-| 4.2 Reliable forwarding | PaymentsAPI Outbox + kernel | AD-3, AD-4, AD-6, AD-8 |
+| 4.2 Reliable forwarding | PaymentsAPI Outbox + kernel | AD-3, AD-4, AD-6, AD-8, AD-12 |
 | 4.3 Idempotent processing | CoreBankAPI Controllers + Inbox | AD-1, AD-4, AD-5 |
 | 4.4 Account services | CoreBankAPI Controllers + Models | AD-1, AD-2 |
 | 4.5 Event publishing | CoreBankAPI Outbox + kernel | AD-3, AD-5, AD-8 |
 | 4.6 Event consumption | PaymentsAPI Inbox + kernel | AD-3, AD-4, AD-8 |
 | 4.7 Messaging library | Messaging | AD-3, AD-4, AD-6, AD-9 |
-| 4.8 Orchestration & chaos | AppHost, ServiceDefaults | AD-1, AD-7 |
-| 4.9 Load harness | LoadTestSupport, LoadTests, k6 | AD-1 (conforms to code) |
+| 4.8 Orchestration & chaos | AppHost, ServiceDefaults | AD-1, AD-7, AD-13 |
+| 4.9 Load harness | LoadTestSupport, LoadTests, k6 | AD-1, AD-9, AD-13 (conforms to code) |
 | 4.10 Test suite & gate | tests/ | AD-2, AD-9, AD-10 |
 
 ## Deferred

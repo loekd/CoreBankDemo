@@ -13,7 +13,7 @@ created: 2026-08-21
 
 ## Overview
 
-Complete epic and story breakdown for the CoreBankDemo rebuild, decomposing the PRD (FR-1..FR-29, NFR-1..NFR-5) and the architecture spine (AD-1..AD-12) into implementable, TDD-ready stories. Epic order is fixed (brief addendum): each epic enters `CoreBankDemo.Rebuild.slnf` at its start after demolition of the old sources (AD-10). Every story: failing tests first, then implementation; gate = `dotnet test CoreBankDemo.Rebuild.slnf` with the ≥90% coverlet threshold.
+Complete epic and story breakdown for the CoreBankDemo rebuild, decomposing the PRD (FR-1..FR-29, NFR-1..NFR-5) and the architecture spine (AD-1..AD-13) into implementable, TDD-ready stories. Epic order is fixed (brief addendum): each epic enters `CoreBankDemo.Rebuild.slnf` at its start after demolition of the old sources (AD-10). Every story: failing tests first, then implementation; gate = `dotnet test CoreBankDemo.Rebuild.slnf` with the ≥90% coverlet threshold.
 
 ## Requirements Inventory
 
@@ -27,7 +27,7 @@ NFR-1 invariants under load · NFR-2 one payment = one trace · NFR-3 constraint
 
 ### Additional Requirements (Architecture)
 
-- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy`; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set; AD-7 no lock renewal; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below.
+- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy` and cross-instance partition exclusivity; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set with a Kiota-backed CoreBank adapter; AD-7 no lock renewal; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below and represented by a checked-in CoreBank OpenAPI document; AD-13 two local replicas per API behind stable Aspire ingress.
 - No starter template — brownfield rebuild in an existing solution.
 
 ### UX Design Requirements
@@ -75,10 +75,10 @@ public record BalanceUpdatedResponse(string TransactionId, string AccountNumber,
 | FR-3 | 5.1, 5.2 | FR-18 | 5.6 |
 | FR-4 | 5.1, 2.1 | FR-19 | 2.1–2.6 |
 | FR-5 | 5.4 | FR-20 | 2.4, 2.5, 3.2, 3.3 |
-| FR-6 | 2.4, 5.4 | FR-21 | 6.1 |
-| FR-7 | 2.3, 2.6 | FR-22 | 6.2 |
-| FR-8 | 2.4, 5.3 | FR-23 | 6.1, 3.1 |
-| FR-9 | 4.4 | FR-24 | 7.3 |
+| FR-6 | 2.4, 5.4, 6.2 | FR-21 | 6.1, 6.2 |
+| FR-7 | 2.3, 2.6 | FR-22 | 6.3 |
+| FR-8 | 2.4, 5.3 | FR-23 | 6.1, 6.2, 3.1 |
+| FR-9 | 4.4 | FR-24 | 6.2, 7.3 |
 | FR-10 | 4.4 | FR-25 | 7.1, 7.2 |
 | FR-11 | 4.3, 4.6 | FR-26 | 7.1–7.3 |
 | FR-12 | 4.2, 4.6 | FR-27 | 1.2, all |
@@ -384,16 +384,31 @@ As a client, I want `POST /api/payments` to accept-and-acknowledge, so that my r
 **Then** `202` references the existing record without a second row
 **And** invalid requests return all validation errors at once; the controller stays logic-free.
 
-### Story 5.3: CoreBank HTTP client
+### Story 5.3: Contract-generated Kiota CoreBank client
 
-As the forwarder, I want one `ICoreBankApiClient`, so that the HTTP hop is mockable and traced (FR-8; AD-6, ruling A1).
+As the forwarder, I want the CoreBank HTTP transport generated from its checked-in contract, so that every public operation stays contract-driven while application logic remains isolated from transport code (FR-8, FR-29; AD-6, AD-8, AD-9, AD-11, AD-12).
 
 **Acceptance Criteria:**
 
-**Given** a mocked HTTP handler
-**When** validate/process calls run
-**Then** requests match the frozen CoreBank DTO shapes, `traceparent`/`tracestate` headers propagate from the ambient activity, and responses map to domain results including non-2xx classification for AD-11
-**And** no `Features:UseDapr` or alternative client exists.
+**Given** CoreBankAPI's frozen HTTP surface
+**When** its checked-in OpenAPI document is inspected
+**Then** `CoreBankDemo.CoreBankAPI/OpenApi/corebank-api.json` describes all four public operations and their frozen request/response shapes: validate account, get account, process transaction, and get transaction status
+**And** changing a frozen HTTP shape remains ADR-gated.
+
+**Given** PaymentsAPI is built
+**When** Kiota generation runs
+**Then** an MSBuild target runs Kiota before compilation and generates the C# client from that checked-in document beneath `$(IntermediateOutputPath)`
+**And** generated sources are excluded from version control and coverage, with no generated source committed.
+
+**Given** application forwarding code
+**When** it calls CoreBankAPI
+**Then** the generated client is wrapped by the single application-owned `ICoreBankApiClient` adapter; generated request/response types do not leak into handlers or delivery strategies
+**And** the adapter propagates ambient `traceparent`/`tracestate`, maps generated models to application-owned domain results, and classifies every 2xx as delivery success and every non-2xx, timeout, or exception through the AD-11 retry outcome
+**And** `Features:UseDapr`, the hand-written HTTP implementation, and every alternative CoreBank client are absent.
+
+**Given** the rebuild test gate
+**When** PaymentsAPI tests run
+**Then** the generated client compiles from the checked-in document and adapter tests cover operation mapping, trace propagation, 2xx responses, non-2xx responses, timeouts, and exceptions without requiring a live CoreBankAPI contract-diff job.
 
 ### Story 5.4: Forwarding processor
 
@@ -432,7 +447,7 @@ As the demo, I want consumed events processed on the kernel loop, so that the fu
 
 ## Epic 6: E5 — AppHost & Orchestration
 
-Rebuild the Aspire graph; the full `.sln` returns to green here (FR-21, FR-22, FR-23; AD-10).
+Rebuild and replicate the Aspire graph; the full `.sln` returns to green here (FR-6, FR-21, FR-22, FR-23, FR-24; AD-3, AD-9, AD-10, AD-13).
 
 ### Story 6.1: Aspire application graph
 
@@ -445,7 +460,28 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 **Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr components (pubsub, lockstore, subscription), and both APIs with sidecars come up healthy
 **And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
 
-### Story 6.2: Chaos opt-in and demo smoke
+### Story 6.2: Replicated local API topology
+
+As the demo owner, I want competing local API instances by default, so that the demo proves partition ordering and exclusivity hold beyond a single process (FR-6, FR-21, FR-23, FR-24; NFR-1, NFR-5; AD-3, AD-9, AD-13).
+
+**Acceptance Criteria:**
+
+**Given** either the regular AppHost or the LoadTests AppHost
+**When** its default topology starts
+**Then** it runs two PaymentsAPI replicas and two CoreBankAPI replicas, each with a healthy Dapr sidecar connected to the shared pubsub and lock stores
+**And** the four-partition configuration and existing external HTTP shapes remain unchanged.
+
+**Given** demo clients or k6 need PaymentsAPI
+**When** they resolve the service
+**Then** they use one stable Aspire-proxied PaymentsAPI endpoint rather than a fixed replica address or a new gateway.
+
+**Given** two service instances compete for work
+**When** messages from the same partition are processed
+**Then** tests prove at most one instance owns that store partition at a time and messages complete oldest-first without reordering
+**And** when messages belong to different partitions, tests prove they can progress concurrently across instances
+**And** lock-expiry takeover is not duplicated here because Story 2.6 owns that failure path.
+
+### Story 6.3: Chaos opt-in and demo smoke
 
 As the speaker, I want DevProxy and the demo flows verified, so that talk stages 0–4 work (FR-22, NFR-5).
 
