@@ -375,6 +375,46 @@ The load test uses disposable PostgreSQL and Redis instances, seeded with 10 tes
 
 **MCP Integration:** The LoadTestSupport service exposes an MCP server at `http://localhost:5181/` for agent-based orchestration. See `mcp-config.example.json` and [CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md) for connection instructions.
 
+## Presentation Console (DemoRunner)
+
+`CoreBankDemo.DemoRunner` is a standalone, mouse-and-keyboard terminal control room for rehearsing and running this talk reliably (Story 7.4, ADR-015). It is a local operator tool only: it references no banking implementation project, connects to no database/Redis/Dapr/container socket directly, and is never a prerequisite for development, tests, or the banking services themselves. It drives the exact same Payments/CoreBank/LoadTestSupport HTTP surface as `demo-requests.http` and `payment-idempotency-tests.http` — those files remain the supported, unchanged fallback whenever the runner is unavailable.
+
+### One-command start
+
+```bash
+# Pre-show prerequisite report — never starts an AppHost or sends a business request
+dotnet run --project CoreBankDemo.DemoRunner -- --doctor --scenario mission-critical-talk-v7
+
+# Speaker-paced live control room
+dotnet run --project CoreBankDemo.DemoRunner -- --show --scenario mission-critical-talk-v7
+
+# Unattended pass through every actionable cue, producing a timestamped proof pack
+dotnet run --project CoreBankDemo.DemoRunner -- --rehearse --scenario mission-critical-talk-v7
+
+# Resume from the last proven checkpoint after Ctrl+C, a crash, or a runner restart
+dotnet run --project CoreBankDemo.DemoRunner -- --show --scenario mission-critical-talk-v7 --resume
+```
+
+### Shortcuts (full keyboard parity — mouse is never required)
+
+| Key | Action |
+|---|---|
+| `Enter` | Run the current cue |
+| `Ctrl+R` | Retry the current cue |
+| `N` | Next (only enabled once the current cue has Passed) |
+| `I` | Investigate (only enabled after a Failed cue, when the cue offers extra diagnostics) |
+| `Q` | Quit (stops only child processes this session started; never touches an attached/unowned topology) |
+
+### Recovery and rehearsal fallback
+
+- A cue is never marked Passed on a guess: failed/ambiguous/cancelled cues keep **Next** disabled and offer **Retry**/**Details**. Retrying reuses the same deterministic idempotency key, so it is always safe to press.
+- If a live cue cannot be recovered inside the talk window, the speaker may show the most recent fully-successful rehearsal proof pack instead — always visibly labelled **REHEARSAL** with its timestamp, source commit, and scenario version. It never replaces or recolors the live cue's Failed state.
+- Local run artifacts (journal, captured output, rehearsal proof packs) live under the gitignored `.demo-runner-artifacts/` directory at the repo root and are never checked in.
+
+### Manual fallback
+
+If the runner is unavailable for any reason, the talk remains fully runnable by hand: use `demo-requests.http` / `payment-idempotency-tests.http` directly against the regular AppHost, and the **load-test**/**aspire-launch** skills (or `aspire` CLI) for the resilience proof. Banking behavior is identical either way — the runner only adds preflight checks, evidence gating, and a proof pack on top of the same requests.
+
 ## Architecture & Technical Details
 
 For detailed architecture information, database schemas, and implementation details, see:

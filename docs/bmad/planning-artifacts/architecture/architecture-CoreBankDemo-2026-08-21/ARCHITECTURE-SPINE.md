@@ -13,7 +13,7 @@ sources:
   - docs/bmad/constraints.md
   - docs/bmad/planning-artifacts/prds/prd-CoreBankDemo-2026-08-21/prd.md
   - ARCHITECTURE.md (brownfield reference, describes main)
-  - docs/adr/ADR-001..014
+  - docs/adr/ADR-001..015
 companions: []
 ---
 
@@ -109,6 +109,12 @@ companions: []
 - **Binds:** regular AppHost, LoadTests AppHost, both APIs, Dapr sidecars
 - **Prevents:** single-instance-only ordering proof; clients binding to ephemeral replica endpoints
 - **Rule:** Both AppHosts run two PaymentsAPI replicas and two CoreBankAPI replicas by default. Aspire's proxy preserves the documented PaymentsAPI entry ports (5294 regular, 5295 load test), and service-to-service calls resolve the logical `corebank-api` endpoint; clients never bind to a replica and no gateway is introduced. Replicas of one service share its database, logical Dapr app id, pubsub, and Aspire-managed Redis lock store while sidecar/runtime ports remain replica-unique. Concurrent empty-database startup must be race-safe. In the load-test graph, APIs run their existing schema initialization while their hosted processors wait on a load-test-only start gate. After API and LoadTestSupport health, a one-shot initializer resets the databases, releases every processor gate, and completes before k6 starts. The regular AppHost leaves the gate open. The four-partition model is unchanged.
+
+### AD-14 — Presentation console is a standalone, allow-listed local tool `[ADOPTED — ADR-015]`
+
+- **Binds:** `CoreBankDemo.DemoRunner`, its scenario files, tests
+- **Prevents:** banking-product UI scope creep from the PRD's "no UI" non-goal; scenario-supplied shell/process/database/URL execution; direct store access from a presentation tool
+- **Rule:** `CoreBankDemo.DemoRunner` is a standalone net10.0 console (Terminal.Gui pinned centrally at `2.4.17`) with no project reference to any banking implementation project, `DbContext`, or Redis/Dapr/container-engine client. It interacts only through stable local HTTP endpoints and a fingerprinted, ownership-tracked Aspire child-process adapter, driven by a closed set of allow-listed scenario action kinds (`selectTopology`, `waitForHealth`, `sendHttp`, `runAcceptedLoadWorkflow`, `assertHttp`, `openKnownUrl`, `speakerPause`). It reuses Story 7.1–7.3's LoadTestSupport/k6 workflow for the load cue rather than a parallel assertion path, gates narrative advancement on proven evidence (never elapsed time or log text), and never becomes a prerequisite for development, tests, or the banking services. `demo-requests.http`/`payment-idempotency-tests.http` remain the unchanged manual fallback.
 
 ### Dependency direction
 
@@ -211,6 +217,7 @@ graph LR
 | 4.8 Orchestration & chaos | AppHost, ServiceDefaults | AD-1, AD-7, AD-13 |
 | 4.9 Load harness | LoadTestSupport, LoadTests, k6 | AD-1, AD-9, AD-13 (conforms to code) |
 | 4.10 Test suite & gate | tests/ | AD-2, AD-9, AD-10 |
+| 4.11 Presentation demo console | CoreBankDemo.DemoRunner | AD-1, AD-9, AD-10, AD-14 (standalone, allow-listed, no banking references) |
 
 ## Deferred
 
@@ -218,5 +225,5 @@ graph LR
 - **Exact repository interface shapes** — emerge per story under AD-6; the spine fixes only that they exist and own raw SQL.
 - **LoadTestSupport schema adaptation details** — E6 conforms to whatever E1–E4 produced (user decision; AD-1 keeps assertion semantics).
 - **k6 script parameters** — carry over from `main` unless the harness realignment forces change.
-- **ADR implementation completion** — ADR-008..ADR-014 are accepted; their remaining code and orchestration work is owned by the corresponding stories.
+- **ADR implementation completion** — ADR-008..ADR-015 are accepted; their remaining code and orchestration work is owned by the corresponding stories.
 - **Deployment/operations envelope** — none beyond Aspire local orchestration; demo-only by PRD non-goal, deliberately unowned.

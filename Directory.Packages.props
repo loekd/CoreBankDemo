@@ -65,5 +65,9 @@
     <!-- FakeTimeProvider: deterministic TimeProvider.CreateTimer-driven cancellation
          tests (story 3.2) without waiting on a real clock. -->
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.6.0" />
+    <!-- Story 7.4: Terminal.Gui is the sole UI package for the standalone
+         CoreBankDemo.DemoRunner presentation console (ADR-015). Pinned centrally
+         so exactly one version is used repo-wide. -->
+    <PackageVersion Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 </Project>
