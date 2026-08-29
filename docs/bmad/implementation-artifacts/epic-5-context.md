@@ -1,6 +1,6 @@
-# Epic 5 Context: PaymentsAPI
+# Epic 5 Context: E4 — PaymentsAPI
 
-<!-- Compiled from planning artifacts. Edit freely. Regenerate with compile-epic-context if planning docs change. -->
+<!-- Generated from planning artifacts. Regenerate with compile-epic-context if planning docs change. -->
 
 ## Goal
 
@@ -43,4 +43,4 @@ This epic depends on the completed messaging-kernel and ServiceDefaults capabili
 
 Within the epic, the payment store and identity rules underpin intake and forwarding. The generated-client adapter must exist before the forwarding strategy can be completed. Event subscription storage must exist before the inbox processor can dispatch consumed events.
 
-Later orchestration work must provide replicated PaymentsAPI instances behind a stable Aspire ingress, logical CoreBankAPI service discovery, shared databases and lock stores, and healthy Dapr sidecars. The load-harness epic will adapt its assertions to these rebuilt stores while retaining the fixed end-to-end invariants.
+At epic start, the old PaymentsAPI sources are removed and the rebuilt project enters the rebuild solution filter; every story must keep that gate green. Later orchestration work must provide replicated PaymentsAPI instances behind a stable Aspire ingress, logical CoreBankAPI service discovery, shared databases and lock stores, and healthy Dapr sidecars. The load-harness epic will adapt its assertions to these rebuilt stores while retaining the fixed end-to-end invariants.
