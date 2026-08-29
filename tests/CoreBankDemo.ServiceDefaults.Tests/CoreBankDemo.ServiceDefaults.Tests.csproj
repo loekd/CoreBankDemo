@@ -9,10 +9,4 @@
     <ProjectReference Include="..\..\CoreBankDemo.ServiceDefaults\CoreBankDemo.ServiceDefaults.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- FakeTimeProvider: drives DaprDistributedLockService's 5/6-cooperative-cancellation
-         timer deterministically (story 3.2) — no real clock wait in tests. -->
-    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
-  </ItemGroup>
-
 </Project>

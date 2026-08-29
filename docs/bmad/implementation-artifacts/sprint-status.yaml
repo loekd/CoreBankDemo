@@ -76,9 +76,9 @@ development_status:
   5-6-event-handling-processor: backlog
   epic-5-retrospective: optional
 
-  epic-6: backlog
+  epic-6: in-progress
   6-1-aspire-application-graph: backlog
-  6-2-renewable-redis-distributed-locking: ready-for-dev
+  6-2-renewable-redis-distributed-locking: review
   6-3-replicated-local-api-topology: backlog
   6-4-chaos-opt-in-and-demo-smoke: backlog
   6-5-opentelemetry-business-metrics: ready-for-dev
@@ -88,6 +88,7 @@ development_status:
   7-1-assertion-api-realignment: backlog
   7-2-mcp-server-tools: backlog
   7-3-k6-run-and-first-full-acceptance-gate: backlog
+  7-4-presentation-safe-terminal-demo-console: ready-for-dev
   epic-7-retrospective: optional
 
   epic-8: backlog

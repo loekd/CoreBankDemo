@@ -9,8 +9,8 @@ namespace CoreBankDemo.ServiceDefaults.Tests.Extensions;
 /// <summary>
 /// Story 3.4: <c>ResolveOtlpEndpoint</c>'s full <c>JAEGER_OTLP_ENDPOINT</c>
 /// parsing matrix, exercised directly now that the member is promoted from
-/// <c>private</c> to <c>internal</c> (mirrors story 3.2's
-/// <c>CooperativeLockCancellation.CancelSafely</c> pattern — reachable here
+/// <c>private</c> to <c>internal</c> (the same private-to-internal-for-
+/// testability pattern this project uses elsewhere — reachable here
 /// via the project's <c>InternalsVisibleTo</c> to
 /// <c>CoreBankDemo.ServiceDefaults.Tests</c>). Each test seeds
 /// <c>JAEGER_OTLP_ENDPOINT</c> via an in-memory configuration source added

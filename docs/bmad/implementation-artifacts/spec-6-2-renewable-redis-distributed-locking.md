@@ -2,7 +2,7 @@
 title: 'Story 6.2: Renewable Redis distributed locking'
 type: 'feature'
 created: '2026-08-29'
-status: 'ready-for-dev'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: '1bc3c56e4f63af22fc336cf838b636d91b3ec383'
 context:
@@ -73,12 +73,12 @@ Historical completed Story 3.2 and its frozen context remain unchanged; the new 
 **Execution:**
 
 - [x] Architecture first: ADR-011 supersedes the old locking decision and current architecture/planning text is aligned without rewriting frozen completed-story history.
-- [ ] Tests first: replace Dapr adapter tests with deterministic tests for immediate acquisition, contention, workload execution, caller cancellation, handle-loss cancellation, handle disposal, logging, exception-to-`false` behavior, and Redis/NoOp DI selection.
-- [ ] Add the centrally pinned Redis client and distributed-lock packages; implement `RedisDistributedLockService` while preserving the existing public port and all Messaging call sites.
-- [ ] Register the named Aspire Redis client in both APIs and inject the AppHost Redis reference into both resources.
-- [ ] Remove the Dapr lock adapter, cooperative cutoff helper/tests, lockstore resource, sidecar references, component YAML, and stale lockstore documentation; retain all Dapr pub/sub code and components.
-- [ ] Add one real-Redis integration proof that holds a lock beyond its initial expiry and verifies a second contender cannot acquire until the first handle is released; keep infrastructure-dependent coverage clearly separated from the ordinary unit gate.
-- [ ] Run the regular AppHost from a clean local state and verify both APIs become healthy with Redis and Dapr pub/sub but without a Dapr lock component.
+- [x] Tests first: replace Dapr adapter tests with deterministic tests for immediate acquisition, contention, workload execution, caller cancellation, handle-loss cancellation, handle disposal, logging, exception-to-`false` behavior, and Redis/NoOp DI selection.
+- [x] Add the centrally pinned Redis client and distributed-lock packages; implement `RedisDistributedLockService` while preserving the existing public port and all Messaging call sites.
+- [x] Register the named Aspire Redis client in both APIs and inject the AppHost Redis reference into both resources.
+- [x] Remove the Dapr lock adapter, cooperative cutoff helper/tests, lockstore resource, sidecar references, component YAML, and stale lockstore documentation; retain all Dapr pub/sub code and components.
+- [x] Add one real-Redis integration proof that holds a lock beyond its initial expiry and verifies a second contender cannot acquire until the first handle is released; keep infrastructure-dependent coverage clearly separated from the ordinary unit gate.
+- [ ] Run the regular AppHost from a clean local state and verify both APIs become healthy with Redis and Dapr pub/sub but without a Dapr lock component. **Not executed**: installed the `aspire` and `dapr` CLIs, fixed the sandbox's `NO_PROXY` to cover DCP's bracketed `[::1]` loopback literal, and trusted the local dev cert, but `aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj` still fails — DCP's Kubernetes-style resource watch API times out after 20s on every resource type (Container/Executable/Endpoint/Service) and the DCP process itself never logs a successful start. This is consistent with a deeper sandbox restriction on what DCP needs (e.g. network-namespace/container-orchestration primitives), not a code or dependency-installation gap. Verified instead by static review: `AppHost.cs` builds cleanly, both APIs carry `.WithReference(redis).WaitFor(redis)`, the Dapr `lockstore` resource/sidecar reference and its component YAML are gone, and `pubsub`/its sidecar wiring is untouched. This step should be re-run in an environment where `aspire run` is known to work before calling the story fully done.
 
 **Acceptance Criteria:**
 
@@ -111,3 +111,75 @@ Package/documentation references for implementation review:
 - `git diff --check` -- expected: no whitespace errors.
 
 ## Spec Change Log
+
+- 2026-08-29: Resumed after an interrupted session. The core adapter (`RedisDistributedLockService.cs`), package pins, `IDistributedLockService` doc updates, AppHost/Program.cs wiring, and old-adapter/lockstore removal were already correct and are unchanged. Found and fixed four gaps before the story could be called done:
+  1. `tests/CoreBankDemo.ServiceDefaults.Tests/Extensions/AddServiceDefaultsTests.cs` still referenced the deleted `DaprDistributedLockService` type and asserted the old DaprClient-gated DI selection — this was a **compile error**, not just a stale reference. Replaced the two tests with `IConnectionMultiplexer`-gated equivalents asserting resolution to `RedisDistributedLockService` / `NoOpDistributedLockService`, matching `Extensions.cs`'s actual registration logic.
+  2. `CoreBankDemo.ServiceDefaults.csproj` granted `InternalsVisibleTo` to the test project only, not to `DynamicProxyGenAssembly2`. Moq/Castle DynamicProxy cannot mock the internal `IRedisDistributedLockFactory` seam without it — every mocked test in `RedisDistributedLockServiceTests.cs` failed at runtime with `ArgumentException: Can not create proxy for type ... because it is not accessible`. Added the same `InternalsVisibleTo` entry already used by `CoreBankDemo.CoreBankAPI`/`CoreBankDemo.PaymentsAPI` for their own internal mocks.
+  3. `AppHost.cs`, `Extensions.cs`, and `CoreBankDemo.ServiceDefaults.csproj` had been rewritten with CRLF line endings on every line (rest of the repo is LF-only), which `git diff --check` reported as trailing-whitespace errors across dozens of lines. Normalized all three files back to LF; also removed one pre-existing trailing-whitespace line in `AppHost.cs` (`.WithReference(coreBankApi)` had trailing spaces before this story touched that hunk).
+  4. Stale prose references to the removed Dapr lock adapter/lockstore in currently-active (non-historical) docs: `README.md`'s Security Notes still listed the deleted `dapr/components*/lockstore-redis.yaml` files; `ARCHITECTURE.md`'s directory listing still showed `DaprDistributedLockService.cs`; `DaprEventPublisher.cs`'s XML doc comments still `cref`'d the deleted type. Updated all three. Left untouched: mentions inside frozen historical spec/ADR/retrospective docs (spec-2-6, spec-3-1/3-3/3-4, ADR-004, epic-2-retrospective, deferred-work.md) and inside `CoreBankDemo.Messaging.Tests` comments explaining story-2.6's historical test design — these describe what was true at the time and match the spec's own "historical frozen artifacts may still describe Story 3.2" caveat.
+  Also removed the now-dead `Microsoft.Extensions.TimeProvider.Testing` package reference (and its stale story-3.2 comment) from `CoreBankDemo.ServiceDefaults.Tests.csproj` — nothing in that project uses it after the Dapr cooperative-cancellation tests were deleted.
+  **Deviation left open:** the "run the regular AppHost from a clean local state" task/acceptance step could not be executed. A follow-up session installed the `aspire` and `dapr` CLIs (neither was present), added the bracketed `[::1]` IPv6 loopback literal to `NO_PROXY` (a known DCP/proxy interaction — DCP addresses its local API via `http://[::1]:<port>` and the sandbox's default `NO_PROXY` only covered unbracketed `::1`), and trusted the local ASP.NET Core dev cert via `SSL_CERT_DIR`. `docker.io` pulls, initially flaky, succeeded on retry (`dapr init` provisioned its placement/redis/zipkin/scheduler containers cleanly). Despite all of that, `aspire start` still fails: DCP's Kubernetes-style resource watch API times out after 20s on every resource type and DCP itself never logs a successful start, before or after any of the fixes above. This looks like a sandbox-level restriction on whatever DCP needs at the OS/container level, not a code, dependency, or proxy-config gap. Verified by static review only (see task list); an environment where `aspire run` is confirmed to work should still run it once before treating this story as fully proven end-to-end.
+
+- 2026-08-29: Step-04 review (blind-hunter, edge-case-hunter, verification-gap layers) against the diff since baseline, scoped to this story's actual files (excluding a concurrently in-progress, unrelated story's uncommitted changes to shared files). Two real defects confirmed and patched; three findings rejected as out of scope (already-committed content from before this story's implementation, or a since-verified non-issue); the rest were pre-existing/out-of-scope or matched the frozen intent and were logged to `deferred-work.md` instead.
+  1. **Patch (correctness, edge-case-hunter):** `RedisDistributedLockService.ExecuteWithLockAsync` could return `true` for a workload that completed without throwing even though `handle.HandleLostToken` had already fired concurrently (a workload that doesn't check its token, or that finishes right at the race boundary) — falsely reporting success under a lock that was no longer exclusively held. Fixed by checking `handle.HandleLostToken.IsCancellationRequested` immediately after a successful workload and returning `false` if ownership was lost, before the outer `return true`.
+  2. **Patch (verification gap):** no test proved `Program.cs`'s actual `builder.AddRedisClient("redis")` call (in both `CoreBankAPI` and `PaymentsAPI`) resolves `IDistributedLockService` to the Redis adapter rather than silently falling back to `NoOpDistributedLockService` on a resource-name mismatch with `AppHost.cs`'s `redis` resource — `Program.cs` is excluded from the coverage gate, so a drift here would ship undetected as a total Inbox/Outbox processing outage. Added `RedisLockWiringTests.cs` to both `CoreBankDemo.CoreBankAPI.Tests` and `CoreBankDemo.PaymentsAPI.Tests`, each driving the real Aspire `AddRedisClient("redis")` call (with `abortConnect=false` so no live Redis is required) through the same sequence `Program.cs` uses.
+  3. **Patch (cleanup, blind-hunter):** removed the unused `RedisDistributedLockFactoryForTests` nested class from `RedisDistributedLockServiceRealRedisTests.cs` — the test actually instantiates the production `RedisDistributedLockFactory` directly.
+  4. **Rejected:** a claim that `CoreBankDemo.LoadTests/AppHost.cs` might still reference the deleted `lockstore-redis.yaml` — verified false; that file has no Dapr/Redis/lockstore wiring at all currently (out of this story's and this epic's scope).
+  5. **Rejected:** claims about `epics.md` referencing an unwritten `ADR-015` and bundling new Story 6.5/7.4 planning content — verified these are uncommitted edits from a different, concurrently in-progress agent's work on an unrelated part of the shared `epics.md` file, pulled in only because this review's diff was scoped to the whole file rather than this story's specific hunks.
+  6. **Rejected (matches frozen intent):** findings that the design has no backstop for a workload that never observes cancellation, and no documented lock-loss-to-`HandleLostToken` latency bound — the spec's own Boundaries & Constraints explicitly required removing the old 5/6 cutoff backstop and explicitly forbids making renewal cadence application-configurable ("renewal cadence remains an adapter/library concern"), so both are deliberate, not gaps.
+  All three patches verified: `dotnet test CoreBankDemo.Rebuild.slnf` green (Messaging 154/154, PaymentsAPI 75/75 @ 100% line, CoreBankAPI 113/113 @ 98.57% line, ServiceDefaults 108/108 @ 98.22% line — all above the 90% gate), the real-Redis integration test passed against a local `redis-server`, and `git diff --check` clean on every touched file.
+
+## Suggested Review Order
+
+**The Redis adapter itself**
+
+- Entry point: the never-throw `ExecuteWithLockAsync` contract, now backed by a real Redis lease instead of a fixed Dapr expiry.
+  [`RedisDistributedLockService.cs:44`](../../CoreBankDemo.ServiceDefaults/RedisDistributedLockService.cs#L44)
+
+- The lock-loss race this review's patch closed: a workload that finishes without observing `HandleLostToken` no longer reports false success.
+  [`RedisDistributedLockService.cs:80`](../../CoreBankDemo.ServiceDefaults/RedisDistributedLockService.cs#L80)
+
+- `IRedisDistributedLockFactory`/`RedisDistributedLockFactory`: the internal seam isolating real Redis construction so unit tests substitute a fake handle.
+  [`RedisDistributedLockService.cs:124`](../../CoreBankDemo.ServiceDefaults/RedisDistributedLockService.cs#L124)
+
+**DI selection and production wiring**
+
+- `AddServiceDefaults` resolves `IDistributedLockService` to the Redis adapter only when `IConnectionMultiplexer` is already registered, else falls back to the no-op.
+  [`Extensions.cs:59`](../../CoreBankDemo.ServiceDefaults/Extensions.cs#L59)
+
+- `CoreBankAPI`'s `AddRedisClient("redis")` must precede `AddServiceDefaults` and must name-match `AppHost.cs`'s `redis` resource.
+  [`CoreBankDemo.CoreBankAPI/Program.cs:19`](../../CoreBankDemo.CoreBankAPI/Program.cs#L19)
+
+- Same registration in `PaymentsAPI`, the second half of the wiring this story's own review found unverified in production.
+  [`CoreBankDemo.PaymentsAPI/Program.cs:7`](../../CoreBankDemo.PaymentsAPI/Program.cs#L7)
+
+- Updated public-port documentation: renewal, not a fixed cutoff, and what ownership loss now means for callers.
+  [`IDistributedLockService.cs:8`](../../CoreBankDemo.ServiceDefaults/IDistributedLockService.cs#L8)
+
+**AppHost topology**
+
+- Both processing APIs get the shared `redis` reference and wait for it; the Dapr `lockstore` resource is gone from this file.
+  [`AppHost.cs:38`](../../CoreBankDemo.AppHost/AppHost.cs#L38)
+
+**Removed: the superseded Dapr adapter**
+
+- `DaprDistributedLockService.cs` and `CooperativeLockCancellation.cs` (the 5/6-of-expiry cutoff mechanism) are deleted outright, along with `dapr/components/lockstore-redis.yaml` and its load-test counterpart — nothing to click through, confirm via `git diff --stat` that they're gone.
+
+**Tests**
+
+- The mocked unit-gate coverage for every I/O & Edge-Case Matrix row: acquisition, contention, cancellation, lock-loss, disposal, logging.
+  [`RedisDistributedLockServiceTests.cs`](../../tests/CoreBankDemo.ServiceDefaults.Tests/DistributedLock/RedisDistributedLockServiceTests.cs)
+
+- The real-Redis proof that a lease survives past its initial expiry and a contender is blocked until release — dynamically skips without a reachable Redis.
+  [`RedisDistributedLockServiceRealRedisTests.cs`](../../tests/CoreBankDemo.ServiceDefaults.Tests/DistributedLock/RedisDistributedLockServiceRealRedisTests.cs)
+
+- DI-selection proof against a manually mocked `IConnectionMultiplexer` — the synthetic-builder half of the coverage.
+  [`AddServiceDefaultsTests.cs:126`](../../tests/CoreBankDemo.ServiceDefaults.Tests/Extensions/AddServiceDefaultsTests.cs#L126)
+
+- This review's added coverage: drives the real `Program.cs` registration sequence per API, closing the "resource-name drift ships silently" gap.
+  [`CoreBankDemo.CoreBankAPI.Tests/RedisLockWiringTests.cs:27`](../../tests/CoreBankDemo.CoreBankAPI.Tests/RedisLockWiringTests.cs#L27)
+
+**Peripherals**
+
+- Centrally pinned `Aspire.StackExchange.Redis` and `DistributedLock.Redis` versions.
+  [`Directory.Packages.props`](../../Directory.Packages.props)

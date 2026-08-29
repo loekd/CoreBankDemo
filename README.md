@@ -315,9 +315,7 @@ To reset state, delete the database containers or clear the tables.
 
 The load test configuration uses a hardcoded Redis password (`myredispassword123`) in the following files:
 - `CoreBankDemo.LoadTests/AppHost.cs`
-- `dapr/components/lockstore-redis.yaml`
 - `dapr/components/pubsub-redis.yaml`
-- `dapr/components-loadtest/lockstore-redis.yaml`
 - `dapr/components-loadtest/pubsub-redis.yaml`
 
 This is intentional — the Redis instance is **disposable and local-only**, spun up and torn down by Aspire for each load test run. The password has no security implications outside that ephemeral container. Do not use these credentials for any real environment.

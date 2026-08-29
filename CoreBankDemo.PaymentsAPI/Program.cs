@@ -1,6 +1,11 @@
 using CoreBankDemo.PaymentsAPI;
 var builder = WebApplication.CreateBuilder(args);
 
+// Story 6.2 (ADR-011): register Aspire's Redis client for the shared "redis"
+// resource before AddServiceDefaults, so IDistributedLockService resolves to
+// RedisDistributedLockService rather than the no-op fallback.
+builder.AddRedisClient("redis");
+
 builder.AddServiceDefaults("CoreBank.PaymentsAPI");
 
 builder.Services.AddHealthChecks()

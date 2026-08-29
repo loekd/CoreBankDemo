@@ -9,6 +9,12 @@
     <PackageVersion Include="Aspire.Hosting.PostgreSQL" Version="13.4.0" />
     <PackageVersion Include="Aspire.Hosting.Redis" Version="13.4.0" />
     <PackageVersion Include="Aspire.Npgsql.EntityFrameworkCore.PostgreSQL" Version="13.4.0" />
+    <!-- Story 6.2: Aspire's Redis client integration, registering IConnectionMultiplexer
+         from the shared "redis" resource for RedisDistributedLockService (ADR-011). -->
+    <PackageVersion Include="Aspire.StackExchange.Redis" Version="13.4.0" />
+    <!-- Story 6.2: renewable Redis distributed locking (ADR-011) — replaces the
+         Dapr lock adapter. -->
+    <PackageVersion Include="DistributedLock.Redis" Version="1.1.1" />
     <!-- Dapr & Community Toolkit -->
     <PackageVersion Include="CommunityToolkit.Aspire.Hosting.Dapr" Version="13.0.0" />
     <PackageVersion Include="Dapr.AspNetCore" Version="1.17.9" />

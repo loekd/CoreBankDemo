@@ -120,23 +120,23 @@ public class AddServiceDefaultsTests
         return names;
     }
 
-    // ---- IDistributedLockService (story 3.2, wiring-only coverage here) ----
+    // ---- IDistributedLockService (story 6.2, ADR-011: wiring-only coverage here) ----
 
     [Fact]
-    public void IDistributedLockService_resolves_to_DaprDistributedLockService_when_DaprClient_is_registered()
+    public void IDistributedLockService_resolves_to_RedisDistributedLockService_when_IConnectionMultiplexer_is_registered()
     {
         var builder = CreateBuilder();
-        builder.Services.AddSingleton(new Mock<DaprClient>().Object);
+        builder.Services.AddSingleton(new Mock<StackExchange.Redis.IConnectionMultiplexer>().Object);
 
         builder.AddServiceDefaults("test-service");
         using var provider = builder.Services.BuildServiceProvider();
         var lockService = provider.GetRequiredService<IDistributedLockService>();
 
-        lockService.Should().BeOfType<DaprDistributedLockService>();
+        lockService.Should().BeOfType<RedisDistributedLockService>();
     }
 
     [Fact]
-    public void IDistributedLockService_resolves_to_NoOpDistributedLockService_when_DaprClient_is_absent()
+    public void IDistributedLockService_resolves_to_NoOpDistributedLockService_when_IConnectionMultiplexer_is_absent()
     {
         var builder = CreateBuilder();
 

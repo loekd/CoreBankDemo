@@ -13,6 +13,11 @@ var builder = WebApplication.CreateBuilder(args);
 // below consumes IEventPublisher through this ordering-sensitive registration.
 builder.Services.AddDaprClient();
 
+// Story 6.2 (ADR-011): register Aspire's Redis client for the shared "redis"
+// resource before AddServiceDefaults, so IDistributedLockService resolves to
+// RedisDistributedLockService rather than the no-op fallback.
+builder.AddRedisClient("redis");
+
 builder.AddServiceDefaults("CoreBank.CoreBankAPI");
 
 builder.Services.AddSingleton(TimeProvider.System);

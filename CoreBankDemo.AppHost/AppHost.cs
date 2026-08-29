@@ -54,11 +54,9 @@ var pubsub = builder.AddDaprPubSub("pubsub", new DaprComponentOptions
     LocalPath = Path.Combine(daprComponentsPath, "pubsub-redis.yaml")
 }).WaitFor(redis);
 
-// Add Dapr lock store component (Redis-backed)
-var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComponentOptions
-{
-    LocalPath = Path.Combine(daprComponentsPath, "lockstore-redis.yaml")
-}).WaitFor(redis);
+// Story 6.2 (ADR-011): partition locking now goes directly through
+// DistributedLock.Redis over the shared "redis" resource below — no Dapr
+// lock component. Dapr remains the pub/sub adapter only.
 
 // Core Bank API (Legacy System) with Dapr sidecar
 // Ports are defined in launchSettings.json (5032)
@@ -66,6 +64,8 @@ var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComp
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
+    .WithReference(redis)
+    .WaitFor(redis)
     .WithHttpHealthCheck("/health")
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithDaprSidecar(opt =>
@@ -81,12 +81,10 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
             Config = Path.Combine(daprComponentsPath, "otel-config.yaml"),
         });
         opt.WithReference(pubsub);
-        opt.WithReference(lockStore);
     })
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(jaeger)
-    .WaitFor(pubsub)
-    .WaitFor(lockStore);
+    .WaitFor(pubsub);
 
 // Payments API (Main Service) with Dapr sidecar
 // Ports are defined in launchSettings.json (5294)
@@ -105,6 +103,8 @@ if (useDevProxy)
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
+    .WithReference(redis)
+    .WaitFor(redis)
     .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
     .WithHttpEndpoint(name: "load-test", port: 5295)
@@ -124,7 +124,6 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
             Config = Path.Combine(daprComponentsPath, "otel-config.yaml"),
         });
         opt.WithReference(pubsub);
-        opt.WithReference(lockStore);
     });
 
 if (devProxy is not null)
@@ -140,7 +139,7 @@ if (devProxy is not null)
 else
 {
     paymentsApi
-        .WithReference(coreBankApi)    
+        .WithReference(coreBankApi)
         .WithEnvironment("Features__UseDapr", "true");
 }
 

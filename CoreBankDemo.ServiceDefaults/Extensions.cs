@@ -49,19 +49,21 @@ public static class Extensions
                 http.AddServiceDiscovery();
             });
 
-            // Register distributed lock service only when DaprClient is available.
-            // Services that don't use Dapr (e.g. read-only support APIs) skip this.
+            // Register the distributed lock service only when Aspire's Redis client
+            // (IConnectionMultiplexer for the shared "redis" resource) is already
+            // registered in DI at this point (story 6.2, ADR-011: services call
+            // builder.AddRedisClient("redis") before AddServiceDefaults, the same
+            // ordering convention IEventPublisher's DaprClient check below uses).
+            // Services that don't participate in locking (e.g. LoadTestSupport)
+            // skip this and fall back to the no-op implementation.
             builder.Services.AddSingleton<IDistributedLockService>(sp =>
             {
-                var daprClient = sp.GetService<Dapr.Client.DaprClient>();
-                if (daprClient is null)
+                var connectionMultiplexer = sp.GetService<StackExchange.Redis.IConnectionMultiplexer>();
+                if (connectionMultiplexer is null)
                     return new NoOpDistributedLockService();
-                var logger = sp.GetRequiredService<ILogger<DaprDistributedLockService>>();
-                // No TimeProvider is registered by AddServiceDefaults itself (story 3.2's
-                // scope is the lock port, not DI-wide time wiring); fall back to the real
-                // clock when nothing else in the host has registered one.
-                var timeProvider = sp.GetService<TimeProvider>() ?? TimeProvider.System;
-                return new DaprDistributedLockService(daprClient, timeProvider, logger);
+                var logger = sp.GetRequiredService<ILogger<RedisDistributedLockService>>();
+                var lockFactory = new RedisDistributedLockFactory(connectionMultiplexer);
+                return new RedisDistributedLockService(lockFactory, logger);
             });
 
             // Register the CloudEvent publisher only when DaprClient is already

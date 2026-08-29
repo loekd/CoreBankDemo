@@ -505,7 +505,7 @@ CoreBankDemo/
 │
 ├── CoreBankDemo.ServiceDefaults/      # Aspire shared config
 │   ├── Extensions.cs                  # Service defaults setup
-│   ├── DaprDistributedLockService.cs  # Distributed locking
+│   ├── RedisDistributedLockService.cs # Distributed locking (Redis, ADR-011)
 │   ├── Configuration/
 │   │   ├── InboxProcessingOptions.cs
 │   │   ├── OutboxProcessingOptions.cs
