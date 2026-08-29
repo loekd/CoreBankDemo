@@ -27,7 +27,7 @@ NFR-1 invariants under load · NFR-2 one payment = one trace · NFR-3 constraint
 
 ### Additional Requirements (Architecture)
 
-- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy` and cross-instance partition exclusivity; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set with a Kiota-backed CoreBank adapter; AD-7 currently specifies no lock renewal, with Story 6.2 requiring a superseding ADR before implementation; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below and represented by a checked-in CoreBank OpenAPI document; AD-13 two local replicas per API behind stable Aspire ingress.
+- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy` and cross-instance partition exclusivity; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set with a Kiota-backed CoreBank adapter; AD-7 amended by ADR-011 to use renewable direct-Redis locks; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below and represented by a checked-in CoreBank OpenAPI document; AD-13 two local replicas per API behind stable Aspire ingress.
 - No starter template — brownfield rebuild in an existing solution.
 
 ### UX Design Requirements
@@ -465,7 +465,7 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 
 ### Story 6.2: Renewable Redis distributed locking
 
-As the demo owner, I want partition locks renewed through the Aspire-managed Redis instance, so that healthy work can safely outlive its initial lease while the demo remains one-command local (FR-20, FR-21, FR-23; AD-6, supersedes AD-7 via a new ADR).
+As the demo owner, I want partition locks renewed through the Aspire-managed Redis instance, so that healthy work can safely outlive its initial lease while the demo remains one-command local (FR-20, FR-21, FR-23; AD-6, ADR-011).
 
 **Acceptance Criteria:**
 
@@ -479,9 +479,9 @@ As the demo owner, I want partition locks renewed through the Aspire-managed Red
 **Then** both APIs receive the shared `redis` connection and wait for Redis, Dapr remains available for pub/sub, and the Dapr `lockstore` component is absent
 **And** a real-Redis integration proof holds a lock beyond its initial expiry and prevents a second contender until release.
 
-**Given** AD-7 and ADR-004 currently specify non-renewed Dapr locking
+**Given** AD-7 and ADR-004 previously specified non-renewed Dapr locking
 **When** this story starts implementation
-**Then** a new accepted ADR supersedes those locking decisions before production code changes; frozen completed Story 3.2 remains historical rather than being rewritten.
+**Then** ADR-011 is the accepted superseding decision; frozen completed Story 3.2 remains historical rather than being rewritten.
 
 ### Story 6.3: Replicated local API topology
 
@@ -509,7 +509,9 @@ As the demo owner, I want competing local API instances by default, so that the 
 
 **Given** the LoadTests AppHost is preparing a run
 **When** reset executes
-**Then** reset completes before replicated processors accept work and cannot overlap in-flight processing.
+**Then** both APIs first complete their existing schema initialization while every hosted processor remains behind a load-test-only start gate
+**And** an explicit one-shot initializer runs after API and LoadTestSupport health, resets the databases, releases every processor gate, and completes before k6 starts
+**And** focused tests prove no processor tick occurs before release; k6 verifies the clean state but is not responsible for startup ordering.
 
 ### Story 6.4: Chaos opt-in and demo smoke
 
@@ -583,6 +585,6 @@ As the process record, I want the rulings written as ADRs, so that decisions out
 **Acceptance Criteria:**
 
 **Given** the spine memlog
-**When** ADR-008..ADR-014 are written (UseDapr deletion; kernel delivery strategy; PartitionCount=4 alignment; lock expiry over renewal; test-tier strategy + coverage gate; checked-in OpenAPI with build-time Kiota generation; replicated local topology behind Aspire ingress)
+**When** ADR-008..ADR-014 are written (UseDapr deletion; kernel delivery strategy; PartitionCount=4 alignment; renewable Redis locking; test-tier strategy + coverage gate; checked-in OpenAPI with build-time Kiota generation; replicated local topology behind Aspire ingress)
 **Then** each follows the existing ADR format with Context/Decision/Implementation references to real files
 **And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where kernel surfaces changed; AGENTS.md rebuild section flips to "completed".

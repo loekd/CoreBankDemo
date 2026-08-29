@@ -1,8 +1,9 @@
 # ADR-003: Distributed tracing and observability with OpenTelemetry
 
 **Date:** 2026-05-23  
-**Status:** Accepted  
-**Deciders:** Architecture team  
+**Status:** Accepted
+**Deciders:** Architecture team
+**Superseded in part by:** ADR-013 replaces the hand-written CoreBank HTTP client; the trace-propagation decision remains accepted
 
 ## Context
 

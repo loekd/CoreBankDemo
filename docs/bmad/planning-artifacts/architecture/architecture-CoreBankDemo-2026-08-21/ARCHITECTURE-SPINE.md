@@ -7,13 +7,13 @@ paradigm: 'Hexagonal (ports & adapters) per service over a shared messaging kern
 scope: 'Full rebuild of CoreBankDemo on feature/bmad — same external contract as main'
 status: final
 created: '2026-08-21'
-updated: '2026-08-28'
+updated: '2026-08-29'
 binds: [FR-1..FR-29, NFR-1..NFR-5]
 sources:
   - docs/bmad/constraints.md
   - docs/bmad/planning-artifacts/prds/prd-CoreBankDemo-2026-08-21/prd.md
   - ARCHITECTURE.md (brownfield reference, describes main)
-  - docs/adr/ADR-001..007
+  - docs/adr/ADR-001..014
 companions: []
 ---
 
@@ -25,7 +25,7 @@ companions: []
 
 - **Domain/application core** (handlers, executors, validators, publishers): pure logic, constructor-injected ports, no framework types beyond `ILogger`/`TimeProvider`. Lives in `Handlers/`, `Inbox/`, `Outbox/`, `Models/` of each API project.
 - **Inbound adapters**: ASP.NET controllers (thin — bind, call, map result) and Dapr subscription endpoints. Live in `Controllers/`.
-- **Outbound adapters**: EF Core repositories, HTTP clients, Dapr publisher, Dapr lock service. Implement the ports; own all raw SQL and network I/O.
+- **Outbound adapters**: EF Core repositories, HTTP clients, Dapr publisher, Redis lock service. Implement the ports; own all raw SQL and network I/O.
 - **Messaging kernel** (`CoreBankDemo.Messaging`): the reusable Inbox/Outbox machinery every processor builds on.
 
 ## Invariants & Rules
@@ -68,11 +68,11 @@ companions: []
 - **Rule:** Infrastructure is reached only through these ports: `IDistributedLockService`, `IEventPublisher` (wraps `DaprClient`), `ICoreBankApiClient` (single Kiota-backed HTTP adapter — ruling A1: the `Features:UseDapr` flag, phantom Dapr client, and parallel hand-written HTTP implementation are deleted), repository interfaces per aggregate/store, and `TimeProvider`. Raw SQL (`SELECT … FOR UPDATE`) exists only inside repository implementations.
 - **Generated client boundary:** CoreBankAPI owns `CoreBankDemo.CoreBankAPI/OpenApi/corebank-api.json`, a checked-in OpenAPI document containing every public account and transaction operation. PaymentsAPI runs a repository-pinned Kiota version from an incremental MSBuild target before compilation, clears obsolete output when regeneration is required, and writes the C# transport client beneath `$(IntermediateOutputPath)`; generated sources are never committed or exposed to handlers. The adapter resolves the logical `corebank-api` Aspire endpoint rather than a replica address, maps generated models and transport outcomes to application-owned types, propagates `traceparent`/`tracestate`, and applies AD-11 response classification.
 
-### AD-7 — Locking is expiry-based, not renewed
+### AD-7 — Locking uses renewable Redis leases `[AMENDED BY ADR-011]`
 
 - **Binds:** messaging kernel, ServiceDefaults
-- **Prevents:** half-wired renewal config resurfacing (ruling A4)
-- **Rule:** Partition locks rely on expiry plus cooperative cancellation at 5/6 of lock lifetime. `LockRenewIntervalSeconds` is deleted, not wired. Options classes contain no unused members; every option is read by code or does not exist.
+- **Prevents:** work outliving an unrenewed lease; half-wired renewal config resurfacing (ruling A4)
+- **Rule:** `IDistributedLockService` uses `DistributedLock.Redis` over the Aspire-managed Redis connection. Acquisition is non-blocking; the finite lease renews automatically while the handle is healthy; caller cancellation or `HandleLostToken` cancels cooperative work. `LockRenewIntervalSeconds` does not exist because cadence is adapter/library-owned. Dapr remains the event-publishing adapter, not the lock adapter.
 
 ### AD-8 — Trace context survives every hop
 
@@ -84,7 +84,7 @@ companions: []
 
 - **Binds:** all test projects; rulings A7/A8
 - **Prevents:** coverage theater; untestable-by-accident code; SQLite/Postgres semantic confusion
-- **Rule:** Three tiers: (1) pure logic tested with Moq against ports, including Kiota generated-client compilation and adapter mapping/classification tests; (2) repository/store behavior tested on EF Core SQLite in-memory; (3) Postgres-only and replicated-topology semantics covered by the k6/Postgres acceptance tier. To keep tiers 2 and 3 separable, repositories are written provider-agnostic (LINQ, EF unique-violation detection via a shared provider-aware helper) except **minimal pass-through methods** embedding provider-specific SQL (`FOR UPDATE`); those pass-throughs contain no logic and may carry individual `[ExcludeFromCodeCoverage]` with a justifying comment — never a blanket class-level exclusion. Coverage: coverlet.msbuild in `tests/Directory.Build.props`, `Threshold=90`, `ThresholdType=line`; hosting wiring carries `[ExcludeFromCodeCoverage]`, while generated code is excluded through coverlet configuration. The gate must pass from plain `dotnet test` on the rebuild solution filter, running the **VSTest runner mode** — Microsoft.Testing.Platform must not be enabled (coverlet is incompatible with MTP; the gate would silently vanish). Replicated acceptance tests use real Postgres and the real Redis-backed Dapr lock adapter, identify which replica processed each message, and prove same-partition exclusion and durable ordering plus concurrent progress on different partitions; lock-expiry takeover remains kernel failure-path coverage.
+- **Rule:** Three tiers: (1) pure logic tested with Moq against ports, including Kiota generated-client compilation and adapter mapping/classification tests; (2) repository/store behavior tested on EF Core SQLite in-memory; (3) Postgres-, Redis-, and replicated-topology semantics covered by the k6/Aspire acceptance tier. To keep tiers 2 and 3 separable, repositories are written provider-agnostic (LINQ, EF unique-violation detection via a shared provider-aware helper) except **minimal pass-through methods** embedding provider-specific SQL (`FOR UPDATE`); those pass-throughs contain no logic and may carry individual `[ExcludeFromCodeCoverage]` with a justifying comment — never a blanket class-level exclusion. Coverage: coverlet.msbuild in `tests/Directory.Build.props`, `Threshold=90`, `ThresholdType=line`; hosting wiring carries `[ExcludeFromCodeCoverage]`, while generated code is excluded through coverlet configuration. The gate must pass from plain `dotnet test` on the rebuild solution filter, running the **VSTest runner mode** — Microsoft.Testing.Platform must not be enabled (coverlet is incompatible with MTP; the gate would silently vanish). Replicated acceptance tests use real Postgres and the renewable Redis lock adapter, identify which replica processed each message, and prove same-partition exclusion and durable ordering plus concurrent progress on different partitions; lock-loss cancellation and renewal receive a real-Redis proof.
 
 ### AD-10 — Rebuild gate is the solution filter
 
@@ -108,7 +108,7 @@ companions: []
 
 - **Binds:** regular AppHost, LoadTests AppHost, both APIs, Dapr sidecars
 - **Prevents:** single-instance-only ordering proof; clients binding to ephemeral replica endpoints
-- **Rule:** Both AppHosts run two PaymentsAPI replicas and two CoreBankAPI replicas by default. Aspire's proxy preserves the documented PaymentsAPI entry ports (5294 regular, 5295 load test), and service-to-service calls resolve the logical `corebank-api` endpoint; clients never bind to a replica and no gateway is introduced. Replicas of one service share its database, logical Dapr app id, pubsub, and lock store while sidecar/runtime ports remain replica-unique. Concurrent empty-database startup must be race-safe. Load-test reset completes before processors accept work and never overlaps an active run. The four-partition model is unchanged.
+- **Rule:** Both AppHosts run two PaymentsAPI replicas and two CoreBankAPI replicas by default. Aspire's proxy preserves the documented PaymentsAPI entry ports (5294 regular, 5295 load test), and service-to-service calls resolve the logical `corebank-api` endpoint; clients never bind to a replica and no gateway is introduced. Replicas of one service share its database, logical Dapr app id, pubsub, and Aspire-managed Redis lock store while sidecar/runtime ports remain replica-unique. Concurrent empty-database startup must be race-safe. In the load-test graph, APIs run their existing schema initialization while their hosted processors wait on a load-test-only start gate. After API and LoadTestSupport health, a one-shot initializer resets the databases, releases every processor gate, and completes before k6 starts. The regular AppHost leaves the gate open. The four-partition model is unchanged.
 
 ### Dependency direction
 
@@ -139,7 +139,7 @@ Arrows are the only permitted project references. `Messaging` and `ServiceDefaul
 | Validation | DataAnnotations-validated options bound fail-fast at startup; request validation returns all errors as `BadRequest(new { Errors })` |
 | Logging | `ILogger<T>` structured, always including `IdempotencyKey` and `PartitionId` where applicable |
 | Packages | Central package management via `Directory.Packages.props` only |
-| Lock names | `<prefix>-partition-<id>` with per-store prefixes: `payments-outbox`, `payments-inbox`, `corebank-inbox`, `corebank-messaging-outbox` — never shared between stores |
+| Lock names | `<prefix>-partition-<id>` with per-store prefixes: `payments-outbox`, `payments-inbox`, `corebank-inbox`, `messaging-outbox` — never shared between stores |
 | Seed data | One owner per dataset: CoreBankAPI startup seeds the 3 demo accounts; LoadTestSupport owns the 10 `NL..LOAD` accounts (seed + reset) |
 | Tests | xUnit `[Fact]`/`[Theory]`, AwesomeAssertions `Should()` syntax, Moq for ports; test names state the pattern contract being proven |
 
@@ -153,6 +153,7 @@ Test packages verified current on NuGet 2026-08-21; production pins carried unch
 | Aspire | 13.4.0 |
 | EF Core + Npgsql provider | 10.0.8 / 10.0.2 |
 | Dapr.AspNetCore / Dapr.Client | 1.17.9 |
+| Aspire.StackExchange.Redis / DistributedLock.Redis | 13.4.0 / 1.1.1 |
 | CloudNative.CloudEvents | 2.8.0 |
 | OpenTelemetry | 1.15.x |
 | xunit.v3 | 4.0.0 |
@@ -168,7 +169,7 @@ Test packages verified current on NuGet 2026-08-21; production pins carried unch
 ```text
 CoreBankDemo/
   CoreBankDemo.Messaging/            # kernel: processor bases, repository bases, MessageConstants, PartitionHelper, IOutboxDeliveryStrategy
-  CoreBankDemo.ServiceDefaults/      # OTel/Polly wiring, IDistributedLockService (+Dapr impl), options bases, CloudEventTypes
+  CoreBankDemo.ServiceDefaults/      # OTel/Polly wiring, IDistributedLockService (+Redis impl), Dapr event publisher, options, CloudEventTypes
   CoreBankDemo.CoreBankAPI/          # ledger service: Controllers/ Inbox/ Outbox/ Models/
   CoreBankDemo.PaymentsAPI/          # intake service: Controllers/ Handlers/ Inbox/ Outbox/ Models/
   CoreBankDemo.AppHost/              # Aspire orchestration + optional DevProxy
@@ -217,5 +218,5 @@ graph LR
 - **Exact repository interface shapes** — emerge per story under AD-6; the spine fixes only that they exist and own raw SQL.
 - **LoadTestSupport schema adaptation details** — E6 conforms to whatever E1–E4 produced (user decision; AD-1 keeps assertion semantics).
 - **k6 script parameters** — carry over from `main` unless the harness realignment forces change.
-- **ADR texts for A1–A4 + test strategy** — written in the docs epic (E7) from this spine's memlog.
+- **ADR implementation completion** — ADR-008..ADR-014 are accepted; their remaining code and orchestration work is owned by the corresponding stories.
 - **Deployment/operations envelope** — none beyond Aspire local orchestration; demo-only by PRD non-goal, deliberately unowned.

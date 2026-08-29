@@ -45,7 +45,7 @@ context:
 
 ## Architecture Decision Required
 
-This story is an explicit human renegotiation of AD-7 and the locking portion of ADR-004. Before production-code changes, add a new accepted ADR that supersedes those parts and records:
+ADR-011 is the accepted record for this story's explicit human renegotiation of AD-7 and the locking portion of ADR-004. It supersedes those parts and records:
 
 - direct Redis locking through `IDistributedLockService`, with Dapr retained only for pub/sub;
 - automatic renewal while the handle is healthy, plus workload cancellation on `HandleLostToken`;
@@ -72,7 +72,7 @@ Historical completed Story 3.2 and its frozen context remain unchanged; the new 
 
 **Execution:**
 
-- [ ] Architecture first: add the superseding ADR and align current architecture/planning text without rewriting frozen completed-story history.
+- [x] Architecture first: ADR-011 supersedes the old locking decision and current architecture/planning text is aligned without rewriting frozen completed-story history.
 - [ ] Tests first: replace Dapr adapter tests with deterministic tests for immediate acquisition, contention, workload execution, caller cancellation, handle-loss cancellation, handle disposal, logging, exception-to-`false` behavior, and Redis/NoOp DI selection.
 - [ ] Add the centrally pinned Redis client and distributed-lock packages; implement `RedisDistributedLockService` while preserving the existing public port and all Messaging call sites.
 - [ ] Register the named Aspire Redis client in both APIs and inject the AppHost Redis reference into both resources.
@@ -111,4 +111,3 @@ Package/documentation references for implementation review:
 - `git diff --check` -- expected: no whitespace errors.
 
 ## Spec Change Log
-
