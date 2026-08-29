@@ -4,6 +4,7 @@ using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.Extensions.Primitives;
 using Moq;
 using Xunit;
@@ -83,7 +84,8 @@ public class PaymentsControllerTests
     public async Task ProcessPayment_returns_a_meaningful_error_for_exception_only_model_errors()
     {
         var controller = CreateController();
-        controller.ModelState.AddModelError("request", new InvalidOperationException());
+        var metadata = new EmptyModelMetadataProvider().GetMetadataForType(typeof(string));
+        controller.ModelState.AddModelError("request", new InvalidOperationException(), metadata);
 
         var result = await controller.ProcessPayment(ValidRequest(), TestContext.Current.CancellationToken);
 

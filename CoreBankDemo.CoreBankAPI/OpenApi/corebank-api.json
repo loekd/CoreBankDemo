@@ -1,0 +1,285 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CoreBankAPI",
+    "description": "Frozen account and transaction operations exposed by CoreBankDemo.CoreBankAPI. This document is the sole generation source for PaymentsAPI's Kiota client (spec-5-3) and must only change alongside an ADR that renegotiates the underlying wire contract.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://corebank-api"
+    }
+  ],
+  "paths": {
+    "/api/accounts/validate": {
+      "post": {
+        "operationId": "ValidateAccount",
+        "summary": "Validates whether an account number exists and is usable.",
+        "description": "Always returns 200 for a business validity outcome (valid or not) reported in the response body; 400 is reserved for request-shape validation failures only.",
+        "tags": ["Accounts"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AccountValidationRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Business validity outcome for the requested account number.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AccountValidationResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Request-shape validation failure (e.g. missing or malformed AccountNumber).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/accounts/{accountNumber}": {
+      "get": {
+        "operationId": "GetAccountDetails",
+        "summary": "Reads the full account record for a known account number.",
+        "tags": ["Accounts"],
+        "parameters": [
+          {
+            "name": "accountNumber",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 15,
+              "maxLength": 34
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account details for the requested account number.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AccountDetailsResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Request-shape validation failure (e.g. malformed accountNumber route value).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "404": {
+            "description": "No account exists for the requested account number.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/transactions/process": {
+      "post": {
+        "operationId": "ProcessTransaction",
+        "summary": "Submits a transaction for idempotent processing.",
+        "description": "202 covers both a freshly-accepted transaction and an in-flight duplicate reporting current status; 200 covers a completed duplicate replaying its cached response; 400 covers both request-shape validation failures and a terminal transport failure for the referenced transaction.",
+        "tags": ["Transactions"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TransactionRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Transaction accepted for processing, or an in-flight duplicate reporting current status.",
+            "headers": {
+              "Location": {
+                "description": "Relative URL to poll for this transaction's current status: /api/transactions/{transactionId}.",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransactionResponse" }
+              }
+            }
+          },
+          "200": {
+            "description": "Duplicate submission replaying the cached response for an already-completed transaction.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransactionResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Request-shape validation failure, or a terminal transport failure for the referenced transaction.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/transactions/{idempotencyKey}": {
+      "get": {
+        "operationId": "GetTransactionStatus",
+        "summary": "Reads the current status (or cached response) for a previously submitted transaction.",
+        "description": "200 covers both an already-completed transaction (replaying its cached TransactionResponse shape: transactionId, status, processedAt) and a still in-flight or terminally-failed transaction (a status snapshot: transactionId, status, receivedAt, optional processedAt). Both variants are represented by TransactionQueryResult with every field but transactionId/status left optional so either wire shape deserializes without loss.",
+        "tags": ["Transactions"],
+        "parameters": [
+          {
+            "name": "idempotencyKey",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cached transaction response, or a status snapshot, for the requested idempotency key.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransactionQueryResult" }
+              }
+            }
+          },
+          "404": {
+            "description": "No transaction exists for the requested idempotency key.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountValidationRequest": {
+        "type": "object",
+        "required": ["accountNumber"],
+        "properties": {
+          "accountNumber": {
+            "type": "string",
+            "minLength": 15,
+            "maxLength": 34
+          }
+        }
+      },
+      "AccountValidationResponse": {
+        "type": "object",
+        "required": ["accountNumber", "isValid"],
+        "properties": {
+          "accountNumber": { "type": "string" },
+          "isValid": { "type": "boolean" },
+          "accountHolderName": { "type": "string", "nullable": true },
+          "balance": { "type": "number", "format": "decimal", "nullable": true }
+        }
+      },
+      "AccountDetailsResponse": {
+        "type": "object",
+        "required": [
+          "accountNumber",
+          "accountHolderName",
+          "balance",
+          "currency",
+          "isActive",
+          "createdAt"
+        ],
+        "properties": {
+          "accountNumber": { "type": "string" },
+          "accountHolderName": { "type": "string" },
+          "balance": { "type": "number", "format": "decimal" },
+          "currency": { "type": "string" },
+          "isActive": { "type": "boolean" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "TransactionRequest": {
+        "type": "object",
+        "required": ["fromAccount", "toAccount", "amount", "currency", "transactionId"],
+        "properties": {
+          "fromAccount": {
+            "type": "string",
+            "minLength": 15,
+            "maxLength": 34
+          },
+          "toAccount": {
+            "type": "string",
+            "minLength": 15,
+            "maxLength": 34
+          },
+          "amount": {
+            "type": "number",
+            "format": "decimal",
+            "minimum": 0.01,
+            "maximum": 1000000
+          },
+          "currency": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 3,
+            "pattern": "^[A-Z]{3}$"
+          },
+          "transactionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        }
+      },
+      "TransactionResponse": {
+        "type": "object",
+        "required": ["transactionId", "status", "processedAt"],
+        "properties": {
+          "transactionId": { "type": "string" },
+          "status": { "type": "string" },
+          "processedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TransactionQueryResult": {
+        "type": "object",
+        "required": ["transactionId", "status"],
+        "properties": {
+          "transactionId": { "type": "string" },
+          "status": { "type": "string" },
+          "receivedAt": { "type": "string", "format": "date-time", "nullable": true },
+          "processedAt": { "type": "string", "format": "date-time", "nullable": true }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "required": ["errors"],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@ builder.Services.AddHealthChecks()
 
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 builder.Services.AddPaymentStorage(builder.Configuration);
+builder.Services.AddCoreBankApiClient();
 
 builder.Services.AddPaymentIntake();
 

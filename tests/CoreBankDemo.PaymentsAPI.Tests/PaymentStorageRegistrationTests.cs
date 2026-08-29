@@ -1,8 +1,10 @@
 using AwesomeAssertions;
+using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Metadata;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
@@ -91,6 +93,11 @@ public class PaymentStorageRegistrationTests
     {
         var builder = WebApplication.CreateBuilder();
         builder.Services.AddPaymentIntake();
+        // The in-process test host's entry assembly is the test project itself, so MVC's
+        // default ApplicationPartManager discovery never finds CoreBankDemo.PaymentsAPI's
+        // controllers here (unlike the real app, where PaymentsAPI is the entry assembly).
+        // Registering the part explicitly restores real controller discovery for this test.
+        builder.Services.AddControllers().AddApplicationPart(typeof(PaymentsController).Assembly);
         await using var app = builder.Build();
 
         app.MapPaymentIntake();

@@ -37,6 +37,16 @@
     <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
     <!-- Model Context Protocol -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
+    <!-- Kiota (story 5.3): runtime dependencies consumed by the generated
+         CoreBank client and its adapter. Pinned to match the
+         microsoft.openapi.kiota CLI version in .config/dotnet-tools.json. -->
+    <PackageVersion Include="Microsoft.Kiota.Bundle" Version="2.0.0" />
+    <!-- Story 5.3: the adapter recognizes the standard resilience pipeline's
+         own timeout exception type explicitly. Pinned to the exact Polly.Core
+         version Microsoft.Extensions.Http.Resilience 10.6.0 already resolves
+         transitively; this is not a new runtime dependency, only an
+         explicit reference to a type already on the graph. -->
+    <PackageVersion Include="Polly.Core" Version="8.4.2" />
     <!-- Test Stack (verified on NuGet 2026-08-21) -->
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
