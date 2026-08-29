@@ -12,7 +12,9 @@ within one process), and gives the LoadTests AppHost a race-safe reset/gating se
 the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solution and
 `dotnet build CoreBankDemo.sln` must go green. It also removes SQLite as a test-only second
 database engine and introduces an independently runnable PostgreSQL Testcontainers persistence
-tier alongside the fast Docker-free unit-test loop.
+tier alongside the fast Docker-free unit-test loop. Finally, it completes ADR-008 by removing all
+remaining Dapr service-invocation configuration and enforcing Kiota as the only production
+request/response path between the banking APIs.
 
 ## Stories
 
@@ -22,6 +24,7 @@ tier alongside the fast Docker-free unit-test loop.
 - Story 6.4: Chaos opt-in and demo smoke
 - Story 6.5: OpenTelemetry business metrics
 - Story 6.6: Remove SQLite with PostgreSQL Testcontainers
+- Story 6.7: Eliminate Dapr service invocation
 
 ## Requirements & Constraints
 
@@ -48,6 +51,10 @@ tier alongside the fast Docker-free unit-test loop.
 - Unit tests must remain runnable without Docker. Persistence integration tests may require the
   devcontainer's Docker runtime and cold-start latency, but must be independently targetable and
   must use PostgreSQL rather than a behaviorally different relational substitute.
+- Dapr is retained for CloudEvent pub/sub only. All production request/response calls from
+  PaymentsAPI to CoreBankAPI use the application-owned port backed by the generated Kiota client;
+  no invocation flag, sidecar invoke route, deprecated SDK invocation API, or alternate client is
+  permitted.
 
 ## Technical Decisions
 
@@ -91,6 +98,12 @@ tier alongside the fast Docker-free unit-test loop.
   Aspire/k6 distributed acceptance. The amendment must define independently runnable targets,
   preserve the combined >=90% line-coverage gate without blanket exclusions, pin the PostgreSQL
   image to the AppHost major version, and remove SQLite-specific packages and production helpers.
+- **Kiota-only service integration (ADR-008 and ADR-013 / Story 6.7):** Story 5.3 already created
+  the sole `ICoreBankApiClient`/`KiotaCoreBankApiClient` path. Story 6.7 does not redesign it; it
+  removes the live AppHost `Features__UseDapr` remnants, stale invocation guidance, and any
+  invocation-only dependencies, then adds an automated guard against Dapr invocation APIs,
+  sidecar invocation URLs/headers, feature flags, and alternate banking service clients. Dapr
+  packages and sidecars remain only where required for event publication/subscription.
 - **Business metrics (ADR-003):** one shared meter contract distinguishes business outcomes,
   transport attempts, and durable message-store transitions. Measurements happen only after the
   represented outcome is known; retries count as transport/processing attempts, while business
@@ -116,6 +129,10 @@ tier alongside the fast Docker-free unit-test loop.
 - Story 6.6 may proceed independently of the orchestration stories once ADR-016 is accepted, but
   it must reconcile concurrent test changes from Stories 5.4 and 6.3 and leave both the unit-only
   and full rebuild gates green. Story 7.1 consumes its PostgreSQL integration-test infrastructure.
+- Story 6.7 depends on completed Story 5.3 and should land after Story 5.5 has made PaymentsAPI's
+  inbound Dapr pub/sub dependency explicit. It must preserve Story 5.4's Kiota-backed forwarding
+  behavior and Story 5.5's subscription behavior while resolving the ADR-008 AppHost item already
+  recorded in `deferred-work.md`.
 - Story 7.4 may later orchestrate only these already-proven flows; it must not paper over or replace
   Story 6.4's validation or treat Story 6.5's counters as a replacement for durable assertions.
 - Outbox/inbox visibility via LoadTestSupport endpoints (mentioned in Story 6.4) is not available

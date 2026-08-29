@@ -592,6 +592,36 @@ As a maintainer, I want persistence integration tests to run against disposable 
 **Then** no SQLite provider package, `UseSqlite`, SQLite fixture, or SQLite-specific exception branch remains
 **And** frozen completed stories remain an unmodified historical record.
 
+### Story 6.7: Eliminate Dapr service invocation
+
+As a maintainer, I want every production API-to-API request/response call to use the contract-generated Kiota client, so that the repository contains no deprecated Dapr service-invocation path, switch, or fallback while retaining Dapr only for CloudEvent pub/sub.
+
+**Acceptance Criteria:**
+
+**Given** completed Story 5.3 and accepted ADR-008/ADR-013
+**When** the current implementation is inspected
+**Then** the existing `ICoreBankApiClient`/`KiotaCoreBankApiClient` path is recognized as the sole PaymentsAPI→CoreBankAPI implementation rather than rebuilt or duplicated
+**And** no new ADR is required because this story completes and enforces the already-accepted decision.
+
+**Given** production source, configuration, AppHosts, project files, tests, scripts, and active documentation
+**When** the cleanup is complete
+**Then** `Features:UseDapr`, `Features__UseDapr`, Dapr invocation clients/handlers, sidecar invocation URLs/headers, and deprecated invocation API calls are absent
+**And** an automated architecture guard rejects their reintroduction.
+
+**Given** PaymentsAPI forwards a payment to CoreBankAPI
+**When** it validates the destination account and submits the transaction
+**Then** both operations flow through the checked-in OpenAPI contract, generated Kiota client, application-owned adapter, Aspire logical `corebank-api` endpoint, standard service discovery/resilience pipeline, and existing trace propagation
+**And** there is no parallel hand-written HTTP client or alternate transport fallback.
+
+**Given** CoreBankAPI publishes events and PaymentsAPI receives them
+**When** the Dapr integration is inspected and its regression tests run
+**Then** Dapr remains only for pub/sub sidecars, subscription delivery, and `PublishEventAsync`
+**And** this story does not replace CloudEvent pub/sub with Kiota or remove a Dapr package still required by that event path.
+
+**Given** frozen completed stories and accepted decision records describe the superseded route historically
+**When** repository-wide verification runs
+**Then** historical context may retain explicit past-tense references, while executable code, live config, current guidance, generated inputs, and forward-looking backlog artifacts describe only the Kiota request/response path.
+
 ---
 
 ## Epic 7: E6 — Load Harness Realignment

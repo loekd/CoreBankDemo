@@ -2,7 +2,7 @@
 title: 'Story 5.5: Event subscription intake'
 type: 'feature'
 created: '2026-08-29'
-status: 'done'
+status: 'blocked'
 review_loop_iteration: 1
 followup_review_recommended: true
 baseline_commit: '312ce8e1b6aa81269fd07c46dfdc09566d11595b'
@@ -120,6 +120,9 @@ deferred: []
 - `git diff --check` -- expected: no whitespace errors.
 
 ## Auto Run Result
+
+Status: blocked
+Blocking condition: finalization left repository dirty
 
 **Summary:** Added durable, idempotent PaymentsAPI intake for the three supported `transaction-events` CloudEvents plus the unknown-event acknowledgement route. Known deliveries now pass through Dapr's real CloudEvents middleware into a typed handler and kernel inbox repository, preserving composite identity, partition, timestamp, payload, and trace context; event processing remains deferred to Story 5.6.
 
