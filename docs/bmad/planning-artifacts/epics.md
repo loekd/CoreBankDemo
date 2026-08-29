@@ -27,7 +27,7 @@ NFR-1 invariants under load · NFR-2 one payment = one trace · NFR-3 constraint
 
 ### Additional Requirements (Architecture)
 
-- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy` and cross-instance partition exclusivity; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set with a Kiota-backed CoreBank adapter; AD-7 no lock renewal; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below and represented by a checked-in CoreBank OpenAPI document; AD-13 two local replicas per API behind stable Aspire ingress.
+- AD-2 hexagonal seams; AD-3 kernel-owned processor machinery with `IOutboxDeliveryStrategy` and cross-instance partition exclusivity; AD-4 identity split (ordering key vs per-store dedupe); AD-5 atomic state+events; AD-6 fixed port set with a Kiota-backed CoreBank adapter; AD-7 currently specifies no lock renewal, with Story 6.2 requiring a superseding ADR before implementation; AD-8 trace persistence; AD-9 three test tiers + VSTest mode; AD-10 slnf gate; AD-11 delivery outcome contract (business rejection = Completed + failure payload); AD-12 wire contracts frozen below and represented by a checked-in CoreBank OpenAPI document; AD-13 two local replicas per API behind stable Aspire ingress.
 - No starter template — brownfield rebuild in an existing solution.
 
 ### UX Design Requirements
@@ -74,11 +74,11 @@ public record BalanceUpdatedResponse(string TransactionId, string AccountNumber,
 | FR-2 | 5.1, 5.2 | FR-17 | 5.5 |
 | FR-3 | 5.1, 5.2 | FR-18 | 5.6 |
 | FR-4 | 5.1, 2.1 | FR-19 | 2.1–2.6 |
-| FR-5 | 5.4 | FR-20 | 2.4, 2.5, 3.2, 3.3 |
-| FR-6 | 2.4, 5.4, 6.2 | FR-21 | 6.1, 6.2 |
-| FR-7 | 2.3, 2.6 | FR-22 | 6.3 |
-| FR-8 | 2.4, 5.3 | FR-23 | 6.1, 6.2, 3.1 |
-| FR-9 | 4.4 | FR-24 | 6.2, 7.3 |
+| FR-5 | 5.4 | FR-20 | 2.4, 2.5, 3.2, 3.3, 6.2 |
+| FR-6 | 2.4, 5.4, 6.3 | FR-21 | 6.1, 6.2, 6.3 |
+| FR-7 | 2.3, 2.6 | FR-22 | 6.4 |
+| FR-8 | 2.4, 5.3 | FR-23 | 6.1, 6.2, 6.3, 3.1 |
+| FR-9 | 4.4 | FR-24 | 6.3, 7.3 |
 | FR-10 | 4.4 | FR-25 | 7.1, 7.2 |
 | FR-11 | 4.3, 4.6 | FR-26 | 7.1–7.3 |
 | FR-12 | 4.2, 4.6 | FR-27 | 1.2, all |
@@ -463,7 +463,27 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 **Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr components (pubsub, lockstore, subscription), and both APIs with sidecars come up healthy
 **And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
 
-### Story 6.2: Replicated local API topology
+### Story 6.2: Renewable Redis distributed locking
+
+As the demo owner, I want partition locks renewed through the Aspire-managed Redis instance, so that healthy work can safely outlive its initial lease while the demo remains one-command local (FR-20, FR-21, FR-23; AD-6, supersedes AD-7 via a new ADR).
+
+**Acceptance Criteria:**
+
+**Given** the existing `IDistributedLockService` consumers
+**When** the Dapr lock adapter is replaced with `DistributedLock.Redis`
+**Then** the public interface and Messaging call sites remain unchanged, lock acquisition is non-blocking, held locks renew automatically, and caller cancellation or `HandleLostToken` cancels the workload
+**And** contention, cancellation, Redis failures, workload failures, and release failures preserve the current non-throwing `false` result contract.
+
+**Given** the regular Aspire AppHost
+**When** it starts locally
+**Then** both APIs receive the shared `redis` connection and wait for Redis, Dapr remains available for pub/sub, and the Dapr `lockstore` component is absent
+**And** a real-Redis integration proof holds a lock beyond its initial expiry and prevents a second contender until release.
+
+**Given** AD-7 and ADR-004 currently specify non-renewed Dapr locking
+**When** this story starts implementation
+**Then** a new accepted ADR supersedes those locking decisions before production code changes; frozen completed Story 3.2 remains historical rather than being rewritten.
+
+### Story 6.3: Replicated local API topology
 
 As the demo owner, I want competing local API instances by default, so that the demo proves partition ordering and exclusivity hold beyond a single process (FR-6, FR-21, FR-23, FR-24; NFR-1, NFR-5; AD-3, AD-9, AD-13).
 
@@ -471,7 +491,7 @@ As the demo owner, I want competing local API instances by default, so that the 
 
 **Given** either the regular AppHost or the LoadTests AppHost
 **When** its default topology starts
-**Then** it runs two PaymentsAPI replicas and two CoreBankAPI replicas, each with a healthy Dapr sidecar connected to the shared pubsub and lock stores
+**Then** it runs two PaymentsAPI replicas and two CoreBankAPI replicas, each with a healthy Dapr sidecar connected to the shared pubsub and each application connected to the shared Aspire Redis lock store
 **And** replicas of each service share its database and logical Dapr app id while sidecar/runtime ports remain unique
 **And** both replicas start reliably against an empty database without racing schema initialization
 **And** the four-partition configuration and existing external HTTP shapes remain unchanged.
@@ -483,7 +503,7 @@ As the demo owner, I want competing local API instances by default, so that the 
 
 **Given** two service instances compete for work
 **When** messages from the same partition are processed
-**Then** the Postgres acceptance tier with the real Redis-backed Dapr lock adapter proves at most one instance owns that store partition at a time and messages complete in durable enqueue order without reordering, including equal ordering timestamps
+**Then** the Postgres acceptance tier with the real renewable Redis lock adapter proves at most one instance owns that store partition at a time and messages complete in durable enqueue order without reordering, including equal ordering timestamps
 **And** processor-instance evidence proves both replicas perform work while different partitions progress concurrently
 **And** lock-expiry takeover is not duplicated here because Story 2.6 owns that failure path.
 
@@ -491,7 +511,7 @@ As the demo owner, I want competing local API instances by default, so that the 
 **When** reset executes
 **Then** reset completes before replicated processors accept work and cannot overlap in-flight processing.
 
-### Story 6.3: Chaos opt-in and demo smoke
+### Story 6.4: Chaos opt-in and demo smoke
 
 As the speaker, I want DevProxy and the demo flows verified, so that talk stages 0–4 work (FR-22, NFR-5).
 
