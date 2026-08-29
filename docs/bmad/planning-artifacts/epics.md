@@ -452,7 +452,7 @@ As the demo, I want consumed events processed on the kernel loop, so that the fu
 
 ## Epic 6: E5 — AppHost & Orchestration
 
-Rebuild and replicate the Aspire graph; the full `.sln` returns to green here (FR-6, FR-21, FR-22, FR-23, FR-24; AD-3, AD-9, AD-10, AD-13).
+Rebuild and replicate the Aspire graph, and align persistence tests with the production PostgreSQL engine; the full `.sln` returns to green here (FR-6, FR-21, FR-22, FR-23, FR-24; AD-3, AD-9, AD-10, AD-13).
 
 ### Story 6.1: Aspire application graph
 
@@ -561,6 +561,37 @@ As the demo operator, I want low-cardinality business and messaging metrics expo
 **When** every outcome path is exercised
 **Then** each expected measurement and tag set is asserted, forbidden high-cardinality tags are absent, failures still propagate, and the full rebuild test/coverage gate remains green.
 
+### Story 6.6: Remove SQLite with PostgreSQL Testcontainers
+
+As a maintainer, I want persistence integration tests to run against disposable PostgreSQL containers, so that tests prove the SQLSTATE, locking, transaction, and data-type behavior used in production without slowing the Docker-free unit-test loop.
+
+**Acceptance Criteria:**
+
+**Given** the current test suite and ADR-012/AD-9 SQLite test-tier decision
+**When** this story starts implementation
+**Then** ADR-016 is accepted to supersede only the SQLite-specific parts of ADR-012 and AD-9 while preserving the fast-unit, persistence-integration, and distributed-acceptance tiers
+**And** the PostgreSQL container image is explicitly pinned to the production/AppHost major version rather than using `latest`.
+
+**Given** tests that exercise EF Core models, repositories, durable Inbox/Outbox stores, seeding, transactions, or provider behavior
+**When** the persistence integration target runs
+**Then** they use real PostgreSQL through Testcontainers, with one amortized container lifecycle and isolated databases/schemas for parallel tests
+**And** real Npgsql behavior is proven for SQLSTATE `23505`, `SELECT ... FOR UPDATE`, rollback/atomicity, concurrent deduplication, durable ordering, and relevant `decimal`/`DateTimeOffset` round trips.
+
+**Given** pure domain, handler, processor, option, telemetry, and adapter-orchestration logic
+**When** the unit-test target runs
+**Then** it remains Docker-free, deterministic, and independently runnable
+**And** persistence adapters are not faked with a second relational provider.
+
+**Given** the repository's test entry points
+**When** maintainers select unit, persistence-integration, or full rebuild validation
+**Then** named solution filters/commands run those scopes independently, the integration target fails clearly when no container runtime is available, and the full gate runs both tiers
+**And** combined coverage remains at least 90% without blanket persistence exclusions or a weaker threshold disguised by moving tests.
+
+**Given** the migration is complete
+**When** active source, project, package, test-support, and forward-looking planning files are inspected
+**Then** no SQLite provider package, `UseSqlite`, SQLite fixture, or SQLite-specific exception branch remains
+**And** frozen completed stories remain an unmodified historical record.
+
 ---
 
 ## Epic 7: E6 — Load Harness Realignment
@@ -576,7 +607,7 @@ As the acceptance tier, I want reset/drain/assert working against the new schema
 **Given** the rebuilt DbContexts
 **When** `/reset`, `/assert/drain`, `/assert/results?expectedUnique=N`, and the inbox/outbox inspection endpoints run
 **Then** semantics match `main`: truncate stores + reset the 10 LOAD accounts (sole owner of that dataset); drain = zero non-terminal; results assert exactly-once, all-submitted-processed, balance conservation, zero failed, balances-correct-by-replay
-**And** assertion logic is unit-tested against seeded SQLite data.
+**And** pure assertion logic is covered by Docker-free unit tests while persistence queries are integration-tested against seeded PostgreSQL Testcontainers data from Story 6.6.
 
 ### Story 7.2: MCP server tools
 

@@ -10,7 +10,9 @@ locking off the Dapr lock component onto renewable Redis leases, runs two replic
 default (proving partition exclusivity and ordering hold across competing processes, not just
 within one process), and gives the LoadTests AppHost a race-safe reset/gating sequence. It is also
 the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solution and
-`dotnet build CoreBankDemo.sln` must go green.
+`dotnet build CoreBankDemo.sln` must go green. It also removes SQLite as a test-only second
+database engine and introduces an independently runnable PostgreSQL Testcontainers persistence
+tier alongside the fast Docker-free unit-test loop.
 
 ## Stories
 
@@ -19,6 +21,7 @@ the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solutio
 - Story 6.3: Replicated local API topology
 - Story 6.4: Chaos opt-in and demo smoke
 - Story 6.5: OpenTelemetry business metrics
+- Story 6.6: Remove SQLite with PostgreSQL Testcontainers
 
 ## Requirements & Constraints
 
@@ -42,6 +45,9 @@ the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solutio
   duplicate keys) against the same default two-by-two topology, using disposable infrastructure.
 - Existing `.http` demo flows (`demo-requests.http`, `payment-idempotency-tests.http`) must keep
   behaving exactly as on `main` (202 Accepted, duplicate replay, current outbox/inbox visibility).
+- Unit tests must remain runnable without Docker. Persistence integration tests may require the
+  devcontainer's Docker runtime and cold-start latency, but must be independently targetable and
+  must use PostgreSQL rather than a behaviorally different relational substitute.
 
 ## Technical Decisions
 
@@ -79,6 +85,12 @@ the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solutio
   exclusion, durable ordering, concurrent progress on different partitions, lock-loss cancellation
   and renewal) belong to the k6/Aspire acceptance tier using real Postgres and the real renewable
   Redis lock adapter — not mocked in unit tests.
+- **Pending persistence-test amendment (Story 6.6 / ADR-016):** ADR-016 must supersede the
+  SQLite-specific portions of ADR-012 and AD-9 before implementation. The intended tiers are fast,
+  Docker-free unit tests; PostgreSQL Testcontainers persistence integration tests; and full
+  Aspire/k6 distributed acceptance. The amendment must define independently runnable targets,
+  preserve the combined >=90% line-coverage gate without blanket exclusions, pin the PostgreSQL
+  image to the AppHost major version, and remove SQLite-specific packages and production helpers.
 - **Business metrics (ADR-003):** one shared meter contract distinguishes business outcomes,
   transport attempts, and durable message-store transitions. Measurements happen only after the
   represented outcome is known; retries count as transport/processing attempts, while business
@@ -101,6 +113,9 @@ the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solutio
 - Story 6.4's demo/chaos smoke test exercises the graph produced by 6.1–6.3. Story 6.5 instruments
   the already-proven business flows and depends on Payments stories 5.4–5.6 so both transport
   directions and all four durable stores exist before their metric hooks are added.
+- Story 6.6 may proceed independently of the orchestration stories once ADR-016 is accepted, but
+  it must reconcile concurrent test changes from Stories 5.4 and 6.3 and leave both the unit-only
+  and full rebuild gates green. Story 7.1 consumes its PostgreSQL integration-test infrastructure.
 - Story 7.4 may later orchestrate only these already-proven flows; it must not paper over or replace
   Story 6.4's validation or treat Story 6.5's counters as a replacement for durable assertions.
 - Outbox/inbox visibility via LoadTestSupport endpoints (mentioned in Story 6.4) is not available
