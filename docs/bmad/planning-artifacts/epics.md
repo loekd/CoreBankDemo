@@ -526,6 +526,41 @@ As the speaker, I want DevProxy and the demo flows verified, so that talk stages
 
 ---
 
+### Story 6.5: OpenTelemetry business metrics
+
+As the demo operator, I want low-cardinality business and messaging metrics exported through OpenTelemetry, so that I can quantify payment intake, transaction outcomes, message movement, and Inbox/Outbox health without reconstructing them from logs.
+
+**Acceptance Criteria:**
+
+**Given** either API starts through `AddServiceDefaults`
+**When** OpenTelemetry metrics are configured
+**Then** the shared business `Meter` is registered and exported through the existing OTLP pipeline, with instrument names, units, descriptions, and allowed tag values defined once
+**And** metric tags use only bounded values (store name/kind, transport, message type, and outcome); transaction ids, idempotency keys, account numbers, trace ids, exception text, and other user-controlled values never become metric attributes.
+
+**Given** payment and transaction intake
+**When** an intake reaches a known outcome
+**Then** counters record payment `stored`/`duplicate`/`validation_failed` and transaction `accepted`/`replayed`/`in_flight`/`transport_failed` outcomes exactly once
+**And** committed transaction execution records `completed` or `business_rejected` exactly once; a business rejection is never counted as an Inbox or transport failure.
+
+**Given** an Inbox or Outbox store operation
+**When** persistence succeeds, loses a dedupe race, or fails
+**Then** a counter records `added`, `duplicate`, or `failed` for the stable store name and store kind
+**And** failed persistence is recorded before the original exception propagates unchanged.
+
+**Given** the shared Inbox/Outbox processors
+**When** a claimed item completes, schedules a retry, reaches terminal `Failed`, or completion/retry persistence fails
+**Then** item-processing counters record the authoritative outcome exactly once and queue-duration histograms record non-negative milliseconds from durable enqueue/receive time to processing start
+**And** cancellation and lock contention are not misclassified as processing failures.
+
+**Given** Payments→CoreBank HTTP delivery or CoreBank→Payments Dapr delivery
+**When** a send/receive attempt succeeds, fails, is deduplicated, or is routed as unknown
+**Then** transport counters record direction, bounded transport, message type, and outcome at the concrete transport boundary
+**And** retries remain visible as attempts without claiming exactly-once physical delivery.
+
+**Given** focused tests using `MeterListener`
+**When** every outcome path is exercised
+**Then** each expected measurement and tag set is asserted, forbidden high-cardinality tags are absent, failures still propagate, and the full rebuild test/coverage gate remains green.
+
 ## Epic 7: E6 — Load Harness Realignment
 
 LoadTestSupport and k6 conform to the rebuilt system (FR-24, FR-25, FR-26; harness adapts to code).
