@@ -28,6 +28,11 @@ builder.Services.AddHostedService<PaymentsOutboxProcessor>();
 
 builder.Services.AddPaymentIntake();
 
+// Story 5.5: event subscription intake. No processor is registered yet
+// (Story 5.6 owns dispatch) -- this only durably stores known
+// transaction-events CloudEvent deliveries.
+builder.Services.AddTransactionEventIntake(builder.Configuration);
+
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
@@ -37,6 +42,17 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.MapDefaultEndpoints();
+
+// Story 5.5: unwrap Dapr's structured CloudEvents into the raw event payload
+// before routing, so TransactionEventsController's [FromBody] model binding
+// deserializes the typed contract directly (Dapr.AspNetCore).
+app.UseCloudEvents();
+
 app.MapPaymentIntake();
 
 app.Run();
+
+// Exposed so Microsoft.AspNetCore.Mvc.Testing's WebApplicationFactory<Program>
+// can boot the real entry point in tests (spec-5-5's real-entry-point
+// CloudEvent POST requirement).
+public partial class Program;

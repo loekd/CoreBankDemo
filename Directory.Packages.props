@@ -30,6 +30,11 @@
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.8" />
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.6.0" />
     <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.6.0" />
+    <!-- Story 5.5: boots PaymentsAPI's real Program entry point in-process so
+         the event-subscription-intake wiring test can POST a structured
+         CloudEvent through the actual production middleware/DI/routing
+         (never a reconstructed application). -->
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.8" />
     <!-- Database -->
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
     <!-- Swagger -->
