@@ -2,7 +2,7 @@
 title: 'Story 7.4: Presentation-safe terminal demo console'
 type: 'feature'
 created: '2026-08-29'
-status: 'done'
+status: 'in-progress'
 review_loop_iteration: 0
 baseline_commit: '8e55a6488619239b533d086995715fa8740b585f'
 context:
@@ -121,9 +121,9 @@ Interaction rules:
 - [x] Add the runner and test projects to the solution/filter; centrally pin Terminal.Gui `2.4.17`; keep the executable independent of banking implementation projects; gitignore only its generated local run artifacts.
 - [x] Implement the versioned talk-scenario model and application state machine with explicit ports for process, HTTP/LoadTestSupport, health, browser, proof pack, journal, and time.
 - [x] Reuse Story 7.3's accepted load-test sequence and evidence sources for Run → Wait → Assert → Investigate; do not create parallel reset, drain, invariant, or trace semantics for the TUI.
-- [x] Implement the owned Aspire-profile process adapter, verified attach mode, health monitor, allow-listed HTTP actions, browser launch, and graceful cleanup. No generic command action is permitted.
-- [x] Build the responsive three-pane Terminal.Gui shell, compact layout, accessible status text, mouse bindings, keyboard shortcuts, and UI-thread-safe progress updates.
-- [x] Encode `MissionCriticalTalk-v7`: Inbox at work (slide 42), Proving everything works/Aspire load test/AI analysis (slides 45–52), and the Dev Containers/Codespace hand-off (slide 53), including speaker notes, deterministic identity, evidence checks, and known Aspire/Jaeger links; preserve the `.http` fallback.
+- [ ] Implement the owned Aspire-profile process adapter, verified attach mode, health monitor, allow-listed HTTP actions, browser launch, and graceful cleanup. No generic command action is permitted.
+- [ ] Build the responsive three-pane Terminal.Gui shell, compact layout, accessible status text, mouse bindings, keyboard shortcuts, and UI-thread-safe progress updates.
+- [ ] Encode `MissionCriticalTalk-v7`: Inbox at work (slide 42), Proving everything works/Aspire load test/AI analysis (slides 45–52), and the Dev Containers/Codespace hand-off (slide 53), including speaker notes, deterministic identity, evidence checks, and known Aspire/Jaeger links; preserve the `.http` fallback.
 - [ ] Add `--doctor`, `--show`, `--rehearse`, and `--resume`; rehearse repeatedly from a healthy local environment, produce a timestamped proof pack, and inject failures at every cue/phase boundary to prove truthful recovery.
 - [ ] Document the presenter workflow and run a timed dress rehearsal on the actual presentation terminal before declaring the story done.
 
@@ -179,3 +179,4 @@ Package/design references for implementation review:
 - 2026-08-29: Initial story created from the user's request for a mouse-enabled, presentation-safe .NET console demo tool.
 - 2026-08-29: Renumbered to Story 7.4 and aligned the first scenario to MissionCriticalTalk v7's actual live cues and Run → Wait → Assert → Investigate narrative.
 - 2026-08-29: ADR-015 accepted; `CoreBankDemo.DemoRunner` implemented end-to-end (scenario model/validator, state machine, ports, Infrastructure adapters, Terminal.Gui shell, `--doctor`/`--show`/`--rehearse`/`--resume`) with 118 tests at 100% line / 91.76% branch coverage on the covered Application/presentation-model surface. `--doctor` verified live. `--rehearse` verified live against a real spawned `CoreBankDemo.AppHost` process: it failed closed when Payments/CoreBank/Jaeger did not become healthy in time (expected — several Epic 4–6 stories the AppHost depends on are still backlog/in-progress on this branch), produced no proof pack, and left no orphaned process or container behind. Tasks 127–128 (a fully healthy rehearsal producing a saved proof pack, and a timed dress rehearsal on the real presentation terminal) remain open until the upstream rebuild stories are done and a real terminal session is available.
+- 2026-08-29: Hardened the implementation review findings: owned AppHost output is now drained into a bounded redacted buffer, Unix shutdown sends SIGINT before forced termination, every normal TUI exit cleans up owned children, run identities are unique while `--resume` resolves the latest matching journal, cancelled cues become explicitly Cancelled, preflight gates Show/Rehearsal startup, and rehearsal proof packs are promoted only after cleanup succeeds. Story remains in progress: explicit attach UX, full compact/resource-detail TUI behavior, slide-42 durable Inbox/execution evidence, a healthy proof-pack rehearsal, and the real-terminal dress rehearsal are still unproven.

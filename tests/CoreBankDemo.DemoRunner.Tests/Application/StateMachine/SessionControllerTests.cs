@@ -72,6 +72,35 @@ public class SessionControllerTests
     }
 
     [Fact]
+    public async Task RunCurrentAsync_ActionIsCancelled_MarksCueCancelledAndKeepsNextLocked()
+    {
+        var harness = new SessionControllerHarness();
+        harness.Health
+            .Setup(h => h.WaitForHealthyAsync(It.IsAny<string>(), It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new OperationCanceledException());
+        var scenario = TestScenarios.Build(
+            TestScenarios.SimpleCue("a", actions:
+            [
+                new ScenarioActionDefinition
+                {
+                    Kind = ActionKind.WaitForHealth,
+                    ResourceName = KnownResources.CoreBankApi,
+                    TimeoutSeconds = 1,
+                },
+            ]),
+            TestScenarios.SimpleCue("b"));
+        var controller = harness.Build(scenario);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        var result = await controller.RunCurrentAsync(cancellation.Token);
+
+        result.Status.Should().Be(CueStatus.Cancelled);
+        controller.TryAdvanceToNext().Should().BeFalse();
+        controller.State.Cues[1].Status.Should().Be(CueStatus.Locked);
+    }
+
+    [Fact]
     public async Task RunCurrentAsync_DuplicateActivationWhileRunning_IsIgnored()
     {
         var harness = new SessionControllerHarness();

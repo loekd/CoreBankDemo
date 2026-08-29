@@ -20,6 +20,9 @@ public interface IProcessAdapter
     /// </summary>
     Task<TopologyHandle?> TryAttachAsync(string profileName, CancellationToken ct);
 
+    /// <summary>Returns bounded, redacted recent output for an owned process.</summary>
+    string GetRecentOutput(TopologyHandle handle);
+
     /// <summary>
     /// Stops only a handle this adapter itself started (<see cref="TopologyHandle.IsOwned"/>);
     /// attempts graceful cancellation before forced termination. A no-op for unowned handles.

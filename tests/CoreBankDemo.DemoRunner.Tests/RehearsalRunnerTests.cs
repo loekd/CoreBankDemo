@@ -48,4 +48,27 @@ public class RehearsalRunnerTests
         exitCode.Should().Be(1);
         proofPacks.Verify(p => p.SaveAsLatestKnownGoodAsync(It.IsAny<ProofPack>(), It.IsAny<CancellationToken>()), Times.Never);
     }
+
+    [Fact]
+    public async Task RunAsync_AllCuesPass_PromotesProofPackOnlyAfterOwnedTopologyStops()
+    {
+        var harness = new SessionControllerHarness();
+        var cleanupCompleted = false;
+        harness.Process
+            .Setup(p => p.StopOwnedAsync(It.IsAny<TopologyHandle>(), It.IsAny<CancellationToken>()))
+            .Callback(() => cleanupCompleted = true)
+            .Returns(Task.CompletedTask);
+        var proofPacks = new Mock<IProofPackStore>();
+        proofPacks
+            .Setup(p => p.SaveAsLatestKnownGoodAsync(It.IsAny<ProofPack>(), It.IsAny<CancellationToken>()))
+            .Callback(() => cleanupCompleted.Should().BeTrue())
+            .Returns(Task.CompletedTask);
+        var controller = harness.Build(TestScenarios.Build(TestScenarios.SimpleCue("a")));
+        await controller.StartTopologyAsync(KnownTopologyProfiles.Regular, CancellationToken.None);
+
+        var exitCode = await RehearsalRunner.RunAsync(controller, proofPacks.Object, CancellationToken.None);
+
+        exitCode.Should().Be(0);
+        cleanupCompleted.Should().BeTrue();
+    }
 }

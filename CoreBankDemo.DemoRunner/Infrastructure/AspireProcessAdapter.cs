@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Application.Scenarios;
 
@@ -18,6 +19,7 @@ public sealed class AspireProcessAdapter(HttpClient httpClient, string repositor
     };
 
     private readonly Dictionary<string, Process> _owned = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, BoundedOutputBuffer> _output = new(StringComparer.Ordinal);
 
     public Task<TopologyHandle> StartOwnedAsync(string profileName, CancellationToken ct)
     {
@@ -39,11 +41,20 @@ public sealed class AspireProcessAdapter(HttpClient httpClient, string repositor
             EnableRaisingEvents = true,
         };
 
+        var output = new BoundedOutputBuffer();
+        process.OutputDataReceived += (_, args) => output.Add(args.Data);
+        process.ErrorDataReceived += (_, args) => output.Add(args.Data);
         process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
         _owned[profileName] = process;
+        _output[profileName] = output;
 
         return Task.FromResult(new TopologyHandle(profileName, IsOwned: true, process.Id, Fingerprint: $"owned:{process.Id}"));
     }
+
+    public string GetRecentOutput(TopologyHandle handle) =>
+        _output.TryGetValue(handle.ProfileName, out var output) ? output.ToString() : string.Empty;
 
     public async Task<TopologyHandle?> TryAttachAsync(string profileName, CancellationToken ct)
     {
@@ -87,7 +98,7 @@ public sealed class AspireProcessAdapter(HttpClient httpClient, string repositor
         {
             if (!process.HasExited)
             {
-                process.CloseMainWindow();
+                RequestGracefulStop(process);
                 using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
                 try
@@ -103,7 +114,46 @@ public sealed class AspireProcessAdapter(HttpClient httpClient, string repositor
         finally
         {
             _owned.Remove(handle.ProfileName);
+            _output.Remove(handle.ProfileName);
             process.Dispose();
         }
+    }
+
+    private static void RequestGracefulStop(Process process)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            process.CloseMainWindow();
+            return;
+        }
+
+        using var signal = Process.Start(new ProcessStartInfo("kill", $"-INT {process.Id}")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        });
+        signal?.WaitForExit();
+    }
+
+    private sealed class BoundedOutputBuffer
+    {
+        private const int MaximumLines = 200;
+        private readonly ConcurrentQueue<string> _lines = new();
+
+        public void Add(string? line)
+        {
+            if (string.IsNullOrEmpty(line))
+            {
+                return;
+            }
+
+            _lines.Enqueue(JournalRedaction.Apply(line));
+            while (_lines.Count > MaximumLines)
+            {
+                _lines.TryDequeue(out _);
+            }
+        }
+
+        public override string ToString() => string.Join(Environment.NewLine, _lines);
     }
 }

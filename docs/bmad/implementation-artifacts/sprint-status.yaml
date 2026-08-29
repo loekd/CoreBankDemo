@@ -89,7 +89,7 @@ development_status:
   7-1-assertion-api-realignment: backlog
   7-2-mcp-server-tools: backlog
   7-3-k6-run-and-first-full-acceptance-gate: backlog
-  7-4-presentation-safe-terminal-demo-console: review
+  7-4-presentation-safe-terminal-demo-console: in-progress
   epic-7-retrospective: optional
 
   epic-8: backlog

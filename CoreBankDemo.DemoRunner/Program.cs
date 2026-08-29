@@ -55,13 +55,39 @@ public static class Program
 
         var scenario = loadResult.Scenario;
         var mode = options.Rehearse ? SessionMode.Rehearsal : SessionMode.Show;
-        var runId = $"{scenario.Name}-{scenario.ScenarioVersion}-{mode}";
+        var runPrefix = $"{scenario.Name}-{scenario.ScenarioVersion}-{mode}-";
+        var journal = new FileJournal(artifactsDirectory);
+        var runId = $"{runPrefix}{Guid.NewGuid():N}";
+        if (options.Resume)
+        {
+            var resumedRunId = await journal.TryReadLatestSessionAsync(runPrefix, CancellationToken.None);
+            if (resumedRunId is null)
+            {
+                Console.WriteLine($"No prior {mode} session is available to resume.");
+                return 1;
+            }
+
+            runId = resumedRunId;
+        }
+
+        var preflightDoctor = new DoctorRunner(environmentProbe, healthMonitor);
+        var requiredPorts = MergePorts(EndpointResolver.RegularProfilePorts, EndpointResolver.LoadTestProfilePorts);
+        var preflight = await preflightDoctor.RunAsync(scenarioPath, requiredPorts, CancellationToken.None);
+        if (!preflight.AllPassed)
+        {
+            Console.WriteLine("Preflight failed; no process was started:");
+            foreach (var check in preflight.Checks.Where(check => !check.Passed))
+            {
+                Console.WriteLine($"  - {check.Name}: {check.Remediation}");
+            }
+
+            return 1;
+        }
 
         var processAdapter = new AspireProcessAdapter(httpClient, repositoryRoot);
         var httpExecutor = new HttpActionExecutor(httpClient);
         var browserLauncher = new BrowserLauncher();
         var loadWorkflowRunner = new LoadWorkflowRunner(httpExecutor, TimeProvider.System);
-        var journal = new FileJournal(artifactsDirectory);
         var proofPackStore = new FileProofPackStore(artifactsDirectory);
 
         var controller = new SessionController(
@@ -106,6 +132,7 @@ public static class Program
         }
         finally
         {
+            controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
             AppTerminal.Shutdown();
         }
 

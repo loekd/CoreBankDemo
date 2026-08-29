@@ -23,6 +23,9 @@ public interface IJournal
 {
     Task AppendAsync(JournalEntry entry, CancellationToken ct);
 
+    /// <summary>Returns the most recently journaled session for this scenario and mode prefix.</summary>
+    Task<string?> TryReadLatestSessionAsync(string sessionPrefix, CancellationToken ct);
+
     /// <summary>Returns the last checkpoint recorded for this session, if any, for resume/recovery.</summary>
     Task<JournalEntry?> TryReadLastCheckpointAsync(string session, CancellationToken ct);
 }

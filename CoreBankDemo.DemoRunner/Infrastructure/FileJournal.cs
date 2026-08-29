@@ -54,4 +54,29 @@ public sealed class FileJournal(string artifactsDirectory) : IJournal
         // journal alone; otherwise surface the most recent proven checkpoint.
         return last is { State: CueStatus.Running } ? last : lastPassed ?? last;
     }
+
+    public async Task<string?> TryReadLatestSessionAsync(string sessionPrefix, CancellationToken ct)
+    {
+        if (!File.Exists(FilePath))
+        {
+            return null;
+        }
+
+        var lines = await File.ReadAllLinesAsync(FilePath, ct);
+        for (var index = lines.Length - 1; index >= 0; index--)
+        {
+            if (string.IsNullOrWhiteSpace(lines[index]))
+            {
+                continue;
+            }
+
+            var entry = JsonSerializer.Deserialize<JournalEntry>(lines[index]);
+            if (entry?.Session.StartsWith(sessionPrefix, StringComparison.Ordinal) == true)
+            {
+                return entry.Session;
+            }
+        }
+
+        return null;
+    }
 }

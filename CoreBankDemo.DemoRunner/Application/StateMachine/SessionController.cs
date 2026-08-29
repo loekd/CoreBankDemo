@@ -274,6 +274,22 @@ public sealed class SessionController
             await JournalAsync(cue, "assert", ct);
             return cue;
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            cue.Status = CueStatus.Cancelled;
+            cue.EvidenceSummary = "Cue cancelled before its evidence was proven.";
+            cue.LastUpdatedAt = _time.GetUtcNow();
+            await JournalAsync(cue, "cancelled", CancellationToken.None);
+            return cue;
+        }
+        catch (Exception ex)
+        {
+            cue.Status = CueStatus.Failed;
+            cue.EvidenceSummary = $"Cue failed unexpectedly: {ex.Message}";
+            cue.LastUpdatedAt = _time.GetUtcNow();
+            await JournalAsync(cue, "failed", CancellationToken.None);
+            throw;
+        }
         finally
         {
             State.IsBusy = false;
@@ -306,9 +322,15 @@ public sealed class SessionController
             case ActionKind.WaitForHealth:
             {
                 var healthy = await _health.WaitForHealthyAsync(action.ResourceName!, TimeSpan.FromSeconds(action.TimeoutSeconds!.Value), ct);
+                var recentOutput = State.Topologies.Values
+                    .Where(handle => handle.IsOwned)
+                    .Select(_process.GetRecentOutput)
+                    .LastOrDefault(output => !string.IsNullOrWhiteSpace(output));
                 return healthy
                     ? ActionOutcome.Passed($"{action.ResourceName} healthy.")
-                    : ActionOutcome.FailedResult($"{action.ResourceName} did not become healthy within {action.TimeoutSeconds}s.");
+                    : ActionOutcome.FailedResult(
+                        $"{action.ResourceName} did not become healthy within {action.TimeoutSeconds}s." +
+                        (recentOutput is null ? string.Empty : $" Recent AppHost output: {recentOutput}"));
             }
 
             case ActionKind.SendHttp:

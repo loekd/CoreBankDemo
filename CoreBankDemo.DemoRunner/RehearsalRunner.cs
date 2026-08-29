@@ -48,8 +48,8 @@ public static class RehearsalRunner
                 .ToList(),
             controller.LastLoadWorkflowResult?.Invariants ?? []);
 
-        await proofPackStore.SaveAsLatestKnownGoodAsync(proofPack, ct);
         await controller.ShutdownAsync(ct);
+        await proofPackStore.SaveAsLatestKnownGoodAsync(proofPack, ct);
 
         Console.WriteLine("REHEARSAL PASSED. Proof pack saved as the latest known-good.");
         return 0;
