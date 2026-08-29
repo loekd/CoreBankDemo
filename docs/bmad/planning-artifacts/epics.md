@@ -32,7 +32,9 @@ NFR-1 invariants under load · NFR-2 one payment = one trace · NFR-3 constraint
 
 ### UX Design Requirements
 
-None — no UI (API/demo product).
+The banking product remains API-only. Story 7.4 adds a local presentation-tool TUI for the speaker;
+it is not a banking UI and must remain outside the banking services. ADR-015 must record that narrow
+exception to the PRD's broad UI non-goal before implementation begins.
 
 ## Wire Contracts (frozen per AD-12, extracted from `main` before demolition)
 
@@ -94,7 +96,7 @@ public record BalanceUpdatedResponse(string TransactionId, string AccountNumber,
 4. **Epic 4 (E3): CoreBankAPI** — the ledger: idempotent intake, atomic execution, event publishing
 5. **Epic 5 (E4): PaymentsAPI** — intake, reliable forwarding, event consumption
 6. **Epic 6 (E5): AppHost & Orchestration** — Aspire graph, config alignment, boot smoke
-7. **Epic 7 (E6): Load Harness Realignment** — LoadTestSupport + k6 conform to the rebuilt system
+7. **Epic 7 (E6): Load Harness Realignment** — LoadTestSupport + k6 conform to the rebuilt system; presentation console
 8. **Epic 8 (E7): Documentation Refresh** — ARCHITECTURE.md from code, ADRs for the rulings
 
 ---
@@ -524,8 +526,6 @@ As the speaker, I want DevProxy and the demo flows verified, so that talk stages
 **Then** all behave as on `main` (202s, duplicate replay, outbox/inbox visibility via LoadTestSupport endpoints once E6 lands — until then via DB)
 **And** enabling DevProxy injects faults and the Polly layer retries visibly in Jaeger; one payment renders as one trace (NFR-2).
 
----
-
 ### Story 6.5: OpenTelemetry business metrics
 
 As the demo operator, I want low-cardinality business and messaging metrics exported through OpenTelemetry, so that I can quantify payment intake, transaction outcomes, message movement, and Inbox/Outbox health without reconstructing them from logs.
@@ -561,9 +561,11 @@ As the demo operator, I want low-cardinality business and messaging metrics expo
 **When** every outcome path is exercised
 **Then** each expected measurement and tag set is asserted, forbidden high-cardinality tags are absent, failures still propagate, and the full rebuild test/coverage gate remains green.
 
+---
+
 ## Epic 7: E6 — Load Harness Realignment
 
-LoadTestSupport and k6 conform to the rebuilt system (FR-24, FR-25, FR-26; harness adapts to code).
+LoadTestSupport and k6 conform to the rebuilt system, then expose their proven workflow through a presentation-safe local console (FR-24, FR-25, FR-26; NFR-5; harness adapts to code).
 
 ### Story 7.1: Assertion API realignment
 
@@ -596,6 +598,27 @@ As the demo owner, I want the end-to-end load test green, so that the rebuild is
 **When** a full run executes (reset → k6 → drain → assertions)
 **Then** all five invariants pass; failures are triaged as code-bug vs harness-mismatch (harness adapts unless an invariant is genuinely violated)
 **And** a trace analysis (`corebank-trace-analysis` skill) shows intact traces across both hops.
+
+### Story 7.4: Presentation-safe terminal demo console
+
+As the speaker, I want a mouse-enabled terminal control room for my talks, so that I can preflight, rehearse, and run each live cue from one dependable place without juggling request files, terminals, configuration, and dashboards (NFR-5; human scope amendment 2026-08-29).
+
+**Acceptance Criteria:**
+
+**Given** the standalone `CoreBankDemo.DemoRunner` console project
+**When** it starts locally
+**Then** it validates the selected talk scenario and prerequisites before launching or explicitly attaching to the required Aspire topology
+**And** it presents a three-pane terminal UI (talk cues, current cue, system confidence) with complete mouse and keyboard operation, responsive layout, and safe Run, Retry, Details, open-dashboard, and Stop actions.
+
+**Given** the checked-in `MissionCriticalTalk-v7` scenario derived from the author's 55-slide deck
+**When** Show or Rehearsal mode reaches the live cues
+**Then** the runner pre-arms and gates “Inbox at work” (slide 42), the Aspire/k6 resilience proof (slides 45–52), and the development-environment hand-off (slide 53)
+**And** the load proof makes the deck's Run → Wait → Assert → Investigate phases and their evidence visible without inventing a second acceptance workflow.
+
+**Given** any action is running, failed, cancelled, or ambiguous
+**When** the speaker tries to advance
+**Then** Next remains unavailable, duplicate activation is suppressed, and the current cue offers concise Retry, Details, or restart-from-checkpoint choices
+**And** the runner never embeds banking logic, connects directly to stores, mutates checked-in configuration, executes scenario-supplied shell commands, fakes live success, or stops an unowned process.
 
 ---
 
