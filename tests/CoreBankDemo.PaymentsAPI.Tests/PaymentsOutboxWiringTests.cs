@@ -3,8 +3,13 @@ using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Xunit;
 
@@ -20,46 +25,85 @@ namespace CoreBankDemo.PaymentsAPI.Tests;
 /// actual registrations, and Program.cs is excluded from the coverage gate.
 /// A dropped or mis-wired line there would leave the app building and
 /// starting normally, with the outbox processor silently never forwarding
-/// any payment (mirrors the gap <see cref="RedisLockWiringTests"/> closes
-/// for story 6.2's Redis wiring). This test replays Program.cs's actual
-/// registration sequence and proves the composed graph is correct.
+/// any payment. This test boots the real entry point and inspects its
+/// composed graph, replacing only external infrastructure.
 /// </summary>
 public class PaymentsOutboxWiringTests
 {
     [Fact]
-    public void Program_cs_registration_sequence_wires_the_forwarding_processor_correctly()
+    public void Program_entry_point_wires_the_forwarding_processor_correctly()
     {
-        var builder = WebApplication.CreateSlimBuilder();
-        builder.Configuration["ConnectionStrings:redis"] = "localhost:6379,abortConnect=false,connectTimeout=100";
-        builder.Configuration["OutboxProcessing:PartitionCount"] = "4";
-        builder.Configuration["OutboxProcessing:LockExpirySeconds"] = "30";
-        builder.Configuration["OutboxProcessing:PollingIntervalMs"] = "200";
+        using var factory = new PaymentsApiFactory();
+        using var client = factory.CreateClient();
 
-        // Mirrors Program.cs exactly (including the Redis client / service
-        // defaults registrations that supply IDistributedLockService and
-        // ActivitySource), substituting an in-memory Sqlite context for the
-        // real builder.AddNpgsqlDbContext("paymentsdb") call so this test
-        // needs no live Postgres.
-        builder.AddRedisClient("redis");
-        builder.AddServiceDefaults("CoreBank.PaymentsAPI");
-        builder.Services.AddDbContext<PaymentsDbContext>(
-            options => options.UseSqlite("Data Source=:memory:"));
-        builder.Services.AddPaymentStorage(builder.Configuration);
-        builder.Services.AddCoreBankApiClient();
-        builder.Services.AddScoped<IOutboxMessageStore<OutboxMessage>>(
-            sp => sp.GetRequiredService<OutboxRepository>());
-        builder.Services.AddScoped<IOutboxDeliveryStrategy<OutboxMessage>, HttpForwardOutboxDeliveryStrategy>();
-        builder.Services.AddHostedService<PaymentsOutboxProcessor>();
-
-        using var provider = builder.Services.BuildServiceProvider();
-
-        provider.GetServices<IHostedService>()
+        factory.Services.GetServices<IHostedService>()
             .Should().Contain(service => service.GetType() == typeof(PaymentsOutboxProcessor));
 
-        using var scope = provider.CreateScope();
+        using var scope = factory.Services.CreateScope();
         var store = scope.ServiceProvider.GetRequiredService<IOutboxMessageStore<OutboxMessage>>();
         store.Should().BeSameAs(scope.ServiceProvider.GetRequiredService<OutboxRepository>());
         scope.ServiceProvider.GetRequiredService<IOutboxDeliveryStrategy<OutboxMessage>>()
             .Should().BeOfType<HttpForwardOutboxDeliveryStrategy>();
+    }
+
+    private sealed class PaymentsApiFactory : WebApplicationFactory<Program>
+    {
+        private readonly string _connectionString =
+            $"Data Source=payments-wiring-{Guid.NewGuid():N};Mode=Memory;Cache=Shared";
+        private readonly SqliteConnection _keeper;
+
+        public PaymentsApiFactory()
+        {
+            _keeper = new SqliteConnection(_connectionString);
+            _keeper.Open();
+        }
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseDefaultServiceProvider(options =>
+            {
+                options.ValidateScopes = true;
+                options.ValidateOnBuild = true;
+            });
+
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<DbContextOptions<PaymentsDbContext>>();
+                services.RemoveAll<PaymentsDbContext>();
+                services.RemoveAll<IDbContextOptionsConfiguration<PaymentsDbContext>>();
+                foreach (var descriptor in services
+                             .Where(descriptor =>
+                                 descriptor.ServiceType.Namespace == "Microsoft.EntityFrameworkCore.Internal" &&
+                                 descriptor.ServiceType.IsGenericType &&
+                                 descriptor.ServiceType.GenericTypeArguments.Contains(typeof(PaymentsDbContext)))
+                             .ToArray())
+                {
+                    services.Remove(descriptor);
+                }
+
+                services.AddDbContext<PaymentsDbContext>(options => options.UseSqlite(_connectionString));
+                services.RemoveAll<IDistributedLockService>();
+                services.AddSingleton<IDistributedLockService, NonAcquiringLockService>();
+            });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                _keeper.Dispose();
+            }
+        }
+    }
+
+    private sealed class NonAcquiringLockService : IDistributedLockService
+    {
+        public Task<bool> ExecuteWithLockAsync(
+            string lockName,
+            int lockExpirySeconds,
+            Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
     }
 }

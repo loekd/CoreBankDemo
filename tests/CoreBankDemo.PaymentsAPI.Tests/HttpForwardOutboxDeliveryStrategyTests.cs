@@ -23,6 +23,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
     [Fact]
     public async Task DeliverAsync_completes_when_account_is_valid_and_submission_succeeds()
     {
+        using var cancellation = new CancellationTokenSource();
         var client = new FakeCoreBankApiClient
         {
             ValidateResult = CoreBankResult<AccountValidation>.Success(
@@ -32,11 +33,13 @@ public class HttpForwardOutboxDeliveryStrategyTests
         };
         var strategy = new HttpForwardOutboxDeliveryStrategy(client);
 
-        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+        var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
         await act.Should().NotThrowAsync();
         client.ValidateCalls.Should().Equal(ToAccount);
+        client.ValidateCancellationTokens.Should().Equal(cancellation.Token);
         client.SubmitCalls.Should().ContainSingle();
+        client.SubmitCancellationTokens.Should().Equal(cancellation.Token);
         client.SubmitCalls[0].FromAccount.Should().Be("NL91ABNA0417164300");
         client.SubmitCalls[0].ToAccount.Should().Be(ToAccount);
         client.SubmitCalls[0].TransactionId.Should().Be("forward-key");
@@ -169,12 +172,17 @@ public class HttpForwardOutboxDeliveryStrategyTests
 
         public List<string> ValidateCalls { get; } = new();
 
+        public List<CancellationToken> ValidateCancellationTokens { get; } = new();
+
         public List<TransactionSubmissionRequest> SubmitCalls { get; } = new();
+
+        public List<CancellationToken> SubmitCancellationTokens { get; } = new();
 
         public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
             string accountNumber, CancellationToken cancellationToken)
         {
             ValidateCalls.Add(accountNumber);
+            ValidateCancellationTokens.Add(cancellationToken);
             return ValidateThrows is not null
                 ? Task.FromException<CoreBankResult<AccountValidation>>(ValidateThrows)
                 : Task.FromResult(ValidateResult!);
@@ -188,6 +196,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             TransactionSubmissionRequest request, CancellationToken cancellationToken)
         {
             SubmitCalls.Add(request);
+            SubmitCancellationTokens.Add(cancellationToken);
             return SubmitThrows is not null
                 ? Task.FromException<CoreBankResult<TransactionSubmission>>(SubmitThrows)
                 : Task.FromResult(SubmitResult!);

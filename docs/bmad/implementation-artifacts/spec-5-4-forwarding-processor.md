@@ -4,6 +4,7 @@ type: 'feature'
 created: '2026-08-29'
 status: 'done'
 review_loop_iteration: 0
+followup_review_recommended: true
 baseline_commit: 'd6d3b4c37853b9b3b9c845ad147bef25f24449f3'
 context:
   - '{project-root}/docs/bmad/implementation-artifacts/epic-5-context.md'
@@ -74,6 +75,7 @@ context:
 ## Spec Change Log
 
 - **Review finding (patch):** verification-gap review found that Program.cs's three new registrations (`IOutboxMessageStore<OutboxMessage>`, `IOutboxDeliveryStrategy<OutboxMessage>`, `AddHostedService<PaymentsOutboxProcessor>`) had no test replaying Program.cs's actual composition — `PaymentsOutboxProcessorTests` builds its own parallel `ServiceCollection`, and Program.cs is excluded from the coverage gate, so a dropped or mis-wired line would silently leave the outbox processor never forwarding payments. Added `tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsOutboxWiringTests.cs`, mirroring the `RedisLockWiringTests.cs` pattern from story 6.2: replays Program.cs's real registration sequence and asserts the composed graph resolves correctly. No code changes to the delivery strategy or processor were needed.
+- **Follow-up review finding (patch):** strengthened the prior wiring regression test to boot the real `Program` entry point rather than reconstructing its registrations. Also added exact cancellation-token forwarding assertions, observable lock-expiry and polling-interval option mapping, and a two-partition barrier that fails if partition processing becomes serial.
 
 ## Design Notes
 
@@ -118,3 +120,39 @@ The strategy is intentionally thin — all classification already happened in `K
 
 - Review-added: replays Program.cs's real registration sequence to close the DI-wiring verification gap.
   [`PaymentsOutboxWiringTests.cs:26`](../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsOutboxWiringTests.cs#L26)
+
+## Review Triage Log
+
+### 2026-08-30 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 1, medium 3, low 0)
+- defer: 0
+- reject: 35: (high 0, medium 0, low 35)
+- addressed_findings:
+  - `[high]` `[patch]` The wiring test reconstructed registrations and could not detect removal from `Program.cs`; replaced it with a real-entry-point `WebApplicationFactory<Program>` composition test.
+  - `[medium]` `[patch]` Delivery tests did not observe cancellation-token forwarding; recorded and asserted the exact token at both CoreBank client calls.
+  - `[medium]` `[patch]` Concrete processor option mapping was not behaviorally observed; asserted lock expiry and measured the configured interval between processor ticks.
+  - `[medium]` `[patch]` The partition test proved ordering but not concurrent progress; added a cross-partition barrier that deadlocks under serial execution.
+
+## Auto Run Result
+
+Status: done
+
+Summary of implemented change: Hardened Story 5.4's verification so production composition, cancellation propagation, concrete option mapping, and independent partition progress are directly observable.
+
+Files changed:
+- `tests/CoreBankDemo.PaymentsAPI.Tests/HttpForwardOutboxDeliveryStrategyTests.cs` — asserts the caller token reaches validation and submission unchanged.
+- `tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsOutboxProcessorTests.cs` — verifies lock expiry, polling interval, and genuine cross-partition concurrency.
+- `tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsOutboxWiringTests.cs` — boots the real PaymentsAPI entry point and validates its forwarding graph.
+- `docs/bmad/implementation-artifacts/spec-5-4-forwarding-processor.md` — records review triage, verification, and completion.
+
+Review findings breakdown: 4 patches applied, 0 items deferred, 35 findings rejected as unrelated later-story findings or unsupported findings from the baseline-wide diff.
+
+Follow-up review recommendation: true — patched findings: high 1, medium 3, low 0; score `3 × 3 + 0 = 9`, with a high-severity patch also independently requiring follow-up.
+
+Verification performed:
+- `dotnet build CoreBankDemo.Rebuild.slnf --no-restore` — succeeded.
+- `dotnet test CoreBankDemo.Rebuild.slnf --no-build --no-restore` — 640 passed, 1 skipped; PaymentsAPI line coverage 100%.
+
+Residual risks: The suite still reports the pre-existing `NU1903` advisory for `SQLitePCLRaw.lib.e_sqlite3` 2.1.11. Live Postgres, Redis, and cross-service behavior remain acceptance-tier concerns rather than unit-test coverage.

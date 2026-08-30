@@ -52,6 +52,7 @@ public class PaymentsOutboxProcessorTests
         row.Status.Should().Be(MessageConstants.Status.Completed);
         row.RetryCount.Should().Be(0);
         lockService.LockName.Should().Be("payments-outbox-partition-0");
+        lockService.LockExpirySeconds.Should().Be(30);
         client.SubmittedTransactionIds.Should().Equal("payment-1");
     }
 
@@ -90,6 +91,26 @@ public class PaymentsOutboxProcessorTests
             .Which.Name.Should().Be("get_LockNamePrefix");
     }
 
+    [Fact]
+    public async Task StartAsync_uses_the_configured_polling_interval()
+    {
+        await using var store = new SqlitePaymentsStore();
+        using var services = BuildServices(store, new RecordingCoreBankApiClient());
+        var secondTick = new TaskCompletionSource<TimeSpan>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lockService = new PollingIntervalLockService(secondTick);
+        var processor = CreateProcessor(
+            services.GetRequiredService<IServiceScopeFactory>(),
+            lockService,
+            pollingIntervalMs: 100);
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        var elapsedBetweenTicks = await secondTick.Task
+            .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        elapsedBetweenTicks.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(75));
+    }
+
     /// <summary>
     /// Interleaving/ordering proof (acceptance criteria): two partitions with
     /// claimed messages progress independently on the same tick while each
@@ -101,7 +122,7 @@ public class PaymentsOutboxProcessorTests
         await using var store = new SqlitePaymentsStore();
         await SeedOrderedAsync(store, partitionId: 0, keys: new[] { "p0-a", "p0-b" });
         await SeedOrderedAsync(store, partitionId: 1, keys: new[] { "p1-a", "p1-b" });
-        var client = new RecordingCoreBankApiClient();
+        var client = new ConcurrentRecordingCoreBankApiClient();
         using var services = BuildServices(store, client);
         var partition0Done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var partition1Done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -138,7 +159,10 @@ public class PaymentsOutboxProcessorTests
     }
 
     private static PaymentsOutboxProcessor CreateProcessor(
-        IServiceScopeFactory scopeFactory, IDistributedLockService lockService, int partitionCount = 1) =>
+        IServiceScopeFactory scopeFactory,
+        IDistributedLockService lockService,
+        int partitionCount = 1,
+        int pollingIntervalMs = 60000) =>
         new(
             lockService,
             scopeFactory,
@@ -149,7 +173,7 @@ public class PaymentsOutboxProcessorTests
             {
                 PartitionCount = partitionCount,
                 LockExpirySeconds = 30,
-                PollingIntervalMs = 60000
+                PollingIntervalMs = pollingIntervalMs
             }));
 
     private static async Task SeedAsync(SqlitePaymentsStore store, string key, int partitionId)
@@ -237,6 +261,7 @@ public class PaymentsOutboxProcessorTests
     {
         private int _executed;
         public string? LockName { get; private set; }
+        public int? LockExpirySeconds { get; private set; }
 
         public async Task<bool> ExecuteWithLockAsync(
             string lockName,
@@ -245,6 +270,7 @@ public class PaymentsOutboxProcessorTests
             CancellationToken cancellationToken = default)
         {
             LockName = lockName;
+            LockExpirySeconds = lockExpirySeconds;
             if (Interlocked.Exchange(ref _executed, 1) != 0)
             {
                 return false;
@@ -252,6 +278,77 @@ public class PaymentsOutboxProcessorTests
 
             await workload(cancellationToken);
             completion.TrySetResult();
+            return true;
+        }
+    }
+
+    private sealed class ConcurrentRecordingCoreBankApiClient : ICoreBankApiClient
+    {
+        private readonly ConcurrentQueue<string> _submittedTransactionIds = new();
+        private readonly TaskCompletionSource _partition0Started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _partition1Started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public IReadOnlyList<string> SubmittedTransactionIds => _submittedTransactionIds.ToArray();
+
+        public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
+            string accountNumber, CancellationToken cancellationToken) =>
+            Task.FromResult(CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(accountNumber, true, null, null)));
+
+        public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
+            string accountNumber, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public async Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+        {
+            _submittedTransactionIds.Enqueue(request.TransactionId);
+
+            if (request.TransactionId == "p0-a")
+            {
+                _partition0Started.TrySetResult();
+                await _partition1Started.Task.WaitAsync(cancellationToken);
+            }
+            else if (request.TransactionId == "p1-a")
+            {
+                _partition1Started.TrySetResult();
+                await _partition0Started.Task.WaitAsync(cancellationToken);
+            }
+
+            return CoreBankResult<TransactionSubmission>.Success(
+                new TransactionSubmission(request.TransactionId, "Completed", DateTimeOffset.UtcNow));
+        }
+
+        public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
+            string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+    }
+
+    private sealed class PollingIntervalLockService(
+        TaskCompletionSource<TimeSpan> secondTick) : IDistributedLockService
+    {
+        private long _firstTickTimestamp;
+        private int _tickCount;
+
+        public async Task<bool> ExecuteWithLockAsync(
+            string lockName,
+            int lockExpirySeconds,
+            Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default)
+        {
+            var timestamp = Stopwatch.GetTimestamp();
+            if (Interlocked.Increment(ref _tickCount) == 1)
+            {
+                _firstTickTimestamp = timestamp;
+            }
+            else
+            {
+                secondTick.TrySetResult(Stopwatch.GetElapsedTime(_firstTickTimestamp, timestamp));
+            }
+
+            await workload(cancellationToken);
             return true;
         }
     }
