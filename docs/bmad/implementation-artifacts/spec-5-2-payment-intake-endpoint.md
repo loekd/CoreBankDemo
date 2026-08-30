@@ -2,7 +2,7 @@
 title: 'Story 5.2: Payment intake endpoint'
 type: 'feature'
 created: '2026-08-28'
-status: 'done'
+status: 'in-progress'
 review_loop_iteration: 0
 baseline_commit: '86e38efbe20fab79e41ebcb220be5866492305b1'
 context:
@@ -62,6 +62,13 @@ context:
 - Given a duplicate key with retry payload values different from the stored row, when submitted, then `202` returns the existing row's identity, amount, currency, status, and creation time without a second store.
 - Given multiple request-model errors, when intake runs, then one `400` contains all errors and storage is not invoked.
 - Given `dotnet test CoreBankDemo.Rebuild.slnf`, when Story 5.2 is complete, then all rebuild tests pass and PaymentsAPI remains above its coverage threshold.
+
+### Review Findings
+
+- [ ] [Review][Patch] `IPaymentStorageHandler` was widened from `internal` to `public` without need or authorization [CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs:37]
+- [ ] [Review][Patch] No `WebApplicationFactory<Program>`-based wiring test proves the real Program.cs registers payment intake [CoreBankDemo.PaymentsAPI/Program.cs:31,63]
+- [x] [Review][Defer] No `[Authorize]`/authentication on the payment-intake endpoint [CoreBankDemo.PaymentsAPI/Controllers/PaymentsController.cs:16] — deferred, pre-existing (matches `TransactionsController` precedent; no auth convention exists anywhere in the codebase yet)
+- [x] [Review][Defer] No `[ProducesResponseType]`/`[Produces]`/`[Consumes]` OpenAPI metadata on `ProcessPayment` [CoreBankDemo.PaymentsAPI/Controllers/PaymentsController.cs:20] — deferred, pre-existing (matches `TransactionsController` precedent; no such attributes exist on any controller yet)
 
 ## Spec Change Log
 

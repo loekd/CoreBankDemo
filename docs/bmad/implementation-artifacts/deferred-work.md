@@ -103,3 +103,15 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-5-2-payment-intake-endpoint.md`
   summary: No `[ProducesResponseType]`/`[Produces]`/`[Consumes]` metadata on `PaymentsController.ProcessPayment`, so the `202`/`400` response shapes aren't reflected in OpenAPI/Swagger generation.
   evidence: Blind-hunter flagged the missing metadata. Confirmed pre-existing and codebase-wide: `TransactionsController` (the story's own cited precedent) carries no such attributes either, despite `Swashbuckle.AspNetCore` being referenced in the project.
+
+## Deferred from: code review of story-5-3-contract-generated-kiota-corebank-client (2026-08-30)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-3-contract-generated-kiota-corebank-client.md`
+  summary: Two separate `dotnet-tools.json` tool manifests exist at different paths — a pre-existing, non-standard root-level `/dotnet-tools.json` (holding `dotnet-outdated-tool`) and this story's new, standard-location `.config/dotnet-tools.json` (holding `microsoft.openapi.kiota`) — not consolidated.
+  evidence: Blind-hunter flagged the split manifests. Confirmed via `git log` that the root-level file predates this commit (last touched at `e38a7b1`) and was already orphaned from standard `dotnet tool restore` resolution (which only walks up looking for `.config/dotnet-tools.json`) before this story's change — pre-existing, not introduced by story 5.3.
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-3-contract-generated-kiota-corebank-client.md`
+  summary: "`TransactionStatusResponse.ReceivedAt`/`ProcessedAt` are plain `DateTime`, unlike every other CoreBankAPI wire timestamp (`AccountDetailsResponse.CreatedAt/UpdatedAt`, `TransactionResponse.ProcessedAt`, all `DateTimeOffset`); an offset-less serialization could be misinterpreted as local time rather than UTC when parsed into the new `TransactionStatus.ReceivedAt`/`ProcessedAt` (`DateTimeOffset?`) on the Payments side."
+  evidence: Blind-hunter flagged the type inconsistency. `TransactionStatusResponse.cs` is unchanged by this diff (pre-existing from story 4.4); `TransactionIntakeHandler.cs:100` does construct the value via `now.UtcDateTime` (Kind=Utc) at creation time, but round-trip Kind-preservation through EF/Postgres isn't verified by this story.
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-3-contract-generated-kiota-corebank-client.md`
+  summary: "`LastResponseStatusHandler`'s single static `AsyncLocal<StatusCapture?>` slot would cross-contaminate if a future caller ever issued two `ICoreBankApiClient` calls concurrently from the same DI scope before either awaited far enough to send its request — the second `BeginCapture()` would overwrite the first call's capture slot."
+  evidence: Flagged independently by both blind-hunter and the verification-gap reviewer. Not reachable today: the verification-gap reviewer confirmed (via a real full-suite test run, 146/146 passing, 100% line / 98.91% branch coverage) that every current caller — all tests in this diff, and story 5.4's `HttpForwardOutboxDeliveryStrategy` — invokes `ICoreBankApiClient` sequentially, never concurrently, from one scope.
