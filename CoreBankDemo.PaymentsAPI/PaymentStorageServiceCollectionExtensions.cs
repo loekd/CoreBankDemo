@@ -9,6 +9,9 @@ namespace CoreBankDemo.PaymentsAPI;
 
 public static class PaymentStorageServiceCollectionExtensions
 {
+    // ADR-010 fixes the system topology at four partitions.
+    private const int RequiredPartitionCount = 4;
+
     public static IServiceCollection AddPaymentStorage(
         this IServiceCollection services,
         IConfiguration configuration)
@@ -22,12 +25,11 @@ public static class PaymentStorageServiceCollectionExtensions
                            int.TryParse(
                                section[nameof(OutboxProcessingOptions.PartitionCount)],
                                out var configuredPartitionCount) &&
-                           configuredPartitionCount == 4 &&
-                           options.PartitionCount == 4,
-                "OutboxProcessing:PartitionCount must be exactly 4.")
+                           configuredPartitionCount == RequiredPartitionCount &&
+                           options.PartitionCount == RequiredPartitionCount,
+                $"OutboxProcessing:PartitionCount must be exactly {RequiredPartitionCount}.")
             .ValidateOnStart();
 
-        services.AddLogging();
         services.TryAddSingleton(TimeProvider.System);
         services.AddScoped<OutboxRepository>();
         services.AddScoped<IOutboxRepository>(provider => provider.GetRequiredService<OutboxRepository>());

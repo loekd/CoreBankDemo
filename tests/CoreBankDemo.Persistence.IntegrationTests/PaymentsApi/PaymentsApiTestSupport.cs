@@ -48,6 +48,29 @@ public abstract class PaymentsPostgresTestBase(PostgresContainerFixture fixture)
 
 internal static class PaymentsApiTestData
 {
+    internal static async Task<T[]> RaceAsync<T>(
+        Func<Task<T>> first,
+        Func<Task<T>> second)
+    {
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var firstTask = RunWhenReleasedAsync(first, firstReady);
+        var secondTask = RunWhenReleasedAsync(second, secondReady);
+        await Task.WhenAll(firstReady.Task, secondReady.Task);
+        start.SetResult();
+
+        return await Task.WhenAll(firstTask, secondTask);
+
+        async Task<T> RunWhenReleasedAsync(Func<Task<T>> operation, TaskCompletionSource ready)
+        {
+            ready.SetResult();
+            await start.Task;
+            return await operation();
+        }
+    }
+
     internal static OutboxMessage Outbox(string key = "payment-key") => new()
     {
         Id = Guid.NewGuid(),

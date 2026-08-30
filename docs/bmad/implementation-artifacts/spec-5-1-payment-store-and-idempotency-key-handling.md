@@ -2,7 +2,7 @@
 title: 'Story 5.1: Payment store and idempotency-key handling'
 type: 'feature'
 created: '2026-08-28'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 2
 baseline_commit: '74fd01083d06b29c77f8f981b30d3723d3559909'
 context:
@@ -74,8 +74,10 @@ context:
 ### Review Findings
 
 - [x] [Review][Decision] Amount is always rounded to 2 decimals regardless of currency — `decimal.Round(request.Amount, 2, MidpointRounding.ToEven)` in `PaymentStorageHandler.StoreAsync` and `entity.Property(e => e.Amount).HasPrecision(18, 2)` in `PaymentsDbContext` unconditionally assume a 2-decimal currency. **Resolved (2026-08-30):** user decision — this is a demo app; keep it as simple as possible. The 2-decimal assumption stands as a permanent, documented demo-scope limitation. No code change. [`CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs:68`, `CoreBankDemo.PaymentsAPI/PaymentsDbContext.cs:29`]
-- [ ] [Review][Patch] Magic literal `4` hardcoded twice in the partition-count startup validation predicate, with no named constant explaining why 4 is the only legal value. [`CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs:25-26`]
-- [ ] [Review][Patch] `AddPaymentStorage` calls `services.AddLogging()` unconditionally, mixing general logging-provider setup into a narrowly-named payment-storage registration method (harmless/idempotent, but misplaced). [`CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs:30`]
+- [x] [Review][Patch] Magic literal `4` hardcoded twice in the partition-count startup validation predicate, with no named constant explaining why 4 is the only legal value. **Resolved (2026-08-30):** extracted `private const int RequiredPartitionCount = 4` and used it in both comparisons and the validation message. [`CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs:17`]
+- [x] [Review][Patch] `AddPaymentStorage` calls `services.AddLogging()` unconditionally, mixing general logging-provider setup into a narrowly-named payment-storage registration method (harmless/idempotent, but misplaced). **Resolved (2026-08-30):** removed the call from `AddPaymentStorage`; production's `WebApplicationBuilder` already supplies logging by default (`Program.cs`), and the bare-`ServiceCollection` unit-test host (`PaymentStorageRegistrationTests.BuildProvider`) now registers it explicitly itself. [`CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs`, `tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageRegistrationTests.cs`]
+- [x] [Review][Patch] The generated-key test did not independently verify that the generated identity determines its partition. **Resolved (2026-08-30):** assert the captured partition against `PartitionHelper.GetPartitionId` using the generated key.
+- [x] [Review][Patch] The PostgreSQL duplicate tests started both operations with `Task.WhenAll` but did not gate them at a common release point. **Resolved (2026-08-30):** both independent-context operations now signal readiness and await a shared asynchronous start gate before inserting.
 - [x] [Review][Defer] Three demo `.http` files (`demo-requests.http`, `payment-idempotency-tests.http`, `CoreBankDemo.PaymentsAPI/CoreBankDemo.http`) still `POST /api/payments`, which this diff deletes; they will 404 until Story 5.2 restores the (frozen, unchanged-path) endpoint — deferred, pre-existing pattern in this project of transitional demo-file staleness during incremental rebuild.
 - [x] [Review][Defer] `Program.cs` dropped the deleted `PaymentsController`'s rich `Payment.Received` span tags (`payment.from_account`, `payment.amount`, `outcome`, etc.); no replacement exists yet. The `AddServiceDefaults` ActivitySource-list drop itself is correct (no new `ActivitySource` is created anywhere in this diff), but the descriptive per-payment span tagging is a minor, real observability regression during the transitional window — deferred, pre-existing gap not yet closed by later stories either.
 - [x] [Review][Defer] `PaymentRequest.FromAccount == request.ToAccount` (self-transfer) is not rejected anywhere in the payment-storage path — deferred, pre-existing: the deleted legacy `PaymentsController` never validated this either, and it is a broader business-rule question outside this story's payment-store/idempotency scope.
@@ -87,6 +89,8 @@ context:
 - 2026-08-28 (final review): added deployed `appsettings.json` startup validation, complete duplicate-winner snapshot assertions, and required-property metadata checks. Deferred persistent schema recreation and temporary lock/poll consumer placeholders.
 - 2026-08-29 (backlog renumbering): inserting renewable-lock Story 6.2 moved replicated local topology to Story 6.3. The Design Notes reference to Story 6.2 is historical numbering and should now be read as Story 6.3; no Story 5.1 intent or implementation changed.
 - 2026-08-30 (code review): resolved the currency-rounding decision-needed finding — 2-decimal precision stands as a permanent, documented demo-scope limitation. No code change.
+- 2026-08-30 (patch findings): resolved the two remaining open Patch findings — named `RequiredPartitionCount` constant replaces the duplicated magic `4`, and `AddPaymentStorage` no longer calls `services.AddLogging()` (moved to the bare-`ServiceCollection` test host that needs it; production already gets logging from `WebApplicationBuilder`). No behavior change; all Story 5.1 tests still pass at 100% line coverage.
+- 2026-08-30 (review verification): independently asserted generated-key partitioning and synchronized the PostgreSQL duplicate tests at a shared release gate while preserving separate contexts and connections.
 
 ## Design Notes
 
@@ -102,35 +106,35 @@ The event inbox schema lands now because `PaymentsDbContext` is the Epic 5 stora
 
 ## Suggested Review Order
 
-**Storage flow**
+**Payment storage flow**
 
-- Centralizes identity validation, normalization, partitioning, trace capture, and race-loser recovery.
+- Centralizes validation, normalization, partitioning, tracing, and duplicate-winner recovery.
   [`PaymentStorageHandler.cs:51`](../../../CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs#L51)
 
-- Reuses the kernel’s insert-first dedupe while returning an untracked persisted winner.
-  [`OutboxRepository.cs:17`](../../../CoreBankDemo.PaymentsAPI/Outbox/OutboxRepository.cs#L17)
+- Reuses kernel deduplication while returning an untracked persisted winner.
+  [`OutboxRepository.cs:20`](../../../CoreBankDemo.PaymentsAPI/Outbox/OutboxRepository.cs#L20)
 
 **Schema and startup guarantees**
 
-- Declares database-enforced command and event identities, query indexes, and concurrency tokens.
+- Defines database-enforced identities, processing indexes, lengths, precision, and concurrency tokens.
   [`PaymentsDbContext.cs:13`](../../../CoreBankDemo.PaymentsAPI/PaymentsDbContext.cs#L13)
 
-- Fails startup unless payment partitioning is explicitly configured to exactly four.
-  [`PaymentStorageServiceCollectionExtensions.cs:12`](../../../CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs#L12)
+- Enforces ADR-010's four-partition topology through startup validation.
+  [`PaymentStorageServiceCollectionExtensions.cs:15`](../../../CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs#L15)
 
-- Keeps the host minimal while creating the fresh demo schema asynchronously.
-  [`Program.cs:3`](../../../CoreBankDemo.PaymentsAPI/Program.cs#L3)
+- Creates the fresh demo schema asynchronously before serving requests.
+  [`Program.cs:53`](../../../CoreBankDemo.PaymentsAPI/Program.cs#L53)
 
-**Verification**
+**Race and behavior verification**
 
-- Covers amount rounding, full request mapping, cancellation, logging, identity, and traces.
-  [`PaymentStorageHandlerTests.cs:63`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageHandlerTests.cs#L63)
+- Verifies generated identities also determine their persisted partition.
+  [`PaymentStorageHandlerTests.cs:136`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageHandlerTests.cs#L136)
 
-- Synchronizes independent SQLite repositories to prove one race winner.
-  [`OutboxRepositoryTests.cs:29`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/OutboxRepositoryTests.cs#L29)
+- Proves concurrent handlers return one PostgreSQL-persisted winner.
+  [`PaymentStorageHandlerConcurrencyTests.cs:27`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/PaymentStorageHandlerConcurrencyTests.cs#L27)
 
-- Exercises schema metadata and database-enforced composite event dedupe.
-  [`PaymentsDbContextTests.cs:12`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsDbContextTests.cs#L12)
+- Proves independent repositories admit exactly one concurrent insert.
+  [`OutboxRepositoryTests.cs:32`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/OutboxRepositoryTests.cs#L32)
 
-- Loads deployed configuration through the real startup validator.
-  [`PaymentStorageRegistrationTests.cs:34`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageRegistrationTests.cs#L34)
+- Exercises schema metadata and database-enforced command and event deduplication.
+  [`PaymentsDbContextTests.cs:11`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/PaymentsDbContextTests.cs#L11)

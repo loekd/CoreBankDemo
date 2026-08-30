@@ -38,9 +38,13 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
         var first = new OutboxRepository(firstContext, System.TimeProvider.System);
         var second = new OutboxRepository(secondContext, System.TimeProvider.System);
 
-        var results = await Task.WhenAll(
-            first.StoreIfNewAsync(PaymentsApiTestData.Outbox("race-key"), TestContext.Current.CancellationToken),
-            second.StoreIfNewAsync(PaymentsApiTestData.Outbox("race-key"), TestContext.Current.CancellationToken));
+        var results = await PaymentsApiTestData.RaceAsync(
+            () => first.StoreIfNewAsync(
+                PaymentsApiTestData.Outbox("race-key"),
+                TestContext.Current.CancellationToken),
+            () => second.StoreIfNewAsync(
+                PaymentsApiTestData.Outbox("race-key"),
+                TestContext.Current.CancellationToken));
 
         results.Should().ContainSingle(stored => stored);
         await using var verification = store.CreateContext();

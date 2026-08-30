@@ -125,6 +125,7 @@ public class PaymentStorageRegistrationTests
     private static ServiceProvider BuildProvider(Dictionary<string, string?> values)
     {
         var services = new ServiceCollection();
+        services.AddLogging();
         services.AddPaymentStorage(Configuration(values));
         services.AddDbContext<PaymentsDbContext>(
             options => options.UseNpgsql(TestConnectionStrings.NeverConnected));

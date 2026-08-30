@@ -34,9 +34,9 @@ public class PaymentStorageHandlerConcurrencyTests(PostgresContainerFixture fixt
         var first = CreateHandler(new OutboxRepository(firstContext, System.TimeProvider.System));
         var second = CreateHandler(new OutboxRepository(secondContext, System.TimeProvider.System));
 
-        var results = await Task.WhenAll(
-            first.StoreAsync(Request, "handler-race", ct),
-            second.StoreAsync(Request, "handler-race", ct));
+        var results = await PaymentsApiTestData.RaceAsync(
+            () => first.StoreAsync(Request, "handler-race", ct),
+            () => second.StoreAsync(Request, "handler-race", ct));
 
         results.Select(result => result.Payment!.Id).Distinct().Should().ContainSingle();
         results.Select(result => result.Outcome)

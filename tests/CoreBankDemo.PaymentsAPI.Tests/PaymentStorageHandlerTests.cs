@@ -147,6 +147,8 @@ public class PaymentStorageHandlerTests
 
         Guid.TryParseExact(captured!.IdempotencyKey, "D", out _).Should().BeTrue();
         captured.TransactionId.Should().Be(captured.IdempotencyKey);
+        captured.PartitionId.Should().Be(
+            PartitionHelper.GetPartitionId(captured.IdempotencyKey, 4));
         captured.CreatedAt.Should().Be(Now.UtcDateTime);
         captured.Status.Should().Be(MessageConstants.Status.Pending);
         captured.TraceParent.Should().BeNull();
