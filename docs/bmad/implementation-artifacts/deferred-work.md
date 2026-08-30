@@ -71,9 +71,6 @@
   summary: `PaymentRequest.FromAccount == request.ToAccount` (self-transfer) is not rejected anywhere in the payment-storage path.
   evidence: Edge-case-hunter flagged the missing guard. The deleted legacy `PaymentsController` never validated this either (pre-existing, not introduced by this story), and deciding whether/where to reject self-transfers (PaymentsAPI intake vs. CoreBankAPI transaction processing) is a broader business-rule question outside this story's narrow payment-store/idempotency scope.
 - source_spec: `docs/bmad/implementation-artifacts/spec-6-2-renewable-redis-distributed-locking.md`
-  summary: "`CoreBankDemo.AppHost/AppHost.cs` still sets `Features__UseDapr` (`\"true\"`/`\"false\"`) on the PaymentsAPI resource in both the DevProxy and non-DevProxy branches, even though ADR-008 (accepted before story 6.2 began) states these overrides `are not permitted` and explicitly lists their removal from `AppHost.cs` as one of its own Code Map items."
-  evidence: Blind-hunter flagged the live contradiction while reviewing story 6.2's diff of `AppHost.cs`. Not this story's fault or scope — ADR-008 predates story 6.2's work and is about the PaymentsAPI-to-CoreBankAPI HTTP integration (story 5.3's concern), not locking; its own Code Map already tracks this cleanup as outstanding.
-- source_spec: `docs/bmad/implementation-artifacts/spec-6-2-renewable-redis-distributed-locking.md`
   summary: "`docs/bmad/planning-artifacts/epics.md`'s Story 6.1 acceptance criteria still reads \"Dapr components (pubsub, lockstore, subscription) ... come up healthy,\" even though the Dapr `lockstore` component this story removes no longer exists and ADR-011/ADR-014 replace it with Redis."
   evidence: Blind-hunter flagged the stale text while reviewing story 6.2's diff. Predates this session (already committed before story 6.2's implementation began) and is a documentation-only inconsistency in a different story's acceptance text, not story 6.2's code.
 - source_spec: `docs/bmad/implementation-artifacts/spec-6-2-renewable-redis-distributed-locking.md`
@@ -97,3 +94,12 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-fix-payments-http-demo-account-mismatch.md`
   summary: Remove or replace the stale `GET /api/outbox/check-index` request in the PaymentsAPI `.http` file.
   evidence: Repository search finds the route only in `CoreBankDemo.PaymentsAPI/CoreBankDemo.http`; no PaymentsAPI endpoint implements it, so running that request returns no useful diagnostic result.
+
+## Deferred from: code review of story-5-2-payment-intake-endpoint (2026-08-30)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-2-payment-intake-endpoint.md`
+  summary: No `[Authorize]`/authentication on the payment-intake endpoint (`POST /api/payments`), which moves money between accounts.
+  evidence: Blind-hunter flagged the missing authorization check. Confirmed pre-existing and codebase-wide: `CoreBankDemo.CoreBankAPI/Controllers/TransactionsController.cs` (the story's own cited thin-controller precedent) has no `[Authorize]` attribute either, and no authentication/authorization convention exists anywhere in the codebase yet.
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-2-payment-intake-endpoint.md`
+  summary: No `[ProducesResponseType]`/`[Produces]`/`[Consumes]` metadata on `PaymentsController.ProcessPayment`, so the `202`/`400` response shapes aren't reflected in OpenAPI/Swagger generation.
+  evidence: Blind-hunter flagged the missing metadata. Confirmed pre-existing and codebase-wide: `TransactionsController` (the story's own cited precedent) carries no such attributes either, despite `Swashbuckle.AspNetCore` being referenced in the project.

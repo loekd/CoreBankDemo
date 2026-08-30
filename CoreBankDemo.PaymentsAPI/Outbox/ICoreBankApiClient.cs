@@ -7,7 +7,8 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// ever appears in this signature or crosses it. Implemented by
 /// <see cref="KiotaCoreBankApiClient"/>; nothing else in this codebase is
 /// permitted to talk to CoreBankAPI (no hand-written HTTP client, no Dapr
-/// client, no <c>Features:UseDapr</c> flag — see the spec's boundaries).
+/// client, and no dead transport-selector flag — see the spec's
+/// boundaries and ADR-008).
 /// </summary>
 internal interface ICoreBankApiClient
 {

@@ -126,21 +126,20 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
         opt.WithReference(pubsub);
     });
 
+// Story 6.7 (ADR-008): PaymentsAPI always reaches CoreBankAPI through the
+// single Kiota-backed HTTP client over the logical "corebank-api" endpoint --
+// there is no transport selector. DevProxy only changes whether that same
+// HTTP request path is additionally routed through the proxy for fault
+// injection; it never switches to a different client or transport.
+paymentsApi.WithReference(coreBankApi);
+
 if (devProxy is not null)
 {
     paymentsApi
-        .WithReference(coreBankApi)
-        .WithEnvironment("Features__UseDapr", "false")  //override any other config because Dapr sidecar circumvents proxy
         .WithEnvironment("HTTP_PROXY", "http://127.0.0.1:8000")
         .WithEnvironment("HTTPS_PROXY", "http://127.0.0.1:8000")
-        .WithEnvironment("NO_PROXY", "localhost") // Exclude Dapr sidecar gRPC (localhost:50001) from proxy
+        .WithEnvironment("NO_PROXY", "localhost") // Exclude the Dapr sidecar's pub/sub gRPC port (localhost:50001) from proxying; the Kiota HTTP call to CoreBankAPI is unaffected and still proxied.
         .WaitFor(devProxy);
-}
-else
-{
-    paymentsApi
-        .WithReference(coreBankApi)
-        .WithEnvironment("Features__UseDapr", "true");
 }
 
 builder.Build().Run();

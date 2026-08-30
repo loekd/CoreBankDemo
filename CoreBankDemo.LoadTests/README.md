@@ -64,7 +64,7 @@ Enable Dev Proxy for chaos between PaymentsAPI and CoreBankAPI:
 
 Load-test Dev Proxy config lives in `CoreBankDemo.LoadTests/devproxy/config/devproxyrc.json`.
 
-When `UseDevProxy=true`, PaymentsAPI uses HTTP (not Dapr) for CoreBank calls and routes outbound HTTP traffic through Dev Proxy.
+PaymentsAPI always calls CoreBankAPI over HTTP through the generated Kiota client (ADR-008); Dapr is reserved for the CoreBank→Payments event hop. When `UseDevProxy=true`, that same Kiota HTTP path is additionally routed through Dev Proxy for fault injection — no transport changes.
 
 All infrastructure is **disposable** — Postgres and Redis are torn down when Aspire exits. No cleanup needed.
 

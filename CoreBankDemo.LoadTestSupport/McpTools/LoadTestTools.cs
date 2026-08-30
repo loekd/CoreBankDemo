@@ -403,7 +403,7 @@ public sealed class LoadTestTools
     }
 
     [McpServerTool(Name = "get_payments_outbox")]
-    [Description("Returns recent Payments outbox messages (payment requests queued for forwarding to CoreBank via Dapr).")]
+    [Description("Returns recent Payments outbox messages (payment requests queued for forwarding to CoreBank via Kiota HTTP).")]
     public static async Task<string> GetPaymentsOutbox(
         PaymentsDbContext db,
         [Description("Max messages to return (default 20, max 100)")]
