@@ -30,9 +30,9 @@ var postgres = builder.AddPostgres("postgres", password: postgresPassword, port:
 var paymentsDb = postgres.AddDatabase("paymentsdb");
 var coreBankDb = postgres.AddDatabase("corebankdb");
 
-// Add Redis for Dapr components (pub/sub + lock store)
+// Add Redis for Dapr pub/sub and direct distributed locking
 // Use a parameter with default value so Dapr YAML can use the same password
-var redisPassword = builder.AddParameter("redis-password", secret: false);
+var redisPassword = builder.AddParameter("redis-password", "myredispassword123", secret: false);
 #pragma warning disable ASPIRECERTIFICATES001
 var redis = builder
     .AddRedis("redis", password: redisPassword)
