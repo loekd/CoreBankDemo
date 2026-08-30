@@ -82,7 +82,7 @@ development_status:
   6-3-replicated-local-api-topology: in-progress
   6-4-chaos-opt-in-and-demo-smoke: backlog
   6-5-opentelemetry-business-metrics: ready-for-dev
-  6-6-remove-sqlite-with-postgresql-testcontainers: in-progress
+  6-6-remove-sqlite-with-postgresql-testcontainers: review
   6-7-eliminate-dapr-service-invocation: done
   epic-6-retrospective: optional
 

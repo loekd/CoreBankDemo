@@ -445,8 +445,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// commits on success, rolls back (and rethrows) if it throws — so a
     /// multi-row operation that fails partway leaves no partial state. Runs
     /// through the context's execution strategy so the transaction composes
-    /// correctly with providers that configure retry-on-failure (SQLite, the
-    /// store test tier, does not retry).
+    /// correctly when Npgsql is configured with retry-on-failure.
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="operation"/> is <see langword="null"/>.</exception>
     public virtual async Task ExecuteInTransactionAsync(Func<Task> operation, CancellationToken cancellationToken = default)

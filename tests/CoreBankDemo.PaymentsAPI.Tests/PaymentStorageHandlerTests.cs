@@ -261,27 +261,6 @@ public class PaymentStorageHandlerTests
     }
 
     [Fact]
-    public async Task Concurrent_handlers_return_the_same_persisted_winner()
-    {
-        await using var store = new SqlitePaymentsStore();
-        var contexts = store.CreateSynchronizedContexts();
-        await using var firstContext = contexts.First;
-        await using var secondContext = contexts.Second;
-        var first = CreateHandler(new OutboxRepository(firstContext, TimeProvider.System));
-        var second = CreateHandler(new OutboxRepository(secondContext, TimeProvider.System));
-
-        var results = await Task.WhenAll(
-            first.StoreAsync(Request, "handler-race", TestContext.Current.CancellationToken),
-            second.StoreAsync(Request, "handler-race", TestContext.Current.CancellationToken));
-
-        results.Select(result => result.Payment!.Id).Distinct().Should().ContainSingle();
-        results.Select(result => result.Outcome)
-            .Should().BeEquivalentTo([PaymentStorageOutcome.Stored, PaymentStorageOutcome.Duplicate]);
-        await using var verification = store.CreateContext();
-        verification.OutboxMessages.Count(message => message.IdempotencyKey == "handler-race").Should().Be(1);
-    }
-
-    [Fact]
     public async Task Null_request_is_rejected()
     {
         var handler = CreateHandler(Mock.Of<IOutboxRepository>());

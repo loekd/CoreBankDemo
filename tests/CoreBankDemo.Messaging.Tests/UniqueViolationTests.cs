@@ -6,13 +6,15 @@ using Xunit;
 namespace CoreBankDemo.Messaging.Tests;
 
 /// <summary>
-/// <see cref="UniqueViolation"/> (story 2.2): the single provider-aware
-/// unique-constraint detector call sites rely on instead of string-matching or
-/// provider-specific checks. Exercised against a real SQLite violation (store
-/// test tier), a faked Npgsql-shaped exception (no live Postgres in this
-/// tier — AD-9), and the shapes that must NOT be classified as duplicates.
+/// <see cref="UniqueViolation"/> (story 2.2): the single unique-constraint
+/// detector call sites rely on instead of string-matching. This unit tier
+/// covers the classification logic with typed <see cref="PostgresException"/>
+/// instances and the shapes that must NOT be classified as duplicates; the
+/// real-provider proof (a live PostgreSQL 23505 raised by an actual unique
+/// index, and a real non-unique failure propagating) lives in
+/// <c>CoreBankDemo.Persistence.IntegrationTests</c> (ADR-016).
 /// </summary>
-public class UniqueViolationTests : SqliteMessagingTestBase
+public class UniqueViolationTests
 {
     [Fact]
     public void Null_exception_throws_argument_null()
@@ -23,35 +25,7 @@ public class UniqueViolationTests : SqliteMessagingTestBase
     }
 
     [Fact]
-    public async Task Real_sqlite_unique_violation_is_detected()
-    {
-        await using var context = CreateContext();
-        context.InboxMessages.Add(new TestInboxMessage { IdempotencyKey = "dup-key" });
-        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
-
-        context.InboxMessages.Add(new TestInboxMessage { IdempotencyKey = "dup-key" });
-        var act = async () => await context.SaveChangesAsync(TestContext.Current.CancellationToken);
-
-        var thrown = await act.Should().ThrowAsync<DbUpdateException>();
-        UniqueViolation.IsUniqueViolation(thrown.Which).Should().BeTrue();
-    }
-
-    [Fact]
-    public async Task Real_sqlite_check_constraint_violation_is_not_a_unique_violation()
-    {
-        // Same base SQLite result code (19) as a UNIQUE violation, but a
-        // different extended code (CHECK, not UNIQUE) — proves the helper
-        // distinguishes constraint kinds rather than matching on code 19 alone.
-        await using var context = CreateContext();
-        context.InboxMessages.Add(new TestInboxMessage { IdempotencyKey = "any-key", RetryCount = -1 });
-        var act = async () => await context.SaveChangesAsync(TestContext.Current.CancellationToken);
-
-        var thrown = await act.Should().ThrowAsync<DbUpdateException>();
-        UniqueViolation.IsUniqueViolation(thrown.Which).Should().BeFalse();
-    }
-
-    [Fact]
-    public void Faked_postgres_unique_violation_is_detected()
+    public void Postgres_unique_violation_sqlstate_is_detected()
     {
         var postgresException = new PostgresException(
             messageText: "duplicate key value violates unique constraint",
@@ -63,14 +37,18 @@ public class UniqueViolationTests : SqliteMessagingTestBase
         UniqueViolation.IsUniqueViolation(dbUpdateException).Should().BeTrue();
     }
 
-    [Fact]
-    public void Faked_postgres_non_unique_violation_is_not_detected()
+    [Theory]
+    [InlineData(PostgresErrorCodes.NotNullViolation)]
+    [InlineData(PostgresErrorCodes.CheckViolation)]
+    [InlineData(PostgresErrorCodes.ForeignKeyViolation)]
+    [InlineData(PostgresErrorCodes.SerializationFailure)]
+    public void Postgres_non_unique_sqlstates_are_not_detected(string sqlState)
     {
         var postgresException = new PostgresException(
-            messageText: "null value in column violates not-null constraint",
+            messageText: "some other constraint failed",
             severity: "ERROR",
             invariantSeverity: "ERROR",
-            sqlState: PostgresErrorCodes.NotNullViolation);
+            sqlState: sqlState);
         var dbUpdateException = new DbUpdateException("Save failed.", postgresException);
 
         UniqueViolation.IsUniqueViolation(dbUpdateException).Should().BeFalse();
@@ -88,6 +66,19 @@ public class UniqueViolationTests : SqliteMessagingTestBase
     public void DbUpdateException_wrapping_unrelated_exception_is_not_a_unique_violation()
     {
         var dbUpdateException = new DbUpdateException("Save failed.", new InvalidOperationException("boom"));
+
+        UniqueViolation.IsUniqueViolation(dbUpdateException).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Non_postgres_database_exception_is_not_a_unique_violation()
+    {
+        // No provider sniffing by type name or message text: an exception that
+        // is not a PostgresException is simply not a duplicate, whatever its
+        // message claims.
+        var dbUpdateException = new DbUpdateException(
+            "Save failed.",
+            new InvalidOperationException("UNIQUE constraint failed: InboxMessages.IdempotencyKey"));
 
         UniqueViolation.IsUniqueViolation(dbUpdateException).Should().BeFalse();
     }

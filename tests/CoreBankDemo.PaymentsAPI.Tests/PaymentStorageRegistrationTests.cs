@@ -47,7 +47,7 @@ public class PaymentStorageRegistrationTests
         var services = new ServiceCollection();
         services.AddPaymentStorage(configuration);
         services.AddDbContext<PaymentsDbContext>(
-            options => options.UseSqlite("Data Source=:memory:"));
+            options => options.UseNpgsql(TestConnectionStrings.NeverConnected));
         using var provider = services.BuildServiceProvider();
 
         provider.GetRequiredService<IStartupValidator>().Validate();
@@ -127,7 +127,7 @@ public class PaymentStorageRegistrationTests
         var services = new ServiceCollection();
         services.AddPaymentStorage(Configuration(values));
         services.AddDbContext<PaymentsDbContext>(
-            options => options.UseSqlite("Data Source=:memory:"));
+            options => options.UseNpgsql(TestConnectionStrings.NeverConnected));
         return services.BuildServiceProvider();
     }
 

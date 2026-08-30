@@ -38,13 +38,14 @@ public class TransactionEventProcessorWiringTests
 
         // Mirrors Program.cs exactly (including the service-defaults
         // registration that supplies the reused "CoreBank.PaymentsAPI"
-        // ActivitySource and IDistributedLockService), substituting an
-        // in-memory Sqlite context for the real
-        // builder.AddNpgsqlDbContext("paymentsdb") call so this test needs
-        // no live Postgres.
+        // ActivitySource and IDistributedLockService). This test only inspects
+        // the composed graph, so the real Npgsql provider is registered against
+        // a connection string that is never opened -- the durable behavior it
+        // would exercise is proved in
+        // CoreBankDemo.Persistence.IntegrationTests (ADR-016).
         builder.AddServiceDefaults("CoreBank.PaymentsAPI");
         builder.Services.AddDbContext<PaymentsDbContext>(
-            options => options.UseSqlite("Data Source=:memory:"));
+            options => options.UseNpgsql(TestConnectionStrings.NeverConnected));
         builder.Services.AddTransactionEventIntake(builder.Configuration);
         builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionEventHandler>();
         builder.Services.AddHostedService<InboxProcessor>();

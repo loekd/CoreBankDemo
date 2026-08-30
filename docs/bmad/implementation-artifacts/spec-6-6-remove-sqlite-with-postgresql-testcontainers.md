@@ -2,7 +2,7 @@
 title: 'Story 6.6: Remove SQLite with PostgreSQL Testcontainers'
 type: 'refactor'
 created: '2026-08-29'
-status: 'ready-for-dev'
+status: 'done'
 baseline_commit: 'd6d3b4c37853b9b3b9c845ad147bef25f24449f3'
 review_loop_iteration: 0
 context:
@@ -89,15 +89,15 @@ The integration tier should be owned by a dedicated `tests/CoreBankDemo.Persiste
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Write and accept ADR-016, then update constraints/architecture guidance so the approved tiers and gates have one unambiguous definition.
-- [ ] Add centrally pinned Testcontainers PostgreSQL/xUnit v3 dependencies and pin the container image to the AppHost PostgreSQL major version in both locations when the AppHost tag is currently implicit; record the chosen versions in ADR-016.
-- [ ] Add explicit unit-only and persistence-integration solution filters/commands; make the full rebuild gate run both.
-- [ ] Create the shared PostgreSQL fixture with amortized lifecycle, generated connection details, bounded waits, actionable diagnostics, isolated databases/schemas, and reliable cleanup.
-- [ ] Move all provider-sensitive EF Core, repository, Inbox/Outbox, seeding, transaction, and concurrency tests into the integration tier; keep pure logic tests in their current unit projects.
-- [ ] Add real-provider coverage for SQLSTATE `23505`, non-unique error propagation, `SELECT ... FOR UPDATE`, rollback/atomicity, concurrent deduplication, durable ordering/claiming, data-type round trips, and concurrent seeding.
-- [ ] Remove SQLite packages, fixtures, helpers, `UseSqlite` calls, provider-neutral workarounds, and the SQLite branch in `UniqueViolation`; do not replace SQLite with EF Core InMemory.
-- [ ] Adapt coverage collection/merging so the full unit+integration gate remains >=90%, while the unit-only target remains useful and does not fail merely because persistence adapters intentionally execute in the integration tier.
-- [ ] Update active docs and developer commands; run the independent targets and full gate from the devcontainer.
+- [x] Write and accept ADR-016, then update constraints/architecture guidance so the approved tiers and gates have one unambiguous definition. [`ADR-016`](../../adr/ADR-016-postgresql-testcontainers-persistence-testing.md) is Accepted and records the three tiers, the named targets, the coverage partition, the version pins, and the production cleanup. `ADR-012` is marked "superseded in part" (three-tier split and >=90% gate retained; its SQLite text is now historical). `docs/bmad/constraints.md` §4 and ruling A7, the architecture spine's AD-9 + pinned-versions table, `epic-6-context.md`, `epics.md`, `AGENTS.md`, `README.md`, and `ARCHITECTURE.md` all now describe the same tiers.
+- [x] Add centrally pinned Testcontainers PostgreSQL/xUnit v3 dependencies and pin the container image to the AppHost PostgreSQL major version in both locations when the AppHost tag is currently implicit; record the chosen versions in ADR-016. `Directory.Packages.props` drops `Microsoft.EntityFrameworkCore.Sqlite` and pins `Testcontainers.PostgreSql` 4.14.0 + `Testcontainers.XunitV3` 4.14.0 (the xUnit v3 integration package; `Testcontainers.Xunit` targets xUnit v2 and is incompatible with this repo's `xunit.v3` 4.0.0). The AppHost previously inherited Aspire 13.4.0's implicit default tag, verified to be `18.3`; `AppHost.cs` now pins `.WithImageTag("18.3")` and `Infrastructure/PostgresImage.cs` pins `postgres:18.3`, each pointing at the other.
+- [x] Add explicit unit-only and persistence-integration solution filters/commands; make the full rebuild gate run both. New `CoreBankDemo.UnitTests.slnf` and `CoreBankDemo.IntegrationTests.slnf`; `CoreBankDemo.Rebuild.slnf` and `CoreBankDemo.sln` both gained `tests/CoreBankDemo.Persistence.IntegrationTests`.
+- [x] Create the shared PostgreSQL fixture with amortized lifecycle, generated connection details, bounded waits, actionable diagnostics, isolated databases/schemas, and reliable cleanup. `PostgresContainerFixture` derives from `Testcontainers.Xunit.DbContainerFixture` and is registered once via `[assembly: AssemblyFixture(...)]`, so one container serves all 143 tests. It uses Testcontainers' generated host port (never 5432), bounds startup with `StartupTimeout` (5 min) and contention with `LockWaitTimeout` (30 s), wraps any startup failure in a remediation message (`docker info` / `docker pull postgres:18.3` / run the unit target), and has deterministic regression coverage for the timeout, no-skip promise, remediation commands, and underlying error detail. Each test receives its own `CREATE DATABASE`, which is dropped `WITH (FORCE)` on teardown — reporting, never swallowing, cleanup failures.
+- [x] Move all provider-sensitive EF Core, repository, Inbox/Outbox, seeding, transaction, and concurrency tests into the integration tier; keep pure logic tests in their current unit projects. 22 files moved with history (`git mv`) into `tests/CoreBankDemo.Persistence.IntegrationTests/{Messaging,CoreBankApi,PaymentsApi}`; `UniqueViolationTests` and `PaymentStorageHandlerTests` were split so only their real-provider cases moved. The two `WebApplicationFactory` wiring tests now boot the real `Program` against the container database via `ConnectionStrings__paymentsdb`, so `AddNpgsqlDbContext` and Program.cs's `EnsureCreatedAsync` run unmodified instead of having their provider swapped.
+- [x] Add real-provider coverage for SQLSTATE `23505`, non-unique error propagation, `SELECT ... FOR UPDATE`, rollback/atomicity, concurrent deduplication, durable ordering/claiming, data-type round trips, and concurrent seeding. `Messaging/PostgresErrorSemanticsTests` (real 23505 from competing connections, real 23514 check violation, non-unique propagation out of `StoreIfNewAsync`, connection failure never reported as duplicate); `CoreBankApi/AccountRowLockTests` (waiter blocks on a held `FOR UPDATE` then observes the committed value, blocks then observes a rolled-back value, two concurrent transfers serialize and conserve balance, missing row returns null); `CoreBankApi/DataTypeRoundTripTests` (decimal scale to 99999999999999.99, `Balance` column asserted as `numeric`, UTC `DateTime` kind/precision, `DateTimeOffset` instant, real `varchar` truncation `22001`); `CoreBankApi/ConcurrentSchemaInitializationTests` (two replicas racing `EnsureCreatedAsync` + seeding on one empty database); plus the migrated rollback/atomicity, concurrent-dedupe and ordering/claim suites now running on PostgreSQL.
+- [x] Remove SQLite packages, fixtures, helpers, `UseSqlite` calls, provider-neutral workarounds, and the SQLite branch in `UniqueViolation`; do not replace SQLite with EF Core InMemory. Package references removed from all three unit-test projects; `SqliteMessagingTestBase`, `SqliteCoreBankApiTestBase`, and `SqlitePaymentsStore` deleted; the three DI-placeholder `UseSqlite("Data Source=:memory:")` registrations became the production Npgsql provider against a never-opened connection string. `UniqueViolation` is now a typed `PostgresException.SqlState == PostgresErrorCodes.UniqueViolation` check with no reflection, no type-name sniffing, and no message matching, and `AccountRepository.LockForUpdateAsync` lost its `[ExcludeFromCodeCoverage]`. No EF Core InMemory package exists anywhere.
+- [x] Adapt coverage collection/merging so the full unit+integration gate remains >=90%, while the unit-only target remains useful and does not fail merely because persistence adapters intentionally execute in the integration tier. `tests/Directory.Build.props` defines one `$(PersistenceTierFilters)` list (the 17 persistence-adapter type filters); unit projects append it to `<Exclude>`, the persistence project uses it as `<Include>`. Both tiers keep `Threshold=90`, so every applicable type is measured exactly once with no ordering dependency, no merge step, and no blanket `[ExcludeFromCodeCoverage]`. Measured: Messaging 93.92%, CoreBankAPI 98.32%, PaymentsAPI 100%, ServiceDefaults 96.44%, DemoRunner 98.84%, persistence tier 99.27% (combined 1810/1840 lines = 98.4%).
+- [x] Update active docs and developer commands; run the independent targets and full gate from the devcontainer. `README.md` gained an **Automated Tests** section with all three commands; `AGENTS.md`, `constraints.md`, the architecture spine, `epic-6-context.md`, `epics.md`, `epic-1-context.md`, and `deferred-work.md` were reconciled. All three targets were run in the devcontainer — see Verification below.
 
 **Acceptance Criteria:**
 - Given Docker is unavailable, when `CoreBankDemo.UnitTests.slnf` runs, then it passes without contacting a container runtime.
@@ -118,16 +118,48 @@ Coverage must be handled deliberately. Persistence adapters should receive cover
 ## Verification
 
 **Commands:**
-- `dotnet test CoreBankDemo.UnitTests.slnf`
-- `dotnet test CoreBankDemo.IntegrationTests.slnf`
-- `dotnet test CoreBankDemo.Rebuild.slnf`
-- `rg -n --glob '!docs/bmad/implementation-artifacts/spec-[1-5]-*.md' --glob '!docs/adr/ADR-012-three-tier-testing-and-coverage-gate.md' 'Microsoft.EntityFrameworkCore.Sqlite|UseSqlite|SqliteConnection|SqliteException' .`
-- `git diff --check`
+- `dotnet test CoreBankDemo.UnitTests.slnf` — green: DemoRunner 120/120 (98.84%), Messaging 106/106 (93.92%), CoreBankAPI 79/79 (98.32%), PaymentsAPI 109/109 (100%), ServiceDefaults 107/108 + 1 designed skip (96.44%). Also re-run with `DOCKER_HOST` pointed at a non-existent socket — still green, and no test in this target references Testcontainers.
+- `dotnet test CoreBankDemo.IntegrationTests.slnf` — green: 143/143, at least 97.08% line coverage across repeated runs, ~3 s once `postgres:18.3` is local (~8 s including container start). The container-failure remediation formatter also passes as a focused test.
+- `dotnet test CoreBankDemo.Rebuild.slnf` — green: all six test projects, both tiers, every coverage threshold met.
+- `dotnet build CoreBankDemo.sln` — green (no warnings).
+- `rg -n --glob '!docs/bmad/implementation-artifacts/spec-[1-5]-*.md' --glob '!docs/adr/ADR-012-three-tier-testing-and-coverage-gate.md' 'Microsoft.EntityFrameworkCore.Sqlite|UseSqlite|SqliteConnection|SqliteException' .` — no hits in source, projects, or package configuration. Remaining hits are this spec itself, its own acceptance criterion in `epics.md`, the new ADR-016-referencing prose in `epic-6-context.md`, the frozen `review-version-verification.md` planning artifact, and `epic-1-context.md`'s package-pin list (annotated as removed by this story).
+- `git diff --check` — clean.
+
+**Known limitation:** the "container runtime unavailable" path could not be exercised end to end in this devcontainer — Testcontainers probes several endpoints and always rediscovered the working local socket, even with `DOCKER_HOST` and `~/.testcontainers.properties` pointed at an unreachable address. The failure remains structural: no test or fixture in the persistence tier is `Skip`-able or catches a container failure, and `PostgresContainerFixture.InitializeAsync` converts any startup failure or timeout into a thrown `InvalidOperationException`, which fails the whole assembly. `PostgresContainerFixtureTests` deterministically protects the bounded timeout text, never-skipped promise, Docker/image/unit-tier remediation, and preservation of the underlying failure detail.
 
 ## Suggested Review Order
 
-1. ADR-016 supersession scope, test boundaries, image pin, and coverage-gate definition.
-2. Fixture lifecycle, database/schema isolation, bounded waits, cleanup, and container-unavailable diagnostics.
-3. Real-provider assertions for `23505`, row locking, transaction rollback, ordering, data types, and seeding races.
-4. Unit/integration/full target composition and combined coverage accounting.
-5. Complete removal of SQLite packages, helpers, fixtures, workarounds, and forward-looking promises.
+**Architecture decision**
+
+- Establishes PostgreSQL as the sole persistence-test engine and preserves the three-tier gate.
+  [`ADR-016:22`](../../adr/ADR-016-postgresql-testcontainers-persistence-testing.md#L22)
+
+- Pins production PostgreSQL to the same version exercised by integration tests.
+  [`AppHost.cs:31`](../../../CoreBankDemo.AppHost/AppHost.cs#L31)
+
+**Tier boundaries and lifecycle**
+
+- Assigns every persistence adapter to exactly one coverage-owning test tier.
+  [`Directory.Build.props:27`](../../../tests/Directory.Build.props#L27)
+
+- Amortizes one container while isolating each test in a generated database.
+  [`PostgresContainerFixture.cs:32`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/Infrastructure/PostgresContainerFixture.cs#L32)
+
+- Keeps unit, integration, and full rebuild entry points independently runnable.
+  [`CoreBankDemo.Rebuild.slnf:10`](../../../CoreBankDemo.Rebuild.slnf#L10)
+
+**Production semantics**
+
+- Recognizes duplicates only through PostgreSQL SQLSTATE `23505`.
+  [`UniqueViolation.cs:25`](../../../CoreBankDemo.Messaging/UniqueViolation.cs#L25)
+
+**Real-provider proofs**
+
+- Proves row-lock blocking, commit, rollback, and serialized transfer behavior.
+  [`AccountRowLockTests.cs:17`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/CoreBankApi/AccountRowLockTests.cs#L17)
+
+- Proves unique and non-unique PostgreSQL failures through actual constraints.
+  [`PostgresErrorSemanticsTests.cs:16`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/Messaging/PostgresErrorSemanticsTests.cs#L16)
+
+- Documents the Docker-free and PostgreSQL-backed developer commands.
+  [`README.md:349`](../../../README.md#L349)

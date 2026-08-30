@@ -24,6 +24,11 @@ var jaegerOtlpGrpcEndpoint = jaeger.GetEndpoint("otlp-grpc");
 // Add PostgreSQL for Payments API and Core Bank API with fixed connection string and persistent lifetime
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
 var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5432)
+    // Story 6.6 (ADR-016): the PostgreSQL major version is pinned explicitly
+    // rather than inherited from Aspire's implicit default, and must stay in
+    // lockstep with the persistence integration tier's pinned image
+    // (tests/CoreBankDemo.Persistence.IntegrationTests/Infrastructure/PostgresImage.cs).
+    .WithImageTag("18.3")
     .WithLifetime(ContainerLifetime.Persistent)
     .WithPgAdmin();
 

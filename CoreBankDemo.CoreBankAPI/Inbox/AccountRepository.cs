@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
@@ -11,7 +10,12 @@ internal interface IAccountRepository
 
 internal sealed class AccountRepository(CoreBankDbContext dbContext) : IAccountRepository
 {
-    [ExcludeFromCodeCoverage(Justification = "Postgres-only SELECT ... FOR UPDATE pass-through; covered by the k6/Postgres acceptance tier.")]
+    /// <summary>
+    /// Pessimistic row lock on the account (ADR-016): proved directly against
+    /// real PostgreSQL with competing connections by
+    /// <c>CoreBankDemo.Persistence.IntegrationTests</c>, never excluded from
+    /// coverage and never re-routed through a provider-neutral load.
+    /// </summary>
     public Task<Account?> LockForUpdateAsync(string accountNumber, CancellationToken cancellationToken) =>
         dbContext.Accounts
             .FromSqlInterpolated($"SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {accountNumber} FOR UPDATE")

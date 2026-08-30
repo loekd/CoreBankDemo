@@ -113,7 +113,7 @@ As the rebuild developer, I want the test stack pinned centrally and a coverage 
 
 **Given** `Directory.Packages.props`
 **When** test packages are added
-**Then** it pins xunit.v3 4.0.0, xunit.runner.visualstudio 4.0.0, Microsoft.NET.Test.Sdk 18.9.0, AwesomeAssertions 9.6.0, Moq 4.20.72, coverlet.collector + coverlet.msbuild 10.0.1, Microsoft.EntityFrameworkCore.Sqlite 10.0.8
+**Then** it pins xunit.v3 4.0.0, xunit.runner.visualstudio 4.0.0, Microsoft.NET.Test.Sdk 18.9.0, AwesomeAssertions 9.6.0, Moq 4.20.72, coverlet.collector + coverlet.msbuild 10.0.1, and the persistence-tier packages Testcontainers.PostgreSql 4.14.0 + Testcontainers.XunitV3 4.14.0 (ADR-016; the original EF Core SQLite pin was removed by story 6.6)
 **And** `tests/Directory.Build.props` sets `CollectCoverage=true`, `Threshold=90`, `ThresholdType=line`, excludes `[*]*.Program`, AppHost assemblies, and `ExcludeByAttribute=ExcludeFromCodeCoverage`
 **And** VSTest runner mode is in effect (no Microsoft.Testing.Platform opt-in anywhere).
 
@@ -164,10 +164,10 @@ As a message producer, I want `StoreIfNewAsync` to be race-safe, so that duplica
 
 **Acceptance Criteria:**
 
-**Given** two concurrent stores with the same dedupe identity (SQLite-in-memory tier)
+**Given** two concurrent stores with the same dedupe identity (persistence tier — real PostgreSQL per ADR-016; originally the SQLite-in-memory tier)
 **When** both call `StoreIfNewAsync`
 **Then** exactly one row exists; the loser reports "already exists" without throwing
-**And** uniqueness violation detection goes through one provider-aware helper (SQLite + Postgres codes), never string matching at call sites
+**And** uniqueness violation detection goes through one helper keyed on Npgsql's SQLSTATE `23505` (ADR-016; originally SQLite + Postgres codes), never string matching at call sites
 **And** command stores dedupe on key alone; event stores on composite identity (AD-4) — enforced by the repository base's unique-index definition hooks.
 
 ### Story 2.3: Claiming, retry, and poison state machine
@@ -284,7 +284,7 @@ As the ledger, I want accounts and message stores defined with correct indexes, 
 
 **Given** `CoreBankDbContext`
 **When** the model builds
-**Then** `Accounts` (PK AccountNumber), `InboxMessages` (unique on TransactionId; partition/status/receivedAt index), `MessagingOutboxMessages` (unique on (TransactionId, EventType, AccountNumber); partition/status/createdAt index) exist — verified on SQLite
+**Then** `Accounts` (PK AccountNumber), `InboxMessages` (unique on TransactionId; partition/status/receivedAt index), `MessagingOutboxMessages` (unique on (TransactionId, EventType, AccountNumber); partition/status/createdAt index) exist — verified on real PostgreSQL (ADR-016; originally SQLite)
 **And** startup seeding creates exactly the 3 demo accounts idempotently (second run adds nothing).
 
 ### Story 4.2: Transaction validation
@@ -303,10 +303,10 @@ As the ledger, I want money movement isolated and deterministic, so that balance
 
 **Acceptance Criteria:**
 
-**Given** an `IAccountRepository` port with a `FOR UPDATE` pass-through (logic-free, individually coverage-excluded per AD-9) and a provider-agnostic load path used in tests
-**When** `TransactionExecutor.Execute` runs with mocked/SQLite accounts
+**Given** an `IAccountRepository` port with a `FOR UPDATE` pass-through and a provider-agnostic load path used in tests
+**When** `TransactionExecutor.Execute` runs with mocked accounts
 **Then** accounts lock in alphabetical order, debit and credit apply exactly once, the cached `ResponsePayload` (frozen `TransactionResponse` shape) is produced, and validation failure produces a failure payload without touching balances
-**And** executor logic reaches ≥90% coverage without Postgres.
+**And** executor logic reaches ≥90% coverage without Postgres, while the `FOR UPDATE` pass-through itself is proved on real PostgreSQL in the persistence tier (ADR-016; it is no longer coverage-excluded).
 
 ### Story 4.4: Idempotent transaction intake
 
@@ -369,7 +369,7 @@ As a client, I want payments stored idempotently with my key, so that retries ar
 
 **Acceptance Criteria:**
 
-**Given** `PaymentsDbContext` (OutboxMessages unique on IdempotencyKey; InboxMessages composite dedupe; partition/status indexes — SQLite-verified)
+**Given** `PaymentsDbContext` (OutboxMessages unique on IdempotencyKey; InboxMessages composite dedupe; partition/status indexes — verified on real PostgreSQL per ADR-016; originally SQLite-verified)
 **When** a payment handler processes a request with/without `Idempotency-Key`
 **Then** provided keys are used verbatim, absent keys become GUIDs, PartitionId = FNV-1a(key) % 4, and TraceParent/TraceState are captured on the row.
 

@@ -346,6 +346,30 @@ lsof -ti:8000 | xargs kill  # Dev Proxy
 # Databases are automatically created on startup
 ```
 
+## Automated Tests
+
+Tests are split into three tiers (see [ADR-016](docs/adr/ADR-016-postgresql-testcontainers-persistence-testing.md)):
+
+```bash
+# Tier 1 — fast unit tests. No Docker required.
+dotnet test CoreBankDemo.UnitTests.slnf
+
+# Tier 2 — persistence integration tests against a real, disposable PostgreSQL
+# container (postgres:18.3). Requires a running container runtime.
+dotnet test CoreBankDemo.IntegrationTests.slnf
+
+# Full gate — runs both tiers and enforces the >=90% line-coverage threshold.
+dotnet test CoreBankDemo.Rebuild.slnf
+```
+
+Tier 3 is the k6/Aspire acceptance harness described under **Load Testing** below.
+
+The persistence tier starts **one** PostgreSQL container per test assembly on a
+Testcontainers-generated host port (never a fixed port, so it cannot collide with a running
+AppHost) and gives every test its own freshly created database. If no container runtime is
+available the integration target fails with remediation instructions — it is never skipped or
+reported green. There is no SQLite or EF Core InMemory fallback anywhere in this repository.
+
 ## Load Testing
 
 The project includes comprehensive load tests that validate the system under concurrent load:

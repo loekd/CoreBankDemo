@@ -36,6 +36,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CoreBankDemo.DemoRunner", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CoreBankDemo.DemoRunner.Tests", "tests\CoreBankDemo.DemoRunner.Tests\CoreBankDemo.DemoRunner.Tests.csproj", "{5E3E4FDD-4111-4569-BFCE-78C4CA9E7D61}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CoreBankDemo.Persistence.IntegrationTests", "tests\CoreBankDemo.Persistence.IntegrationTests\CoreBankDemo.Persistence.IntegrationTests.csproj", "{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -202,6 +204,18 @@ Global
 		{5E3E4FDD-4111-4569-BFCE-78C4CA9E7D61}.Release|x64.Build.0 = Release|Any CPU
 		{5E3E4FDD-4111-4569-BFCE-78C4CA9E7D61}.Release|x86.ActiveCfg = Release|Any CPU
 		{5E3E4FDD-4111-4569-BFCE-78C4CA9E7D61}.Release|x86.Build.0 = Release|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Debug|x64.Build.0 = Debug|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Debug|x86.Build.0 = Debug|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Release|x64.ActiveCfg = Release|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Release|x64.Build.0 = Release|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Release|x86.ActiveCfg = Release|Any CPU
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -218,5 +232,6 @@ Global
 		{21688CE8-D6C9-4AA6-B96F-8FAB516C1A3B} = {A481A8B4-0EA7-44CA-A7C3-94295A27CFB9}
 		{C5C8074D-505F-4D32-9AA3-488C63F91358} = {A481A8B4-0EA7-44CA-A7C3-94295A27CFB9}
 		{5E3E4FDD-4111-4569-BFCE-78C4CA9E7D61} = {A481A8B4-0EA7-44CA-A7C3-94295A27CFB9}
+		{8A6B6CFB-2ED6-4CAE-825F-3A2C18D3DCED} = {A481A8B4-0EA7-44CA-A7C3-94295A27CFB9}
 	EndGlobalSection
 EndGlobal

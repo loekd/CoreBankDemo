@@ -587,11 +587,15 @@ CoreBankDemo/
 
 ## Key Design Decisions
 
-### Why PostgreSQL instead of SQLite?
+### Why PostgreSQL everywhere?
 - Production-ready database
-- Better concurrency handling
+- Better concurrency handling (`SELECT ... FOR UPDATE` row locks)
 - Supports distributed locking
 - Easier to scale horizontally
+- One engine in production *and* in tests: persistence tests run against a pinned
+  `postgres:18.3` Testcontainer (ADR-016), so SQL translation, SQLSTATE handling,
+  transaction behavior, and data-type round trips are proved, not assumed. No second
+  relational engine exists in this repository.
 
 ### Why Generic Base Classes?
 - Eliminates code duplication

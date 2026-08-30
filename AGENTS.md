@@ -27,7 +27,7 @@ This repo is being rebuilt from scratch on `feature/bmad` using [BMAD-METHOD v6.
 
 - **Source of truth:** `ARCHITECTURE.md` + `docs/adr/` describe the *system*; `docs/bmad/` describes the *rebuild process* (planning-artifacts, implementation-artifacts, test-artifacts). Contradictions are resolved by writing a new ADR, never by silently diverging.
 - **Guardrails for every story:** follow the `conventions`, `messaging-patterns`, and `observability` skills; `docs/bmad/constraints.md` is the binding contract (invariants, external API surface, ports, test rules).
-- **Test bar:** xUnit + AwesomeAssertions + Moq; ≥90% line coverage (coverlet-enforced) on logic projects; hosting boilerplate excluded. Build/test gate runs against `CoreBankDemo.Rebuild.slnf` until the rebuild completes — the full `.sln` may be red mid-flight, by design.
+- **Test bar:** xUnit + AwesomeAssertions + Moq; ≥90% line coverage (coverlet-enforced) on logic projects; hosting boilerplate excluded. Three tiers (ADR-016): `dotnet test CoreBankDemo.UnitTests.slnf` (Docker-free), `dotnet test CoreBankDemo.IntegrationTests.slnf` (persistence on a pinned `postgres:18.3` Testcontainer), and the k6/Aspire acceptance harness. The build/test gate runs `CoreBankDemo.Rebuild.slnf` (both .NET tiers) until the rebuild completes — the full `.sln` may be red mid-flight, by design. Never use SQLite or EF Core InMemory as a PostgreSQL substitute.
 - **Acceptance harness:** the k6 load test + LoadTestSupport assertions (exactly-once, no message loss, balance conservation, drain, per-key ordering). If code and load tests conflict, the load tests adapt — unless a real invariant is violated.
 
 ## Design Patterns

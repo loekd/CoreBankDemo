@@ -1,9 +1,10 @@
 # ADR-012: Three test tiers with an enforced logic-coverage gate
 
 **Date:** 2026-08-29
-**Status:** Accepted
+**Status:** Accepted — tier 2 superseded in part by [ADR-016](ADR-016-postgresql-testcontainers-persistence-testing.md)
 **Deciders:** Architecture team
 **Supersedes:** Unenforced coverage expectations and ambiguous SQLite/PostgreSQL test claims
+**Superseded in part by:** ADR-016 (2026-08-30) — tier 2 now runs on PostgreSQL Testcontainers, not SQLite in memory. The three-tier split and the enforced >=90% line-coverage gate below remain in force; every SQLite reference below is historical.
 
 ## Context
 

@@ -12,7 +12,7 @@ within one process), and gives the LoadTests AppHost a race-safe reset/gating se
 the point at which `CoreBankDemo.Rebuild.slnf` becomes equal to the full solution and
 `dotnet build CoreBankDemo.sln` must go green. It also removes SQLite as a test-only second
 database engine and introduces an independently runnable PostgreSQL Testcontainers persistence
-tier alongside the fast Docker-free unit-test loop. Finally, it completes ADR-008 by removing all
+tier alongside the fast Docker-free unit-test loop (ADR-016). Finally, it completes ADR-008 by removing all
 remaining Dapr service-invocation configuration and enforcing Kiota as the only production
 request/response path between the banking APIs.
 
@@ -92,12 +92,15 @@ request/response path between the banking APIs.
   exclusion, durable ordering, concurrent progress on different partitions, lock-loss cancellation
   and renewal) belong to the k6/Aspire acceptance tier using real Postgres and the real renewable
   Redis lock adapter — not mocked in unit tests.
-- **Pending persistence-test amendment (Story 6.6 / ADR-016):** ADR-016 must supersede the
-  SQLite-specific portions of ADR-012 and AD-9 before implementation. The intended tiers are fast,
-  Docker-free unit tests; PostgreSQL Testcontainers persistence integration tests; and full
-  Aspire/k6 distributed acceptance. The amendment must define independently runnable targets,
-  preserve the combined >=90% line-coverage gate without blanket exclusions, pin the PostgreSQL
-  image to the AppHost major version, and remove SQLite-specific packages and production helpers.
+- **Persistence-test tiers (Story 6.6 / ADR-016, accepted — supersedes the SQLite-specific
+  portions of ADR-012 and AD-9):** the tiers are fast, Docker-free unit tests
+  (`CoreBankDemo.UnitTests.slnf`); PostgreSQL Testcontainers persistence integration tests
+  (`CoreBankDemo.IntegrationTests.slnf`, image pinned to `postgres:18.3`, the same major the
+  AppHost now pins explicitly); and full Aspire/k6 distributed acceptance. The full rebuild gate
+  runs both .NET tiers and keeps combined line coverage >=90% without blanket exclusions, using
+  the `$(PersistenceTierFilters)` partition in `tests/Directory.Build.props`. SQLite packages,
+  fixtures, `UseSqlite` calls, and the SQLite branch in `UniqueViolation` are removed; no second
+  relational engine (including EF Core InMemory) may stand in for PostgreSQL.
 - **Kiota-only service integration (ADR-008 and ADR-013 / Story 6.7):** Story 5.3 already created
   the sole `ICoreBankApiClient`/`KiotaCoreBankApiClient` path. Story 6.7 does not redesign it; it
   removes the live AppHost `Features__UseDapr` remnants, stale invocation guidance, and any

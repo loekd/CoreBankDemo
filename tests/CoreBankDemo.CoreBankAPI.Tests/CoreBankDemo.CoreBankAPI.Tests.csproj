@@ -9,9 +9,4 @@
     <ProjectReference Include="..\..\CoreBankDemo.CoreBankAPI\CoreBankDemo.CoreBankAPI.csproj" />
   </ItemGroup>
 
-  <ItemGroup>
-    <!-- SQLite in-memory is the store test tier (AD-9); version pinned centrally. -->
-    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
-  </ItemGroup>
-
 </Project>

@@ -43,6 +43,7 @@
 
     <ItemGroup>
       <InternalsVisibleTo Include="CoreBankDemo.PaymentsAPI.Tests" />
+      <InternalsVisibleTo Include="CoreBankDemo.Persistence.IntegrationTests" />
       <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
     </ItemGroup>
 
