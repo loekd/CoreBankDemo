@@ -81,7 +81,7 @@ Accepts payments over HTTP and acknowledges them durably before any downstream w
 
 ### 4.8 Orchestration & chaos (AppHost)
 
-- **FR-21:** One command boots the full system via Aspire: Postgres (`paymentsdb`, `corebankdb`), Redis, Dapr sidecars + components, Jaeger, two PaymentsAPI replicas, two CoreBankAPI replicas, pgAdmin/RedisInsight. Both regular and load-test AppHosts use this replicated topology by default; every API replica has a healthy Dapr sidecar and PaymentsAPI remains reachable through one stable Aspire-proxied endpoint.
+- **FR-21:** One command boots the full system via Aspire: Postgres (`paymentsdb`, `corebankdb`), Redis, Dapr pub/sub components with one adapter per logical API service, Jaeger, two PaymentsAPI replicas, two CoreBankAPI replicas, pgAdmin/RedisInsight. Both regular and load-test AppHosts use this replicated application topology by default; both CoreBankAPI replicas publish through the logical CoreBank adapter, the logical Payments adapter delivers through the stable Aspire-proxied PaymentsAPI endpoint, and neither adapter is claimed as infrastructure high availability.
 - **FR-22:** DevProxy fault injection (errors, latency, rate limiting) is available opt-in for the resilience demo stages; the HTTP layer's retry/circuit-breaker/timeout policies handle transient faults.
 - **FR-23:** Configuration matches documentation: partition count 4, no dead feature flags (constraints rulings A1, A3). Competing API instances use the same distributed partition locks so no partition is processed concurrently or out of order, while different partitions remain eligible for parallel processing.
 

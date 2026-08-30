@@ -67,6 +67,7 @@ var pubsub = builder.AddDaprPubSub("pubsub", new DaprComponentOptions
 // Ports are defined in launchSettings.json (5032)
 // Runs at 127.0.0.1 instead of localhost, so it will be proxied.
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
+    .WithReplicas(2)
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
     .WithReference(redis)
@@ -106,6 +107,7 @@ if (useDevProxy)
 }
 
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
+    .WithReplicas(2)
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
     .WithReference(redis)

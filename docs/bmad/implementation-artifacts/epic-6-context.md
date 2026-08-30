@@ -18,9 +18,9 @@ Rebuild the Aspire orchestration graph as a reliable one-command, production-sha
 
 ## Requirements & Constraints
 
-- `aspire run` must boot healthy PostgreSQL databases for both APIs, pgAdmin, Redis and RedisInsight, Jaeger, Dapr pub/sub and subscription components, and both APIs with healthy sidecars. There is no Dapr lock component.
+- `aspire run` must boot healthy PostgreSQL databases for both APIs, pgAdmin, Redis and RedisInsight, Jaeger, Dapr pub/sub and subscription components, one healthy Dapr adapter per logical API service, and both APIs. There is no Dapr lock component.
 - Both regular and load-test AppHosts run two PaymentsAPI and two CoreBankAPI replicas by default. Clients use stable Aspire-proxied PaymentsAPI ports 5294 and 5295 respectively; PaymentsAPI reaches CoreBankAPI through its logical Aspire endpoint, never a replica address.
-- Replicas share their service database, logical Dapr app identity, pub/sub, and Redis lock store while runtime ports remain unique. Concurrent empty-database startup must be safe.
+- Replicas share their service database, logical Dapr app identity, pub/sub, and Redis lock store. Dapr runs one pub/sub adapter per logical API service: both CoreBank replicas publish through the logical CoreBank adapter, and the logical Payments adapter delivers through the stable Payments proxy. Concurrent empty-database startup must be safe.
 - Partition count is fixed at four. A shared distributed lock must prevent concurrent processing or reordering within a store partition while allowing different partitions to progress concurrently.
 - The external HTTP shapes, Dapr pubsub name `pubsub`, topic `transaction-events`, CloudEvent types, seeded accounts, and existing `.http` demo behavior remain unchanged.
 - DevProxy chaos is opt-in. Retry, circuit-breaker, and timeout behavior must remain visible in telemetry, and one payment must retain one distributed trace across HTTP, stores, and pub/sub.
@@ -33,7 +33,7 @@ Rebuild the Aspire orchestration graph as a reliable one-command, production-sha
 
 - Distributed locking uses `DistributedLock.Redis` over the Aspire-managed Redis connection. Acquisition is non-blocking, leases renew automatically, and caller cancellation or lock-loss cancellation stops cooperative work. The existing lock-service interface and non-throwing failure contract remain stable; renewal cadence is not configurable.
 - Lock names are store-specific (`<prefix>-partition-<id>`), so unrelated Inbox and Outbox stores never contend for the same partition lock. Replicated acceptance tests must prove single ownership and durable ordering for a partition, including equal timestamps, while showing concurrent work across different partitions and replicas.
-- Aspire proxying supplies stable ingress without introducing a gateway. Service replicas share logical dependencies, but sidecar and runtime ports are replica-unique.
+- Aspire proxying supplies stable ingress without introducing a gateway. Service replicas share logical dependencies and one Dapr pub/sub adapter per logical service; adapter count is outside the application-lock proof and is not an infrastructure high-availability claim.
 - In the load-test graph, APIs complete schema initialization while hosted processors wait behind a load-test-only start gate. After API and LoadTestSupport health, a one-shot initializer resets databases and releases all processor gates before k6 starts. The regular AppHost leaves processing enabled.
 - Persistence verification has three tiers: Docker-free unit tests, PostgreSQL Testcontainers integration tests using pinned `postgres:18.3`, and distributed Aspire/k6 acceptance. Integration tests cover real Npgsql uniqueness, row locking, transactions, ordering, concurrency, and data-type behavior.
 - The sole banking request/response integration is the checked-in OpenAPI contract, generated Kiota transport client, application-owned adapter, Aspire service discovery, and standard resilience pipeline. Live configuration, tests, scripts, and guidance must reject obsolete Dapr invocation flags, routes, APIs, or fallback clients.

@@ -462,7 +462,7 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 
 **Given** `aspire run` (per `aspire-launch` skill)
 **When** the AppHost starts
-**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr pub/sub and subscription components, and both APIs with sidecars come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
+**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr pub/sub and subscription components, one Dapr pub/sub adapter per logical API service, and both APIs come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
 **And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
 
 ### Story 6.2: Renewable Redis distributed locking
@@ -493,8 +493,8 @@ As the demo owner, I want competing local API instances by default, so that the 
 
 **Given** either the regular AppHost or the LoadTests AppHost
 **When** its default topology starts
-**Then** it runs two PaymentsAPI replicas and two CoreBankAPI replicas, each with a healthy Dapr sidecar connected to the shared pubsub and each application connected to the shared Aspire Redis lock store
-**And** replicas of each service share its database and logical Dapr app id while sidecar/runtime ports remain unique
+**Then** it runs two PaymentsAPI replicas and two CoreBankAPI replicas connected to the shared Aspire Redis lock store, with one healthy Dapr pub/sub adapter for each logical API service
+**And** replicas of each service share its database and logical Dapr app identity; both CoreBankAPI replicas publish through the logical CoreBank adapter, and the logical Payments adapter delivers through the stable PaymentsAPI proxy
 **And** both replicas start reliably against an empty database without racing schema initialization
 **And** the four-partition configuration and existing external HTTP shapes remain unchanged.
 
@@ -505,7 +505,7 @@ As the demo owner, I want competing local API instances by default, so that the 
 
 **Given** two service instances compete for work
 **When** messages from the same partition are processed
-**Then** the Postgres acceptance tier with the real renewable Redis lock adapter proves at most one instance owns that store partition at a time and messages complete in durable enqueue order without reordering, including equal ordering timestamps
+**Then** the Postgres acceptance tier with the real renewable Redis lock adapter proves at most one application instance owns that store partition at a time and messages complete in durable enqueue order without reordering, including equal ordering timestamps; Dapr adapter count is irrelevant to this proof
 **And** processor-instance evidence proves both replicas perform work while different partitions progress concurrently
 **And** lock-expiry takeover is not duplicated here because Story 2.6 owns that failure path.
 
