@@ -4,41 +4,45 @@
 
 ## Goal
 
-Rebuild PaymentsAPI as the durable entry point for payment requests. The service must accept and deduplicate submissions, reliably forward accepted work to CoreBankAPI, and consume the resulting domain events while preserving the external behavior of the existing demo. The completed epic closes the end-to-end payment loop without weakening safe retries, per-key ordering, message durability, or distributed tracing.
+Rebuild PaymentsAPI as the durable intake and client-facing status edge of the payment flow. The service must accept a payment before downstream processing is available, preserve retries through an idempotent outbox, forward accepted work to CoreBankAPI without losing ordering or trace continuity, and consume resulting transaction events idempotently. The rebuilt service must preserve the frozen external behavior while expressing all polling, retry, locking, and trace-restoration behavior through the shared messaging kernel.
 
 ## Stories
 
-- Story 5.1: Payment store and idempotency-key handling
-- Story 5.2: Payment intake endpoint
-- Story 5.3: Contract-generated Kiota CoreBank client
-- Story 5.4: Forwarding processor
-- Story 5.5: Event subscription intake
-- Story 5.6: Event handling processor
+- **5.1 — Payment store and idempotency-key handling**
+- **5.2 — Payment intake endpoint**
+- **5.3 — Contract-generated Kiota CoreBank client**
+- **5.4 — Forwarding processor**
+- **5.5 — Event subscription intake**
+- **5.6 — Event handling processor**
 
 ## Requirements & Constraints
 
-Payment intake must retain the frozen `POST /api/payments` contract. A valid request is stored durably before PaymentsAPI returns `202 Accepted` with pending status. The supplied `Idempotency-Key` is authoritative; if none is supplied, the service generates a GUID-formatted key. Repeating a key returns the existing payment rather than creating another outbox row. Validation reports all errors together, and controllers contain no business logic.
-
-Accepted payments are forwarded to CoreBankAPI over HTTP by validating the destination account and then submitting the transaction. Processing is oldest-first within a partition, different partitions may progress concurrently, and competing replicas must never process the same store partition simultaneously. Failed transport attempts return to pending with recorded error and incremented retry count; retry exhaustion is the only reason forwarding becomes terminally failed. Every 2xx response, including duplicate acceptance, completes delivery.
-
-PaymentsAPI consumes transaction-completed, transaction-failed, and balance-updated CloudEvents from Dapr pubsub `pubsub` on topic `transaction-events`. Events are stored idempotently so duplicate broker deliveries return success without adding another inbox record. The existing completed, failed, balance-updated, and unknown event routes remain stable. Event handling is observational only: structured logging and span tagging, with no mutation of local business state.
-
-The rebuild must preserve exactly-once business processing, zero loss of accepted payments, terminal-state completeness, and per-key ordering under retries and concurrent replicas. Trace context must survive the intake store, HTTP forwarding, event subscription, and inbox processing so one payment remains one distributed trace. Frozen HTTP DTO shapes, event records, endpoint behavior, and messaging names cannot change without an ADR.
-
-Implementation is test-first and must keep `CoreBankDemo.Rebuild.slnf` green. PaymentsAPI logic is covered by the repository’s enforced minimum line coverage. Generated transport sources and hosting wiring may be excluded, but validation, handlers, repositories, idempotency behavior, delivery classification, adapter mapping, trace propagation, and event dispatch remain testable. Use xUnit, AwesomeAssertions, and Moq; repository behavior is verified with EF Core SQLite in-memory, while replicated Postgres and Redis semantics remain acceptance-tier concerns.
+- `POST /api/payments` validates account identifiers, amount, and currency and returns all validation failures together. Controllers remain thin: bind the request, invoke application logic, and map the result.
+- Acceptance is durable and asynchronous. A valid payment is stored in the Payments Outbox before returning `202 Accepted` with the frozen payment response shape and `Pending` status.
+- The client-provided `Idempotency-Key` is used verbatim; when absent, a GUID-formatted key is generated. A repeated key returns the existing accepted payment and must never create a second outbox row.
+- The payment key is also the transaction identity and ordering identity. Partition assignment uses FNV-1a over the key with a fixed partition count of four. Every stored message captures `TraceParent` and `TraceState`.
+- Forwarding validates the destination account and submits the transaction to CoreBankAPI over HTTP. Any 2xx response, including duplicate acceptance, completes delivery. A 4xx, 5xx, timeout, cancellation caused by transport failure, malformed success response, or exception follows the messaging retry path and becomes terminal `Failed` only after the configured retry limit.
+- Processing is oldest-first within each partition. A shared distributed lock prevents two service replicas from processing the same store partition concurrently, while separate partitions remain eligible for parallel progress. Stale processing claims must be reclaimable.
+- PaymentsAPI subscribes to the transaction event topic through declarative Dapr routing. Completed, failed, balance-updated, and unknown event types are accepted through their designated routes.
+- Event intake is idempotent. The inbox dedupe identity is composite because one transaction can legitimately produce multiple events: transaction id, event type, and account number where applicable. Duplicate deliveries return success and are logged rather than retried.
+- Event handling restores trace context, dispatches by event type, deserializes the frozen event records, emits structured logs, and tags the active span. It does not mutate PaymentsAPI state.
+- The service must retain the frozen HTTP DTOs, event payloads, CloudEvent types, topic names, and subscription behavior. Contract changes require an explicit architecture decision rather than incidental implementation drift.
+- Tests are written first with xUnit, AwesomeAssertions, and Moq. PaymentsAPI logic must achieve at least 90% line coverage. PostgreSQL persistence behavior is tested against the pinned PostgreSQL Testcontainer; SQLite and EF Core InMemory are not permitted substitutes.
+- The story gate is the rebuild solution filter using the VSTest runner. Generated code and hosting-only wiring may be excluded from coverage, but application logic, persistence behavior, delivery classification, ordering, and trace propagation require direct tests.
 
 ## Technical Decisions
 
-Both PaymentsAPI processors reuse the shared messaging kernel. PaymentsAPI must not duplicate polling, partition fan-out, distributed locking, batch claiming, stale-claim recovery, retry and poison handling, or trace restoration. HTTP forwarding is supplied through the outbox delivery-strategy port, and event processing uses the inbox handler seam. Partition assignment uses the shared FNV-1a algorithm with a validated partition count of four and store-specific partition lock names.
+- PaymentsAPI follows ports and adapters. Application handlers and processor strategies depend on repository ports, `ICoreBankApiClient`, `TimeProvider`, and logging; EF Core, HTTP, Dapr, and other network or storage concerns remain in adapters.
+- Both PaymentsAPI processors derive from the shared `OutboxProcessorBase` or `InboxProcessorBase`. Polling, partition fan-out, distributed locking, batch claiming, stale-claim recovery, retry/poison transitions, and trace restoration must not be reimplemented in the service.
+- Idempotent storage uses a database uniqueness constraint plus `StoreIfNewAsync`; check-then-insert is forbidden. Payments Outbox dedupes on the payment key, while Payments Inbox dedupes on the composite event identity.
+- CoreBankAPI owns a checked-in OpenAPI contract covering every public account and transaction operation. A repository-pinned Kiota version generates the transport client before compilation into the intermediate build output. Generated files are neither committed nor exposed to application code.
+- `ICoreBankApiClient` is the only application-owned CoreBank transport boundary. Its Kiota-backed adapter resolves Aspire's logical `corebank-api` endpoint, maps generated models into application-owned results, propagates W3C trace headers, and applies the common delivery-outcome classification. No hand-written parallel client, Dapr service invocation path, or `Features:UseDapr` switch remains.
+- Message statuses describe transport state only: `Pending`, `Processing`, `Completed`, or `Failed`. A downstream business rejection is a successfully delivered transaction outcome, not a transport failure to retry.
+- Distributed locking uses renewable leases through the shared Aspire-managed Redis connection. Lock names remain store-specific so the payments outbox and payments inbox never contend through a shared lock namespace.
+- PostgreSQL is the persistence engine. Repository code stays provider-agnostic except for minimal, isolated PostgreSQL-specific operations whose semantics require direct integration coverage.
 
-Persistence uses EF Core and `Database.EnsureCreated()` rather than migrations. Idempotency is enforced by unique indexes plus race-safe insert handling, never check-then-insert. The payment outbox deduplicates on the idempotency key. The event inbox uses a composite identity based on transaction, event type, and account where applicable, because one transaction legitimately produces multiple events. Message records persist partition, transport status, retry data, timestamps, and trace context.
+## Cross-Story Dependencies
 
-CoreBankAPI integration has one application-owned boundary: `ICoreBankApiClient`. Its transport implementation wraps a Kiota client generated during the build from CoreBankAPI’s checked-in OpenAPI document. Generated files live under the intermediate output path, are not committed, are excluded from coverage, and cannot leak generated models into application handlers or delivery strategies. The adapter resolves Aspire’s logical `corebank-api` endpoint, propagates `traceparent` and `tracestate`, maps transport data to application-owned results, and applies the shared delivery-outcome rules. Alternative hand-written clients, Dapr service invocation, and the obsolete `Features:UseDapr` flag are excluded.
-
-The service follows hexagonal boundaries: HTTP and Dapr endpoints are inbound adapters; EF, Kiota HTTP, and messaging integrations are outbound adapters; application logic depends on ports, `TimeProvider`, and `ILogger<T>`. Message statuses represent transport state rather than business outcome. Configuration is validated at startup, package versions are centrally managed, constants own status and CloudEvent names, and structured logs include idempotency and partition context where applicable.
-
-## Dependencies
-
-This epic relies on the rebuilt messaging kernel and ServiceDefaults for race-safe stores, processor bases, partition locking, validated processing options, trace restoration, and shared CloudEvent contracts. It also relies on CoreBankAPI’s stable account and transaction endpoints, duplicate-response semantics, checked-in OpenAPI description, and published event shapes.
-
-At epic start, the old PaymentsAPI implementation is demolished and the rebuilt project enters the rebuild solution filter. Later orchestration work supplies replicated instances behind stable Aspire ingress, logical CoreBankAPI service discovery, shared persistence and lock infrastructure, and healthy Dapr sidecars. The load harness will validate the completed flow against the fixed system invariants.
+- Epic 5 depends on the established test infrastructure, messaging kernel, ServiceDefaults ports and telemetry wiring, and the frozen CoreBankAPI contract. CoreBankAPI and PaymentsAPI work may overlap once those shared prerequisites and stable contracts exist.
+- The forwarding processor depends on the generated-client adapter and the payment outbox model. Event handling depends on idempotent subscription intake and the shared inbox processor machinery.
+- Later orchestration and acceptance work depends on these service seams remaining stable. Full replicated-topology, cross-instance ordering, no-loss, exactly-once, and end-to-end trace proof belongs to the Aspire and load-test tiers; Epic 5 must provide the ports, persistence semantics, and tests those tiers exercise.

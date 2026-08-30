@@ -213,13 +213,22 @@ public class TransactionEventIntakeWiringTests(PostgresContainerFixture fixture)
                      "dapr/components-loadtest/subscription-transaction-events.yaml"
                  })
         {
-            var manifest = File.ReadAllText(Path.Combine(root, relativePath));
-            manifest.Should().Contain($"event.type == \"{Constants.TransactionCompleted}\"");
-            manifest.Should().Contain("path: /events/transactions/completed");
-            manifest.Should().Contain($"event.type == \"{Constants.TransactionFailed}\"");
-            manifest.Should().Contain("path: /events/transactions/failed");
-            manifest.Should().Contain($"event.type == \"{Constants.BalanceUpdated}\"");
-            manifest.Should().Contain("path: /events/transactions/balance-updated");
+            var manifest = File.ReadAllText(Path.Combine(root, relativePath)).ReplaceLineEndings("\n");
+            manifest.Should().Contain(
+                $"""
+                      - match: event.type == "{Constants.TransactionCompleted}"
+                        path: /events/transactions/completed
+                """);
+            manifest.Should().Contain(
+                $"""
+                      - match: event.type == "{Constants.TransactionFailed}"
+                        path: /events/transactions/failed
+                """);
+            manifest.Should().Contain(
+                $"""
+                      - match: event.type == "{Constants.BalanceUpdated}"
+                        path: /events/transactions/balance-updated
+                """);
             manifest.Should().Contain("default: /events/transactions/unknown");
         }
     }

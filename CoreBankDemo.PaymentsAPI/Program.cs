@@ -58,7 +58,11 @@ app.MapDefaultEndpoints();
 // Story 5.5: unwrap Dapr's structured CloudEvents into the raw event payload
 // before routing, so TransactionEventsController's [FromBody] model binding
 // deserializes the typed contract directly (Dapr.AspNetCore).
-app.UseCloudEvents();
+app.UseCloudEvents(new Dapr.CloudEventsMiddlewareOptions
+{
+    ForwardCloudEventPropertiesAsHeaders = true,
+    IncludedCloudEventPropertiesAsHeaders = ["type", "id", "source"]
+});
 
 app.MapPaymentIntake();
 

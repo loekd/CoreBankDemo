@@ -52,9 +52,16 @@ public class TransactionEventsController(
     }
 
     [HttpPost("events/transactions/unknown")]
-    public IActionResult Unknown()
+    public IActionResult Unknown(
+        [FromHeader(Name = "Cloudevent.type")] string? eventType,
+        [FromHeader(Name = "Cloudevent.id")] string? eventId,
+        [FromHeader(Name = "Cloudevent.source")] string? source)
     {
-        logger.LogWarning("Received an unsupported transaction-events CloudEvent type; acknowledging without storage");
+        logger.LogWarning(
+            "Received unsupported transaction-events CloudEvent {EventId} of type {EventType} from {EventSource}; acknowledging without storage",
+            eventId,
+            eventType,
+            source);
         return Ok();
     }
 }

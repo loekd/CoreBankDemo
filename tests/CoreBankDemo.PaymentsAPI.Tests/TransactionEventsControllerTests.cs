@@ -82,11 +82,18 @@ public class TransactionEventsControllerTests
         var logger = new CapturingLogger();
         var controller = CreateController(handler.Object, logger);
 
-        var result = controller.Unknown();
+        var result = controller.Unknown(
+            "com.corebank.unknown.type",
+            "event-unknown-1",
+            "test-source");
 
         result.Should().BeOfType<OkResult>();
         handler.VerifyNoOtherCalls();
-        logger.Entries.Should().ContainSingle(entry => entry.Level == LogLevel.Warning);
+        logger.Entries.Should().ContainSingle(entry =>
+            entry.Level == LogLevel.Warning &&
+            entry.Message.Contains("com.corebank.unknown.type", StringComparison.Ordinal) &&
+            entry.Message.Contains("event-unknown-1", StringComparison.Ordinal) &&
+            entry.Message.Contains("test-source", StringComparison.Ordinal));
     }
 
     [Fact]

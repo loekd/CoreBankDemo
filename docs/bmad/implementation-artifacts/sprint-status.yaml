@@ -72,7 +72,7 @@ development_status:
   5-2-payment-intake-endpoint: done
   5-3-contract-generated-kiota-corebank-client: done
   5-4-forwarding-processor: done
-  5-5-event-subscription-intake: backlog
+  5-5-event-subscription-intake: review
   5-6-event-handling-processor: done
   epic-5-retrospective: optional
 

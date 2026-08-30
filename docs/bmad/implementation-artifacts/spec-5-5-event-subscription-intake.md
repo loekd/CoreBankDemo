@@ -2,9 +2,9 @@
 title: 'Story 5.5: Event subscription intake'
 type: 'feature'
 created: '2026-08-29'
-status: 'blocked'
+status: 'done'
 review_loop_iteration: 1
-followup_review_recommended: true
+followup_review_recommended: false
 baseline_commit: '312ce8e1b6aa81269fd07c46dfdc09566d11595b'
 baseline_revision: '312ce8e1b6aa81269fd07c46dfdc09566d11595b'
 context:
@@ -57,9 +57,9 @@ deferred: []
 - `CoreBankDemo.PaymentsAPI/Handlers/TransactionEventIntakeHandler.cs` (new) -- typed overloads map known contracts to rows, serialize payloads, capture time/trace, and log scoped identity/duplicate details.
 - `CoreBankDemo.PaymentsAPI/Controllers/TransactionEventsController.cs` (new) -- thin four-route HTTP adapter returning 200 after handler completion.
 - `CoreBankDemo.PaymentsAPI/TransactionEventIntakeServiceCollectionExtensions.cs`, `Program.cs`, and `appsettings.json` -- testable controllers+Dapr, repository/handler, inbox options, CloudEvents, and route wiring; no processor registration yet.
-- `tests/CoreBankDemo.PaymentsAPI.Tests/{InboxMessageRepositoryTests,TransactionEventIntakeHandlerTests,TransactionEventsControllerTests,TransactionEventIntakeWiringTests}.cs` (new) -- repository race behavior; exact mapping/token/log assertions; controller completion/warning behavior; and an actual structured CloudEvent POST through the production entry point (with infrastructure dependencies replaced by test doubles) that proves Dapr unwrapping, production DI/middleware/routing, HTTP 200, and the durable row together.
-- `tests/CoreBankDemo.PaymentsAPI.Tests/CoreBankDemo.PaymentsAPI.Tests.csproj` and central package management (only if required) -- add the existing-platform ASP.NET hosting test dependency needed to exercise the real entry point; do not introduce an alternate application bootstrap.
-- `tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsApiTestSupport.cs` -- reuse the shared SQLite store and inbox fixture.
+- `tests/CoreBankDemo.PaymentsAPI.Tests/{TransactionEventIntakeHandlerTests,TransactionEventsControllerTests}.cs` -- exact mapping/token/log assertions and controller completion/warning behavior.
+- `tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/{InboxMessageRepositoryTests,TransactionEventIntakeWiringTests}.cs` -- PostgreSQL repository race behavior and structured CloudEvent POSTs through the production entry point proving Dapr unwrapping, production DI/middleware/routing, HTTP 200, and durable storage together.
+- `tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/PaymentsApiTestSupport.cs` -- reuse the shared PostgreSQL Testcontainer database fixture.
 
 ## Tasks & Acceptance
 
@@ -68,8 +68,8 @@ deferred: []
 - `CoreBankDemo.PaymentsAPI/Handlers/TransactionEventIntakeHandler.cs` -- implement typed event-to-row mapping, serialization, partition/time/trace capture, and structured duplicate logging.
 - `CoreBankDemo.PaymentsAPI/Controllers/TransactionEventsController.cs` -- expose the frozen known-event and default unknown routes as thin actions.
 - `CoreBankDemo.PaymentsAPI/TransactionEventIntakeServiceCollectionExtensions.cs`, `Program.cs`, `appsettings.json` -- register validated inbox options and intake dependencies, add Dapr controller integration, and enable CloudEvent/controller routing.
-- `tests/CoreBankDemo.PaymentsAPI.Tests/{InboxMessageRepositoryTests,TransactionEventIntakeHandlerTests,TransactionEventsControllerTests,TransactionEventIntakeWiringTests}.cs` -- cover every matrix row; pin transaction/idempotency/partition mapping for all three event types; verify exact cancellation-token forwarding, structured duplicate fields, warning-level unknown logging, and that controller completion waits for storage; then post structured CloudEvents through the real PaymentsAPI entry point and assert production middleware/DI/routing, both duplicate HTTP 200 responses, and one durable row.
-- `tests/CoreBankDemo.PaymentsAPI.Tests/CoreBankDemo.PaymentsAPI.Tests.csproj` and central package management (only if required) -- enable real-entry-point HTTP hosting without creating a test-only application composition.
+- `tests/CoreBankDemo.PaymentsAPI.Tests/{TransactionEventIntakeHandlerTests,TransactionEventsControllerTests}.cs` -- cover event mapping, exact cancellation-token forwarding, structured duplicate/unknown logging, and storage-before-controller-completion behavior.
+- `tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/{InboxMessageRepositoryTests,TransactionEventIntakeWiringTests}.cs` -- cover PostgreSQL dedupe and post structured CloudEvents through the real PaymentsAPI entry point, asserting production middleware/DI/routing, duplicate HTTP 200 responses, and one durable row.
 
 **Acceptance Criteria:**
 - Given Dapr posts any supported `transaction-events` payload to its configured route, when PaymentsAPI accepts it, then HTTP 200 is returned only after the correctly typed pending inbox row is durably stored with composite identity, partition, timestamp, and trace context.
@@ -80,9 +80,24 @@ deferred: []
 
 ## Spec Change Log
 
+- **Follow-up review (2026-08-30):** forwarded CloudEvent type, id, and source through Dapr middleware and included them as structured fields in unknown-event warnings. Strengthened both subscription-manifest assertions so each event-type expression must remain paired with its exact route; swapping two paths now fails verification. Updated Story 5.5's test map from the retired SQLite unit fixture to the PostgreSQL integration tier introduced by ADR-016.
 - **Review loop 1:** verification and intent-alignment reviewers found that the original plan reconstructed registrations and inspected route metadata but never sent a CloudEvent through the production PaymentsAPI entry point. Amended the Code Map and test task to require real-entry-point structured CloudEvent posts with infrastructure overridden by test doubles, including duplicate HTTP acknowledgements and durable-row assertions. This avoids a green suite when `Program.cs` omits Dapr middleware, routing, or intake DI. Also carried forward the lower verification patches so re-derivation pins every event's identity/partition mapping, exact cancellation-token forwarding, structured duplicate and unknown-warning logging, and delayed controller completion. **KEEP:** the thin controller, typed handler, kernel repository, shared constants/contracts, approved composite identity, transaction-based partitioning, injected time, ambient trace capture, insert-first dedupe, and Story 5.6 processing boundary.
 
 ## Review Triage Log
+
+### 2026-08-30 — Follow-up review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2 (high 1, medium 1, low 0)
+- defer: 0
+- addressed_findings:
+  - `[high]` `[patch]` Replaced independent manifest substring checks with event-type/route pair assertions, so swapped routes cannot pass.
+  - `[medium]` `[patch]` Forwarded and logged unknown CloudEvent type, id, and source as structured fields instead of emitting a fixed warning with no event identity.
+- verification:
+  - Full rebuild gate passed.
+  - Focused PaymentsAPI and PostgreSQL Story 5.5 tests passed.
+  - `git diff --check` passed.
+- followup_review_recommended: false
 
 ### 2026-08-29 — Review pass
 - intent_gap: 0
@@ -144,4 +159,22 @@ Blocking condition: finalization left repository dirty
 
 **Verification:** `dotnet test CoreBankDemo.Rebuild.slnf` passed 615 tests with one pre-existing skipped Redis integration test (616 total); PaymentsAPI coverage was 100% line, 98.21% branch, and 100% method. `git diff --check` passed.
 
-**Residual risks:** Verification substitutes SQLite for PostgreSQL and does not run a live Dapr sidecar/broker; repository behavior, the actual ASP.NET entry point, CloudEvent unwrapping, declarative manifest alignment, and all route payloads are covered independently and together.
+**Residual risks:** Verification does not run a live Dapr sidecar/broker; PostgreSQL repository behavior, the actual ASP.NET entry point, CloudEvent unwrapping, declarative manifest alignment, and all route payloads are covered independently and together.
+
+## Suggested Review Order
+
+**Unknown-event diagnostics**
+
+- Forward CloudEvent identity metadata before Dapr unwraps the payload.
+  [`Program.cs:61`](../../../CoreBankDemo.PaymentsAPI/Program.cs#L61)
+
+- Acknowledge unsupported events while preserving type, id, and source in structured logs.
+  [`TransactionEventsController.cs:55`](../../../CoreBankDemo.PaymentsAPI/Controllers/TransactionEventsController.cs#L55)
+
+**Regression verification**
+
+- Prove unknown acknowledgements include all diagnostic identity fields.
+  [`TransactionEventsControllerTests.cs:79`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/TransactionEventsControllerTests.cs#L79)
+
+- Bind each subscription expression to its exact route in both manifests.
+  [`TransactionEventIntakeWiringTests.cs:207`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/TransactionEventIntakeWiringTests.cs#L207)
