@@ -67,12 +67,12 @@ development_status:
   4-7-event-publishing-processor: done
   epic-4-retrospective: optional
 
-  epic-5: in-progress
+  epic-5: done
   5-1-payment-store-and-idempotency-key-handling: done
   5-2-payment-intake-endpoint: done
   5-3-contract-generated-kiota-corebank-client: done
   5-4-forwarding-processor: done
-  5-5-event-subscription-intake: review
+  5-5-event-subscription-intake: done
   5-6-event-handling-processor: done
   epic-5-retrospective: optional
 
