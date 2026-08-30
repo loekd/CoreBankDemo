@@ -15,7 +15,7 @@ Depth that belongs in downstream documents (PRD, architecture, epics), preserved
 | E6 | LoadTestSupport + k6 realignment to new schemas; keep 10% duplicate-key ratio | 3–4 |
 | E7 | Docs: regenerate ARCHITECTURE.md from code; ADRs for A1–A4 + test strategy; update skills if surfaces changed | 2 |
 
-Strict dependency order E0 → E1 → … → E7. ~30 stories total. Stories sized ≤ one class-cluster (agent context guardrail).
+Dependency spine: E0 → E1 → E2 establishes the shared test, messaging, and service foundation. E3 and E4 may overlap once their shared prerequisites exist. E5 work may overlap when the affected service seams are stable. E6 implementation may proceed behind stable ports and fakes, but live load integration and acceptance cannot complete until the required E3–E5 stories are done. E7 completes after the implementation and acceptance evidence it documents. Advanced statuses are preserved; a story remains in progress while any recorded completion dependency is unmet. Stories remain sized to an agent-safe class cluster unless a human-approved story explicitly records a broader boundary.
 
 ## Rejected alternatives
 

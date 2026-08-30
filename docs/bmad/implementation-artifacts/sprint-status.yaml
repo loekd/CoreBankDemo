@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-21-2026 16:00
-last_updated: 08-30-2026 13:10
+last_updated: 08-30-2026 14:00
 project: CoreBankDemo
 project_key: NOKEY
 tracking_system: file-system
@@ -70,8 +70,8 @@ development_status:
   epic-5: in-progress
   5-1-payment-store-and-idempotency-key-handling: review
   5-2-payment-intake-endpoint: in-progress
-  5-3-contract-generated-kiota-corebank-client: in-progress
-  5-4-forwarding-processor: review
+  5-3-contract-generated-kiota-corebank-client: done
+  5-4-forwarding-processor: done
   5-5-event-subscription-intake: backlog
   5-6-event-handling-processor: done
   epic-5-retrospective: optional

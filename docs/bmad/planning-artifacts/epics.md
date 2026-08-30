@@ -462,7 +462,7 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 
 **Given** `aspire run` (per `aspire-launch` skill)
 **When** the AppHost starts
-**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr components (pubsub, lockstore, subscription), and both APIs with sidecars come up healthy
+**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr pub/sub and subscription components, and both APIs with sidecars come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
 **And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
 
 ### Story 6.2: Renewable Redis distributed locking
@@ -681,6 +681,13 @@ As the speaker, I want a mouse-enabled terminal control room for my talks, so th
 **Then** Next remains unavailable, duplicate activation is suppressed, and the current cue offers concise Retry, Details, or restart-from-checkpoint choices
 **And** the runner never embeds banking logic, connects directly to stores, mutates checked-in configuration, executes scenario-supplied shell commands, fakes live success, or stops an unowned process.
 
+**Given** Stories 7.1–7.3 are not yet done
+**When** Story 7.4 implementation proceeds
+**Then** the scenario model, state machine, process ownership, allow-listed adapters, TUI, and load-workflow presentation contract may be implemented and tested through ports and fakes
+**And** live LoadTestSupport binding, a successful five-invariant rehearsal proof pack, and Story 7.4 completion remain blocked until Stories 7.1–7.3 are done
+**When** Story 7.3 establishes the accepted load workflow
+**Then** Story 7.4 binds to those exact endpoints and evidence semantics, completes the live rehearsal and presentation-terminal dress rehearsal, and introduces no parallel assertion path.
+
 ---
 
 ## Epic 8: E7 — Documentation Refresh
@@ -699,11 +706,11 @@ As a repo visitor, I want the architecture doc generated from the rebuilt code, 
 
 ### Story 8.2: ADRs and skill updates
 
-As the process record, I want the rulings written as ADRs, so that decisions outlive the chat (rulings A1–A4, A7/A9-tiering, contract generation, replicated local topology; NFR-4).
+As the process record, I want the accepted rebuild decisions audited against the final code and documentation, so that ADR-008..ADR-016, their supersession links, and the project skills describe the implemented system accurately (rulings A1–A4 and A7–A8; NFR-4).
 
 **Acceptance Criteria:**
 
-**Given** the spine memlog
-**When** ADR-008..ADR-014 are written (UseDapr deletion; kernel delivery strategy; PartitionCount=4 alignment; renewable Redis locking; test-tier strategy + coverage gate; checked-in OpenAPI with build-time Kiota generation; replicated local topology behind Aspire ingress)
-**Then** each follows the existing ADR format with Context/Decision/Implementation references to real files
-**And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where kernel surfaces changed; AGENTS.md rebuild section flips to "completed".
+**Given** ADR-008..ADR-016 are accepted
+**When** the final documentation audit runs
+**Then** each ADR's status, Context, Decision, Consequences, supersession links, and implementation references match the final code; ADR-012 identifies ADR-016's PostgreSQL Testcontainers supersession, ADR-015 records the presentation-tool exception, and no forward-looking artifact refers to an undefined ruling
+**And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where implemented surfaces changed; `ARCHITECTURE.md` links the complete ADR set; and the `AGENTS.md` rebuild section flips to "completed" only after the implementation and acceptance gates pass.

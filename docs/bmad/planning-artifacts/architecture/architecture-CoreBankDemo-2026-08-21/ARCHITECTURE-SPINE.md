@@ -7,13 +7,13 @@ paradigm: 'Hexagonal (ports & adapters) per service over a shared messaging kern
 scope: 'Full rebuild of CoreBankDemo on feature/bmad — same external contract as main'
 status: final
 created: '2026-08-21'
-updated: '2026-08-29'
+updated: '2026-08-30'
 binds: [FR-1..FR-29, NFR-1..NFR-5]
 sources:
   - docs/bmad/constraints.md
   - docs/bmad/planning-artifacts/prds/prd-CoreBankDemo-2026-08-21/prd.md
   - ARCHITECTURE.md (brownfield reference, describes main)
-  - docs/adr/ADR-001..015
+  - docs/adr/ADR-001..016
 companions: []
 ---
 
@@ -227,5 +227,5 @@ graph LR
 - **Exact repository interface shapes** — emerge per story under AD-6; the spine fixes only that they exist and own raw SQL.
 - **LoadTestSupport schema adaptation details** — E6 conforms to whatever E1–E4 produced (user decision; AD-1 keeps assertion semantics).
 - **k6 script parameters** — carry over from `main` unless the harness realignment forces change.
-- **ADR implementation completion** — ADR-008..ADR-015 are accepted; their remaining code and orchestration work is owned by the corresponding stories.
+- **ADR implementation completion** — ADR-008..ADR-016 are accepted; ADR-016 partially supersedes ADR-012's persistence-tier engine while preserving its three-tier model and coverage gate. Remaining code, orchestration, acceptance, and documentation alignment is owned by the corresponding stories.
 - **Deployment/operations envelope** — none beyond Aspire local orchestration; demo-only by PRD non-goal, deliberately unowned.

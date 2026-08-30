@@ -32,8 +32,9 @@ public class HttpForwardOutboxDeliveryStrategyTests
                 new TransactionSubmission("forward-key", "Pending", DateTimeOffset.UtcNow))
         };
         var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var message = Message();
 
-        var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
+        var act = () => strategy.DeliverAsync(message, cancellation.Token);
 
         await act.Should().NotThrowAsync();
         client.ValidateCalls.Should().Equal(ToAccount);
@@ -42,6 +43,8 @@ public class HttpForwardOutboxDeliveryStrategyTests
         client.SubmitCancellationTokens.Should().Equal(cancellation.Token);
         client.SubmitCalls[0].FromAccount.Should().Be("NL91ABNA0417164300");
         client.SubmitCalls[0].ToAccount.Should().Be(ToAccount);
+        client.SubmitCalls[0].Amount.Should().Be(message.Amount);
+        client.SubmitCalls[0].Currency.Should().Be(message.Currency);
         client.SubmitCalls[0].TransactionId.Should().Be("forward-key");
     }
 
@@ -103,6 +106,12 @@ public class HttpForwardOutboxDeliveryStrategyTests
 
         var assertion = await act.Should().ThrowAsync<InvalidOperationException>();
         assertion.Which.Message.Should().Contain(reason.ToString());
+        if (statusCode is int code)
+        {
+            assertion.Which.Message.Should().Contain(code.ToString());
+        }
+
+        client.ValidateCalls.Should().Equal(ToAccount);
         client.SubmitCalls.Should().BeEmpty();
     }
 
@@ -131,33 +140,47 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             assertion.Which.Message.Should().Contain(code.ToString());
         }
+
+        client.ValidateCalls.Should().Equal(ToAccount);
+        client.SubmitCalls.Should().ContainSingle();
     }
 
     [Fact]
     public async Task DeliverAsync_propagates_caller_cancellation_from_account_validation_unchanged()
     {
-        var client = new FakeCoreBankApiClient { ValidateThrows = new OperationCanceledException() };
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        var expected = new OperationCanceledException(cancellation.Token);
+        var client = new FakeCoreBankApiClient { ValidateThrows = expected };
         var strategy = new HttpForwardOutboxDeliveryStrategy(client);
 
-        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+        var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        var assertion = await act.Should().ThrowAsync<OperationCanceledException>();
+        assertion.Which.Should().BeSameAs(expected);
+        client.ValidateCancellationTokens.Should().Equal(cancellation.Token);
     }
 
     [Fact]
     public async Task DeliverAsync_propagates_caller_cancellation_from_transaction_submission_unchanged()
     {
+        using var cancellation = new CancellationTokenSource();
+        await cancellation.CancelAsync();
+        var expected = new OperationCanceledException(cancellation.Token);
         var client = new FakeCoreBankApiClient
         {
             ValidateResult = CoreBankResult<AccountValidation>.Success(
                 new AccountValidation(ToAccount, true, null, null)),
-            SubmitThrows = new OperationCanceledException()
+            SubmitThrows = expected
         };
         var strategy = new HttpForwardOutboxDeliveryStrategy(client);
 
-        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+        var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
-        await act.Should().ThrowAsync<OperationCanceledException>();
+        var assertion = await act.Should().ThrowAsync<OperationCanceledException>();
+        assertion.Which.Should().BeSameAs(expected);
+        client.ValidateCancellationTokens.Should().Equal(cancellation.Token);
+        client.SubmitCancellationTokens.Should().Equal(cancellation.Token);
     }
 
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient

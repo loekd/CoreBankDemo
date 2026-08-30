@@ -3,8 +3,8 @@ title: 'Story 5.4: Forwarding processor'
 type: 'feature'
 created: '2026-08-29'
 status: 'done'
-review_loop_iteration: 0
-followup_review_recommended: true
+review_loop_iteration: 1
+followup_review_recommended: false
 baseline_commit: 'd6d3b4c37853b9b3b9c845ad147bef25f24449f3'
 context:
   - '{project-root}/docs/bmad/implementation-artifacts/epic-5-context.md'
@@ -134,6 +134,24 @@ The strategy is intentionally thin — all classification already happened in `K
   - `[medium]` `[patch]` Delivery tests did not observe cancellation-token forwarding; recorded and asserted the exact token at both CoreBank client calls.
   - `[medium]` `[patch]` Concrete processor option mapping was not behaviorally observed; asserted lock expiry and measured the configured interval between processor ticks.
   - `[medium]` `[patch]` The partition test proved ordering but not concurrent progress; added a cross-partition barrier that deadlocks under serial execution.
+
+### 2026-08-30 — Follow-up review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 7: (high 1, medium 4, low 2)
+- defer: 0
+- addressed_findings:
+  - `[high]` `[patch]` Asserted amount and currency as well as account and transaction identities on the forwarded request.
+  - `[medium]` `[patch]` Exercised real caller cancellation through the composed processor during validation and submission, proving the row remains `Processing` without consuming a retry.
+  - `[medium]` `[patch]` Proved all four configured partitions are attempted and bounded the configured polling interval on both sides.
+  - `[medium]` `[patch]` Used a non-default lock expiry so hard-coded option mappings cannot pass.
+  - `[medium]` `[patch]` Preserved validation HTTP status diagnostics in the asserted retry exception.
+  - `[low]` `[patch]` Asserted exactly one validation/submission attempt so strategy-local retries cannot be introduced silently.
+- verification:
+  - PaymentsAPI unit suite: 125 passed; 100% line coverage.
+  - PostgreSQL integration suite: 145 passed; 99.27% combined line coverage.
+  - Full rebuild gate: 682 passed, 1 intentionally skipped Redis integration test; every enforced line-coverage threshold exceeded 90%.
+- followup_review_recommended: false
 
 ## Auto Run Result
 

@@ -41,7 +41,8 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         using var services = BuildServices(store, client);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var lockService = new SingleTickLockService(completion);
-        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), lockService);
+        var processor = CreateProcessor(
+            services.GetRequiredService<IServiceScopeFactory>(), lockService, lockExpirySeconds: 17);
 
         await processor.StartAsync(TestContext.Current.CancellationToken);
         await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -54,7 +55,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         row.Status.Should().Be(MessageConstants.Status.Completed);
         row.RetryCount.Should().Be(0);
         lockService.LockName.Should().Be("payments-outbox-partition-0");
-        lockService.LockExpirySeconds.Should().Be(30);
+        lockService.LockExpirySeconds.Should().Be(17);
         client.SubmittedTransactionIds.Should().Equal("payment-1");
     }
 
@@ -111,6 +112,34 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         await processor.StopAsync(TestContext.Current.CancellationToken);
 
         elapsedBetweenTicks.Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(75));
+        elapsedBetweenTicks.Should().BeLessThan(TimeSpan.FromMilliseconds(500));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StopAsync_during_delivery_leaves_the_claimed_row_processing_without_a_retry(
+        bool cancelDuringSubmission)
+    {
+        await using var store = CreateStore();
+        await SeedAsync(store, "payment-cancelled", partitionId: 0);
+        var client = new CancellationBlockingCoreBankApiClient(cancelDuringSubmission);
+        using var services = BuildServices(store, client);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var processor = CreateProcessor(
+            services.GetRequiredService<IServiceScopeFactory>(), new SingleTickLockService(completion));
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await client.CallStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        await using var verifyContext = store.CreateContext();
+        var row = await verifyContext.OutboxMessages
+            .AsNoTracking()
+            .SingleAsync(TestContext.Current.CancellationToken);
+        row.Status.Should().Be(MessageConstants.Status.Processing);
+        row.RetryCount.Should().Be(0);
+        row.LastError.Should().BeNull();
     }
 
     /// <summary>
@@ -128,12 +157,13 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         using var services = BuildServices(store, client);
         var partition0Done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var partition1Done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var lockService = new TwoPartitionLockService(partition0Done, partition1Done);
+        var allPartitionsSeen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var lockService = new TwoPartitionLockService(partition0Done, partition1Done, allPartitionsSeen);
         var processor = CreateProcessor(
             services.GetRequiredService<IServiceScopeFactory>(), lockService, partitionCount: 4);
 
         await processor.StartAsync(TestContext.Current.CancellationToken);
-        await Task.WhenAll(partition0Done.Task, partition1Done.Task)
+        await Task.WhenAll(partition0Done.Task, partition1Done.Task, allPartitionsSeen.Task)
             .WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         await processor.StopAsync(TestContext.Current.CancellationToken);
 
@@ -145,6 +175,8 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             .Should().Equal("p1-a", "p1-b");
         lockService.LockNames.Should().Contain("payments-outbox-partition-0");
         lockService.LockNames.Should().Contain("payments-outbox-partition-1");
+        lockService.LockNames.Should().Contain("payments-outbox-partition-2");
+        lockService.LockNames.Should().Contain("payments-outbox-partition-3");
     }
 
     private static ServiceProvider BuildServices(PaymentsStore store, ICoreBankApiClient client)
@@ -164,7 +196,8 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         IServiceScopeFactory scopeFactory,
         IDistributedLockService lockService,
         int partitionCount = 1,
-        int pollingIntervalMs = 60000) =>
+        int pollingIntervalMs = 60000,
+        int lockExpirySeconds = 30) =>
         new(
             lockService,
             scopeFactory,
@@ -174,7 +207,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             Options.Create(new OutboxProcessingOptions
             {
                 PartitionCount = partitionCount,
-                LockExpirySeconds = 30,
+                LockExpirySeconds = lockExpirySeconds,
                 PollingIntervalMs = pollingIntervalMs
             }));
 
@@ -252,6 +285,42 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             SubmitAttempted = true;
             return Task.FromResult(CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission(request.TransactionId, "Completed", DateTimeOffset.UtcNow)));
+        }
+
+        public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
+            string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+    }
+
+    private sealed class CancellationBlockingCoreBankApiClient(bool cancelDuringSubmission)
+        : ICoreBankApiClient
+    {
+        public TaskCompletionSource CallStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
+            string accountNumber, CancellationToken cancellationToken)
+        {
+            if (!cancelDuringSubmission)
+            {
+                CallStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            return CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(accountNumber, true, null, null));
+        }
+
+        public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
+            string accountNumber, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public async Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+        {
+            CallStarted.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("The cancellation delay returned unexpectedly.");
         }
 
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
@@ -362,9 +431,12 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
     /// workload -- the two partitions this test's messages live in.
     /// </summary>
     private sealed class TwoPartitionLockService(
-        TaskCompletionSource partition0Done, TaskCompletionSource partition1Done) : IDistributedLockService
+        TaskCompletionSource partition0Done,
+        TaskCompletionSource partition1Done,
+        TaskCompletionSource allPartitionsSeen) : IDistributedLockService
     {
         private readonly ConcurrentBag<string> _lockNames = new();
+        private int _partitionCount;
         public IReadOnlyCollection<string> LockNames => _lockNames;
 
         public async Task<bool> ExecuteWithLockAsync(
@@ -374,6 +446,11 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             CancellationToken cancellationToken = default)
         {
             _lockNames.Add(lockName);
+            if (Interlocked.Increment(ref _partitionCount) == 4)
+            {
+                allPartitionsSeen.TrySetResult();
+            }
+
             await workload(cancellationToken).ConfigureAwait(false);
 
             if (lockName.EndsWith("-partition-0", StringComparison.Ordinal))
