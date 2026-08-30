@@ -2,8 +2,9 @@
 title: 'Story 5.2: Payment intake endpoint'
 type: 'feature'
 created: '2026-08-28'
-status: 'in-progress'
-review_loop_iteration: 0
+status: 'done'
+review_loop_iteration: 1
+followup_review_recommended: false
 baseline_commit: '86e38efbe20fab79e41ebcb220be5866492305b1'
 context:
   - '{project-root}/docs/bmad/implementation-artifacts/epic-5-context.md'
@@ -65,14 +66,15 @@ context:
 
 ### Review Findings
 
-- [ ] [Review][Patch] `IPaymentStorageHandler` was widened from `internal` to `public` without need or authorization [CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs:37]
-- [ ] [Review][Patch] No `WebApplicationFactory<Program>`-based wiring test proves the real Program.cs registers payment intake [CoreBankDemo.PaymentsAPI/Program.cs:31,63]
+- [x] [Review][Reject] `IPaymentStorageHandler` was widened from `internal` to `public` without need or authorization [CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs:37] — rejected (2026-08-30): `PaymentsController` is public and its public constructor exposes this type; making the interface internal produces inconsistent accessibility unless the MVC controller is needlessly redesigned.
+- [x] [Review][Patch] Added a PostgreSQL-backed `WebApplicationFactory` HTTP test proving the real PaymentsAPI entry point maps payment intake, returns the exact six-field acknowledgement and winner-derived duplicate response, persists one durable row, and preserves the manual `{ Errors }` validation envelope without writing invalid requests; `PaymentsDbContext` selects the entry assembly because both referenced APIs export an ambiguous global `Program` type [tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/PaymentIntakeWiringTests.cs:24]
 - [x] [Review][Defer] No `[Authorize]`/authentication on the payment-intake endpoint [CoreBankDemo.PaymentsAPI/Controllers/PaymentsController.cs:16] — deferred, pre-existing (matches `TransactionsController` precedent; no auth convention exists anywhere in the codebase yet)
 - [x] [Review][Defer] No `[ProducesResponseType]`/`[Produces]`/`[Consumes]` OpenAPI metadata on `ProcessPayment` [CoreBankDemo.PaymentsAPI/Controllers/PaymentsController.cs:20] — deferred, pre-existing (matches `TransactionsController` precedent; no such attributes exist on any controller yet)
 
 ## Spec Change Log
 
 - 2026-08-28 (final review): escaped arbitrary transaction identities in `Location`, supplied a safe message for exception-only model errors, and added production-owned route-mapping verification.
+- 2026-08-30 (completion review): rejected the invalid interface-accessibility finding, replaced reconstructed route evidence with a real-entry-point PostgreSQL test, and hardened that test to verify the raw frozen JSON shape, persisted timestamp, duplicate-winner stability, aggregated validation, and no invalid-request write. Follow-up review found no production defect. Verification passed 684 tests with one intentional Redis skip; PaymentsAPI unit and persistence line coverage remained 100%.
 
 ## Design Notes
 
@@ -100,7 +102,7 @@ The durable row is the acknowledgement source. Mapping `ProcessedAt` from `Payme
   [`PaymentIntakeServiceCollectionExtensions.cs:8`](../../../CoreBankDemo.PaymentsAPI/PaymentIntakeServiceCollectionExtensions.cs#L8)
 
 - Activates payment intake in the deployed host.
-  [`Program.cs:12`](../../../CoreBankDemo.PaymentsAPI/Program.cs#L12)
+  [`Program.cs:31`](../../../CoreBankDemo.PaymentsAPI/Program.cs#L31)
 
 **Contract and verification**
 
@@ -110,5 +112,8 @@ The durable row is the acknowledgement source. Mapping `ProcessedAt` from `Payme
 - Covers validation, winner mapping, header semantics, and escaped locations.
   [`PaymentsControllerTests.cs:67`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentsControllerTests.cs#L67)
 
-- Proves production registration exposes the POST route and manual validation behavior.
-  [`PaymentStorageRegistrationTests.cs:78`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageRegistrationTests.cs#L78)
+- Boots the real host and verifies route mapping plus the manual validation envelope.
+  [`PaymentIntakeWiringTests.cs:23`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/PaymentsApi/PaymentIntakeWiringTests.cs#L23)
+
+- Proves production MVC options suppress automatic model-state responses.
+  [`PaymentStorageRegistrationTests.cs:80`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/PaymentStorageRegistrationTests.cs#L80)
