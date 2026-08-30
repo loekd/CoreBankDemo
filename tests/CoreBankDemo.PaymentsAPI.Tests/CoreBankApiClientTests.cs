@@ -94,6 +94,21 @@ public class CoreBankApiClientTests
         result.StatusCode.Should().BeNull();
     }
 
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task ValidateAccountAsync_rejects_missing_account_number(string? accountNumber)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            throw new InvalidOperationException("invalid input must not reach the transport"));
+        var client = CreateClient(handler);
+
+        var act = () => client.ValidateAccountAsync(accountNumber!, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
     [Fact]
     public async Task GetAccountDetailsAsync_maps_2xx_body_to_success()
     {
@@ -158,6 +173,41 @@ public class CoreBankApiClientTests
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
         result.StatusCode.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task GetAccountDetailsAsync_treats_blank_required_string_as_retry()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) => JsonResponse(HttpStatusCode.OK, new
+        {
+            accountNumber = AccountNumber,
+            accountHolderName = "   ",
+            balance = 100m,
+            currency = "EUR",
+            isActive = true,
+            createdAt = new DateTimeOffset(2026, 8, 20, 9, 0, 0, TimeSpan.Zero)
+        }));
+        var client = CreateClient(handler);
+
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task GetAccountDetailsAsync_rejects_missing_account_number(string? accountNumber)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            throw new InvalidOperationException("invalid input must not reach the transport"));
+        var client = CreateClient(handler);
+
+        var act = () => client.GetAccountDetailsAsync(accountNumber!, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<ArgumentException>();
     }
 
     [Fact]
@@ -248,6 +298,25 @@ public class CoreBankApiClientTests
     }
 
     [Fact]
+    public async Task ProcessTransactionAsync_treats_blank_required_string_as_retry()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) => JsonResponse(HttpStatusCode.Accepted, new
+        {
+            transactionId = "txn-1",
+            status = "   ",
+            processedAt = new DateTimeOffset(2026, 8, 29, 10, 0, 0, TimeSpan.Zero)
+        }));
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(
+            AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
+    }
+
+    [Fact]
     public async Task ProcessTransactionAsync_throws_for_null_request_instead_of_reporting_a_transport_retry()
     {
         using var handler = new FakeHttpMessageHandler((_, _) =>
@@ -326,6 +395,40 @@ public class CoreBankApiClientTests
         var client = CreateClient(handler);
 
         var result = await client.GetTransactionStatusAsync("txn-1", TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
+        result.StatusCode.Should().BeNull();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task GetTransactionStatusAsync_rejects_missing_idempotency_key(string? idempotencyKey)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            throw new InvalidOperationException("invalid input must not reach the transport"));
+        var client = CreateClient(handler);
+
+        var act = () => client.GetTransactionStatusAsync(
+            idempotencyKey!, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Theory]
+    [InlineData("{")]
+    [InlineData("{\"accountNumber\":[],\"isValid\":true}")]
+    public async Task Call_treats_malformed_2xx_json_as_malformed_response(string responseBody)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseBody, Encoding.UTF8, "application/json")
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
@@ -446,43 +549,64 @@ public class CoreBankApiClientTests
     [Fact]
     public async Task Call_propagates_current_traceparent_and_tracestate_when_activity_present()
     {
-        using var activitySource = new ActivitySource(nameof(CoreBankApiClientTests));
-        using var listener = new ActivityListener
-        {
-            ShouldListenTo = _ => true,
-            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData
-        };
-        ActivitySource.AddActivityListener(listener);
+        await AssertTraceContextAsync(
+            new { accountNumber = AccountNumber, isValid = true },
+            async (client, ct) =>
+            {
+                var result = await client.ValidateAccountAsync(AccountNumber, ct);
+                result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+            });
+    }
 
-        using var activity = activitySource.StartActivity("test-activity");
-        activity!.TraceStateString = "vendor=value";
-        // Captured up front: HttpClient's own built-in instrumentation
-        // starts a child "System.Net.Http.HttpRequestOut" activity around
-        // the actual send (since this test's listener matches every
-        // source), so Activity.Current by the time the fake handler runs is
-        // no longer this activity -- the header must still carry *this*
-        // activity's id, the one ConfigureTraceContext actually read.
-        var expectedTraceParent = activity.Id;
-
-        using var handler = new FakeHttpMessageHandler((request, _) =>
-        {
-            request.Headers.TryGetValues("traceparent", out var traceParents).Should().BeTrue();
-            traceParents!.Should().ContainSingle();
-            traceParents!.Single().Should().Be(expectedTraceParent, "the outgoing header must carry the " +
-                "exact ambient trace context, not merely some traceparent-shaped value");
-            request.Headers.TryGetValues("tracestate", out var traceStates).Should().BeTrue();
-            traceStates!.Should().ContainSingle("vendor=value");
-            return JsonResponse(HttpStatusCode.OK, new
+    [Fact]
+    public async Task GetAccountDetailsAsync_propagates_current_trace_context()
+    {
+        await AssertTraceContextAsync(
+            new
             {
                 accountNumber = AccountNumber,
-                isValid = true
+                accountHolderName = "Jane Doe",
+                balance = 100m,
+                currency = "EUR",
+                isActive = true,
+                createdAt = new DateTimeOffset(2026, 8, 20, 9, 0, 0, TimeSpan.Zero)
+            },
+            async (client, ct) =>
+            {
+                var result = await client.GetAccountDetailsAsync(AccountNumber, ct);
+                result.Outcome.Should().Be(CoreBankClientOutcome.Success);
             });
-        });
-        var client = CreateClient(handler);
+    }
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+    [Fact]
+    public async Task ProcessTransactionAsync_propagates_current_trace_context()
+    {
+        await AssertTraceContextAsync(
+            new
+            {
+                transactionId = "txn-1",
+                status = "Pending",
+                processedAt = new DateTimeOffset(2026, 8, 29, 10, 0, 0, TimeSpan.Zero)
+            },
+            async (client, ct) =>
+            {
+                var request = new TransactionSubmissionRequest(
+                    AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+                var result = await client.ProcessTransactionAsync(request, ct);
+                result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+            });
+    }
 
-        result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+    [Fact]
+    public async Task GetTransactionStatusAsync_propagates_current_trace_context()
+    {
+        await AssertTraceContextAsync(
+            new { transactionId = "txn-1", status = "Pending" },
+            async (client, ct) =>
+            {
+                var result = await client.GetTransactionStatusAsync("txn-1", ct);
+                result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+            });
     }
 
     [Fact]
@@ -531,6 +655,34 @@ public class CoreBankApiClientTests
         var adapter = new HttpClientRequestAdapter(new AnonymousAuthenticationProvider(), httpClient: httpClient);
         var generatedClient = new GeneratedClient(adapter);
         return new KiotaCoreBankApiClient(generatedClient);
+    }
+
+    private static async Task AssertTraceContextAsync(
+        object responseBody,
+        Func<KiotaCoreBankApiClient, CancellationToken, Task> call)
+    {
+        using var activitySource = new ActivitySource(nameof(CoreBankApiClientTests));
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = _ => true,
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        using var activity = activitySource.StartActivity("test-activity");
+        activity!.TraceStateString = "vendor=value";
+        var expectedTraceParent = activity.Id;
+
+        using var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            request.Headers.TryGetValues("traceparent", out var traceParents).Should().BeTrue();
+            traceParents!.Should().ContainSingle(expectedTraceParent);
+            request.Headers.TryGetValues("tracestate", out var traceStates).Should().BeTrue();
+            traceStates!.Should().ContainSingle("vendor=value");
+            return JsonResponse(HttpStatusCode.OK, responseBody);
+        });
+
+        await call(CreateClient(handler), TestContext.Current.CancellationToken);
     }
 
     private static HttpResponseMessage JsonResponse(HttpStatusCode statusCode, object body) =>

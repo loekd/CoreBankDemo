@@ -49,8 +49,8 @@
     <!-- Model Context Protocol -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
     <!-- Kiota (story 5.3): runtime dependencies consumed by the generated
-         CoreBank client and its adapter. Pinned to match the
-         microsoft.openapi.kiota CLI version in .config/dotnet-tools.json. -->
+         CoreBank client and its adapter. Pinned to a version known to be
+         compatible with the CLI in .config/dotnet-tools.json. -->
     <PackageVersion Include="Microsoft.Kiota.Bundle" Version="2.0.0" />
     <!-- Story 5.3: the adapter recognizes the standard resilience pipeline's
          own timeout exception type explicitly. Pinned to the exact Polly.Core

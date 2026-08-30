@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Kiota.Abstractions;
 using Polly.Timeout;
 using GeneratedClient = CoreBankDemo.PaymentsAPI.GeneratedClients.CoreBank.CoreBankApiKiotaClient;
@@ -39,8 +40,11 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBankApiClient
 {
     public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-        string accountNumber, CancellationToken cancellationToken) =>
-        ExecuteAsync(
+        string accountNumber, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountNumber);
+
+        return ExecuteAsync(
             async ct =>
             {
                 var body = new GeneratedModels.AccountValidationRequest { AccountNumber = accountNumber };
@@ -63,10 +67,14 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
                     response.Balance);
             },
             cancellationToken);
+    }
 
     public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
-        string accountNumber, CancellationToken cancellationToken) =>
-        ExecuteAsync(
+        string accountNumber, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountNumber);
+
+        return ExecuteAsync(
             async ct =>
             {
                 var response = await client.Api.Accounts[accountNumber]
@@ -97,6 +105,7 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
                     response.UpdatedAt);
             },
             cancellationToken);
+    }
 
     public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
         TransactionSubmissionRequest request, CancellationToken cancellationToken)
@@ -140,8 +149,11 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
     }
 
     public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
-        string idempotencyKey, CancellationToken cancellationToken) =>
-        ExecuteAsync(
+        string idempotencyKey, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(idempotencyKey);
+
+        return ExecuteAsync(
             async ct =>
             {
                 var response = await client.Api.Transactions[idempotencyKey]
@@ -164,6 +176,7 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
                     response.ProcessedAt);
             },
             cancellationToken);
+    }
 
     /// <summary>
     /// Shared exception-to-outcome classification for every operation above.
@@ -190,6 +203,13 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
             // The caller asked for this — propagate cooperatively rather than
             // reporting it as a transport outcome (edge-case matrix).
             throw;
+        }
+        catch (JsonException)
+        {
+            var statusCode = statusCapture.StatusCode;
+            return statusCode is >= 400 and <= 599
+                ? CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, statusCode)
+                : CoreBankResult<T>.Retry(CoreBankRetryReason.MalformedResponse);
         }
         catch (ApiException ex)
         {
