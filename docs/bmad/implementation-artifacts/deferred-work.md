@@ -115,3 +115,15 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-5-3-contract-generated-kiota-corebank-client.md`
   summary: "`LastResponseStatusHandler`'s single static `AsyncLocal<StatusCapture?>` slot would cross-contaminate if a future caller ever issued two `ICoreBankApiClient` calls concurrently from the same DI scope before either awaited far enough to send its request — the second `BeginCapture()` would overwrite the first call's capture slot."
   evidence: Flagged independently by both blind-hunter and the verification-gap reviewer. Not reachable today: the verification-gap reviewer confirmed (via a real full-suite test run, 146/146 passing, 100% line / 98.91% branch coverage) that every current caller — all tests in this diff, and story 5.4's `HttpForwardOutboxDeliveryStrategy` — invokes `ICoreBankApiClient` sequentially, never concurrently, from one scope.
+- source_spec: `docs/bmad/implementation-artifacts/spec-fix-dapr-replica-integration.md`
+  summary: Reconcile Story 6.3's reset owner so the AppHost initializer, not k6 setup, owns reset-before-release ordering.
+  evidence: ADR-014 assigns ordering to an explicit AppHost initializer while the current Story 6.3 spec describes k6's `/reset` call as the initializer.
+- source_spec: `docs/bmad/implementation-artifacts/spec-fix-dapr-replica-integration.md`
+  summary: Make the Story 6.3 Redis release protocol subscribe before checking the generation marker and atomically advance/publish that generation.
+  evidence: Checking the marker before subscribing permits a release between those operations to be missed, leaving a late replica blocked.
+- source_spec: `docs/bmad/implementation-artifacts/spec-fix-dapr-replica-integration.md`
+  summary: Define pause/reset/release semantics before allowing a second `/reset` after one-way processor gates have opened.
+  evidence: The current idempotent-reset matrix permits a second reset while processors remain active and can read or write the stores being truncated.
+- source_spec: `docs/bmad/implementation-artifacts/spec-fix-dapr-replica-integration.md`
+  summary: Require acknowledgements from every expected replica before the load initializer allows k6 to start.
+  evidence: A successful Redis publish proves delivery was attempted, not that every replica opened its local processor gate.

@@ -1,7 +1,8 @@
 ---
 title: 'Story 6.3: Replicated local API topology'
 type: 'feature'
-created: '2026-08-30'
+created: '2026-08-29'
+updated: '2026-08-30'
 status: 'ready-for-dev'
 review_loop_iteration: 0
 baseline_commit: '3b17e6b4e55c955e2b600212d60f6f3f85a27cef'
@@ -91,7 +92,7 @@ The release channel is control-plane only: subscribers open a local one-way gate
 - `dotnet test CoreBankDemo.UnitTests.slnf` -- expected: Docker-free gate green at >=90% line coverage.
 - `dotnet test CoreBankDemo.IntegrationTests.slnf` -- expected: PostgreSQL/Redis persistence and contention proofs green.
 - `dotnet test CoreBankDemo.Rebuild.slnf` -- expected: combined rebuild gate green.
-- Start both AppHosts with the `aspire-launch` skill and inspect via `aspire-mcp` -- expected: 2x2 healthy APIs/sidecars, stable ports, and no pre-release processing in the load graph.
+- Start both AppHosts with the `aspire-launch` skill and inspect via `aspire-mcp` -- expected: 2x2 healthy API processes, one healthy Dapr pub/sub adapter per logical API service, stable ports, and no pre-release processing in the load graph.
 - `git diff --check` -- expected: no whitespace errors.
 
 ## Auto Run Result

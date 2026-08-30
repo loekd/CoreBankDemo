@@ -117,6 +117,55 @@ public class NoDaprServiceInvocationArchitectureTests
                 "the CoreBankAPI reference must apply to both normal and DevProxy orchestration");
     }
 
+    [Fact]
+    public void AppHost_keeps_two_replicas_behind_one_logical_dapr_adapter_per_api()
+    {
+        var repoRoot = FindRepoRoot();
+        var appHostPath = Path.Combine(repoRoot, "CoreBankDemo.AppHost", "AppHost.cs");
+        var source = File.ReadAllText(appHostPath);
+
+        var coreBankBlock = Slice(
+            source,
+            "var coreBankApi =",
+            "// Payments API (Main Service)");
+        var paymentsBlock = Slice(
+            source,
+            "var paymentsApi =",
+            "// Story 6.7 (ADR-008)");
+
+        AssertLogicalReplicatedService(coreBankBlock);
+        AssertLogicalReplicatedService(paymentsBlock);
+
+        paymentsBlock.Should().Contain(".WithExternalHttpEndpoints()");
+        paymentsBlock.Should().Contain(".WithHttpEndpoint(name: \"load-test\", port: 5295)");
+
+        var launchSettingsPath = Path.Combine(
+            repoRoot,
+            "CoreBankDemo.PaymentsAPI",
+            "Properties",
+            "launchSettings.json");
+        File.ReadAllText(launchSettingsPath).Should().Contain("\"applicationUrl\": \"http://127.0.0.1:5294\"");
+    }
+
+    private static string Slice(string source, string startMarker, string endMarker)
+    {
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
+
+        start.Should().BeGreaterThanOrEqualTo(0);
+        end.Should().BeGreaterThan(start);
+
+        return source[start..end];
+    }
+
+    private static void AssertLogicalReplicatedService(string sourceBlock)
+    {
+        Regex.Matches(sourceBlock, @"\.WithReplicas\(2\)")
+            .Should().ContainSingle("each logical API service must run exactly two application replicas");
+        Regex.Matches(sourceBlock, @"\.WithDaprSidecar\(")
+            .Should().ContainSingle("each logical API service owns one shared Dapr pub/sub adapter");
+    }
+
     private static IEnumerable<string> EnumerateScannedFiles(string repoRoot)
     {
         var scopedRoots = Directory

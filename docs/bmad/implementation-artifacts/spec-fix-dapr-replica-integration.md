@@ -64,6 +64,7 @@ context:
 ## Spec Change Log
 
 - 2026-08-30: Implemented the shared logical Dapr adapter amendment, proved the 2x2 application topology and CloudEvent round trip, and returned Story 6.3 to ready-for-dev.
+- 2026-08-30: Review hardened the amendment with an executable AppHost architecture guard, explicit ADR amendment history/adapter terminology, corrected Story 6.3 provenance and resource-count wording, and existing retry-test evidence.
 
 ## Verification
 
@@ -78,7 +79,8 @@ context:
 - Aspire reported two healthy replicas of each API and one healthy Dapr CLI adapter per logical service.
 - 80 partition-balanced payments produced 240 completed CloudEvents. CoreBank replica completion evidence split 108/132; Payments delivery split 157/83.
 - PostgreSQL confirmed all 80 transactions and all 240 published/received events completed with zero retries, pending rows, or failures.
-- `dotnet test CoreBankDemo.UnitTests.slnf --no-restore` passed: 537 tests passed, one pre-existing real-Redis test skipped by the Docker-free tier, and every measured project remained above 90% line coverage.
+- `dotnet test CoreBankDemo.UnitTests.slnf --no-restore` passed after review: 538 tests passed, one pre-existing real-Redis test skipped by the Docker-free tier, and every measured project remained above 90% line coverage.
+- Existing `DaprOutboxDeliveryStrategyTests` and `OutboxProcessorBaseTests` remained green, preserving publish-failure propagation into the kernel retry path.
 - `git diff --check` passed.
 
 ## Suggested Review Order
@@ -112,3 +114,8 @@ context:
 
 - Story 6.3 records the successful spike and resumes ready-for-dev.
   [`spec-6-3-replicated-local-api-topology.md:102`](spec-6-3-replicated-local-api-topology.md#L102)
+
+**Executable guard**
+
+- Source-level assertions prevent replica, adapter, and stable-port declarations from regressing.
+  [`NoDaprServiceInvocationArchitectureTests.cs:122`](../../../tests/CoreBankDemo.PaymentsAPI.Tests/NoDaprServiceInvocationArchitectureTests.cs#L122)

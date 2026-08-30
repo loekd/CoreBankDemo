@@ -1,9 +1,10 @@
 # ADR-014: Replicated local topology behind stable Aspire ingress
 
 **Date:** 2026-08-29
-**Status:** Accepted
+**Status:** Accepted — amended 2026-08-30
 **Deciders:** Architecture team
 **Supersedes:** Single-instance local topology assumptions
+**Amendment:** The original per-replica Dapr-sidecar requirement was replaced with one pub/sub adapter per logical API service after the pinned Aspire integration proved replica-unaware.
 
 ## Context
 
@@ -13,7 +14,7 @@ A single local instance can demonstrate Inbox and Outbox flows but cannot prove 
 
 The regular and load-test AppHosts run two PaymentsAPI replicas and two CoreBankAPI replicas by default. Aspire's proxy provides one stable PaymentsAPI ingress at port 5294 for the regular demo and port 5295 for load tests. PaymentsAPI resolves the logical `corebank-api` service endpoint; no client binds to a replica address and no gateway is introduced.
 
-Replicas of each service share their PostgreSQL database, Redis lock store, and logical Dapr app identity. Dapr provides one pub/sub adapter per logical API service: both CoreBankAPI replicas publish through the logical CoreBank adapter, and the logical Payments adapter delivers subscriptions through Aspire's stable PaymentsAPI proxy. The adapters are not infrastructure replicas and do not participate in the distributed-lock proof. Schema initialization must be safe when application replicas start concurrently.
+Replicas of each service share their PostgreSQL database, Redis lock store, and logical Dapr app identity. Dapr provides one pub/sub adapter per logical API service. Here, an adapter means the single Dapr runtime/CLI process created by `WithDaprSidecar` for the logical Aspire project resource: it retains that service's logical app id and targets Aspire's stable service proxy rather than a replica address. Both CoreBankAPI replicas publish through the logical CoreBank adapter, and the logical Payments adapter delivers subscriptions through Aspire's stable PaymentsAPI proxy. The adapters are not infrastructure replicas and do not participate in the distributed-lock proof. Schema initialization must be safe when application replicas start concurrently.
 
 The LoadTests AppHost owns disposable infrastructure. Both APIs start far enough to run their existing schema initialization, but their hosted Inbox/Outbox processors wait on a load-test-only processing-start gate before the first poll. After the APIs and LoadTestSupport are healthy, an explicit one-shot reset initializer resets the databases and releases each API's processing gate. k6 waits for that initializer and may verify the clean state, but it is not the ordering mechanism. Acceptance evidence identifies the processing replica and proves same-partition exclusion and durable ordering, including equal ordering timestamps, while different partitions progress concurrently.
 
@@ -35,11 +36,11 @@ The LoadTests AppHost owns disposable infrastructure. Both APIs start far enough
 - Different partitions can demonstrate parallel progress without weakening per-partition ordering.
 
 ### Negative / Trade-offs
-- Local startup consumes more CPU, memory, ports, and sidecars.
+- Local startup consumes more CPU, memory, and runtime resources for the additional application processes.
 - Database initialization and test reset require explicit coordination.
 - Per-process circuit-breaker state remains independent across PaymentsAPI replicas.
 - Dapr pub/sub availability is represented by one adapter per logical service, so this topology demonstrates application concurrency and resilience rather than infrastructure high availability.
 
 ## Key takeaway
 
-> Run competing replicas by default, but expose one stable Aspire-proxied service endpoint to every client.
+> Run competing application replicas behind stable Aspire proxies, with one Dapr pub/sub adapter per logical API service.
