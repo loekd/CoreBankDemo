@@ -51,7 +51,7 @@ export const options = {
 };
 
 // ---------------------------------------------------------------------------
-// Setup — called once before load. Resets database and verifies APIs.
+// Setup — called once after the AppHost reset initializer and verifies APIs.
 // ---------------------------------------------------------------------------
 export function setup() {
     console.log(`Starting load test: ${UNIQUE_COUNT} unique transactions, ${VU_COUNT} VUs, ${RETRY_COUNT} intentional retries`);
@@ -78,24 +78,6 @@ export function setup() {
     if (!paymentsHealthy) {
         console.error(`Payments API health check failed: status=${paymentsHealthRes.status}, body=${paymentsHealthRes.body ? paymentsHealthRes.body.substring(0, 200) : 'empty'}`);
         throw new Error(`Payments API is not reachable at ${PAYMENTS_URL}/health - check that the service is running on the correct port`);
-    }
-
-    // Reset database to clean state
-    console.log('Resetting database to clean state...');
-    const resetRes = http.post(`${SUPPORT_URL}/reset`, null, { timeout: '30s' });
-    const resetSuccess = check(resetRes, {
-        'database reset successful': (r) => r.status === 200,
-        'reset: not 404 (endpoint exists)': (r) => r.status !== 404,
-        'reset: not 500 (no server error)': (r) => r.status !== 500,
-    });
-    if (!resetSuccess) {
-        console.error(`Database reset failed: status=${resetRes.status}, body=${resetRes.body ? resetRes.body.substring(0, 200) : 'empty'}`);
-        throw new Error(`Database reset failed - cannot proceed with load test`);
-    }
-
-    if (resetRes.status === 200) {
-        const resetData = JSON.parse(resetRes.body);
-        console.log(`Reset complete: ${resetData.accountsReset} accounts, total balance: €${resetData.totalBalance.toLocaleString()}`);
     }
 
     return { startTime: Date.now() };
@@ -289,5 +271,4 @@ export function teardown(data) {
         console.log('✓ All exactly-once guarantees and balance correctness verified successfully');
     }
 }
-
 

@@ -25,7 +25,8 @@ public sealed class PaymentsOutboxProcessor : OutboxProcessorBase<OutboxMessage>
         TimeProvider timeProvider,
         ILogger<PaymentsOutboxProcessor> logger,
         BusinessMetrics businessMetrics,
-        IOptions<OutboxProcessingOptions> options)
+        IOptions<OutboxProcessingOptions> options,
+        IProcessorStartGate? startGate = null)
         : base(
             lockService,
             scopeFactory,
@@ -38,7 +39,8 @@ public sealed class PaymentsOutboxProcessor : OutboxProcessorBase<OutboxMessage>
                 PartitionCount = options.Value.PartitionCount,
                 LockExpirySeconds = options.Value.LockExpirySeconds,
                 PollingInterval = TimeSpan.FromMilliseconds(options.Value.PollingIntervalMs)
-            })
+            },
+            startGate)
     {
     }
 

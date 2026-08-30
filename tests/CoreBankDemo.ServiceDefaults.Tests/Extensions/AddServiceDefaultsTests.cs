@@ -200,6 +200,43 @@ public class AddServiceDefaultsTests
         lockService.Should().BeOfType<NoOpDistributedLockService>();
     }
 
+    [Fact]
+    public void Processor_start_gate_is_always_open_by_default()
+    {
+        var builder = CreateBuilder();
+
+        builder.AddServiceDefaults("test-service");
+        using var provider = builder.Services.BuildServiceProvider();
+
+        provider.GetRequiredService<IProcessorStartGate>().Should().BeOfType<ProcessorStartGate>();
+        provider.GetRequiredService<IProcessorStartGatePublisher>()
+            .Should().BeSameAs(provider.GetRequiredService<IProcessorStartGate>());
+    }
+
+    [Fact]
+    public void Processor_start_gate_uses_the_shared_Redis_connection_when_enabled()
+    {
+        var builder = CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ProcessorStartGate:Enabled"] = "true",
+            ["ProcessorStartGate:ExpectedParticipants"] = "4"
+        });
+        var multiplexer = new Mock<StackExchange.Redis.IConnectionMultiplexer>();
+        multiplexer.Setup(m => m.GetDatabase(It.IsAny<int>(), It.IsAny<object>()))
+            .Returns(Mock.Of<StackExchange.Redis.IDatabase>());
+        multiplexer.Setup(m => m.GetSubscriber(It.IsAny<object>()))
+            .Returns(Mock.Of<StackExchange.Redis.ISubscriber>());
+        builder.Services.AddSingleton(multiplexer.Object);
+
+        builder.AddServiceDefaults("test-service");
+        using var provider = builder.Services.BuildServiceProvider();
+
+        provider.GetRequiredService<IProcessorStartGate>().Should().BeOfType<RedisProcessorStartGate>();
+        provider.GetRequiredService<IProcessorStartGatePublisher>()
+            .Should().BeSameAs(provider.GetRequiredService<IProcessorStartGate>());
+    }
+
     // ---- IEventPublisher (story 3.3, newly wired by this story) ----
 
     [Fact]

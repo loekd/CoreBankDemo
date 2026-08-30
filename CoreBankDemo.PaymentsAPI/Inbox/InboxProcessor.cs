@@ -26,7 +26,8 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage>
         TimeProvider timeProvider,
         ILogger<InboxProcessor> logger,
         BusinessMetrics businessMetrics,
-        IOptions<InboxProcessingOptions> options)
+        IOptions<InboxProcessingOptions> options,
+        IProcessorStartGate? startGate = null)
         : base(
             lockService,
             scopeFactory,
@@ -39,7 +40,8 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage>
                 PartitionCount = options.Value.PartitionCount,
                 LockExpirySeconds = options.Value.LockExpirySeconds,
                 PollingInterval = TimeSpan.FromMilliseconds(options.Value.PollingIntervalMs)
-            })
+            },
+            startGate)
     {
     }
 

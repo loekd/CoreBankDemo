@@ -80,6 +80,24 @@ public class ProcessingOptionsRegistrationTests
             .Which.Failures.Should().Contain(f => f.Contains("PartitionCount"));
     }
 
+    [Fact]
+    public void AddInboxProcessingOptions_rejects_a_partition_count_other_than_four()
+    {
+        var builder = CreateBuilder(InboxProcessingOptions.SectionName, new()
+        {
+            ["PartitionCount"] = "2",
+            ["LockExpirySeconds"] = "30",
+            ["PollingIntervalMs"] = "5000",
+        });
+
+        builder.AddInboxProcessingOptions();
+        using var provider = builder.Services.BuildServiceProvider();
+        var act = provider.GetRequiredService<IStartupValidator>().Validate;
+
+        act.Should().Throw<OptionsValidationException>()
+            .Which.Failures.Should().Contain(f => f.Contains("exactly 4"));
+    }
+
     // ---- AddOutboxProcessingOptions ----
 
     [Fact]
@@ -119,6 +137,24 @@ public class ProcessingOptionsRegistrationTests
 
         act.Should().Throw<OptionsValidationException>()
             .Which.Failures.Should().Contain(f => f.Contains("LockExpirySeconds"));
+    }
+
+    [Fact]
+    public void AddOutboxProcessingOptions_rejects_a_partition_count_other_than_four()
+    {
+        var builder = CreateBuilder(OutboxProcessingOptions.SectionName, new()
+        {
+            ["PartitionCount"] = "3",
+            ["LockExpirySeconds"] = "30",
+            ["PollingIntervalMs"] = "5000",
+        });
+
+        builder.AddOutboxProcessingOptions();
+        using var provider = builder.Services.BuildServiceProvider();
+        var act = provider.GetRequiredService<IStartupValidator>().Validate;
+
+        act.Should().Throw<OptionsValidationException>()
+            .Which.Failures.Should().Contain(f => f.Contains("exactly 4"));
     }
 
     // ---- AddMessagingOutboxProcessingOptions ----
@@ -164,5 +200,25 @@ public class ProcessingOptionsRegistrationTests
 
         act.Should().Throw<OptionsValidationException>()
             .Which.Failures.Should().Contain(f => f.Contains("PubSubName"));
+    }
+
+    [Fact]
+    public void AddMessagingOutboxProcessingOptions_rejects_a_partition_count_other_than_four()
+    {
+        var builder = CreateBuilder(MessagingOutboxProcessingOptions.SectionName, new()
+        {
+            ["PartitionCount"] = "5",
+            ["LockExpirySeconds"] = "30",
+            ["PollingIntervalMs"] = "5000",
+            ["PubSubName"] = "pubsub",
+            ["TopicName"] = "events",
+        });
+
+        builder.AddMessagingOutboxProcessingOptions();
+        using var provider = builder.Services.BuildServiceProvider();
+        var act = provider.GetRequiredService<IStartupValidator>().Validate;
+
+        act.Should().Throw<OptionsValidationException>()
+            .Which.Failures.Should().Contain(f => f.Contains("exactly 4"));
     }
 }

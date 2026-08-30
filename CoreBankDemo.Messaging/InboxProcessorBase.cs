@@ -70,6 +70,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     private readonly ILogger _logger;
     private readonly InboxProcessorOptions _options;
     private readonly BusinessMetrics _businessMetrics;
+    private readonly IProcessorStartGate _startGate;
 
     protected InboxProcessorBase(
         IDistributedLockService lockService,
@@ -78,7 +79,8 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         TimeProvider timeProvider,
         ILogger logger,
         BusinessMetrics businessMetrics,
-        InboxProcessorOptions? options = null)
+        InboxProcessorOptions? options = null,
+        IProcessorStartGate? startGate = null)
     {
         _lockService = lockService ?? throw new ArgumentNullException(nameof(lockService));
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
@@ -87,6 +89,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _businessMetrics = businessMetrics ?? throw new ArgumentNullException(nameof(businessMetrics));
         _options = options ?? new InboxProcessorOptions();
+        _startGate = startGate ?? new ProcessorStartGate();
     }
 
     /// <summary>
@@ -108,6 +111,15 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        try
+        {
+            await _startGate.WaitAsync(stoppingToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             await RunTickAsync(stoppingToken).ConfigureAwait(false);

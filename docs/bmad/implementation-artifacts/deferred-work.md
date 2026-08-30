@@ -127,3 +127,18 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-fix-dapr-replica-integration.md`
   summary: Require acknowledgements from every expected replica before the load initializer allows k6 to start.
   evidence: A successful Redis publish proves delivery was attempted, not that every replica opened its local processor gate.
+- source_spec: `docs/bmad/implementation-artifacts/spec-6-3-replicated-local-api-topology.md`
+  summary: Run both completed AppHosts and retain live 2x2 topology, reset-before-processing, stable-ingress, and shared-Dapr evidence.
+  evidence: Builds and executable PostgreSQL/Redis acceptance tests pass, but the execution sandbox denied Aspire DCP loopback traffic; the user accepted closure and retained this live run as a human follow-up.
+- source_spec: `docs/bmad/implementation-artifacts/spec-6-3-replicated-local-api-topology.md`
+  summary: Record a failed HTTP delivery attempt when `ProcessTransactionAsync` throws a non-cancellation transport exception.
+  evidence: Story 6.5 records delivery outcomes only after `ProcessTransactionAsync` returns, so thrown transport attempts currently emit no failed delivery metric.
+- source_spec: `docs/bmad/implementation-artifacts/spec-6-3-replicated-local-api-topology.md`
+  summary: Count tracked CoreBank outbox additions when an enqueuer adds a row and then throws before returning.
+  evidence: `TransactionExecutionHandler` increments `enqueuedEventCount` only after each enqueuer returns, so rollback metrics undercount an add-then-throw path.
+- source_spec: `docs/bmad/implementation-artifacts/spec-6-3-replicated-local-api-topology.md`
+  summary: Assert production PostgreSQL repository transition return values for applied and already-terminal completion/failure paths.
+  evidence: Existing persistence tests verify durable state but discard `MessageTransitionOutcome`, while processor tests supply mocked outcomes.
+- source_spec: `docs/bmad/implementation-artifacts/spec-6-3-replicated-local-api-topology.md`
+  summary: Prevent incompatible `BusinessMetrics.StoreName` and `StoreKind` combinations.
+  evidence: The typed metrics API accepts both enums independently and can emit impossible store-name/store-kind series if a caller pairs them incorrectly.

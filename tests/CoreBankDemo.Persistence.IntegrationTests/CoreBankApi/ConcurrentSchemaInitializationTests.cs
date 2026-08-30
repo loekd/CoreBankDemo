@@ -27,8 +27,10 @@ public class ConcurrentSchemaInitializationTests(PostgresContainerFixture fixtur
         async Task StartupAsync()
         {
             await using var context = CreateContext<CoreBankDbContext>();
-            await context.Database.EnsureCreatedAsync(ct);
-            await new DemoAccountSeeder(context, TimeProvider).SeedAsync(ct);
+            await CoreBankDatabaseInitializer.InitializeAsync(
+                context,
+                new DemoAccountSeeder(context, TimeProvider),
+                ct);
         }
 
         var act = () => Task.WhenAll(StartupAsync(), StartupAsync())
@@ -55,15 +57,39 @@ public class ConcurrentSchemaInitializationTests(PostgresContainerFixture fixtur
 
         await using (var first = CreateContext<CoreBankDbContext>())
         {
-            (await first.Database.EnsureCreatedAsync(ct)).Should().BeTrue();
-            await new DemoAccountSeeder(first, TimeProvider).SeedAsync(ct);
+            await CoreBankDatabaseInitializer.InitializeAsync(
+                first,
+                new DemoAccountSeeder(first, TimeProvider),
+                ct);
         }
 
         await using var second = CreateContext<CoreBankDbContext>();
-        (await second.Database.EnsureCreatedAsync(ct))
-            .Should().BeFalse("the schema already exists, so the second replica must not recreate it");
-        await new DemoAccountSeeder(second, TimeProvider).SeedAsync(ct);
+        await CoreBankDatabaseInitializer.InitializeAsync(
+            second,
+            new DemoAccountSeeder(second, TimeProvider),
+            ct);
 
         (await second.Accounts.CountAsync(ct)).Should().Be(3);
+    }
+
+    [Fact]
+    public async Task Two_payments_replicas_initializing_one_empty_database_converge_to_one_schema()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        async Task StartupAsync()
+        {
+            await using var context = CreateContext<CoreBankDemo.PaymentsAPI.PaymentsDbContext>();
+            await CoreBankDemo.PaymentsAPI.PaymentsDatabaseInitializer.InitializeAsync(context, ct);
+        }
+
+        var act = () => Task.WhenAll(StartupAsync(), StartupAsync())
+            .WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
+
+        await act.Should().NotThrowAsync();
+
+        await using var verification = CreateContext<CoreBankDemo.PaymentsAPI.PaymentsDbContext>();
+        (await verification.OutboxMessages.CountAsync(ct)).Should().Be(0);
+        (await verification.InboxMessages.CountAsync(ct)).Should().Be(0);
     }
 }

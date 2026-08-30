@@ -137,7 +137,7 @@ public class NoDaprServiceInvocationArchitectureTests
         AssertLogicalReplicatedService(paymentsBlock);
 
         paymentsBlock.Should().Contain(".WithExternalHttpEndpoints()");
-        paymentsBlock.Should().Contain(".WithHttpEndpoint(name: \"load-test\", port: 5295)");
+        paymentsBlock.Should().NotContain("5295");
 
         var launchSettingsPath = Path.Combine(
             repoRoot,
@@ -145,6 +145,50 @@ public class NoDaprServiceInvocationArchitectureTests
             "Properties",
             "launchSettings.json");
         File.ReadAllText(launchSettingsPath).Should().Contain("\"applicationUrl\": \"http://127.0.0.1:5294\"");
+    }
+
+    [Fact]
+    public void LoadTest_AppHost_owns_the_replicated_topology_and_gates_k6_on_the_initializer()
+    {
+        var repoRoot = FindRepoRoot();
+        var source = File.ReadAllText(Path.Combine(repoRoot, "CoreBankDemo.LoadTests", "AppHost.cs"));
+
+        Regex.Matches(source, @"\.WithReplicas\(2\)").Should().HaveCount(2);
+        Regex.Matches(source, @"\.WithDaprSidecar\(").Should().HaveCount(2);
+        source.Should().Contain("builder.AddPostgres(\"postgres\"");
+        source.Should().Contain("builder.AddRedis(\"redis\"");
+        source.Should().Contain(".WithEndpoint(\"http\", endpoint => endpoint.Port = 5295)");
+        source.Should().Contain(".WithEnvironment(\"ProcessorStartGate__Enabled\", \"true\")");
+        source.Should().Contain(".WithEnvironment(\"ProcessorStartGate__ExpectedParticipants\", \"4\")");
+        source.Should().Contain("builder.AddProject<Projects.CoreBankDemo_LoadTestInitializer>");
+        source.Should().Contain(".WithReference(loadTestSupport)");
+        source.Should().Contain(".WaitFor(coreBankApi)");
+        source.Should().Contain(".WaitFor(paymentsApi)");
+        source.Should().Contain(".WaitFor(loadTestSupport)");
+        source.Should().Contain(".WaitForCompletion(initializer)");
+        source.Should().NotContain("Host=localhost");
+        source.Should().NotContain("ConnectionStrings__");
+
+        var k6 = File.ReadAllText(Path.Combine(repoRoot, "k6", "script.js"));
+        k6.Should().NotContain("http.post(`${SUPPORT_URL}/reset`");
+    }
+
+    [Fact]
+    public void Replicated_topology_has_four_partitions_and_no_replica_or_obsolete_lockstore_wiring()
+    {
+        var repoRoot = FindRepoRoot();
+        var coreBankSettings = File.ReadAllText(
+            Path.Combine(repoRoot, "CoreBankDemo.CoreBankAPI", "appsettings.json"));
+        var paymentsSettings = File.ReadAllText(
+            Path.Combine(repoRoot, "CoreBankDemo.PaymentsAPI", "appsettings.json"));
+        var appHosts = File.ReadAllText(Path.Combine(repoRoot, "CoreBankDemo.AppHost", "AppHost.cs"))
+            + File.ReadAllText(Path.Combine(repoRoot, "CoreBankDemo.LoadTests", "AppHost.cs"));
+
+        Regex.Matches(coreBankSettings + paymentsSettings, "\\\"PartitionCount\\\"\\s*:\\s*4")
+            .Should().HaveCount(4);
+        appHosts.Should().NotContain("lockstore");
+        appHosts.Should().NotContain("replica-address");
+        appHosts.Should().NotContain("replicaAddress");
     }
 
     private static string Slice(string source, string startMarker, string endMarker)
@@ -197,7 +241,7 @@ public class NoDaprServiceInvocationArchitectureTests
     {
         var relativePath = Path.GetRelativePath(repoRoot, file);
         var normalizedRelativePath = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-        if (string.Equals(normalizedRelativePath, GuardRelativePath, StringComparison.Ordinal))
+        if (string.Equals(normalizedRelativePath, GuardRelativePath, StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

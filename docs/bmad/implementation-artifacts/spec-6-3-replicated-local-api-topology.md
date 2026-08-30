@@ -3,8 +3,8 @@ title: 'Story 6.3: Replicated local API topology'
 type: 'feature'
 created: '2026-08-29'
 updated: '2026-08-30'
-status: 'ready-for-dev'
-review_loop_iteration: 0
+status: 'done'
+review_loop_iteration: 1
 baseline_commit: '3b17e6b4e55c955e2b600212d60f6f3f85a27cef'
 context:
   - '{project-root}/docs/bmad/constraints.md'
@@ -52,19 +52,20 @@ deferred: []
 - `CoreBankDemo.LoadTestSupport/Endpoints/ResetEndpoints.cs` -- publish the release only after both database resets commit successfully.
 - `CoreBankDemo.CoreBankAPI/appsettings.json` -- change the remaining Inbox partition count from 2 to 4.
 - `tests/CoreBankDemo.Messaging.Tests`, `tests/CoreBankDemo.Persistence.IntegrationTests`, `tests/CoreBankDemo.LoadTestSupport.Tests` -- reuse processor harnesses, PostgreSQL assembly fixture, and real Redis lock setup.
-- `k6/script.js` -- existing setup already calls health then `/reset`; keep this as the one-shot initializer and ensure failure aborts load.
+- `CoreBankDemo.LoadTestInitializer/Program.cs` -- one-shot AppHost resource calls `/reset` and must complete before k6 starts.
+- `k6/script.js` -- verifies healthy endpoints after the AppHost-owned initializer completes; it never owns reset ordering.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- `CoreBankDemo.ServiceDefaults/*ProcessorStartGate*.cs`, `Extensions.cs` -- add an always-open default and a load-test Redis subscriber/publisher with idempotent local release.
-- `CoreBankDemo.Messaging/InboxProcessorBase.cs`, `OutboxProcessorBase.cs` plus processor tests -- inject the gate and prove zero ticks before release, normal cancellation, and unchanged default startup.
-- API startup files plus persistence tests -- serialize schema creation and CoreBank seeding through a PostgreSQL advisory lock on the same open connection; prove concurrent startup on fresh databases.
-- Both AppHost files -- configure two replicas per API, one Dapr pub/sub adapter per logical service, stable ingress, disposable load infrastructure, shared dependencies, and health ordering.
-- `ResetEndpoints.cs` plus LoadTestSupport tests -- complete both existing database resets, then broadcast release; never release after either reset fails.
-- Persistence/Redis acceptance tests -- run two real processor instances and capture processor identity to prove same-partition exclusivity/order and different-partition concurrent progress.
-- Configuration and architecture guards -- enforce partition count four and reject replica-address, obsolete lockstore, or alternate transport wiring.
-- Run both AppHosts and verify healthy replicas, shared logical Dapr adapters, stable ports, reset-before-processing, and unchanged contracts.
+- [x] `CoreBankDemo.ServiceDefaults/*ProcessorStartGate*.cs`, `Extensions.cs` -- add an always-open default and a load-test Redis subscriber/publisher with idempotent local release.
+- [x] `CoreBankDemo.Messaging/InboxProcessorBase.cs`, `OutboxProcessorBase.cs` plus processor tests -- inject the gate and prove zero ticks before release, normal cancellation, and unchanged default startup.
+- [x] API startup files plus persistence tests -- serialize schema creation and CoreBank seeding through a PostgreSQL advisory lock on the same open connection; prove concurrent startup on fresh databases.
+- [x] Both AppHost files -- configure two replicas per API, one Dapr pub/sub adapter per logical service, stable ingress, disposable load infrastructure, shared dependencies, and health ordering.
+- [x] `ResetEndpoints.cs` plus LoadTestSupport tests -- complete both existing database resets, then broadcast release; never release after either reset fails.
+- [x] Persistence/Redis acceptance tests -- run two real processor instances and capture processor identity to prove same-partition exclusivity/order and different-partition concurrent progress.
+- [x] Configuration and architecture guards -- enforce partition count four and reject replica-address, obsolete lockstore, or alternate transport wiring.
+- [x] Run both AppHosts and verify healthy replicas, shared logical Dapr adapters, stable ports, reset-before-processing, and unchanged contracts. Automated startup was blocked by sandbox DCP loopback policy; the user accepted the recorded build/integration evidence and retained the live AppHost run as a human follow-up outside this workflow.
 
 **Acceptance Criteria:**
 - Given either AppHost, when it starts from empty infrastructure, then two healthy replicas of each API share logical dependencies, use one healthy Dapr pub/sub adapter per logical service, and expose one stable Payments endpoint.
@@ -80,11 +81,17 @@ deferred: []
 
 - 2026-08-30: Replanned from current code after the course correction. Replaced replica-specific gate-release ambiguity with a Redis broadcast feeding per-process in-memory gates; corrected the stale claim that PaymentsAPI had no hosted processors; retained the human-approved topology and acceptance intent.
 
+- 2026-08-30: Implemented the replicated load graph, AppHost-owned reset initializer, atomic Redis generation/release protocol with exact replica acknowledgements, one-shot reset safety, advisory-locked startup, four-partition guards, and real PostgreSQL/Redis replica evidence. Runtime verification remains blocked by sandbox DCP network policy.
+
 ## Review Triage Log
+
+- 2026-08-30: Accepted patch findings added retryable gate registration/marker recovery, bounded acknowledgement retry, rejection of zero-participant publishers, deterministic gate and overlap tests, serialized global-key Redis tests, corrected subscribe-before-marker documentation, and first-class solution inclusion for the initializer.
+- 2026-08-30: Deferred four Story 6.5 observability findings surfaced because this story's historical baseline predates 6.5, plus the user-owned live Aspire verification blocked by sandbox DCP policy.
+- 2026-08-30: Rejected replica-restart participant cleanup and run-scoped Redis keys because the load AppHost owns disposable Redis and intentionally fails closed when the expected pre-release process set changes; rejected source-text topology limitations because live acceptance remains an explicit human follow-up.
 
 ## Design Notes
 
-The release channel is control-plane only: subscribers open a local one-way gate and never transport business data. A new replica that starts after the release must determine the current run is open from a Redis generation marker before subscribing, avoiding a missed-publish deadlock. `/reset` advances that marker only after database reset succeeds. PostgreSQL advisory locking is scoped to schema initialization and uses an open application connection so `EnsureCreatedAsync` executes under the same session lock.
+The release channel is control-plane only: subscribers open a local one-way gate and never transport business data. A new replica subscribes before checking the current Redis generation marker, so a release cannot fall between those operations and cause a missed-publish deadlock. `/reset` advances that marker only after database reset succeeds. PostgreSQL advisory locking is scoped to schema initialization and uses an open application connection so `EnsureCreatedAsync` executes under the same session lock.
 
 ## Verification
 
@@ -97,8 +104,17 @@ The release channel is control-plane only: subscribers open a local one-way gate
 
 ## Auto Run Result
 
-Status: ready-for-dev
-Blocking condition: none
+Status: done
+Blocking condition: none. Live Aspire verification is a user-owned follow-up because the execution sandbox denies DCP's loopback Kubernetes API traffic.
+
+Implementation verification:
+
+- `dotnet test CoreBankDemo.UnitTests.slnf`: 629 passed, one pre-existing opt-in Redis test skipped; every measured logic project remained above 90% line coverage.
+- `dotnet test CoreBankDemo.IntegrationTests.slnf`: 157 passed; total measured line coverage 98.41%.
+- `dotnet test CoreBankDemo.Rebuild.slnf`: 786 passed, one pre-existing opt-in Redis test skipped.
+- Both AppHost projects build with zero errors. Existing MessagePack vulnerability warnings remain unchanged.
+- `git diff --check`: passed.
+- `aspire start` was attempted in regular and isolated modes after installing workspace-local tooling. Both attempts reached DCP and failed before resource creation because sandbox network policy denied DCP's loopback API traffic.
 
 The focused regular-AppHost spike passed with the amended topology:
 
@@ -108,4 +124,45 @@ The focused regular-AppHost spike passed with the amended topology:
 - The two Payments replicas stored 157 and 83 delivered events respectively. PostgreSQL confirmed 80 completed CoreBank inbox rows, 240 completed CoreBank outbox rows, and 240 completed Payments inbox rows, with zero pending or failed rows.
 - Event counts and retry state were unchanged end to end: 80 `com.corebank.transaction.completed` plus 160 `com.corebank.account.balance.updated`, all with `RetryCount = 0` in both the publishing and receiving stores.
 
-The spike used Aspire's isolated mode because the environment is shared, so host ports were dynamically remapped; the unchanged AppHost endpoint declarations continue to own the documented non-isolated ports. Story 6.3 is unblocked and ready to resume its remaining non-Dapr topology work.
+The earlier spike used Aspire's isolated mode because the environment was shared, so host ports were dynamically remapped; it unblocked the shared-Dapr design before the remaining Story 6.3 implementation began.
+
+## Suggested Review Order
+
+**Replicated topology**
+
+- Start with the disposable two-replica topology, shared adapters, reset initializer, and k6 dependency chain.
+  [`AppHost.cs:40`](../../../CoreBankDemo.LoadTests/AppHost.cs#L40)
+
+**Startup coordination**
+
+- Follow the generation-based Redis barrier, participant registration, acknowledgement, and missed-broadcast recovery.
+  [`ProcessorStartGate.cs:78`](../../../CoreBankDemo.ServiceDefaults/ProcessorStartGate.cs#L78)
+
+- See how reset commits both databases before atomically releasing all processor participants.
+  [`DatabaseResetCoordinator.cs:55`](../../../CoreBankDemo.LoadTestSupport/DatabaseResetCoordinator.cs#L55)
+
+- Confirm the one-shot initializer invokes reset before k6 can start.
+  [`Program.cs:15`](../../../CoreBankDemo.LoadTestInitializer/Program.cs#L15)
+
+- Verify inbox and outbox workers await the shared gate before processing.
+  [`OutboxProcessorBase.cs:102`](../../../CoreBankDemo.Messaging/OutboxProcessorBase.cs#L102)
+  [`InboxProcessorBase.cs:116`](../../../CoreBankDemo.Messaging/InboxProcessorBase.cs#L116)
+
+**Replica-safe persistence**
+
+- Review advisory locking around CoreBank schema initialization and seeding.
+  [`CoreBankDatabaseInitializer.cs:10`](../../../CoreBankDemo.CoreBankAPI/CoreBankDatabaseInitializer.cs#L10)
+
+- Review matching advisory locking around Payments schema initialization.
+  [`PaymentsDatabaseInitializer.cs:10`](../../../CoreBankDemo.PaymentsAPI/PaymentsDatabaseInitializer.cs#L10)
+
+**Integration evidence**
+
+- Prove same-partition contention, durable ordering, and cross-partition overlap on real PostgreSQL.
+  [`ReplicatedCoreBankOutboxProcessorTests.cs:24`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/CoreBankApi/ReplicatedCoreBankOutboxProcessorTests.cs#L24)
+
+- Prove the Redis broadcast releases four participants and recovers late waiters.
+  [`ProcessorStartGateIntegrationTests.cs:13`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/ServiceDefaults/ProcessorStartGateIntegrationTests.cs#L13)
+
+- Prove reset releases exactly four real gates only after both database commits.
+  [`LoadTestDatabaseResetterTests.cs:117`](../../../tests/CoreBankDemo.Persistence.IntegrationTests/LoadTestSupport/LoadTestDatabaseResetterTests.cs#L117)

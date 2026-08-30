@@ -51,8 +51,9 @@ public class InboxProcessorBaseTests
             TimeProvider timeProvider,
             ILogger logger,
             BusinessMetrics businessMetrics,
-            InboxProcessorOptions? options = null)
-            : base(lockService, scopeFactory, activitySource, timeProvider, logger, businessMetrics, options)
+            InboxProcessorOptions? options = null,
+            IProcessorStartGate? startGate = null)
+            : base(lockService, scopeFactory, activitySource, timeProvider, logger, businessMetrics, options, startGate)
         {
         }
 
@@ -1230,6 +1231,77 @@ public class InboxProcessorBaseTests
         await processor.StopAsync(CancellationToken.None);
 
         tickCount.Should().BeGreaterThanOrEqualTo(2);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_runs_no_tick_until_the_start_gate_releases()
+    {
+        var firstTick = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                firstTick.TrySetResult();
+                return (IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>();
+            });
+        var gate = new ManualStartGate();
+        var processor = new TestInboxProcessor(
+            new AlwaysAcquiringLockService(),
+            new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>()),
+            ActivitySource,
+            TimeProvider.System,
+            NullLoggerLike(),
+            TestBusinessMetrics,
+            new InboxProcessorOptions { PartitionCount = 1, PollingInterval = TimeSpan.FromMinutes(1) },
+            gate);
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await gate.WaitStarted.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        firstTick.Task.IsCompleted.Should().BeFalse();
+
+        gate.Release();
+        await firstTick.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task StopAsync_cancels_a_processor_waiting_at_the_start_gate()
+    {
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        var gate = new ManualStartGate();
+        var processor = new TestInboxProcessor(
+            new AlwaysAcquiringLockService(),
+            new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>()),
+            ActivitySource,
+            TimeProvider.System,
+            NullLoggerLike(),
+            TestBusinessMetrics,
+            new InboxProcessorOptions { PartitionCount = 1 },
+            gate);
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        store.Verify(s => s.ClaimBatchForPartitionAsync(
+            It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    private sealed class ManualStartGate : IProcessorStartGate
+    {
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _waitStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task WaitStarted => _waitStarted.Task;
+
+        public Task WaitAsync(CancellationToken cancellationToken = default)
+        {
+            _waitStarted.TrySetResult();
+            return _release.Task.WaitAsync(cancellationToken);
+        }
+
+        public void Release() => _release.TrySetResult();
     }
 
     [Fact]

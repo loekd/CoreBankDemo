@@ -9,6 +9,7 @@
       "CoreBankDemo.ServiceDefaults\\CoreBankDemo.ServiceDefaults.csproj",
       "tests\\CoreBankDemo.CoreBankAPI.Tests\\CoreBankDemo.CoreBankAPI.Tests.csproj",
       "tests\\CoreBankDemo.DemoRunner.Tests\\CoreBankDemo.DemoRunner.Tests.csproj",
+      "tests\\CoreBankDemo.LoadTestSupport.Tests\\CoreBankDemo.LoadTestSupport.Tests.csproj",
       "tests\\CoreBankDemo.Messaging.Tests\\CoreBankDemo.Messaging.Tests.csproj",
       "tests\\CoreBankDemo.PaymentsAPI.Tests\\CoreBankDemo.PaymentsAPI.Tests.csproj",
       "tests\\CoreBankDemo.Persistence.IntegrationTests\\CoreBankDemo.Persistence.IntegrationTests.csproj",

@@ -114,7 +114,6 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     .WaitFor(redis)
     .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
-    .WithHttpEndpoint(name: "load-test", port: 5295)
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(coreBankApi)

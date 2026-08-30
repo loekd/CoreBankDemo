@@ -76,10 +76,8 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-    await dbContext.Database.EnsureCreatedAsync();
-
     var seeder = scope.ServiceProvider.GetRequiredService<DemoAccountSeeder>();
-    await seeder.SeedAsync();
+    await CoreBankDatabaseInitializer.InitializeAsync(dbContext, seeder);
 }
 
 app.MapDefaultEndpoints();

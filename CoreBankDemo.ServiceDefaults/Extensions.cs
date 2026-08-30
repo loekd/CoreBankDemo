@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
@@ -47,6 +48,39 @@ public static class Extensions
             // the same Meter instance that ConfigureOpenTelemetry below
             // subscribes into the OTel metrics pipeline.
             builder.Services.TryAddSingleton<BusinessMetrics>();
+            builder.Services.TryAddSingleton(TimeProvider.System);
+
+            var gateEnabled = builder.Configuration.GetValue<bool>("ProcessorStartGate:Enabled");
+            if (gateEnabled)
+            {
+                builder.Services.TryAddSingleton<RedisProcessorStartGate>(sp =>
+                {
+                    var connectionMultiplexer = sp.GetRequiredService<StackExchange.Redis.IConnectionMultiplexer>();
+                    var expectedParticipants = builder.Configuration.GetValue<int>(
+                        "ProcessorStartGate:ExpectedParticipants");
+                    var releaseTimeoutSeconds = builder.Configuration.GetValue<int?>(
+                        "ProcessorStartGate:ReleaseTimeoutSeconds") ?? 30;
+
+                    return new RedisProcessorStartGate(
+                        connectionMultiplexer,
+                        expectedParticipants,
+                        sp.GetRequiredService<TimeProvider>(),
+                        TimeSpan.FromSeconds(releaseTimeoutSeconds),
+                        sp.GetRequiredService<ILogger<RedisProcessorStartGate>>());
+                });
+                builder.Services.TryAddSingleton<IProcessorStartGate>(
+                    sp => sp.GetRequiredService<RedisProcessorStartGate>());
+                builder.Services.TryAddSingleton<IProcessorStartGatePublisher>(
+                    sp => sp.GetRequiredService<RedisProcessorStartGate>());
+            }
+            else
+            {
+                builder.Services.TryAddSingleton<ProcessorStartGate>();
+                builder.Services.TryAddSingleton<IProcessorStartGate>(
+                    sp => sp.GetRequiredService<ProcessorStartGate>());
+                builder.Services.TryAddSingleton<IProcessorStartGatePublisher>(
+                    sp => sp.GetRequiredService<ProcessorStartGate>());
+            }
 
             builder.Services.ConfigureHttpClientDefaults(http =>
             {
@@ -108,6 +142,8 @@ public static class Extensions
             builder.Services.AddOptions<InboxProcessingOptions>()
                 .BindConfiguration(InboxProcessingOptions.SectionName)
                 .ValidateDataAnnotations()
+                .Validate(options => options.PartitionCount == 4,
+                    "InboxProcessing:PartitionCount must be exactly 4.")
                 .ValidateOnStart();
 
             return builder;
@@ -118,6 +154,8 @@ public static class Extensions
             builder.Services.AddOptions<OutboxProcessingOptions>()
                 .BindConfiguration(OutboxProcessingOptions.SectionName)
                 .ValidateDataAnnotations()
+                .Validate(options => options.PartitionCount == 4,
+                    "OutboxProcessing:PartitionCount must be exactly 4.")
                 .ValidateOnStart();
 
             return builder;
@@ -128,6 +166,8 @@ public static class Extensions
             builder.Services.AddOptions<MessagingOutboxProcessingOptions>()
                 .BindConfiguration(MessagingOutboxProcessingOptions.SectionName)
                 .ValidateDataAnnotations()
+                .Validate(options => options.PartitionCount == 4,
+                    "MessagingOutboxProcessing:PartitionCount must be exactly 4.")
                 .ValidateOnStart();
 
             return builder;

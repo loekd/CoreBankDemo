@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Include>[CoreBankDemo.LoadTestSupport]CoreBankDemo.LoadTestSupport.DatabaseResetCoordinator*</Include>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.LoadTestSupport\CoreBankDemo.LoadTestSupport.csproj" />
+  </ItemGroup>
+
+</Project>

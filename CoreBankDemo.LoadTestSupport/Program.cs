@@ -12,6 +12,7 @@ public class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
+        builder.AddRedisClient("redis");
         builder.AddServiceDefaults("CoreBank.LoadTestSupport");
 
 // Health checks so Aspire's WaitFor blocks until both schemas are ready
@@ -22,6 +23,9 @@ public class Program
 // Connect to both databases using the actual DbContexts from the APIs
         builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
         builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
+        builder.Services.AddScoped<ILoadTestDatabaseResetter, LoadTestDatabaseResetter>();
+        builder.Services.AddSingleton<DatabaseResetState>();
+        builder.Services.AddScoped<DatabaseResetCoordinator>();
 
 // MCP server — exposes load test tools to AI agents via Streamable HTTP
         builder.Services.AddMcpServer()

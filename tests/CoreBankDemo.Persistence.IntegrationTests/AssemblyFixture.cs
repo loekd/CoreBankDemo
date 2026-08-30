@@ -5,3 +5,4 @@ using Xunit;
 // cost is amortized across every persistence test, while per-test databases
 // created from this fixture keep concurrently running classes isolated.
 [assembly: AssemblyFixture(typeof(PostgresContainerFixture))]
+[assembly: AssemblyFixture(typeof(RedisContainerFixture))]

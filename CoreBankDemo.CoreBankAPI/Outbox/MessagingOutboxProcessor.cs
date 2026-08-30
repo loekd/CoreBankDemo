@@ -15,7 +15,8 @@ public sealed class MessagingOutboxProcessor : OutboxProcessorBase<MessagingOutb
         TimeProvider timeProvider,
         ILogger<MessagingOutboxProcessor> logger,
         BusinessMetrics businessMetrics,
-        IOptions<MessagingOutboxProcessingOptions> options)
+        IOptions<MessagingOutboxProcessingOptions> options,
+        IProcessorStartGate? startGate = null)
         : base(
             lockService,
             scopeFactory,
@@ -28,7 +29,8 @@ public sealed class MessagingOutboxProcessor : OutboxProcessorBase<MessagingOutb
                 PartitionCount = options.Value.PartitionCount,
                 LockExpirySeconds = options.Value.LockExpirySeconds,
                 PollingInterval = TimeSpan.FromMilliseconds(options.Value.PollingIntervalMs)
-            })
+            },
+            startGate)
     {
     }
 

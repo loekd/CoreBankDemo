@@ -9,6 +9,7 @@
     <ProjectReference Include="..\..\CoreBankDemo.Messaging\CoreBankDemo.Messaging.csproj" />
     <ProjectReference Include="..\..\CoreBankDemo.CoreBankAPI\CoreBankDemo.CoreBankAPI.csproj" />
     <ProjectReference Include="..\..\CoreBankDemo.PaymentsAPI\CoreBankDemo.PaymentsAPI.csproj" />
+    <ProjectReference Include="..\..\CoreBankDemo.LoadTestSupport\CoreBankDemo.LoadTestSupport.csproj" />
   </ItemGroup>
 
   <ItemGroup>
