@@ -22,8 +22,9 @@
     "vscode": {
       "extensions": [
         "ms-dotnettools.csharp",
-        "ms-dotnettools.csdevkit"
-    ]
+        "ms-dotnettools.csdevkit",
+        "humao.rest-client"
+      ]
     }
   },
   "forwardPorts": [5032, 5294, 8000, 15888, 16686, 4317, 5432, 6379],
