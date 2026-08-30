@@ -79,3 +79,9 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-restore-redis-development-password-default.md`
   summary: Redis authentication is configured independently in the AppHost parameter and Dapr component YAML, so overriding only `Parameters:redis-password` causes Dapr authentication failures.
   evidence: The AppHost default and both Dapr pub/sub component files currently repeat `myredispassword123`; no shared substitution or consistency test prevents future drift.
+- source_spec: `docs/bmad/implementation-artifacts/spec-fix-payments-http-demo-account-mismatch.md`
+  summary: Add an automated AppHost smoke test that executes the checked-in PaymentsAPI demo request and verifies outbox completion and duplicate suppression.
+  evidence: The corrected request was verified against the real AppHost, but no automated test consumes the `.http` artifact; a future account-fixture mismatch could therefore pass the existing unit and composition suites.
+- source_spec: `docs/bmad/implementation-artifacts/spec-fix-payments-http-demo-account-mismatch.md`
+  summary: Remove or replace the stale `GET /api/outbox/check-index` request in the PaymentsAPI `.http` file.
+  evidence: Repository search finds the route only in `CoreBankDemo.PaymentsAPI/CoreBankDemo.http`; no PaymentsAPI endpoint implements it, so running that request returns no useful diagnostic result.

@@ -79,3 +79,6 @@ The live AppHost established the fault boundary: a fresh payment using `NL91ABNA
 
 - The self-contained demo request now targets seeded accounts with an uncontaminated deduplication key.
   [`CoreBankDemo.http:1`](../../../CoreBankDemo.PaymentsAPI/CoreBankDemo.http#L1)
+
+- Review follow-up gaps captured without expanding this runtime-fix scope.
+  [`deferred-work.md:82`](deferred-work.md#L82)
