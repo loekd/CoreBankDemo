@@ -64,6 +64,7 @@ context:
 ## Spec Change Log
 
 - 2026-08-30: Completed all runtime acceptance tasks against the regular AppHost and reconciled the original Story 6.2 spec and sprint tracking.
+- 2026-08-30: Review closed the Dapr-component proof gap by recording the active component inventory/reference audit, then independently restarted the AppHost and repeated the durable-state assertions with a new transaction.
 
 ## Design Notes
 
@@ -82,8 +83,11 @@ Story 6.3 is concurrently changing replica topology. This completion pass valida
 
 - Restarted the regular AppHost through `aspire stop` / `aspire start` with the optional Dev Proxy disabled, then successfully waited for `redis`, `corebank-api`, `payments-api`, `corebank-api-dapr-cli`, and `payments-api-dapr-cli`.
 - `aspire describe` showed exactly one healthy Redis resource, both APIs and both Dapr sidecars healthy, and no lockstore resource.
+- The production tree under test was baseline `395012a0493b2cdfe5580da208263043521401df`; this completion pass changed documentation/tracking only. "Clean" means the prior AppHost and its processes were stopped before startup; persistent PostgreSQL data was intentionally retained.
+- The active Dapr component directories contain only `otel-config.yaml`, `pubsub-redis.yaml`, and `subscription-transaction-events.yaml` in both regular and load-test variants. A scoped search of AppHost, both APIs, ServiceDefaults, and `dapr/` found no `lockstore-redis`, `DaprDistributedLockService`, `CooperativeLockCancellation`, or Dapr `Lock`/`Unlock` reference, while both sidecars still load the regular components path and reference `pubsub`.
 - Both API logs showed `CoreBankDemo.ServiceDefaults.RedisDistributedLockService` acquiring and releasing Inbox/Outbox partition locks.
 - Payment `story-6-2-runtime-20260830T093621Z-28656` returned `202 Accepted`. Direct PostgreSQL assertions found exactly one completed, zero-retry, error-free record for the Payments outbox, CoreBank inbox, CoreBank `transaction.completed` messaging-outbox event, and Payments `transaction.completed` inbox event. The two expected `balance.updated` events also completed exactly once through both event stores, proving Dapr pub/sub remained operational.
+- Review independently restarted the graph and submitted `story-6-2-review-20260830T0944Z`. PostgreSQL counts were: Payments outbox `1`, CoreBank inbox `1`, CoreBank messaging outbox `1 transaction.completed + 2 balance.updated`, and Payments inbox `1 transaction.completed + 2 balance.updated`; every row was `Completed`, total retries were `0`, and non-null errors were `0`.
 - The original Story 6.2 final task is checked and `6-2-renewable-redis-distributed-locking` is `done` in sprint tracking; Story 6.3 tracking was not changed.
 
 ## Suggested Review Order
@@ -93,8 +97,8 @@ Story 6.3 is concurrently changing replica topology. This completion pass valida
 - Start with the closed original task and its concise end-to-end runtime proof.
   [`spec-6-2-renewable-redis-distributed-locking.md:81`](spec-6-2-renewable-redis-distributed-locking.md#L81)
 
-- Review the detailed commands, identifiers, and durable-state assertions supporting completion.
-  [`spec-6-2-runtime-acceptance-completion.md:81`](spec-6-2-runtime-acceptance-completion.md#L81)
+- Review the detailed component audit and repeated durable-state assertions supporting completion.
+  [`spec-6-2-runtime-acceptance-completion.md:82`](spec-6-2-runtime-acceptance-completion.md#L82)
 
 **Tracking reconciliation**
 
