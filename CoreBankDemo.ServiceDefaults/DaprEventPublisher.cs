@@ -24,9 +24,10 @@ namespace CoreBankDemo.ServiceDefaults;
 public sealed class DaprEventPublisher(
     DaprClient daprClient,
     IOptions<MessagingOutboxProcessingOptions> options,
-    ILogger<DaprEventPublisher> logger) : IEventPublisher
+    ILogger<DaprEventPublisher> logger,
+    BusinessMetrics businessMetrics) : IEventPublisher
 {
-    public Task PublishAsync(
+    public async Task PublishAsync(
         string type,
         string source,
         string subject,
@@ -53,6 +54,52 @@ public sealed class DaprEventPublisher(
             "Publishing CloudEvent {Type} to {PubSubName}/{TopicName} for subject {Subject}",
             type, pubSubName, topicName, subject);
 
-        return daprClient.PublishEventAsync(pubSubName, topicName, payload, metadata, cancellationToken);
+        // Story 6.5 (AD-6/this class's the sole Dapr-send hook, chosen over
+        // DaprOutboxDeliveryStrategy to avoid double counting): record only
+        // after PublishEventAsync's outcome is known, and never swallow the
+        // exception on failure — it still propagates unchanged to the caller
+        // (the kernel's own retry/terminal-failure classification), matching
+        // this class's existing no-catch contract.
+        try
+        {
+            await daprClient.PublishEventAsync(pubSubName, topicName, payload, metadata, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            businessMetrics.RecordDelivery(
+                BusinessMetrics.DeliveryDirection.Sent,
+                BusinessMetrics.Transport.Dapr,
+                ToMessageType(type),
+                BusinessMetrics.DeliveryOutcome.Failed);
+            throw;
+        }
+
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Sent,
+            BusinessMetrics.Transport.Dapr,
+            ToMessageType(type),
+            BusinessMetrics.DeliveryOutcome.Succeeded);
     }
+
+    /// <summary>
+    /// Maps a CloudEvent <c>type</c> to the closed <see cref="BusinessMetrics.MessageType"/>
+    /// vocabulary. <paramref name="type"/> is always one of the outgoing
+    /// <see cref="CloudEventTypes.Constants"/> values chosen by this
+    /// process's own <c>IOutboxDeliveryStrategy</c> — never copied verbatim
+    /// from an incoming CloudEvent — but an unrecognized value still degrades
+    /// to <see cref="BusinessMetrics.MessageType.Unknown"/> rather than
+    /// throwing, so a future event type can never crash publication.
+    /// </summary>
+    private static BusinessMetrics.MessageType ToMessageType(string type) => type switch
+    {
+        CloudEventTypes.Constants.TransactionCompleted => BusinessMetrics.MessageType.TransactionCompleted,
+        CloudEventTypes.Constants.TransactionFailed => BusinessMetrics.MessageType.TransactionFailed,
+        CloudEventTypes.Constants.BalanceUpdated => BusinessMetrics.MessageType.BalanceUpdated,
+        _ => BusinessMetrics.MessageType.Unknown
+    };
 }

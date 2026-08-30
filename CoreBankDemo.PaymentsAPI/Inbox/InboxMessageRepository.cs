@@ -1,4 +1,5 @@
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.PaymentsAPI.Inbox;
@@ -24,8 +25,10 @@ internal interface IInboxMessageRepository
 /// the inherited <see cref="InboxMessageRepositoryBase{TMessage,TDbContext}"/>
 /// members exposed through <see cref="IInboxMessageStore{TMessage}"/>).
 /// </summary>
-internal sealed class InboxMessageRepository(PaymentsDbContext dbContext, TimeProvider timeProvider)
-    : InboxMessageRepositoryBase<InboxMessage, PaymentsDbContext>(dbContext, timeProvider), IInboxMessageRepository
+internal sealed class InboxMessageRepository(PaymentsDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
+    : InboxMessageRepositoryBase<InboxMessage, PaymentsDbContext>(dbContext, timeProvider, businessMetrics), IInboxMessageRepository
 {
     protected override DbSet<InboxMessage> InboxMessages => DbContext.InboxMessages;
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsInbox;
 }

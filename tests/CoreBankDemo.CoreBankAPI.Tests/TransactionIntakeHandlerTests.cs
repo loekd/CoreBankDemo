@@ -3,6 +3,7 @@ using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -24,12 +25,14 @@ public class TransactionIntakeHandlerTests
 
     private readonly FakeTimeProvider _timeProvider = new();
     private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
+    private readonly BusinessMetrics _businessMetrics = new();
 
     private TransactionIntakeHandler CreateHandler(int partitionCount = 4) =>
         new(_repository.Object,
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
-            NullLogger<TransactionIntakeHandler>.Instance);
+            NullLogger<TransactionIntakeHandler>.Instance,
+            _businessMetrics);
 
     private static TransactionRequest ValidRequest(string transactionId = TransactionId) =>
         new(FromAccount, ToAccount, 50m, "EUR", transactionId);
@@ -230,6 +233,70 @@ public class TransactionIntakeHandlerTests
         // never crash the request (AD-5 guarantees this "should not happen").
         result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
         result.Response!.Status.Should().Be(MessageConstants.Status.Completed);
+    }
+
+    // ---- Story 6.5: business metrics ----
+
+    [Fact]
+    public async Task ProcessAsync_records_an_accepted_transaction_intake_metric_for_a_fresh_transaction_id()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        using var listener = new MetricsTestListener(_businessMetrics);
+
+        await CreateHandler().ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(
+            m => m.InstrumentName == "corebankdemo.transaction.intake")
+            .Which.Tags["outcome"].Should().Be("accepted");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_records_a_replayed_transaction_intake_metric_for_a_completed_duplicate()
+    {
+        var cachedResponse = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow());
+        var existing = ExistingMessage(MessageConstants.Status.Completed, responsePayload: JsonSerializer.Serialize(cachedResponse));
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        using var listener = new MetricsTestListener(_businessMetrics);
+
+        await CreateHandler().ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(
+            m => m.InstrumentName == "corebankdemo.transaction.intake")
+            .Which.Tags["outcome"].Should().Be("replayed");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_records_an_in_flight_transaction_intake_metric_for_a_pending_duplicate()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Pending);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        using var listener = new MetricsTestListener(_businessMetrics);
+
+        await CreateHandler().ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(
+            m => m.InstrumentName == "corebankdemo.transaction.intake")
+            .Which.Tags["outcome"].Should().Be("in_flight");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_records_a_transport_failed_transaction_intake_metric_for_a_failed_duplicate()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Failed, lastError: "boom");
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        using var listener = new MetricsTestListener(_businessMetrics);
+
+        await CreateHandler().ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(
+            m => m.InstrumentName == "corebankdemo.transaction.intake")
+            .Which.Tags["outcome"].Should().Be("transport_failed");
     }
 
     [Fact]

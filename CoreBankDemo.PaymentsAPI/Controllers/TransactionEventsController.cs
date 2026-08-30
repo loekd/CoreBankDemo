@@ -1,4 +1,5 @@
 using CoreBankDemo.PaymentsAPI.Handlers;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using Microsoft.AspNetCore.Mvc;
 
@@ -22,7 +23,8 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 [ApiController]
 public class TransactionEventsController(
     ITransactionEventIntakeHandler handler,
-    ILogger<TransactionEventsController> logger) : ControllerBase
+    ILogger<TransactionEventsController> logger,
+    BusinessMetrics businessMetrics) : ControllerBase
 {
     [HttpPost("events/transactions/completed")]
     public async Task<IActionResult> TransactionCompleted(
@@ -62,6 +64,15 @@ public class TransactionEventsController(
             eventId,
             eventType,
             source);
+        // Story 6.5: the incoming CloudEvent's own type is never used as a
+        // tag (edge-case matrix) -- this route is reached only for a type
+        // this service intentionally does not recognize, so message.type is
+        // always the closed BusinessMetrics.MessageType.Unknown value.
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Received,
+            BusinessMetrics.Transport.Dapr,
+            BusinessMetrics.MessageType.Unknown,
+            BusinessMetrics.DeliveryOutcome.Unknown);
         return Ok();
     }
 }

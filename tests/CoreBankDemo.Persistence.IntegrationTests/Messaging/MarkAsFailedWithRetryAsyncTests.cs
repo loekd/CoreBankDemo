@@ -19,7 +19,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var message = new TestInboxMessage { IdempotencyKey = "under-limit", RetryCount = 2 };
         context.InboxMessages.Add(message);
@@ -42,7 +42,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var message = new TestInboxMessage
         {
@@ -67,7 +67,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var message = new TestInboxMessage
         {
@@ -107,7 +107,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
         var detachedCopy = await loadContext.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == seeded.Id, ct);
 
         await using var repoContext = CreateContext();
-        var repository = new TestInboxMessageRepository(repoContext, TimeProvider);
+        var repository = new TestInboxMessageRepository(repoContext, TimeProvider, TestBusinessMetrics.Instance);
         repoContext.Entry(detachedCopy).State.Should().Be(EntityState.Detached);
 
         await repository.MarkAsFailedWithRetryAsync(detachedCopy, "detached transport error", ct);
@@ -135,13 +135,13 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
 
         await using var failContext = CreateContext();
         var messageForFailure = await failContext.InboxMessages.SingleAsync(m => m.Id == seeded.Id, ct);
-        var failRepository = new TestInboxMessageRepository(failContext, TimeProvider);
+        var failRepository = new TestInboxMessageRepository(failContext, TimeProvider, TestBusinessMetrics.Instance);
 
         // Concurrently, a different caller claims the same row (Pending ->
         // Processing), changing the Status concurrency token out from under
         // failRepository's already-loaded, now-stale in-memory copy.
         await using var claimContext = CreateContext();
-        var claimRepository = new TestInboxMessageRepository(claimContext, TimeProvider);
+        var claimRepository = new TestInboxMessageRepository(claimContext, TimeProvider, TestBusinessMetrics.Instance);
         var claimed = await claimRepository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
         claimed.Should().ContainSingle(m => m.Id == seeded.Id);
 
@@ -160,7 +160,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.MarkAsFailedWithRetryAsync(null!, "error", ct);
 
@@ -172,7 +172,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var message = new TestInboxMessage { IdempotencyKey = "null-error" };
         context.InboxMessages.Add(message);
         await context.SaveChangesAsync(ct);

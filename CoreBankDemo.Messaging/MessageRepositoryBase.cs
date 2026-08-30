@@ -1,4 +1,5 @@
 using System.Reflection;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -18,10 +19,13 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     where TMessage : class, IMessage
     where TDbContext : DbContext
 {
-    protected MessageRepositoryBase(TDbContext dbContext, TimeProvider timeProvider)
+    private readonly BusinessMetrics _businessMetrics;
+
+    protected MessageRepositoryBase(TDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
     {
         DbContext = dbContext ?? throw new ArgumentNullException(nameof(dbContext));
         TimeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
+        _businessMetrics = businessMetrics ?? throw new ArgumentNullException(nameof(businessMetrics));
     }
 
     protected TDbContext DbContext { get; }
@@ -35,6 +39,19 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
     /// <summary>The store's message table; named by the inbox/outbox-specific base.</summary>
     protected abstract DbSet<TMessage> Messages { get; }
+
+    /// <summary>
+    /// This store's stable business identity (story 6.5) — e.g.
+    /// <see cref="BusinessMetrics.StoreName.CoreBankInbox"/> — supplied by the
+    /// concrete leaf repository. Never derived from a CLR type name or this
+    /// store's distributed-lock prefix (design notes): a lock prefix is an
+    /// infrastructure contention scope, while this identity is the durable
+    /// store a metric attribute reports.
+    /// </summary>
+    protected abstract BusinessMetrics.StoreName StoreName { get; }
+
+    /// <summary>Whether this store is an inbox or an outbox (story 6.5) — fixed by the inbox/outbox-specific base, never by the leaf repository.</summary>
+    protected abstract BusinessMetrics.StoreKind StoreKind { get; }
 
     /// <summary>
     /// Stores <paramref name="message"/> if no row with the same dedupe identity
@@ -65,20 +82,32 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         try
         {
             await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            _businessMetrics.RecordStoreOperation(StoreName, StoreKind, BusinessMetrics.StoreOperationOutcome.Added);
             return true;
         }
         catch (DbUpdateException ex) when (UniqueViolation.IsUniqueViolation(ex))
         {
             DbContext.Entry(message).State = EntityState.Detached;
+            _businessMetrics.RecordStoreOperation(StoreName, StoreKind, BusinessMetrics.StoreOperationOutcome.Duplicate);
             return false;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancellation, not a store failure (story 6.5 boundaries): never
+            // recorded as `failed` — the caller stopped, the store did not.
+            DbContext.Entry(message).State = EntityState.Detached;
+            throw;
         }
         catch
         {
-            // Any other save failure (timeout, cancellation, a different
-            // DbUpdateException, ...) still leaves the entity tracked as
-            // Added unless we detach it here — a stale tracked entity would
-            // corrupt every subsequent SaveChangesAsync on this context.
+            // Any other save failure (timeout, a different DbUpdateException,
+            // ...) still leaves the entity tracked as Added unless we detach
+            // it here — a stale tracked entity would corrupt every subsequent
+            // SaveChangesAsync on this context. Recorded before the rethrow
+            // (metric contract) so a caller that swallows/wraps this
+            // exception still leaves the failure visible in metrics.
             DbContext.Entry(message).State = EntityState.Detached;
+            _businessMetrics.RecordStoreOperation(StoreName, StoreKind, BusinessMetrics.StoreOperationOutcome.Failed);
             throw;
         }
     }
@@ -294,7 +323,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// The retried save still conflicted with a second concurrent change to
     /// <paramref name="message"/>'s row; propagates unchanged.
     /// </exception>
-    public virtual async Task MarkAsFailedWithRetryAsync(
+    public virtual async Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
         TMessage message, string errorMessage, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
@@ -305,7 +334,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             // Already terminal — a repeat report of failure for a row that has
             // already been given up on must be a no-op, not another
             // RetryCount increment past MaxRetryCount.
-            return;
+            return MessageTransitionOutcome.AlreadyTerminal;
         }
 
         if (DbContext.Entry(message).State == EntityState.Detached)
@@ -336,12 +365,14 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
                 // The concurrent change already drove this row to terminal
                 // Failed (e.g. another caller's retry hit MaxRetryCount) —
                 // nothing further for this call to do.
-                return;
+                return MessageTransitionOutcome.AlreadyTerminal;
             }
 
             ApplyFailureTransition(message, errorMessage);
             await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        return MessageTransitionOutcome.Applied;
     }
 
     private static void ApplyFailureTransition(TMessage message, string errorMessage)
@@ -383,7 +414,8 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// The retried save still conflicted with a second concurrent change to
     /// <paramref name="message"/>'s row; propagates unchanged.
     /// </exception>
-    public virtual async Task MarkAsCompletedAsync(TMessage message, CancellationToken cancellationToken = default)
+    public virtual async Task<MessageTransitionOutcome> MarkAsCompletedAsync(
+        TMessage message, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(message);
 
@@ -393,7 +425,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             // report for a row that is already in a terminal state must be a
             // no-op, never re-stamping ProcessedAt or reviving a row that a
             // concurrent caller already drove to terminal Failed.
-            return;
+            return MessageTransitionOutcome.AlreadyTerminal;
         }
 
         if (DbContext.Entry(message).State == EntityState.Detached)
@@ -416,12 +448,14 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
                 // The concurrent change already drove this row to a terminal
                 // state (Completed by another caller, or Failed via retry
                 // exhaustion) — nothing further for this call to do.
-                return;
+                return MessageTransitionOutcome.AlreadyTerminal;
             }
 
             ApplyCompletionTransition(message);
             await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
+
+        return MessageTransitionOutcome.Applied;
     }
 
     private static bool IsTerminal(TMessage message) =>

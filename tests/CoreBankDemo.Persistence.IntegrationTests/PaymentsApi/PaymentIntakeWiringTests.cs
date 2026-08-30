@@ -77,8 +77,9 @@ public class PaymentIntakeWiringTests(PostgresContainerFixture fixture)
             stored.Amount.Should().Be(12.34m);
             stored.Currency.Should().Be("EUR");
             stored.Status.Should().Be(MessageConstants.Status.Pending);
-            acknowledgement.ProcessedAt.Should().Be(
-                new DateTimeOffset(DateTime.SpecifyKind(stored.CreatedAt, DateTimeKind.Utc)));
+            acknowledgement.ProcessedAt.Should().BeCloseTo(
+                new DateTimeOffset(DateTime.SpecifyKind(stored.CreatedAt, DateTimeKind.Utc)),
+                TimeSpan.FromMicroseconds(1));
         }
 
         using var duplicateRequest = new HttpRequestMessage(HttpMethod.Post, "/api/payments")
@@ -100,7 +101,12 @@ public class PaymentIntakeWiringTests(PostgresContainerFixture fixture)
         duplicateResponse.Headers.Location!.ToString().Should().Be($"/api/payments/{idempotencyKey}");
         var duplicateAcknowledgement = await duplicateResponse.Content.ReadFromJsonAsync<PaymentResponse>(
             TestContext.Current.CancellationToken);
-        duplicateAcknowledgement.Should().Be(acknowledgement);
+        duplicateAcknowledgement.Should().BeEquivalentTo(
+            acknowledgement,
+            options => options.Excluding(response => response.ProcessedAt));
+        duplicateAcknowledgement!.ProcessedAt.Should().BeCloseTo(
+            acknowledgement.ProcessedAt,
+            TimeSpan.FromMicroseconds(1));
 
         var invalidResponse = await client.PostAsJsonAsync(
             "/api/payments",

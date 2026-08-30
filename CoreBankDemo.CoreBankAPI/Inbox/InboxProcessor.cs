@@ -14,6 +14,7 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage>
         ActivitySource activitySource,
         TimeProvider timeProvider,
         ILogger<InboxProcessor> logger,
+        BusinessMetrics businessMetrics,
         IOptions<InboxProcessingOptions> options)
         : base(
             lockService,
@@ -21,6 +22,7 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage>
             activitySource,
             timeProvider,
             logger,
+            businessMetrics,
             new InboxProcessorOptions
             {
                 PartitionCount = options.Value.PartitionCount,
@@ -31,4 +33,6 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage>
     }
 
     protected override string LockNamePrefix => "corebank-inbox";
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.CoreBankInbox;
 }

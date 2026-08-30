@@ -31,8 +31,8 @@ public class PaymentStorageHandlerConcurrencyTests(PostgresContainerFixture fixt
         var contexts = store.CreateCompetingContexts();
         await using var firstContext = contexts.First;
         await using var secondContext = contexts.Second;
-        var first = CreateHandler(new OutboxRepository(firstContext, System.TimeProvider.System));
-        var second = CreateHandler(new OutboxRepository(secondContext, System.TimeProvider.System));
+        var first = CreateHandler(new OutboxRepository(firstContext, System.TimeProvider.System, TestBusinessMetrics.Instance));
+        var second = CreateHandler(new OutboxRepository(secondContext, System.TimeProvider.System, TestBusinessMetrics.Instance));
 
         var results = await PaymentsApiTestData.RaceAsync(
             () => first.StoreAsync(Request, "handler-race", ct),
@@ -55,5 +55,6 @@ public class PaymentStorageHandlerConcurrencyTests(PostgresContainerFixture fixt
                 PollingIntervalMs = 200
             }),
             new FixedTimeProvider(),
-            NullLogger<PaymentStorageHandler>.Instance);
+            NullLogger<PaymentStorageHandler>.Instance,
+            TestBusinessMetrics.Instance);
 }

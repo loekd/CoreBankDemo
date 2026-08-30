@@ -1,5 +1,6 @@
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.AspNetCore.Mvc;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
@@ -13,7 +14,7 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-public class PaymentsController(IPaymentStorageHandler handler) : ControllerBase
+public class PaymentsController(IPaymentStorageHandler handler, BusinessMetrics businessMetrics) : ControllerBase
 {
     private const string IdempotencyKeyHeader = "Idempotency-Key";
 
@@ -23,6 +24,7 @@ public class PaymentsController(IPaymentStorageHandler handler) : ControllerBase
     {
         if (!ModelState.IsValid)
         {
+            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.ValidationFailed);
             var errors = ModelState.Values
                 .SelectMany(value => value.Errors)
                 .Select(error => string.IsNullOrWhiteSpace(error.ErrorMessage)

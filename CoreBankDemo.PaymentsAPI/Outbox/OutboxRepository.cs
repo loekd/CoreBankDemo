@@ -1,4 +1,5 @@
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
@@ -12,10 +13,12 @@ internal interface IOutboxRepository
         CancellationToken cancellationToken);
 }
 
-internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider timeProvider)
-    : OutboxMessageRepositoryBase<OutboxMessage, PaymentsDbContext>(dbContext, timeProvider), IOutboxRepository
+internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
+    : OutboxMessageRepositoryBase<OutboxMessage, PaymentsDbContext>(dbContext, timeProvider, businessMetrics), IOutboxRepository
 {
     protected override DbSet<OutboxMessage> OutboxMessages => DbContext.OutboxMessages;
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsOutbox;
 
     public Task<OutboxMessage?> FindByIdempotencyKeyAsync(
         string idempotencyKey,

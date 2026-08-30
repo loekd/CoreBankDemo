@@ -14,6 +14,7 @@ public sealed class MessagingOutboxProcessor : OutboxProcessorBase<MessagingOutb
         ActivitySource activitySource,
         TimeProvider timeProvider,
         ILogger<MessagingOutboxProcessor> logger,
+        BusinessMetrics businessMetrics,
         IOptions<MessagingOutboxProcessingOptions> options)
         : base(
             lockService,
@@ -21,6 +22,7 @@ public sealed class MessagingOutboxProcessor : OutboxProcessorBase<MessagingOutb
             activitySource,
             timeProvider,
             logger,
+            businessMetrics,
             new OutboxProcessorOptions
             {
                 PartitionCount = options.Value.PartitionCount,
@@ -31,4 +33,6 @@ public sealed class MessagingOutboxProcessor : OutboxProcessorBase<MessagingOutb
     }
 
     protected override string LockNamePrefix => "messaging-outbox";
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.CoreBankOutbox;
 }

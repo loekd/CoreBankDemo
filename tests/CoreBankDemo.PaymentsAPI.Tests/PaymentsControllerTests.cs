@@ -2,6 +2,7 @@ using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
@@ -29,6 +30,7 @@ public class PaymentsControllerTests
     private const string TransactionId = "txn-abc";
 
     private readonly Mock<IPaymentStorageHandler> _handler = new(MockBehavior.Strict);
+    private readonly BusinessMetrics _businessMetrics = new();
 
     private static PaymentRequest ValidRequest() => new(FromAccount, ToAccount, 50m, "EUR");
 
@@ -59,7 +61,7 @@ public class PaymentsControllerTests
             httpContext.Request.Headers["Idempotency-Key"] = idempotencyKeyHeader;
         }
 
-        return new PaymentsController(_handler.Object)
+        return new PaymentsController(_handler.Object, _businessMetrics)
         {
             ControllerContext = new ControllerContext { HttpContext = httpContext }
         };
@@ -68,6 +70,7 @@ public class PaymentsControllerTests
     [Fact]
     public async Task ProcessPayment_returns_bad_request_with_all_errors_when_model_state_is_invalid()
     {
+        using var listener = new MetricsTestListener(_businessMetrics);
         var controller = CreateController();
         controller.ModelState.AddModelError("Amount", "Amount is required");
         controller.ModelState.AddModelError("Currency", "Currency is required");
@@ -78,6 +81,9 @@ public class PaymentsControllerTests
         GetErrors(badRequest.Value).Should().BeEquivalentTo(["Amount is required", "Currency is required"]);
 
         _handler.VerifyNoOtherCalls();
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentIntakeInstrumentName)
+            .Which.Tags["outcome"].Should().Be("validation_failed");
     }
 
     [Fact]

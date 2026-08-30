@@ -9,6 +9,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Moq;
+using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using Xunit;
@@ -52,6 +53,58 @@ public class AddServiceDefaultsTests
         var activitySource = provider.GetRequiredService<System.Diagnostics.ActivitySource>();
 
         activitySource.Name.Should().Be("test-service");
+    }
+
+    // ---- BusinessMetrics (story 6.5) ----
+
+    [Fact]
+    public void Registers_a_singleton_BusinessMetrics_recorder()
+    {
+        var builder = CreateBuilder();
+
+        builder.AddServiceDefaults("test-service");
+        using var provider = builder.Services.BuildServiceProvider();
+
+        var first = provider.GetRequiredService<BusinessMetrics>();
+        var second = provider.GetRequiredService<BusinessMetrics>();
+
+        first.Should().BeSameAs(second, "every composition root must record through the same Meter instance");
+    }
+
+    [Fact]
+    public void BusinessMetrics_MeterName_is_added_to_the_metrics_provider()
+    {
+        var builder = CreateBuilder();
+        var exporter = new CollectingMetricExporter();
+
+        builder.AddServiceDefaults("test-service");
+        builder.Services.AddOpenTelemetry()
+            .WithMetrics(metrics => metrics.AddReader(
+                new PeriodicExportingMetricReader(exporter, exportIntervalMilliseconds: int.MaxValue)));
+        using var provider = builder.Services.BuildServiceProvider();
+
+        using var meterProvider = provider.GetRequiredService<MeterProvider>();
+        var metrics = provider.GetRequiredService<BusinessMetrics>();
+
+        metrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored);
+        meterProvider.ForceFlush();
+
+        exporter.InstrumentNames.Should().Contain(BusinessMetrics.PaymentIntakeInstrumentName);
+    }
+
+    private sealed class CollectingMetricExporter : BaseExporter<Metric>
+    {
+        public List<string> InstrumentNames { get; } = [];
+
+        public override ExportResult Export(in Batch<Metric> batch)
+        {
+            foreach (var metric in batch)
+            {
+                InstrumentNames.Add(metric.Name);
+            }
+
+            return ExportResult.Success;
+        }
     }
 
     [Fact]

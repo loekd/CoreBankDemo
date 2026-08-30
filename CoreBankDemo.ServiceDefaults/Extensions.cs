@@ -5,6 +5,7 @@ using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Logging;
 using OpenTelemetry;
@@ -39,6 +40,13 @@ public static class Extensions
             builder.AddDefaultHealthChecks();
 
             builder.Services.AddServiceDiscovery();
+
+            // Story 6.5: one shared BusinessMetrics recorder per process,
+            // registered once here so every composition root's processors,
+            // repositories, handlers, and transport boundaries record through
+            // the same Meter instance that ConfigureOpenTelemetry below
+            // subscribes into the OTel metrics pipeline.
+            builder.Services.TryAddSingleton<BusinessMetrics>();
 
             builder.Services.ConfigureHttpClientDefaults(http =>
             {
@@ -81,7 +89,8 @@ public static class Extensions
                     var daprClient = sp.GetRequiredService<Dapr.Client.DaprClient>();
                     var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<MessagingOutboxProcessingOptions>>();
                     var logger = sp.GetRequiredService<ILogger<DaprEventPublisher>>();
-                    return new DaprEventPublisher(daprClient, options, logger);
+                    var businessMetrics = sp.GetRequiredService<BusinessMetrics>();
+                    return new DaprEventPublisher(daprClient, options, logger, businessMetrics);
                 });
             }
 
@@ -140,7 +149,8 @@ public static class Extensions
                 {
                     metrics.AddAspNetCoreInstrumentation()
                         .AddHttpClientInstrumentation()
-                        .AddRuntimeInstrumentation();
+                        .AddRuntimeInstrumentation()
+                        .AddMeter(BusinessMetrics.MeterName);
 
                     if (otlpEndpoint is not null)
                     {

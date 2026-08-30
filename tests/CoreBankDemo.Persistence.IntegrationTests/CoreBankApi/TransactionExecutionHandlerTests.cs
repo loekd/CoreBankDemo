@@ -6,6 +6,7 @@ using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 using Moq;
 using Xunit;
@@ -28,7 +29,9 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
 
         var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
         var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Strict);
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
         var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, TimeProvider.GetUtcNow());
         var result = new TransactionExecutionResult(true, response, null, 50m, 75m);
 
@@ -38,7 +41,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, FromAccount, -50m, 50m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, ToAccount, 50m, 75m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -48,6 +51,19 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         JsonSerializer.Deserialize<TransactionResponse>(persisted.ResponsePayload!).Should().Be(response);
         enqueuer.VerifyAll();
         executor.VerifyAll();
+
+        // Story 6.5: recorded exactly once, only after the enclosing
+        // transaction committed, plus the three directly-enqueued
+        // corebank-outbox rows (never counted via MessageRepositoryBase's own
+        // StoreIfNewAsync, since OutboxEventEnqueuer adds them straight to
+        // the DbContext).
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.transaction.processed")
+            .Which.Tags["outcome"].Should().Be("completed");
+        listener.Measurements.Count(m =>
+                m.InstrumentName == "corebankdemo.messaging.store.operations" &&
+                Equals(m.Tags["messaging.store.name"], "corebank-outbox") &&
+                Equals(m.Tags["outcome"], "added"))
+            .Should().Be(3);
     }
 
     [Fact]
@@ -60,7 +76,9 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
 
         var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
         var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Strict);
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
         var response = new TransactionResponse(TransactionId, MessageConstants.Status.Failed, TimeProvider.GetUtcNow());
         var result = new TransactionExecutionResult(false, response, "Insufficient funds", null, null);
 
@@ -68,7 +86,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
             .ReturnsAsync(result);
         enqueuer.Setup(x => x.EnqueueTransactionFailedAsync(message, "Insufficient funds", It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -79,6 +97,53 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         enqueuer.Verify(x => x.EnqueueTransactionCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
         enqueuer.Verify(x => x.EnqueueBalanceUpdatedAsync(It.IsAny<InboxMessage>(), It.IsAny<string>(), It.IsAny<decimal>(), It.IsAny<decimal>(), It.IsAny<CancellationToken>()), Times.Never);
         enqueuer.VerifyAll();
+
+        // Story 6.5: business rejection is a completed business outcome, never
+        // processing/transport `failed` — and only one corebank-outbox row
+        // (the failure event) is added.
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.transaction.processed")
+            .Which.Tags["outcome"].Should().Be("business_rejected");
+        listener.Measurements.Count(m =>
+                m.InstrumentName == "corebankdemo.messaging.store.operations" &&
+                Equals(m.Tags["messaging.store.name"], "corebank-outbox"))
+            .Should().Be(1);
+    }
+
+    [Fact]
+    public async Task HandleAsync_records_no_transaction_processed_metric_when_save_changes_throws_and_rolls_back()
+    {
+        await using var context = CreateContext();
+        var message = NewMessage();
+        context.InboxMessages.Add(message);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
+        var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Strict);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, TimeProvider.GetUtcNow());
+        var result = new TransactionExecutionResult(true, response, null, 50m, 75m);
+
+        executor.Setup(x => x.ExecuteAsync(FromAccount, ToAccount, 50m, TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(result);
+        enqueuer.Setup(x => x.EnqueueTransactionCompletedAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, FromAccount, -50m, 50m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, ToAccount, 50m, 75m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+
+        var handler = new TransactionExecutionHandler(
+            executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider, businessMetrics);
+
+        var act = async () => await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom during save");
+
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == "corebankdemo.transaction.processed");
+        listener.Measurements.Count(m =>
+                m.InstrumentName == "corebankdemo.messaging.store.operations" &&
+                Equals(m.Tags["messaging.store.name"], "corebank-outbox") &&
+                Equals(m.Tags["outcome"], "failed"))
+            .Should().Be(3);
     }
 
     [Fact]
@@ -91,7 +156,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
 
         var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
         var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Strict);
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var repository = new InboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, TimeProvider.GetUtcNow());
         var result = new TransactionExecutionResult(true, response, null, 50m, 75m);
 
@@ -101,7 +166,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, FromAccount, -50m, 50m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, ToAccount, 50m, 75m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 

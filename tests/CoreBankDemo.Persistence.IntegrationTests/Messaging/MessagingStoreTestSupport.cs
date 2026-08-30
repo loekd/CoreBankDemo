@@ -1,5 +1,6 @@
 using CoreBankDemo.Messaging;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.Persistence.IntegrationTests.Messaging;
@@ -80,16 +81,20 @@ public class TestMessagingDbContext(DbContextOptions<TestMessagingDbContext> opt
     }
 }
 
-public sealed class TestInboxMessageRepository(TestMessagingDbContext dbContext, TimeProvider timeProvider)
-    : InboxMessageRepositoryBase<TestInboxMessage, TestMessagingDbContext>(dbContext, timeProvider)
+public sealed class TestInboxMessageRepository(TestMessagingDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
+    : InboxMessageRepositoryBase<TestInboxMessage, TestMessagingDbContext>(dbContext, timeProvider, businessMetrics)
 {
     protected override DbSet<TestInboxMessage> InboxMessages => DbContext.InboxMessages;
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsInbox;
 }
 
-public sealed class TestOutboxEventMessageRepository(TestMessagingDbContext dbContext, TimeProvider timeProvider)
-    : OutboxMessageRepositoryBase<TestOutboxEventMessage, TestMessagingDbContext>(dbContext, timeProvider)
+public sealed class TestOutboxEventMessageRepository(TestMessagingDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
+    : OutboxMessageRepositoryBase<TestOutboxEventMessage, TestMessagingDbContext>(dbContext, timeProvider, businessMetrics)
 {
     protected override DbSet<TestOutboxEventMessage> OutboxMessages => DbContext.OutboxEventMessages;
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsOutbox;
 }
 
 /// <summary>

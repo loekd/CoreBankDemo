@@ -17,7 +17,7 @@ public class MessageRepositoryBaseTests(PostgresContainerFixture fixture) : Mess
     [Fact]
     public void Constructor_rejects_null_dbContext()
     {
-        var act = () => new TestInboxMessageRepository(null!, TimeProvider);
+        var act = () => new TestInboxMessageRepository(null!, TimeProvider, TestBusinessMetrics.Instance);
 
         act.Should().Throw<ArgumentNullException>().WithParameterName("dbContext");
     }
@@ -26,7 +26,7 @@ public class MessageRepositoryBaseTests(PostgresContainerFixture fixture) : Mess
     public void Constructor_rejects_null_timeProvider()
     {
         using var context = CreateContext();
-        var act = () => new TestInboxMessageRepository(context, null!);
+        var act = () => new TestInboxMessageRepository(context, null!, TestBusinessMetrics.Instance);
 
         act.Should().Throw<ArgumentNullException>().WithParameterName("timeProvider");
     }
@@ -35,7 +35,7 @@ public class MessageRepositoryBaseTests(PostgresContainerFixture fixture) : Mess
     public async Task StoreIfNewAsync_rejects_null_message()
     {
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.StoreIfNewAsync(null!, TestContext.Current.CancellationToken);
 

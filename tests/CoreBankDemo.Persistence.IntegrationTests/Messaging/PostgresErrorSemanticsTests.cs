@@ -58,7 +58,7 @@ public class PostgresErrorSemanticsTests(PostgresContainerFixture fixture)
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.StoreIfNewAsync(
             new TestInboxMessage { IdempotencyKey = "propagates", RetryCount = -1 }, ct);
@@ -80,7 +80,7 @@ public class PostgresErrorSemanticsTests(PostgresContainerFixture fixture)
 
         await using var context = new TestMessagingDbContext(
             new DbContextOptionsBuilder<TestMessagingDbContext>().UseNpgsql(unreachable).Options);
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.StoreIfNewAsync(
             new TestInboxMessage { IdempotencyKey = "unreachable" }, ct);

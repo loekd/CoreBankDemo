@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Inbox;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
@@ -34,7 +35,8 @@ internal sealed class TransactionEventIntakeHandler(
     IInboxMessageRepository repository,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
-    ILogger<TransactionEventIntakeHandler> logger) : ITransactionEventIntakeHandler
+    ILogger<TransactionEventIntakeHandler> logger,
+    BusinessMetrics businessMetrics) : ITransactionEventIntakeHandler
 {
     /// <summary>
     /// Transaction-wide events store under the empty-account sentinel
@@ -105,7 +107,24 @@ internal sealed class TransactionEventIntakeHandler(
             TraceState = Activity.Current?.TraceStateString
         };
 
-        var stored = await repository.StoreIfNewAsync(message, cancellationToken).ConfigureAwait(false);
+        bool stored;
+        try
+        {
+            stored = await repository.StoreIfNewAsync(message, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            businessMetrics.RecordDelivery(
+                BusinessMetrics.DeliveryDirection.Received,
+                BusinessMetrics.Transport.Dapr,
+                ToMessageType(eventType),
+                BusinessMetrics.DeliveryOutcome.Failed);
+            throw;
+        }
         if (stored)
         {
             logger.LogInformation(
@@ -118,5 +137,26 @@ internal sealed class TransactionEventIntakeHandler(
                 "Duplicate transaction event ignored: {EventType} for transaction {TransactionId}, account {AccountNumber}",
                 eventType, transactionId, accountNumber);
         }
+
+        // Story 6.5: the concrete Dapr-receive boundary for this event.
+        // eventType is always one of this class's own three known call
+        // sites' Constants values above -- never copied from the incoming
+        // CloudEvent's own type string -- so ToMessageType's closed mapping
+        // never needs an "unknown" fallback here (the truly unknown route is
+        // TransactionEventsController.Unknown, which never reaches this
+        // handler at all).
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Received,
+            BusinessMetrics.Transport.Dapr,
+            ToMessageType(eventType),
+            stored ? BusinessMetrics.DeliveryOutcome.Succeeded : BusinessMetrics.DeliveryOutcome.Duplicate);
     }
+
+    private static BusinessMetrics.MessageType ToMessageType(string eventType) => eventType switch
+    {
+        Constants.TransactionCompleted => BusinessMetrics.MessageType.TransactionCompleted,
+        Constants.TransactionFailed => BusinessMetrics.MessageType.TransactionFailed,
+        Constants.BalanceUpdated => BusinessMetrics.MessageType.BalanceUpdated,
+        _ => BusinessMetrics.MessageType.Unknown
+    };
 }

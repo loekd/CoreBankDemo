@@ -69,6 +69,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     private readonly TimeProvider _timeProvider;
     private readonly ILogger _logger;
     private readonly InboxProcessorOptions _options;
+    private readonly BusinessMetrics _businessMetrics;
 
     protected InboxProcessorBase(
         IDistributedLockService lockService,
@@ -76,6 +77,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         ActivitySource activitySource,
         TimeProvider timeProvider,
         ILogger logger,
+        BusinessMetrics businessMetrics,
         InboxProcessorOptions? options = null)
     {
         _lockService = lockService ?? throw new ArgumentNullException(nameof(lockService));
@@ -83,6 +85,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         _activitySource = activitySource ?? throw new ArgumentNullException(nameof(activitySource));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _businessMetrics = businessMetrics ?? throw new ArgumentNullException(nameof(businessMetrics));
         _options = options ?? new InboxProcessorOptions();
     }
 
@@ -92,6 +95,16 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     /// (<c>&lt;prefix&gt;-partition-&lt;id&gt;</c>).
     /// </summary>
     protected abstract string LockNamePrefix { get; }
+
+    /// <summary>
+    /// This inbox's stable business identity (story 6.5) — e.g.
+    /// <see cref="BusinessMetrics.StoreName.CoreBankInbox"/> — used to tag
+    /// queue-duration and item-processed measurements. Independent of
+    /// <see cref="LockNamePrefix"/> (design notes): a lock prefix is an
+    /// infrastructure contention scope, not necessarily this store's business
+    /// identity.
+    /// </summary>
+    protected abstract BusinessMetrics.StoreName StoreName { get; }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -281,6 +294,12 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     {
         using var activity = StartDispatchActivity(message);
 
+        // Story 6.5: recorded once per claimed item, right as handling
+        // starts — never inside a database query, per this story's design
+        // notes (no observable-gauge backlog query).
+        _businessMetrics.RecordQueueDuration(
+            StoreName, BusinessMetrics.StoreKind.Inbox, _timeProvider.GetUtcNow().UtcDateTime - message.ReceivedAt);
+
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -294,7 +313,8 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
             // retry-counted — and picked up again by a future claim (fresh, or
             // via stale-claim reclaim). Propagates out of this partition's
             // dispatch loop so no further messages in this batch are attempted
-            // once cancellation has been observed ("stops promptly").
+            // once cancellation has been observed ("stops promptly"). No item
+            // metric is recorded solely because of this cancellation.
             throw;
         }
         catch (Exception ex)
@@ -306,7 +326,12 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
 
             try
             {
-                await store.MarkAsFailedWithRetryAsync(message, ex.Message, cancellationToken).ConfigureAwait(false);
+                var transition = await store.MarkAsFailedWithRetryAsync(
+                    message, ex.Message, cancellationToken).ConfigureAwait(false);
+                if (transition == MessageTransitionOutcome.AlreadyTerminal)
+                {
+                    return;
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -330,14 +355,35 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                     retryEx,
                     "Failed to record retry for message {MessageId} (IdempotencyKey={IdempotencyKey}, PartitionId={PartitionId}) after a handler failure",
                     message.Id, message.IdempotencyKey, message.PartitionId);
+                _businessMetrics.RecordItemProcessed(
+                    StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.RetryPersistenceFailed);
+                return;
             }
+
+            // MarkAsFailedWithRetryAsync mutates message.Status in place
+            // (ApplyFailureTransition) before returning normally, so its
+            // post-call value is authoritative: Failed means this call was
+            // the one that hit MaxRetryCount (recorded exactly once, since a
+            // row already Failed is never re-claimed — see
+            // GetClaimableMessagesQuery's RetryCount filter), anything else
+            // means it went back to Pending for another attempt.
+            _businessMetrics.RecordItemProcessed(
+                StoreName,
+                BusinessMetrics.StoreKind.Inbox,
+                message.Status == MessageConstants.Status.Failed
+                    ? BusinessMetrics.ItemOutcome.TerminalFailed
+                    : BusinessMetrics.ItemOutcome.RetryScheduled);
 
             return;
         }
 
         try
         {
-            await store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
+            var transition = await store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
+            if (transition == MessageTransitionOutcome.AlreadyTerminal)
+            {
+                return;
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -362,7 +408,12 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                 ex,
                 "Failed to persist completion for message {MessageId} (IdempotencyKey={IdempotencyKey}, PartitionId={PartitionId}) after successful handling; it will be reprocessed once its claim goes stale",
                 message.Id, message.IdempotencyKey, message.PartitionId);
+            _businessMetrics.RecordItemProcessed(
+                StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.CompletionPersistenceFailed);
+            return;
         }
+
+        _businessMetrics.RecordItemProcessed(StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.Completed);
     }
 
     /// <summary>

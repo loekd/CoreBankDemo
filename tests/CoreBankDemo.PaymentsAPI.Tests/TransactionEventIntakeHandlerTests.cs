@@ -4,6 +4,7 @@ using AwesomeAssertions;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Inbox;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging;
@@ -214,6 +215,53 @@ public class TransactionEventIntakeHandlerTests
         logger.Messages.Should().ContainSingle(message => message.Contains("Duplicate"));
     }
 
+    // ---- Story 6.5: business metrics ----
+
+    [Fact]
+    public async Task TransactionCompleted_records_a_succeeded_dapr_receive_delivery_metric_when_newly_stored()
+    {
+        var repository = new Mock<IInboxMessageRepository>();
+        repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(new TransactionCompletedEvent("txn-100", "Completed", Now), TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries").Which;
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["messaging.direction"] = "received",
+            ["messaging.transport"] = "dapr",
+            ["messaging.message.type"] = "transaction-completed",
+            ["outcome"] = "succeeded",
+        });
+    }
+
+    [Theory]
+    [InlineData(true, "succeeded")]
+    [InlineData(false, "duplicate")]
+    public async Task BalanceUpdated_records_the_dapr_receive_delivery_outcome_matching_the_store_result(
+        bool stored, string expectedOutcome)
+    {
+        var repository = new Mock<IInboxMessageRepository>();
+        repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(stored);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(
+            new BalanceUpdatedEvent("txn-101", "NL91ABNA0417164300", 1m, 2m, "EUR"), TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries").Which;
+        measurement.Tags["messaging.message.type"].Should().Be("balance-updated");
+        measurement.Tags["outcome"].Should().Be(expectedOutcome);
+    }
+
     [Fact]
     public async Task Cancellation_token_is_forwarded_unchanged_to_the_repository()
     {
@@ -237,13 +285,18 @@ public class TransactionEventIntakeHandlerTests
         repository
             .Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(failure);
-        var handler = CreateHandler(repository.Object);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
 
         var act = () => handler.StoreAsync(
             new TransactionCompletedEvent("txn-10", "Completed", Now),
             TestContext.Current.CancellationToken);
 
         (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Should().BeSameAs(failure);
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingDeliveriesInstrumentName)
+            .Which.Tags["outcome"].Should().Be("failed");
     }
 
     [Fact]
@@ -265,7 +318,8 @@ public class TransactionEventIntakeHandlerTests
 
     private static TransactionEventIntakeHandler CreateHandler(
         IInboxMessageRepository repository,
-        ILogger<TransactionEventIntakeHandler>? logger = null) =>
+        ILogger<TransactionEventIntakeHandler>? logger = null,
+        BusinessMetrics? businessMetrics = null) =>
         new(
             repository,
             Options.Create(new InboxProcessingOptions
@@ -275,7 +329,8 @@ public class TransactionEventIntakeHandlerTests
                 PollingIntervalMs = 200
             }),
             new FixedTimeProvider(Now),
-            logger ?? NullLogger<TransactionEventIntakeHandler>.Instance);
+            logger ?? NullLogger<TransactionEventIntakeHandler>.Instance,
+            businessMetrics ?? new BusinessMetrics());
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {

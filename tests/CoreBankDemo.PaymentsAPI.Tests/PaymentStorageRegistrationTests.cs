@@ -2,6 +2,7 @@ using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -126,6 +127,7 @@ public class PaymentStorageRegistrationTests
     {
         var services = new ServiceCollection();
         services.AddLogging();
+        services.AddSingleton<BusinessMetrics>();
         services.AddPaymentStorage(Configuration(values));
         services.AddDbContext<PaymentsDbContext>(
             options => options.UseNpgsql(TestConnectionStrings.NeverConnected));

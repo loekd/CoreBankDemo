@@ -4,6 +4,7 @@ using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -229,6 +230,57 @@ public class PaymentStorageHandlerTests
         repository.VerifyAll();
     }
 
+    // ---- Story 6.5: business metrics ----
+
+    [Fact]
+    public async Task StoreAsync_records_a_stored_payment_intake_metric_for_a_fresh_key()
+    {
+        var repository = new Mock<IOutboxRepository>();
+        repository.Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(Request, "fresh-key", TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.payment.intake")
+            .Which.Tags["outcome"].Should().Be("stored");
+    }
+
+    [Fact]
+    public async Task StoreAsync_records_a_duplicate_payment_intake_metric_for_an_existing_key()
+    {
+        var winner = PaymentsApiTestData.Outbox("duplicate-key");
+        var repository = new Mock<IOutboxRepository>();
+        repository.Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        repository.Setup(store => store.FindByIdempotencyKeyAsync("duplicate-key", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(winner);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(Request, "duplicate-key", TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.payment.intake")
+            .Which.Tags["outcome"].Should().Be("duplicate");
+    }
+
+    [Fact]
+    public async Task StoreAsync_records_a_validation_failed_payment_intake_metric_for_an_invalid_key()
+    {
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(Request, string.Empty, TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.payment.intake")
+            .Which.Tags["outcome"].Should().Be("validation_failed");
+    }
+
     [Fact]
     public async Task Missing_winner_after_race_throws_explicit_invalid_state()
     {
@@ -272,7 +324,8 @@ public class PaymentStorageHandlerTests
 
     private static PaymentStorageHandler CreateHandler(
         IOutboxRepository repository,
-        ILogger<PaymentStorageHandler>? logger = null) =>
+        ILogger<PaymentStorageHandler>? logger = null,
+        BusinessMetrics? businessMetrics = null) =>
         new(
             repository,
             Options.Create(new OutboxProcessingOptions
@@ -282,7 +335,8 @@ public class PaymentStorageHandlerTests
                 PollingIntervalMs = 200
             }),
             new FixedTimeProvider(Now),
-            logger ?? NullLogger<PaymentStorageHandler>.Instance);
+            logger ?? NullLogger<PaymentStorageHandler>.Instance,
+            businessMetrics ?? new BusinessMetrics());
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
     {

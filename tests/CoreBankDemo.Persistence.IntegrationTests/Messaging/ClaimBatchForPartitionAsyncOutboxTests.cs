@@ -21,7 +21,7 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var oldest = new TestOutboxEventMessage
         {
@@ -46,7 +46,7 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         context.OutboxEventMessages.Add(new TestOutboxEventMessage
         {
@@ -68,7 +68,7 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var stuck = new TestOutboxEventMessage
         {
@@ -95,7 +95,7 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         context.OutboxEventMessages.Add(new TestOutboxEventMessage
         {

@@ -10,6 +10,14 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="CoreBankDemo.ServiceDefaults.Tests" />
+    <!-- Story 6.5: MeterListener-based tests scope observation to one
+         BusinessMetrics instance's own Meter (multiple instances share
+         MeterName, especially under parallel test execution), via the
+         internal Meter accessor. -->
+    <InternalsVisibleTo Include="CoreBankDemo.CoreBankAPI.Tests" />
+    <InternalsVisibleTo Include="CoreBankDemo.PaymentsAPI.Tests" />
+    <InternalsVisibleTo Include="CoreBankDemo.Messaging.Tests" />
+    <InternalsVisibleTo Include="CoreBankDemo.Persistence.IntegrationTests" />
     <!-- Moq/Castle DynamicProxy needs this to mock the internal
          IRedisDistributedLockFactory seam (story 6.2) — same pattern already
          used by CoreBankAPI/PaymentsAPI for their own internal mocks. -->

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -67,7 +68,8 @@ internal sealed class TransactionIntakeHandler(
     IInboxMessageRepository repository,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
-    ILogger<TransactionIntakeHandler> logger) : ITransactionIntakeHandler
+    ILogger<TransactionIntakeHandler> logger,
+    BusinessMetrics businessMetrics) : ITransactionIntakeHandler
 {
     public async Task<TransactionIntakeResult> ProcessAsync(TransactionRequest request, CancellationToken cancellationToken)
     {
@@ -109,6 +111,7 @@ internal sealed class TransactionIntakeHandler(
                 "Accepted transaction {TransactionId} into partition {PartitionId}",
                 request.TransactionId, partitionId);
             Activity.Current?.SetTag("outcome", "accepted");
+            businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.Accepted);
             var response = new TransactionResponse(request.TransactionId, MessageConstants.Status.Pending, now);
             return new TransactionIntakeResult(TransactionIntakeOutcome.Accepted, response, null);
         }
@@ -131,6 +134,7 @@ internal sealed class TransactionIntakeHandler(
                 "Transaction {TransactionId} lost the store race but no row was found on re-query",
                 request.TransactionId);
             Activity.Current?.SetTag("outcome", "transport_failed");
+            businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.TransportFailed);
             return new TransactionIntakeResult(
                 TransactionIntakeOutcome.TransportFailed,
                 null,
@@ -181,6 +185,7 @@ internal sealed class TransactionIntakeHandler(
         {
             logger.LogInformation("Replaying cached response for transaction {TransactionId}", existing.TransactionId);
             Activity.Current?.SetTag("outcome", "replayed");
+            businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.Replayed);
             return new TransactionIntakeResult(TransactionIntakeOutcome.Replayed, cachedResponse, null);
         }
 
@@ -188,6 +193,7 @@ internal sealed class TransactionIntakeHandler(
         {
             logger.LogInformation("Transaction {TransactionId} previously failed", existing.TransactionId);
             Activity.Current?.SetTag("outcome", "transport_failed");
+            businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.TransportFailed);
             return new TransactionIntakeResult(
                 TransactionIntakeOutcome.TransportFailed,
                 null,
@@ -195,6 +201,7 @@ internal sealed class TransactionIntakeHandler(
         }
 
         Activity.Current?.SetTag("outcome", "in_flight");
+        businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.InFlight);
         var response = new TransactionResponse(
             existing.TransactionId, existing.Status, new DateTimeOffset(existing.ReceivedAt, TimeSpan.Zero));
         return new TransactionIntakeResult(TransactionIntakeOutcome.InFlight, response, null);

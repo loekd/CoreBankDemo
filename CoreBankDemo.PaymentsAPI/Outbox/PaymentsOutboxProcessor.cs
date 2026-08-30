@@ -24,6 +24,7 @@ public sealed class PaymentsOutboxProcessor : OutboxProcessorBase<OutboxMessage>
         ActivitySource activitySource,
         TimeProvider timeProvider,
         ILogger<PaymentsOutboxProcessor> logger,
+        BusinessMetrics businessMetrics,
         IOptions<OutboxProcessingOptions> options)
         : base(
             lockService,
@@ -31,6 +32,7 @@ public sealed class PaymentsOutboxProcessor : OutboxProcessorBase<OutboxMessage>
             activitySource,
             timeProvider,
             logger,
+            businessMetrics,
             new OutboxProcessorOptions
             {
                 PartitionCount = options.Value.PartitionCount,
@@ -41,4 +43,6 @@ public sealed class PaymentsOutboxProcessor : OutboxProcessorBase<OutboxMessage>
     }
 
     protected override string LockNamePrefix => "payments-outbox";
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsOutbox;
 }

@@ -1,5 +1,6 @@
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.AspNetCore.Mvc;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
@@ -13,7 +14,7 @@ namespace CoreBankDemo.CoreBankAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-public class TransactionsController(ITransactionIntakeHandler handler) : ControllerBase
+public class TransactionsController(ITransactionIntakeHandler handler, BusinessMetrics businessMetrics) : ControllerBase
 {
     [HttpPost("process")]
     public async Task<IActionResult> ProcessTransaction(
@@ -25,7 +26,41 @@ public class TransactionsController(ITransactionIntakeHandler handler) : Control
             return BadRequest(new { Errors = errors });
         }
 
-        var result = await handler.ProcessAsync(request, cancellationToken);
+        TransactionIntakeResult result;
+        try
+        {
+            result = await handler.ProcessAsync(request, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            businessMetrics.RecordDelivery(
+                BusinessMetrics.DeliveryDirection.Received,
+                BusinessMetrics.Transport.Http,
+                BusinessMetrics.MessageType.TransactionCommand,
+                BusinessMetrics.DeliveryOutcome.Failed);
+            throw;
+        }
+
+        // Story 6.5: the concrete HTTP-receive boundary for the transaction
+        // command. Recorded from the already-known intake outcome rather
+        // than re-deriving it, so this can never disagree with the
+        // transaction-intake measurement the handler already recorded.
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Received,
+            BusinessMetrics.Transport.Http,
+            BusinessMetrics.MessageType.TransactionCommand,
+            result.Outcome switch
+            {
+                TransactionIntakeOutcome.Accepted => BusinessMetrics.DeliveryOutcome.Succeeded,
+                TransactionIntakeOutcome.Replayed => BusinessMetrics.DeliveryOutcome.Duplicate,
+                TransactionIntakeOutcome.InFlight => BusinessMetrics.DeliveryOutcome.Duplicate,
+                TransactionIntakeOutcome.TransportFailed => BusinessMetrics.DeliveryOutcome.Failed,
+                _ => throw new InvalidOperationException($"Unhandled transaction intake outcome: {result.Outcome}")
+            });
 
         return result.Outcome switch
         {

@@ -29,7 +29,8 @@ public interface IInboxMessageStore<TMessage>
     /// <c>ProcessedAt</c> stamped from the store's <see cref="TimeProvider"/>.
     /// See <see cref="MessageRepositoryBase{TMessage,TDbContext}.MarkAsCompletedAsync"/>.
     /// </summary>
-    Task MarkAsCompletedAsync(TMessage message, CancellationToken cancellationToken = default);
+    Task<MessageTransitionOutcome> MarkAsCompletedAsync(
+        TMessage message, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Handler-failure retry/poison transition: retries below
@@ -37,5 +38,6 @@ public interface IInboxMessageStore<TMessage>
     /// <see cref="MessageConstants.Status.Failed"/> at the limit. See
     /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.MarkAsFailedWithRetryAsync"/>.
     /// </summary>
-    Task MarkAsFailedWithRetryAsync(TMessage message, string errorMessage, CancellationToken cancellationToken = default);
+    Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
+        TMessage message, string errorMessage, CancellationToken cancellationToken = default);
 }

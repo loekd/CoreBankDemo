@@ -3,6 +3,7 @@ using CoreBankDemo.CoreBankAPI.Controllers;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Moq;
@@ -26,12 +27,13 @@ public class TransactionsControllerTests
     private const string TransactionId = "txn-123";
 
     private readonly Mock<ITransactionIntakeHandler> _handler = new(MockBehavior.Strict);
+    private readonly BusinessMetrics _businessMetrics = new();
 
     private static TransactionRequest ValidRequest() => new(FromAccount, ToAccount, 50m, "EUR", TransactionId);
 
     private TransactionsController CreateController()
     {
-        var controller = new TransactionsController(_handler.Object)
+        var controller = new TransactionsController(_handler.Object, _businessMetrics)
         {
             ControllerContext = new ControllerContext
             {
@@ -116,6 +118,67 @@ public class TransactionsControllerTests
 
         var badRequest = result.Should().BeOfType<BadRequestObjectResult>().Subject;
         GetErrors(badRequest.Value).Should().Equal("boom");
+    }
+
+    // ---- Story 6.5: business metrics ----
+
+    [Theory]
+    [InlineData(TransactionIntakeOutcome.Accepted, "succeeded")]
+    [InlineData(TransactionIntakeOutcome.Replayed, "duplicate")]
+    [InlineData(TransactionIntakeOutcome.InFlight, "duplicate")]
+    [InlineData(TransactionIntakeOutcome.TransportFailed, "failed")]
+    public async Task ProcessTransaction_records_the_http_receive_delivery_outcome_matching_the_intake_outcome(
+        TransactionIntakeOutcome intakeOutcome, string expectedDeliveryOutcome)
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Pending, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionIntakeResult(
+                intakeOutcome,
+                intakeOutcome == TransactionIntakeOutcome.TransportFailed ? null : response,
+                intakeOutcome == TransactionIntakeOutcome.TransportFailed ? ["boom"] : null));
+        using var listener = new MetricsTestListener(_businessMetrics);
+        var controller = CreateController();
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries").Which;
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["messaging.direction"] = "received",
+            ["messaging.transport"] = "http",
+            ["messaging.message.type"] = "transaction-command",
+            ["outcome"] = expectedDeliveryOutcome,
+        });
+    }
+
+    [Fact]
+    public async Task ProcessTransaction_records_no_delivery_metric_when_model_state_is_invalid()
+    {
+        using var listener = new MetricsTestListener(_businessMetrics);
+        var controller = CreateController();
+        controller.ModelState.AddModelError("Amount", "Amount is required");
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ProcessTransaction_records_a_failed_http_receive_and_rethrows_handler_failure()
+    {
+        var failure = new InvalidOperationException("database unavailable");
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(failure);
+        using var listener = new MetricsTestListener(_businessMetrics);
+        var controller = CreateController();
+
+        var act = () => controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Should().BeSameAs(failure);
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingDeliveriesInstrumentName)
+            .Which.Tags["outcome"].Should().Be("failed");
     }
 
     [Fact]

@@ -26,7 +26,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Cor
         context.InboxMessages.Add(message);
         await context.SaveChangesAsync(TestContext.Current.CancellationToken);
 
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var repository = new InboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var result = await repository.FindByIdempotencyKeyAsync(TransactionId, TestContext.Current.CancellationToken);
 
@@ -39,7 +39,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Cor
     public async Task FindByIdempotencyKeyAsync_returns_null_when_no_row_matches()
     {
         await using var context = CreateContext();
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var repository = new InboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var result = await repository.FindByIdempotencyKeyAsync("unknown-txn", TestContext.Current.CancellationToken);
 
@@ -50,7 +50,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Cor
     public async Task StoreIfNewAsync_stores_a_fresh_row_and_returns_true()
     {
         await using var context = CreateContext();
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var repository = new InboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var message = NewMessage(TransactionId);
 
         var result = await repository.StoreIfNewAsync(message, TestContext.Current.CancellationToken);
@@ -58,7 +58,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Cor
         result.Should().BeTrue();
 
         await using var verifyContext = CreateContext();
-        var stored = await new InboxMessageRepository(verifyContext, TimeProvider)
+        var stored = await new InboxMessageRepository(verifyContext, TimeProvider, TestBusinessMetrics.Instance)
             .FindByIdempotencyKeyAsync(TransactionId, TestContext.Current.CancellationToken);
         stored.Should().NotBeNull();
     }
@@ -71,7 +71,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Cor
         await seedContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
         await using var context = CreateContext();
-        var repository = new InboxMessageRepository(context, TimeProvider);
+        var repository = new InboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var duplicate = NewMessage(TransactionId);
 
         var result = await repository.StoreIfNewAsync(duplicate, TestContext.Current.CancellationToken);

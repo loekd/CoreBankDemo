@@ -23,7 +23,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Pay
     {
         await using var store = CreateStore();
         await using var context = store.CreateContext();
-        var repository = new InboxMessageRepository(context, System.TimeProvider.System);
+        var repository = new InboxMessageRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
 
         (await repository.StoreIfNewAsync(
             PaymentsApiTestData.Inbox("transaction-1", "com.corebank.transaction.completed", ""),
@@ -44,7 +44,7 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Pay
     {
         await using var store = CreateStore();
         await using var context = store.CreateContext();
-        var repository = new InboxMessageRepository(context, System.TimeProvider.System);
+        var repository = new InboxMessageRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
 
         (await repository.StoreIfNewAsync(
             PaymentsApiTestData.Inbox("transaction-2", "com.corebank.transaction.completed", ""),
@@ -66,8 +66,8 @@ public class InboxMessageRepositoryTests(PostgresContainerFixture fixture) : Pay
         var contexts = store.CreateCompetingContexts();
         await using var firstContext = contexts.First;
         await using var secondContext = contexts.Second;
-        var first = new InboxMessageRepository(firstContext, System.TimeProvider.System);
-        var second = new InboxMessageRepository(secondContext, System.TimeProvider.System);
+        var first = new InboxMessageRepository(firstContext, System.TimeProvider.System, TestBusinessMetrics.Instance);
+        var second = new InboxMessageRepository(secondContext, System.TimeProvider.System, TestBusinessMetrics.Instance);
 
         var results = await Task.WhenAll(
             first.StoreIfNewAsync(

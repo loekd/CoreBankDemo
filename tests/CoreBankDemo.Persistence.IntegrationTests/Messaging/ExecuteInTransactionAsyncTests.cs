@@ -19,7 +19,7 @@ public class ExecuteInTransactionAsyncTests(PostgresContainerFixture fixture) : 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var message = new TestInboxMessage { IdempotencyKey = "commits" };
 
         await repository.ExecuteInTransactionAsync(async () =>
@@ -37,7 +37,7 @@ public class ExecuteInTransactionAsyncTests(PostgresContainerFixture fixture) : 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var message = new TestInboxMessage { IdempotencyKey = "rolled-back" };
 
         var act = async () => await repository.ExecuteInTransactionAsync(async () =>
@@ -59,7 +59,7 @@ public class ExecuteInTransactionAsyncTests(PostgresContainerFixture fixture) : 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var first = new TestInboxMessage { IdempotencyKey = "multi-row-1" };
         var second = new TestInboxMessage { IdempotencyKey = "multi-row-2" };
@@ -90,7 +90,7 @@ public class ExecuteInTransactionAsyncTests(PostgresContainerFixture fixture) : 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.ExecuteInTransactionAsync(null!, ct);
 

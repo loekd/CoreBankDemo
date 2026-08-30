@@ -2,7 +2,7 @@
 title: 'Story 6.5: OpenTelemetry business metrics'
 type: 'feature'
 created: '2026-08-29'
-status: 'ready-for-dev'
+status: 'done'
 baseline_commit: '8e55a6488619239b533d086995715fa8740b585f'
 review_loop_iteration: 0
 context:
@@ -75,13 +75,13 @@ Transport delivery counters are attempt metrics: a publish can succeed and later
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Add `BusinessMetrics` with the exact metric contract and typed low-cardinality recording API; unit-test instrument metadata and forbidden-tag absence.
-- [ ] Register the meter and recorder through `AddServiceDefaults`; prove both APIs receive the same contract through existing composition roots.
-- [ ] Instrument repository-backed store outcomes, including dedupe and failure without changing exception behavior; record CoreBank's directly enqueued outbox rows only after their enclosing transaction commits.
-- [ ] Instrument Inbox/Outbox queue duration and processing outcomes at authoritative state-transition points, including persistence-failure distinctions and cancellation exclusions.
-- [ ] Instrument payment intake, transaction intake, and committed transaction outcomes exactly once.
-- [ ] Instrument concrete HTTP and Dapr send/receive attempts without duplicating measurements across adapters, strategies, handlers, and processors.
-- [ ] Run focused metrics tests and the full rebuild solution gate.
+- [x] Add `BusinessMetrics` with the exact metric contract and typed low-cardinality recording API; unit-test instrument metadata and forbidden-tag absence.
+- [x] Register the meter and recorder through `AddServiceDefaults`; prove both APIs receive the same contract through existing composition roots.
+- [x] Instrument repository-backed store outcomes, including dedupe and failure without changing exception behavior; record CoreBank's directly enqueued outbox rows only after their enclosing transaction commits.
+- [x] Instrument Inbox/Outbox queue duration and processing outcomes at authoritative state-transition points, including persistence-failure distinctions and cancellation exclusions.
+- [x] Instrument payment intake, transaction intake, and committed transaction outcomes exactly once.
+- [x] Instrument concrete HTTP and Dapr send/receive attempts without duplicating measurements across adapters, strategies, handlers, and processors.
+- [x] Run focused metrics tests and the full rebuild solution gate.
 
 **Acceptance Criteria:**
 - Given service startup, when the OTel metrics provider is built, then `BusinessMetrics.MeterName` is subscribed and exported through the same endpoint/resource configuration as framework metrics.
@@ -110,8 +110,45 @@ Do not implement a current-backlog gauge in this story. An asynchronous database
 
 ## Suggested Review Order
 
-1. Metric names, descriptions, units, closed-set values, and registration in ServiceDefaults.
-2. Shared repository and processor hooks, especially retry versus persistence-failure classification.
-3. Transaction commit timing and business-rejection semantics.
-4. Concrete HTTP/Dapr send/receive hooks for accidental double counting.
-5. `MeterListener` tests proving exact counts and bounded tags.
+**Metric contract and export**
+
+- Central typed recorder owns instruments and the complete closed attribute vocabulary.
+  [`BusinessMetrics.cs:27`](../../../CoreBankDemo.ServiceDefaults/BusinessMetrics.cs#L27)
+
+- Service defaults register one recorder and subscribe its meter to OpenTelemetry.
+  [`Extensions.cs:49`](../../../CoreBankDemo.ServiceDefaults/Extensions.cs#L49)
+
+**Durable state outcomes**
+
+- Repository transitions report whether this caller actually changed durable terminal state.
+  [`MessageRepositoryBase.cs:326`](../../../CoreBankDemo.Messaging/MessageRepositoryBase.cs#L326)
+
+- Inbox processing separates retries, terminal failures, persistence failures, and completion.
+  [`InboxProcessorBase.cs:300`](../../../CoreBankDemo.Messaging/InboxProcessorBase.cs#L300)
+
+- Outbox processing mirrors authoritative Inbox classification without double-counting races.
+  [`OutboxProcessorBase.cs:302`](../../../CoreBankDemo.Messaging/OutboxProcessorBase.cs#L302)
+
+**Business and transport boundaries**
+
+- Transaction metrics emit only after commit; rolled-back outbox additions report failure.
+  [`TransactionExecutionHandler.cs:28`](../../../CoreBankDemo.CoreBankAPI/Inbox/TransactionExecutionHandler.cs#L28)
+
+- HTTP receive attempts map returned and exceptional intake outcomes without swallowing errors.
+  [`TransactionsController.cs:40`](../../../CoreBankDemo.CoreBankAPI/Controllers/TransactionsController.cs#L40)
+
+- Dapr receive and send hooks classify failures once while excluding host cancellation.
+  [`TransactionEventIntakeHandler.cs:121`](../../../CoreBankDemo.PaymentsAPI/Handlers/TransactionEventIntakeHandler.cs#L121)
+  [`DaprEventPublisher.cs:74`](../../../CoreBankDemo.ServiceDefaults/DaprEventPublisher.cs#L74)
+
+**Verification**
+
+- Instrument metadata and bounded tags are asserted directly with `MeterListener`.
+  [`BusinessMetricsTests.cs:20`](../../../tests/CoreBankDemo.ServiceDefaults.Tests/BusinessMetricsTests.cs#L20)
+
+- OpenTelemetry export registration is proven through a real metric reader.
+  [`AddServiceDefaultsTests.cs:75`](../../../tests/CoreBankDemo.ServiceDefaults.Tests/Extensions/AddServiceDefaultsTests.cs#L75)
+
+- Concurrency tests prove terminal outcomes are never counted twice.
+  [`InboxProcessorBaseTests.cs:557`](../../../tests/CoreBankDemo.Messaging.Tests/InboxProcessorBaseTests.cs#L557)
+  [`OutboxProcessorBaseTests.cs:627`](../../../tests/CoreBankDemo.Messaging.Tests/OutboxProcessorBaseTests.cs#L627)

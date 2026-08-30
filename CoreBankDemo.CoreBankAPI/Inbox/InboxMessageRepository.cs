@@ -1,4 +1,5 @@
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
@@ -32,12 +33,14 @@ internal interface IInboxMessageRepository
 internal sealed class InboxMessageRepository
     : InboxMessageRepositoryBase<InboxMessage, CoreBankDbContext>, IInboxMessageRepository
 {
-    public InboxMessageRepository(CoreBankDbContext dbContext, TimeProvider timeProvider)
-        : base(dbContext, timeProvider)
+    public InboxMessageRepository(CoreBankDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
+        : base(dbContext, timeProvider, businessMetrics)
     {
     }
 
     protected override DbSet<InboxMessage> InboxMessages => DbContext.InboxMessages;
+
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.CoreBankInbox;
 
     public Task<InboxMessage?> FindByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken) =>
         InboxMessages.FirstOrDefaultAsync(m => m.IdempotencyKey == idempotencyKey, cancellationToken);

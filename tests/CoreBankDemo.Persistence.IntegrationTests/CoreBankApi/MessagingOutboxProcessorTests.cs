@@ -110,19 +110,23 @@ public class MessagingOutboxProcessorTests(PostgresContainerFixture fixture) : C
     }
 
     [Fact]
-    public void Concrete_processor_overrides_only_the_lock_name_prefix()
+    public void Concrete_processor_overrides_only_the_lock_name_prefix_and_store_name()
     {
         var declaredMethods = typeof(MessagingOutboxProcessor)
             .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
 
-        declaredMethods.Should().ContainSingle()
-            .Which.Name.Should().Be("get_LockNamePrefix");
+        // Story 6.5 adds a second override (StoreName) alongside the
+        // existing LockNamePrefix — everything else (polling, partition
+        // fan-out, locking, claiming, retry/terminal-failure classification)
+        // still stays owned by the base class.
+        declaredMethods.Select(m => m.Name).Should().BeEquivalentTo(["get_LockNamePrefix", "get_StoreName"]);
     }
 
     private ServiceProvider BuildServices(IEventPublisher publisher)
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(TimeProvider);
+        services.AddSingleton(TestBusinessMetrics.Instance);
         services.AddSingleton(publisher);
         services.AddScoped<CoreBankDbContext>(_ => CreateContext());
         services.AddScoped<MessagingOutboxRepository>();
@@ -142,6 +146,7 @@ public class MessagingOutboxProcessorTests(PostgresContainerFixture fixture) : C
             new ActivitySource(nameof(MessagingOutboxProcessorTests)),
             TimeProvider,
             NullLogger<MessagingOutboxProcessor>.Instance,
+            TestBusinessMetrics.Instance,
             Options.Create(new MessagingOutboxProcessingOptions
             {
                 PartitionCount = 1,

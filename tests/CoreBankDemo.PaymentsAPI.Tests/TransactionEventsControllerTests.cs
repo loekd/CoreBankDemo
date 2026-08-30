@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -97,6 +98,27 @@ public class TransactionEventsControllerTests
     }
 
     [Fact]
+    public void Unknown_records_an_unknown_dapr_receive_delivery_metric_without_using_the_incoming_type_as_a_tag()
+    {
+        var handler = new Mock<ITransactionEventIntakeHandler>(MockBehavior.Strict);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var controller = CreateController(handler.Object, businessMetrics: businessMetrics);
+
+        controller.Unknown("com.corebank.unknown.type", "event-unknown-1", "test-source");
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries").Which;
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["messaging.direction"] = "received",
+            ["messaging.transport"] = "dapr",
+            ["messaging.message.type"] = "unknown",
+            ["outcome"] = "unknown",
+        });
+    }
+
+    [Fact]
     public async Task Cancellation_token_is_forwarded_unchanged_to_the_handler()
     {
         using var cts = new CancellationTokenSource();
@@ -128,8 +150,9 @@ public class TransactionEventsControllerTests
 
     private static TransactionEventsController CreateController(
         ITransactionEventIntakeHandler handler,
-        ILogger<TransactionEventsController>? logger = null) =>
-        new(handler, logger ?? new CapturingLogger());
+        ILogger<TransactionEventsController>? logger = null,
+        BusinessMetrics? businessMetrics = null) =>
+        new(handler, logger ?? new CapturingLogger(), businessMetrics ?? new BusinessMetrics());
 
     private sealed class CapturingLogger : ILogger<TransactionEventsController>
     {

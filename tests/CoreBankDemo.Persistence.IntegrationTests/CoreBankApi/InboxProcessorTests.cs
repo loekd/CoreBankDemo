@@ -140,6 +140,7 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
             new ActivitySource(nameof(InboxProcessorTests)),
             TimeProvider,
             NullLogger<InboxProcessor>.Instance,
+            TestBusinessMetrics.Instance,
             Options.Create(new InboxProcessingOptions
             {
                 PartitionCount = 1,
@@ -151,6 +152,7 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(TimeProvider);
+        services.AddSingleton(TestBusinessMetrics.Instance);
         services.AddSingleton<IOptions<MessagingOutboxProcessingOptions>>(Options.Create(new MessagingOutboxProcessingOptions
         {
             PartitionCount = 4,

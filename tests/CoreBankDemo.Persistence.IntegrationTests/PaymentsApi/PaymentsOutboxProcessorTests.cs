@@ -85,13 +85,16 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
     }
 
     [Fact]
-    public void Concrete_processor_overrides_only_the_lock_name_prefix()
+    public void Concrete_processor_overrides_only_the_lock_name_prefix_and_store_name()
     {
         var declaredMethods = typeof(PaymentsOutboxProcessor)
             .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
 
-        declaredMethods.Should().ContainSingle()
-            .Which.Name.Should().Be("get_LockNamePrefix");
+        // Story 6.5 adds a second override (StoreName) alongside the
+        // existing LockNamePrefix — everything else (polling, partition
+        // fan-out, locking, claiming, retry/terminal-failure classification)
+        // still stays owned by the base class.
+        declaredMethods.Select(m => m.Name).Should().BeEquivalentTo(["get_LockNamePrefix", "get_StoreName"]);
     }
 
     [Fact]
@@ -183,12 +186,13 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(System.TimeProvider.System);
+        services.AddSingleton(TestBusinessMetrics.Instance);
         services.AddScoped<PaymentsDbContext>(_ => store.CreateContext());
         services.AddScoped<OutboxRepository>();
         services.AddScoped<IOutboxMessageStore<OutboxMessage>>(
             sp => sp.GetRequiredService<OutboxRepository>());
         services.AddScoped<IOutboxDeliveryStrategy<OutboxMessage>>(
-            _ => new HttpForwardOutboxDeliveryStrategy(client));
+            _ => new HttpForwardOutboxDeliveryStrategy(client, TestBusinessMetrics.Instance));
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
@@ -204,6 +208,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             new ActivitySource(nameof(PaymentsOutboxProcessorTests)),
             System.TimeProvider.System,
             NullLogger<PaymentsOutboxProcessor>.Instance,
+            TestBusinessMetrics.Instance,
             Options.Create(new OutboxProcessingOptions
             {
                 PartitionCount = partitionCount,

@@ -22,7 +22,7 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var message = new TestOutboxEventMessage { IdempotencyKey = "complete-me", EventType = "Debited" };
         context.OutboxEventMessages.Add(message);
@@ -54,7 +54,7 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
         var detachedCopy = await loadContext.OutboxEventMessages.AsNoTracking().SingleAsync(m => m.Id == seeded.Id, ct);
 
         await using var repoContext = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(repoContext, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(repoContext, TimeProvider, TestBusinessMetrics.Instance);
         repoContext.Entry(detachedCopy).State.Should().Be(EntityState.Detached);
 
         await repository.MarkAsCompletedAsync(detachedCopy, ct);
@@ -79,10 +79,10 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
 
         await using var completeContext = CreateContext();
         var messageForCompletion = await completeContext.OutboxEventMessages.SingleAsync(m => m.Id == seeded.Id, ct);
-        var completeRepository = new TestOutboxEventMessageRepository(completeContext, TimeProvider);
+        var completeRepository = new TestOutboxEventMessageRepository(completeContext, TimeProvider, TestBusinessMetrics.Instance);
 
         await using var claimContext = CreateContext();
-        var claimRepository = new TestOutboxEventMessageRepository(claimContext, TimeProvider);
+        var claimRepository = new TestOutboxEventMessageRepository(claimContext, TimeProvider, TestBusinessMetrics.Instance);
         var claimed = await claimRepository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
         claimed.Should().ContainSingle(m => m.Id == seeded.Id);
 
@@ -100,7 +100,7 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var originalProcessedAt = new DateTime(2026, 8, 20, 12, 0, 0, DateTimeKind.Utc);
         var message = new TestOutboxEventMessage
@@ -129,7 +129,7 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var message = new TestOutboxEventMessage
         {
@@ -158,7 +158,7 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.MarkAsCompletedAsync(null!, ct);
 

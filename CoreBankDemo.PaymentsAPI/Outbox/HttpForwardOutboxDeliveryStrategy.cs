@@ -1,4 +1,5 @@
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
@@ -35,7 +36,7 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// cancellation — not a delivery failure — per its own contract.
 /// </para>
 /// </summary>
-internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient client)
+internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient client, BusinessMetrics businessMetrics)
     : IOutboxDeliveryStrategy<OutboxMessage>
 {
     public async Task DeliverAsync(OutboxMessage message, CancellationToken cancellationToken = default)
@@ -72,6 +73,22 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient clien
                     message.TransactionId),
                 cancellationToken)
             .ConfigureAwait(false);
+
+        // Story 6.5: this is the sole concrete HTTP-send boundary for the
+        // transaction command (account validation is a different message
+        // shape, outside the closed message-type vocabulary, so it is never
+        // tagged here). Recorded after the attempt's outcome is known, before
+        // throwing on failure -- never for a caller-cancelled attempt, since
+        // an OperationCanceledException raised by ProcessTransactionAsync
+        // itself propagates straight out of the awaited call above without
+        // ever reaching this line.
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Sent,
+            BusinessMetrics.Transport.Http,
+            BusinessMetrics.MessageType.TransactionCommand,
+            submission.Outcome == CoreBankClientOutcome.Success
+                ? BusinessMetrics.DeliveryOutcome.Succeeded
+                : BusinessMetrics.DeliveryOutcome.Failed);
 
         if (submission.Outcome != CoreBankClientOutcome.Success)
         {

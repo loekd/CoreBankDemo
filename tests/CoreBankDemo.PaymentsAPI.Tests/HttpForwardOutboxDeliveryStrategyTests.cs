@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.ServiceDefaults;
 using Xunit;
 
 namespace CoreBankDemo.PaymentsAPI.Tests;
@@ -17,6 +18,7 @@ namespace CoreBankDemo.PaymentsAPI.Tests;
 public class HttpForwardOutboxDeliveryStrategyTests
 {
     private const string ToAccount = "NL20INGB0001234567";
+    private static readonly BusinessMetrics BusinessMetrics = new();
 
     private static OutboxMessage Message() => PaymentsApiTestData.Outbox("forward-key");
 
@@ -31,7 +33,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", "Pending", DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
         var message = Message();
 
         var act = () => strategy.DeliverAsync(message, cancellation.Token);
@@ -61,7 +63,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", "Completed", DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -76,7 +78,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             ValidateResult = CoreBankResult<AccountValidation>.Success(
                 new AccountValidation(ToAccount, false, null, null))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -100,7 +102,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             ValidateResult = CoreBankResult<AccountValidation>.Retry(reason, statusCode)
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -130,7 +132,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
                 new AccountValidation(ToAccount, true, null, null)),
             SubmitResult = CoreBankResult<TransactionSubmission>.Retry(reason, statusCode)
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -152,7 +154,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         await cancellation.CancelAsync();
         var expected = new OperationCanceledException(cancellation.Token);
         var client = new FakeCoreBankApiClient { ValidateThrows = expected };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
 
         var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
@@ -173,7 +175,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
                 new AccountValidation(ToAccount, true, null, null)),
             SubmitThrows = expected
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
 
         var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
@@ -181,6 +183,75 @@ public class HttpForwardOutboxDeliveryStrategyTests
         assertion.Which.Should().BeSameAs(expected);
         client.ValidateCancellationTokens.Should().Equal(cancellation.Token);
         client.SubmitCancellationTokens.Should().Equal(cancellation.Token);
+    }
+
+    // ---- Story 6.5: business metrics ----
+
+    [Fact]
+    public async Task DeliverAsync_records_a_succeeded_http_send_delivery_metric_for_the_transaction_command()
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(
+                new TransactionSubmission("forward-key", "Pending", DateTimeOffset.UtcNow))
+        };
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, businessMetrics);
+
+        await strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries").Which;
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["messaging.direction"] = "sent",
+            ["messaging.transport"] = "http",
+            ["messaging.message.type"] = "transaction-command",
+            ["outcome"] = "succeeded",
+        });
+    }
+
+    [Fact]
+    public async Task DeliverAsync_records_a_failed_http_send_delivery_metric_when_submission_is_a_retry_outcome()
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.Timeout)
+        };
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, businessMetrics);
+
+        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries")
+            .Which.Tags["outcome"].Should().Be("failed");
+    }
+
+    [Fact]
+    public async Task DeliverAsync_records_no_delivery_metric_when_account_validation_is_a_retry_outcome()
+    {
+        // Account validation is a different message shape, outside the
+        // closed message-type vocabulary, so it is never a source of a
+        // "transaction-command" delivery measurement.
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Retry(CoreBankRetryReason.Timeout)
+        };
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, businessMetrics);
+
+        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        listener.Measurements.Should().BeEmpty();
     }
 
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient

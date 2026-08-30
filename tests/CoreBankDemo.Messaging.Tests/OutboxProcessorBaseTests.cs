@@ -36,6 +36,7 @@ namespace CoreBankDemo.Messaging.Tests;
 public class OutboxProcessorBaseTests
 {
     private static readonly ActivitySource ActivitySource = new(nameof(OutboxProcessorBaseTests));
+    private static readonly BusinessMetrics TestBusinessMetrics = new();
 
     private sealed class TestOutboxProcessor : OutboxProcessorBase<TestOutboxEventMessage>
     {
@@ -46,6 +47,7 @@ public class OutboxProcessorBaseTests
             ActivitySource activitySource,
             TimeProvider timeProvider,
             ILogger logger,
+            BusinessMetrics businessMetrics,
             OutboxProcessorOptions? options = null)
             : this(
                 lockService,
@@ -53,6 +55,7 @@ public class OutboxProcessorBaseTests
                 activitySource,
                 timeProvider,
                 logger,
+                businessMetrics,
                 options)
         {
         }
@@ -63,10 +66,13 @@ public class OutboxProcessorBaseTests
             ActivitySource activitySource,
             TimeProvider timeProvider,
             ILogger logger,
+            BusinessMetrics businessMetrics,
             OutboxProcessorOptions? options = null)
-            : base(lockService, scopeFactory, activitySource, timeProvider, logger, options)
+            : base(lockService, scopeFactory, activitySource, timeProvider, logger, businessMetrics, options)
         {
         }
+
+        protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsOutbox;
 
         protected override string LockNamePrefix => "test-outbox";
     }
@@ -119,14 +125,16 @@ public class OutboxProcessorBaseTests
             return Task.FromResult<IReadOnlyList<TestOutboxEventMessage>>(Array.Empty<TestOutboxEventMessage>());
         }
 
-        public Task MarkAsCompletedAsync(
+        public Task<MessageTransitionOutcome> MarkAsCompletedAsync(
             TestOutboxEventMessage message,
-            CancellationToken cancellationToken = default) => Task.CompletedTask;
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(MessageTransitionOutcome.Applied);
 
-        public Task MarkAsFailedWithRetryAsync(
+        public Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
             TestOutboxEventMessage message,
             string errorMessage,
-            CancellationToken cancellationToken = default) => Task.CompletedTask;
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(MessageTransitionOutcome.Applied);
 
         public ValueTask DisposeAsync()
         {
@@ -325,8 +333,7 @@ public class OutboxProcessorBaseTests
             services.GetRequiredService<IServiceScopeFactory>(),
             ActivitySource,
             TimeProvider.System,
-            NullLoggerLike(),
-            new OutboxProcessorOptions { PartitionCount = 4 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 4 });
 
         await processor.RunTickAsync(CancellationToken.None);
 
@@ -351,7 +358,7 @@ public class OutboxProcessorBaseTests
         var options = new OutboxProcessorOptions { PartitionCount = 3 };
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), options);
+            NullLoggerLike(), TestBusinessMetrics, options);
 
         await processor.RunTickAsync(CancellationToken.None);
 
@@ -371,7 +378,7 @@ public class OutboxProcessorBaseTests
         var scopeFactory = new FixedScopeFactory(store.Object, strategy.Object);
         var processor = new TestOutboxProcessor(
             lockService, scopeFactory, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -392,7 +399,7 @@ public class OutboxProcessorBaseTests
         var lockService = new NeverAcquiringLockService();
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 4 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 4 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -415,7 +422,7 @@ public class OutboxProcessorBaseTests
         strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
 
@@ -437,7 +444,7 @@ public class OutboxProcessorBaseTests
             .ThrowsAsync(new InvalidOperationException("downstream refused it"));
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -467,7 +474,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -499,6 +506,203 @@ public class OutboxProcessorBaseTests
             "the completion-persistence failure must be logged distinctly from a delivery failure");
     }
 
+    // ---- Story 6.5: business metrics ----
+
+    [Fact]
+    public async Task Delivery_success_records_queue_duration_and_a_completed_item_metric()
+    {
+        var claimedAt = new DateTime(2026, 8, 21, 0, 45, 0, DateTimeKind.Utc);
+        var message = NewMessage();
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, new FixedTimeProvider(claimedAt),
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingQueueDurationInstrumentName)
+            .Which.Value.Should().Be(45d * 60 * 1000, "the message waited 45 minutes between CreatedAt and the fixed claimedAt");
+        var itemMeasurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName).Which;
+        itemMeasurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["messaging.store.name"] = "payments-outbox",
+            ["messaging.store.kind"] = "outbox",
+            ["outcome"] = "completed",
+        });
+    }
+
+    [Fact]
+    public async Task Delivery_failure_below_max_retry_records_a_retry_scheduled_item_metric()
+    {
+        var message = NewMessage();
+        message.RetryCount = 0;
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        store.Setup(s => s.MarkAsFailedWithRetryAsync(message, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<TestOutboxEventMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Pending)
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags["outcome"].Should().Be("retry_scheduled");
+    }
+
+    [Fact]
+    public async Task Delivery_failure_at_max_retry_records_a_terminal_failed_item_metric_exactly_once()
+    {
+        var message = NewMessage();
+        message.RetryCount = MessageConstants.Defaults.MaxRetryCount - 1;
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        store.Setup(s => s.MarkAsFailedWithRetryAsync(message, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<TestOutboxEventMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Failed)
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags["outcome"].Should().Be("terminal_failed");
+    }
+
+    [Fact]
+    public async Task Completion_persistence_failure_records_a_completion_persistence_failed_item_metric()
+    {
+        var message = NewMessage();
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        store.Setup(s => s.MarkAsCompletedAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("concurrency conflict"));
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags["outcome"].Should().Be("completion_persistence_failed");
+    }
+
+    [Fact]
+    public async Task Concurrent_terminal_transition_records_no_completed_metric()
+    {
+        var message = NewMessage();
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
+        store.Setup(s => s.MarkAsCompletedAsync(message, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.AlreadyTerminal);
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object,
+            new AlwaysAcquiringLockService(),
+            strategy.Object,
+            ActivitySource,
+            TimeProvider.System,
+            NullLoggerLike(),
+            businessMetrics,
+            new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should().NotContain(
+            measurement => measurement.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
+    }
+
+    [Fact]
+    public async Task Retry_persistence_failure_records_a_retry_persistence_failed_item_metric()
+    {
+        var message = NewMessage();
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
+        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
+        store.Setup(s => s.MarkAsFailedWithRetryAsync(message, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transient db conflict"));
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags["outcome"].Should().Be("retry_persistence_failed");
+    }
+
+    [Fact]
+    public async Task Lock_not_acquired_records_no_queue_duration_or_item_metric()
+    {
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        var lockService = new NeverAcquiringLockService();
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        var scopeFactory = new FixedScopeFactory(store.Object, strategy.Object);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        listener.Measurements.Should().BeEmpty();
+    }
+
+    private sealed class FixedTimeProvider(DateTime utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => new(utcNow, TimeSpan.Zero);
+    }
+
     [Fact]
     public async Task Null_claim_batch_from_the_store_is_treated_as_empty_rather_than_throwing()
     {
@@ -508,7 +712,7 @@ public class OutboxProcessorBaseTests
         var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -531,7 +735,7 @@ public class OutboxProcessorBaseTests
         strategy.Setup(s => s.DeliverAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
 
@@ -563,7 +767,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -603,7 +807,7 @@ public class OutboxProcessorBaseTests
             });
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(cts.Token);
 
@@ -640,7 +844,7 @@ public class OutboxProcessorBaseTests
             });
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 1 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         using var ambientCts = new CancellationTokenSource();
         var act = async () => await processor.RunTickAsync(ambientCts.Token);
@@ -684,7 +888,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         using var ambientCts = new CancellationTokenSource();
         var act = async () => await processor.RunTickAsync(ambientCts.Token);
@@ -715,7 +919,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 4 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 4 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -750,7 +954,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 4 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 4 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -779,7 +983,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
@@ -807,7 +1011,7 @@ public class OutboxProcessorBaseTests
         var logger = new Mock<ILogger>();
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            logger.Object, new OutboxProcessorOptions { PartitionCount = 1 });
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
 
@@ -836,7 +1040,7 @@ public class OutboxProcessorBaseTests
         var lockService = new SerializingLockService();
         var processor = new TestOutboxProcessor(
             store.Object, lockService, strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 4 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 4 });
 
         await Task.WhenAll(
             processor.RunTickAsync(CancellationToken.None),
@@ -875,7 +1079,7 @@ public class OutboxProcessorBaseTests
 
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), new OutboxProcessorOptions { PartitionCount = 4 });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 4 });
 
         await processor.RunTickAsync(CancellationToken.None);
 
@@ -899,8 +1103,7 @@ public class OutboxProcessorBaseTests
         var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
         var processor = new TestOutboxProcessor(
             store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(),
-            new OutboxProcessorOptions { PartitionCount = 1, PollingInterval = TimeSpan.FromMilliseconds(10) });
+            NullLoggerLike(), TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1, PollingInterval = TimeSpan.FromMilliseconds(10) });
 
         var testCancellationToken = TestContext.Current.CancellationToken;
         using var cts = new CancellationTokenSource();

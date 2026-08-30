@@ -21,7 +21,7 @@ public class FindByIdAsyncTests(PostgresContainerFixture fixture) : MessagingPos
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var message = new TestOutboxEventMessage { IdempotencyKey = "find-me", EventType = "Debited" };
         context.OutboxEventMessages.Add(message);
@@ -39,7 +39,7 @@ public class FindByIdAsyncTests(PostgresContainerFixture fixture) : MessagingPos
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var found = await repository.FindByIdAsync(Guid.NewGuid(), ct);
 

@@ -13,7 +13,7 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
     {
         await using var store = CreateStore();
         await using var context = store.CreateContext();
-        var repository = new OutboxRepository(context, System.TimeProvider.System);
+        var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
         var message = PaymentsApiTestData.Outbox("repository-key");
 
         (await repository.StoreIfNewAsync(message, TestContext.Current.CancellationToken)).Should().BeTrue();
@@ -35,8 +35,8 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
         var contexts = store.CreateCompetingContexts();
         await using var firstContext = contexts.First;
         await using var secondContext = contexts.Second;
-        var first = new OutboxRepository(firstContext, System.TimeProvider.System);
-        var second = new OutboxRepository(secondContext, System.TimeProvider.System);
+        var first = new OutboxRepository(firstContext, System.TimeProvider.System, TestBusinessMetrics.Instance);
+        var second = new OutboxRepository(secondContext, System.TimeProvider.System, TestBusinessMetrics.Instance);
 
         var results = await PaymentsApiTestData.RaceAsync(
             () => first.StoreIfNewAsync(

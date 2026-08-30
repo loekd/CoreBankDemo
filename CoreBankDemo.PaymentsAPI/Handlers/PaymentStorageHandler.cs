@@ -2,6 +2,7 @@ using System.Diagnostics;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -46,7 +47,8 @@ internal sealed class PaymentStorageHandler(
     IOutboxRepository repository,
     IOptions<OutboxProcessingOptions> options,
     TimeProvider timeProvider,
-    ILogger<PaymentStorageHandler> logger) : IPaymentStorageHandler
+    ILogger<PaymentStorageHandler> logger,
+    BusinessMetrics businessMetrics) : IPaymentStorageHandler
 {
     public async Task<PaymentStorageResult> StoreAsync(
         PaymentRequest request,
@@ -57,6 +59,7 @@ internal sealed class PaymentStorageHandler(
 
         if (idempotencyKey is not null && (idempotencyKey.Length is < 1 or > 100))
         {
+            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.ValidationFailed);
             return new PaymentStorageResult(
                 PaymentStorageOutcome.ValidationFailed,
                 null,
@@ -94,6 +97,7 @@ internal sealed class PaymentStorageHandler(
                 "Stored payment {IdempotencyKey} in partition {PartitionId}",
                 key,
                 partitionId);
+            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored);
             return new PaymentStorageResult(PaymentStorageOutcome.Stored, ToSnapshot(message), []);
         }
 
@@ -105,6 +109,7 @@ internal sealed class PaymentStorageHandler(
             ?? throw new InvalidOperationException(
                 $"Payment store reported duplicate idempotency key '{key}', but no persisted winner was found.");
 
+        businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Duplicate);
         return new PaymentStorageResult(PaymentStorageOutcome.Duplicate, ToSnapshot(winner), []);
     }
 

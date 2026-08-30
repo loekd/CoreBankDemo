@@ -1,3 +1,4 @@
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.Messaging;
@@ -19,8 +20,8 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
     where TMessage : class, IOutboxMessage
     where TDbContext : DbContext
 {
-    protected OutboxMessageRepositoryBase(TDbContext dbContext, TimeProvider timeProvider)
-        : base(dbContext, timeProvider)
+    protected OutboxMessageRepositoryBase(TDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
+        : base(dbContext, timeProvider, businessMetrics)
     {
     }
 
@@ -28,6 +29,9 @@ public abstract class OutboxMessageRepositoryBase<TMessage, TDbContext>
     protected abstract DbSet<TMessage> OutboxMessages { get; }
 
     protected override DbSet<TMessage> Messages => OutboxMessages;
+
+    /// <summary>Every outbox store reports <see cref="BusinessMetrics.StoreKind.Outbox"/> (story 6.5) — fixed here, never overridden by a leaf repository.</summary>
+    protected override BusinessMetrics.StoreKind StoreKind => BusinessMetrics.StoreKind.Outbox;
 
     /// <inheritdoc/>
     protected override IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold) =>

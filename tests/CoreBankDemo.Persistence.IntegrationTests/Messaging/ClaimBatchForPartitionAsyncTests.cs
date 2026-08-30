@@ -22,7 +22,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var oldest = new TestInboxMessage { IdempotencyKey = "oldest", ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime };
         TimeProvider.Advance(TimeSpan.FromSeconds(1));
@@ -49,7 +49,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var poisoned = new TestInboxMessage
         {
@@ -69,7 +69,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         context.InboxMessages.Add(new TestInboxMessage { IdempotencyKey = "partition-2-row", PartitionId = 2 });
         await context.SaveChangesAsync(ct);
@@ -84,7 +84,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var stuck = new TestInboxMessage
         {
@@ -107,7 +107,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var inFlight = new TestInboxMessage
         {
@@ -136,7 +136,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
         // NOT re-grab the same row out from under whoever just claimed it.
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var stuck = new TestInboxMessage
         {
@@ -172,7 +172,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
         // currently stored at that instant.
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var originalArrival = TimeProvider.GetUtcNow().UtcDateTime;
         var messageA = new TestInboxMessage { IdempotencyKey = "fifo-a", ReceivedAt = originalArrival };
@@ -215,7 +215,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.ClaimBatchForPartitionAsync(partitionId: -1, batchSize: 10, ct);
 
@@ -250,7 +250,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
         async Task<List<TestInboxMessage>> ClaimAsync()
         {
             await using var context = CreateContext();
-            var repository = new TestInboxMessageRepository(context, TimeProvider);
+            var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
             var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
             return [.. claimed];
         }
@@ -300,7 +300,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
         async Task<List<TestInboxMessage>> ClaimAsync()
         {
             await using var context = CreateContext();
-            var repository = new TestInboxMessageRepository(context, TimeProvider);
+            var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
             var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 1, ct);
             return [.. claimed];
         }
@@ -322,7 +322,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
         var act = async () => await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 0, ct);
 

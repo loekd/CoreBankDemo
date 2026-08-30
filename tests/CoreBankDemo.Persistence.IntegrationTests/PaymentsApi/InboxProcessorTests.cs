@@ -258,6 +258,7 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
             activitySource ?? new ActivitySource(nameof(InboxProcessorTests)),
             System.TimeProvider.System,
             NullLogger<InboxProcessor>.Instance,
+            TestBusinessMetrics.Instance,
             Options.Create(new InboxProcessingOptions
             {
                 PartitionCount = partitionCount,
@@ -282,6 +283,7 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
         var services = new ServiceCollection();
         services.AddSingleton<ILogger<TransactionEventHandler>>(NullLogger<TransactionEventHandler>.Instance);
         services.AddSingleton<TimeProvider>(System.TimeProvider.System);
+        services.AddSingleton(TestBusinessMetrics.Instance);
         services.AddScoped<PaymentsDbContext>(_ => store.CreateContext());
         services.AddScoped<InboxMessageRepository>();
         services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());

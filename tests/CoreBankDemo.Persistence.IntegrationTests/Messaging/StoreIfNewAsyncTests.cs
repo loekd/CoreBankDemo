@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
+using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 using Xunit;
 
@@ -21,13 +22,97 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var message = new TestInboxMessage { IdempotencyKey = "first-store-key" };
 
         var stored = await repository.StoreIfNewAsync(message, ct);
 
         stored.Should().BeTrue();
         (await context.InboxMessages.CountAsync(m => m.IdempotencyKey == "first-store-key", ct)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task First_store_records_an_added_store_operation_metric()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, businessMetrics);
+
+        await repository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = "metric-store-key" }, ct);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.store.operations").Which;
+        measurement.Tags["messaging.store.kind"].Should().Be("inbox");
+        measurement.Tags["outcome"].Should().Be("added");
+    }
+
+    [Fact]
+    public async Task Sequential_duplicate_records_a_duplicate_store_operation_metric()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        const string key = "metric-dup-key";
+        await using (var firstContext = CreateContext())
+        {
+            var firstRepository = new TestInboxMessageRepository(firstContext, TimeProvider, new BusinessMetrics());
+            (await firstRepository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = key }, ct)).Should().BeTrue();
+        }
+
+        await using var secondContext = CreateContext();
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var secondRepository = new TestInboxMessageRepository(secondContext, TimeProvider, businessMetrics);
+
+        await secondRepository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = key }, ct);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.store.operations").Which;
+        measurement.Tags["outcome"].Should().Be("duplicate");
+    }
+
+    [Fact]
+    public async Task Non_unique_violation_failure_records_a_failed_store_operation_metric_before_rethrow()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, businessMetrics);
+        var invalidMessage = new TestInboxMessage { IdempotencyKey = "metric-failed-key", RetryCount = -1 };
+
+        var act = async () => await repository.StoreIfNewAsync(invalidMessage, ct);
+
+        // Recorded before the rethrow (metric contract), and the original
+        // exception/state-transition behavior — a real check-constraint
+        // `DbUpdateException` that is not a unique violation — is unchanged.
+        var thrown = await act.Should().ThrowAsync<DbUpdateException>();
+        UniqueViolation.IsUniqueViolation(thrown.Which).Should().BeFalse();
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.store.operations").Which;
+        measurement.Tags["messaging.store.kind"].Should().Be("inbox");
+        measurement.Tags["outcome"].Should().Be("failed");
+    }
+
+    [Fact]
+    public async Task Cancellation_during_save_records_no_store_operation_metric_and_rethrows()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, businessMetrics);
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+
+        var act = async () => await repository.StoreIfNewAsync(
+            new TestInboxMessage { IdempotencyKey = "metric-cancelled-key" }, cancelled.Token);
+
+        // Cancellation is not a store failure (story 6.5 boundaries): the
+        // original `OperationCanceledException` still propagates, but it is
+        // never counted as `failed`, `added`, or `duplicate`.
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == "corebankdemo.messaging.store.operations");
     }
 
     [Fact]
@@ -38,12 +123,12 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
 
         await using (var firstContext = CreateContext())
         {
-            var firstRepository = new TestInboxMessageRepository(firstContext, TimeProvider);
+            var firstRepository = new TestInboxMessageRepository(firstContext, TimeProvider, TestBusinessMetrics.Instance);
             (await firstRepository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = key }, ct)).Should().BeTrue();
         }
 
         await using var secondContext = CreateContext();
-        var secondRepository = new TestInboxMessageRepository(secondContext, TimeProvider);
+        var secondRepository = new TestInboxMessageRepository(secondContext, TimeProvider, TestBusinessMetrics.Instance);
         var act = async () => await secondRepository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = key }, ct);
 
         var stored = await act.Should().NotThrowAsync();
@@ -60,7 +145,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
         async Task<bool> StoreAsync()
         {
             await using var context = CreateContext();
-            var repository = new TestInboxMessageRepository(context, TimeProvider);
+            var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
             return await repository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = key }, ct);
         }
 
@@ -83,7 +168,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
         async Task<bool> StoreAsync()
         {
             await using var context = CreateContext();
-            var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+            var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
             return await repository.StoreIfNewAsync(
                 new TestOutboxEventMessage { IdempotencyKey = key, EventType = eventType }, ct);
         }
@@ -103,7 +188,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         const string key = "txn-123";
 
         var firstStored = await repository.StoreIfNewAsync(
@@ -121,7 +206,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestOutboxEventMessageRepository(context, TimeProvider);
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         const string key = "txn-456";
 
         var firstStored = await repository.StoreIfNewAsync(
@@ -139,7 +224,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var invalidMessage = new TestInboxMessage { IdempotencyKey = "invalid-retry-count", RetryCount = -1 };
 
         var act = async () => await repository.StoreIfNewAsync(invalidMessage, ct);
@@ -153,7 +238,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         var invalidMessage = new TestInboxMessage { IdempotencyKey = "invalid-then-valid", RetryCount = -1 };
 
         var act = async () => await repository.StoreIfNewAsync(invalidMessage, ct);
@@ -178,7 +263,7 @@ public class StoreIfNewAsyncTests(PostgresContainerFixture fixture) : MessagingP
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
-        var repository = new TestInboxMessageRepository(context, TimeProvider);
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
         const string key = "tracker-cleanup-key";
 
         (await repository.StoreIfNewAsync(new TestInboxMessage { IdempotencyKey = key }, ct)).Should().BeTrue();
