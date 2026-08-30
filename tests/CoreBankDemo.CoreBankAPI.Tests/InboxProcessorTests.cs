@@ -27,11 +27,9 @@ public class InboxProcessorTests : SqliteCoreBankApiTestBase
     {
         await SeedAccountsAndMessageAsync();
 
-        await using var storeContext = CreateContext();
-        var store = new InboxMessageRepository(storeContext, TimeProvider);
         using var services = BuildHandlerServices();
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var processor = CreateProcessor(store, services.GetRequiredService<IServiceScopeFactory>(), completion);
+        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion);
 
         await processor.StartAsync(TestContext.Current.CancellationToken);
         await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -72,14 +70,12 @@ public class InboxProcessorTests : SqliteCoreBankApiTestBase
     {
         await SeedAccountsAndMessageAsync();
 
-        await using var storeContext = CreateContext();
-        var store = new InboxMessageRepository(storeContext, TimeProvider);
         using var services = BuildHandlerServices(scopedServices =>
         {
             scopedServices.AddScoped<IOutboxEventEnqueuer, ThrowingAfterFirstAddOutboxEventEnqueuer>();
         });
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var processor = CreateProcessor(store, services.GetRequiredService<IServiceScopeFactory>(), completion);
+        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion);
 
         await processor.StartAsync(TestContext.Current.CancellationToken);
         await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -134,11 +130,9 @@ public class InboxProcessorTests : SqliteCoreBankApiTestBase
     }
 
     private InboxProcessor CreateProcessor(
-        IInboxMessageStore<InboxMessage> store,
         IServiceScopeFactory scopeFactory,
         TaskCompletionSource completion) =>
         new(
-            store,
             new SingleTickLockService(completion),
             scopeFactory,
             new ActivitySource(nameof(InboxProcessorTests)),
@@ -164,6 +158,7 @@ public class InboxProcessorTests : SqliteCoreBankApiTestBase
         services.AddScoped<CoreBankDbContext>(_ => CreateContext());
         services.AddScoped<InboxMessageRepository>();
         services.AddScoped<IInboxMessageRepository>(sp => sp.GetRequiredService<InboxMessageRepository>());
+        services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());
         services.AddScoped<ITransactionExecutor, SqliteTransactionExecutor>();
         services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
         overrideScopedServices?.Invoke(services);

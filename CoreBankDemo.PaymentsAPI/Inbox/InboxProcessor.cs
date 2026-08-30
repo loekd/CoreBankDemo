@@ -4,8 +4,19 @@ using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
 
-namespace CoreBankDemo.CoreBankAPI.Inbox;
+namespace CoreBankDemo.PaymentsAPI.Inbox;
 
+/// <summary>
+/// Story 5.6's concrete kernel processor for PaymentsAPI's event inbox --
+/// mirrors <see cref="CoreBankDemo.CoreBankAPI.Inbox.InboxProcessor"/>
+/// exactly (messaging-patterns skill's sibling reference), reusing
+/// <see cref="InboxProcessorBase{TMessage}"/> unchanged and specializing only
+/// <see cref="LockNamePrefix"/> and the validated
+/// <see cref="InboxProcessingOptions"/>-to-<see cref="InboxProcessorOptions"/>
+/// mapping. Never reimplements polling, partition fan-out, locking,
+/// claiming, retry, poison classification, completion, or trace restoration
+/// (boundaries).
+/// </summary>
 public class InboxProcessor : InboxProcessorBase<InboxMessage>
 {
     public InboxProcessor(
@@ -30,5 +41,5 @@ public class InboxProcessor : InboxProcessorBase<InboxMessage>
     {
     }
 
-    protected override string LockNamePrefix => "corebank-inbox";
+    protected override string LockNamePrefix => "payments-inbox";
 }

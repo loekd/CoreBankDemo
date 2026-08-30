@@ -1,5 +1,7 @@
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
+using CoreBankDemo.PaymentsAPI.Handlers;
+using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
 var builder = WebApplication.CreateBuilder(args);
 
@@ -28,10 +30,20 @@ builder.Services.AddHostedService<PaymentsOutboxProcessor>();
 
 builder.Services.AddPaymentIntake();
 
-// Story 5.5: event subscription intake. No processor is registered yet
-// (Story 5.6 owns dispatch) -- this only durably stores known
+// Story 5.5: event subscription intake -- durably stores known
 // transaction-events CloudEvent deliveries.
 builder.Services.AddTransactionEventIntake(builder.Configuration);
+
+// Story 5.6: event handling processor. IInboxMessageStore<InboxMessage> is
+// already exposed by AddTransactionEventIntake above (the same
+// InboxMessageRepository instance); TransactionEventHandler is observational
+// only (no payment/account state mutation) and enriches the consumer span
+// InboxProcessor's InboxProcessorBase<InboxMessage> restores from each
+// message's persisted TraceParent/TraceState onto the same
+// "CoreBank.PaymentsAPI" ActivitySource already registered by
+// AddServiceDefaults above -- never a second ActivitySource.
+builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionEventHandler>();
+builder.Services.AddHostedService<InboxProcessor>();
 
 var app = builder.Build();
 

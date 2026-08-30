@@ -15,20 +15,31 @@ namespace CoreBankDemo.Messaging;
 ///
 /// <para>
 /// Depends only on the seams needed to run and test the loop —
-/// <see cref="IInboxMessageStore{TMessage}"/>, <see cref="IDistributedLockService"/>,
-/// <see cref="IServiceScopeFactory"/>, and a ctor-injected
-/// <see cref="ActivitySource"/> (never <c>new</c>'d here — the
-/// <c>observability</c> skill and AD-8 require a registered source) — plus
-/// <see cref="TimeProvider"/> and <see cref="ILogger"/>. Never a concrete
-/// <see cref="Microsoft.EntityFrameworkCore.DbContext"/> and never a
-/// ctor-injected handler instance: unlike
-/// <see cref="OutboxProcessorBase{TMessage}"/>'s ctor-injected singleton
-/// <see cref="IOutboxDeliveryStrategy{TMessage}"/>, this base resolves a
-/// fresh <see cref="IInboxMessageHandler{TMessage}"/> per message from a
-/// fresh <see cref="IServiceScopeFactory"/>-created DI scope — so each
-/// message gets independent scoped dependencies (e.g. a fresh
-/// <see cref="Microsoft.EntityFrameworkCore.DbContext"/> for whatever the
-/// handler does), and this base stays Moq-testable (AD-2/AD-9).
+/// <see cref="IDistributedLockService"/>, <see cref="IServiceScopeFactory"/>,
+/// and a ctor-injected <see cref="ActivitySource"/> (never <c>new</c>'d here
+/// — the <c>observability</c> skill and AD-8 require a registered source) —
+/// plus <see cref="TimeProvider"/> and <see cref="ILogger"/>. Never a
+/// concrete <see cref="Microsoft.EntityFrameworkCore.DbContext"/> and never a
+/// ctor-injected <see cref="IInboxMessageStore{TMessage}"/> or handler
+/// instance: unlike <see cref="OutboxProcessorBase{TMessage}"/>'s
+/// ctor-injected singleton <see cref="IOutboxDeliveryStrategy{TMessage}"/>,
+/// this base is itself a singleton hosted service (registered once for the
+/// process lifetime), so ctor-injecting a scoped
+/// <see cref="IInboxMessageStore{TMessage}"/> would create a captive
+/// dependency — the container would resolve one scoped store instance at
+/// startup and hold it captive for the singleton's entire lifetime, defeating
+/// the store's scoped registration (e.g. a scoped
+/// <see cref="Microsoft.EntityFrameworkCore.DbContext"/> would never be
+/// recycled per partition). Instead, <see cref="ProcessPartitionAsync"/>
+/// resolves a fresh <see cref="IInboxMessageStore{TMessage}"/> from its own
+/// per-partition <see cref="IServiceScopeFactory"/>-created DI scope for that
+/// partition's claim/complete/retry calls — mirroring the existing
+/// per-message handler scope below, just at partition granularity — and a
+/// fresh <see cref="IInboxMessageHandler{TMessage}"/> is still resolved per
+/// message from its own fresh scope, so each message gets independent scoped
+/// dependencies (e.g. a fresh <see cref="Microsoft.EntityFrameworkCore.DbContext"/>
+/// for whatever the handler does), and this base stays Moq-testable
+/// (AD-2/AD-9).
 /// </para>
 ///
 /// <para>
@@ -52,7 +63,6 @@ namespace CoreBankDemo.Messaging;
 public abstract class InboxProcessorBase<TMessage> : BackgroundService
     where TMessage : class, IInboxMessage
 {
-    private readonly IInboxMessageStore<TMessage> _store;
     private readonly IDistributedLockService _lockService;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ActivitySource _activitySource;
@@ -61,7 +71,6 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     private readonly InboxProcessorOptions _options;
 
     protected InboxProcessorBase(
-        IInboxMessageStore<TMessage> store,
         IDistributedLockService lockService,
         IServiceScopeFactory scopeFactory,
         ActivitySource activitySource,
@@ -69,7 +78,6 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         ILogger logger,
         InboxProcessorOptions? options = null)
     {
-        _store = store ?? throw new ArgumentNullException(nameof(store));
         _lockService = lockService ?? throw new ArgumentNullException(nameof(lockService));
         _scopeFactory = scopeFactory ?? throw new ArgumentNullException(nameof(scopeFactory));
         _activitySource = activitySource ?? throw new ArgumentNullException(nameof(activitySource));
@@ -197,9 +205,22 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Resolves <see cref="IInboxMessageStore{TMessage}"/> from a fresh
+    /// per-partition <see cref="IServiceScopeFactory"/>-created DI scope,
+    /// disposed once this partition's claim/dispatch/complete/retry work
+    /// returns or throws — never a ctor-injected singleton field (see the
+    /// class-level remarks on the captive-dependency defect this avoids) —
+    /// then claims and dispatches this partition's batch through that same
+    /// store instance for the whole partition, mirroring the existing
+    /// per-message handler scope below just at partition granularity.
+    /// </summary>
     private async Task ProcessPartitionAsync(int partitionId, CancellationToken cancellationToken)
     {
-        var claimed = await _store
+        using var partitionScope = _scopeFactory.CreateScope();
+        var store = partitionScope.ServiceProvider.GetRequiredService<IInboxMessageStore<TMessage>>();
+
+        var claimed = await store
             .ClaimBatchForPartitionAsync(partitionId, MessageConstants.Defaults.BatchSize, cancellationToken)
             .ConfigureAwait(false);
 
@@ -226,7 +247,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                 continue;
             }
 
-            await ProcessMessageAsync(message, cancellationToken).ConfigureAwait(false);
+            await ProcessMessageAsync(store, message, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -234,11 +255,14 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     /// Handles <paramref name="message"/> — resolving its
     /// <see cref="IInboxMessageHandler{TMessage}"/> from a fresh
     /// <see cref="IServiceScopeFactory"/>-created DI scope, disposed once this
-    /// call returns or throws — and then persists its completion, in two
-    /// separate try/catch scopes, deliberately, never one shared
-    /// <c>try</c> around both (mirroring story 2.4's fixed defect for the
-    /// outbox). A single shared <c>try</c>/<c>catch</c> cannot tell "handling
-    /// threw" apart from "handling succeeded but
+    /// call returns or throws — and then persists its completion via
+    /// <paramref name="store"/> (resolved by the caller,
+    /// <see cref="ProcessPartitionAsync"/>, from that partition's own scope —
+    /// never a ctor-injected field here), in two separate try/catch scopes,
+    /// deliberately, never one shared <c>try</c> around both (mirroring story
+    /// 2.4's fixed defect for the outbox). A single shared
+    /// <c>try</c>/<c>catch</c> cannot tell "handling threw" apart from
+    /// "handling succeeded but
     /// <see cref="IInboxMessageStore{TMessage}.MarkAsCompletedAsync"/> then
     /// threw" — e.g. a <see cref="Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException"/>
     /// racing a concurrent stale-claim reclaim. Misclassifying the latter as a
@@ -253,7 +277,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     /// what must never happen is reporting the wrong reason a message didn't
     /// reach <c>Completed</c>).
     /// </summary>
-    private async Task ProcessMessageAsync(TMessage message, CancellationToken cancellationToken)
+    private async Task ProcessMessageAsync(IInboxMessageStore<TMessage> store, TMessage message, CancellationToken cancellationToken)
     {
         using var activity = StartDispatchActivity(message);
 
@@ -282,7 +306,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
 
             try
             {
-                await _store.MarkAsFailedWithRetryAsync(message, ex.Message, cancellationToken).ConfigureAwait(false);
+                await store.MarkAsFailedWithRetryAsync(message, ex.Message, cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -313,7 +337,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
 
         try
         {
-            await _store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
+            await store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

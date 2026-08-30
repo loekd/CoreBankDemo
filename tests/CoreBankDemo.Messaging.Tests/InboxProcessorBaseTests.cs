@@ -44,14 +44,13 @@ public class InboxProcessorBaseTests
     private sealed class TestInboxProcessor : InboxProcessorBase<TestInboxMessage>
     {
         public TestInboxProcessor(
-            IInboxMessageStore<TestInboxMessage> store,
             IDistributedLockService lockService,
             IServiceScopeFactory scopeFactory,
             ActivitySource activitySource,
             TimeProvider timeProvider,
             ILogger logger,
             InboxProcessorOptions? options = null)
-            : base(store, lockService, scopeFactory, activitySource, timeProvider, logger, options)
+            : base(lockService, scopeFactory, activitySource, timeProvider, logger, options)
         {
         }
 
@@ -120,49 +119,82 @@ public class InboxProcessorBaseTests
     }
 
     /// <summary>
-    /// Fake <see cref="IServiceScope"/> resolving exactly one
-    /// <see cref="IInboxMessageHandler{TMessage}"/> instance (constructor-supplied),
-    /// tracking whether it was disposed.
+    /// Fake <see cref="IServiceScope"/> capable of resolving either an
+    /// <see cref="IInboxMessageStore{TMessage}"/> or an
+    /// <see cref="IInboxMessageHandler{TMessage}"/> instance, tracking
+    /// whether it was disposed. This mirrors the real DI container: one
+    /// scope, requested via the same <see cref="IServiceScopeFactory"/>,
+    /// can serve whichever service type is actually asked of it — the kernel
+    /// now creates a scope per partition (to resolve the store, closing the
+    /// former captive-dependency defect) as well as its existing per-message
+    /// scope (to resolve the handler), and this fake must serve both without
+    /// knowing in advance which one a given <see cref="CreateScope"/> call is
+    /// for. Each factory delegate is invoked lazily, only if that type is
+    /// actually requested from this scope, so a scope created purely to
+    /// resolve the store never spuriously manufactures an unused handler
+    /// instance (and vice versa) — preserving the "one handler instance per
+    /// message" assertions that predate this fake serving two service types.
     /// </summary>
     private sealed class FakeServiceScope : IServiceScope
     {
-        private readonly IInboxMessageHandler<TestInboxMessage> _handler;
+        private readonly Func<IInboxMessageStore<TestInboxMessage>> _storeFactory;
+        private readonly Func<IInboxMessageHandler<TestInboxMessage>> _handlerFactory;
 
-        public FakeServiceScope(IInboxMessageHandler<TestInboxMessage> handler) => _handler = handler;
+        public FakeServiceScope(
+            Func<IInboxMessageStore<TestInboxMessage>> storeFactory,
+            Func<IInboxMessageHandler<TestInboxMessage>> handlerFactory)
+        {
+            _storeFactory = storeFactory;
+            _handlerFactory = handlerFactory;
+        }
 
         public bool Disposed { get; private set; }
 
-        public IServiceProvider ServiceProvider => new FakeServiceProvider(_handler);
+        public IServiceProvider ServiceProvider => new FakeServiceProvider(_storeFactory, _handlerFactory);
 
         public void Dispose() => Disposed = true;
 
-        private sealed class FakeServiceProvider(IInboxMessageHandler<TestInboxMessage> handler) : IServiceProvider
+        private sealed class FakeServiceProvider(
+            Func<IInboxMessageStore<TestInboxMessage>> storeFactory,
+            Func<IInboxMessageHandler<TestInboxMessage>> handlerFactory) : IServiceProvider
         {
             public object? GetService(Type serviceType) =>
-                serviceType == typeof(IInboxMessageHandler<TestInboxMessage>) ? handler : null;
+                serviceType == typeof(IInboxMessageStore<TestInboxMessage>) ? storeFactory()
+                : serviceType == typeof(IInboxMessageHandler<TestInboxMessage>) ? handlerFactory()
+                : null;
         }
     }
 
     /// <summary>
     /// Fake <see cref="IServiceScopeFactory"/> that hands out a fresh
-    /// <see cref="FakeServiceScope"/> — wrapping a fresh handler instance from
-    /// <paramref name="handlerFactory"/> — on every <see cref="CreateScope"/>
-    /// call, and records every scope it created, so tests can assert one scope
-    /// (and, via <paramref name="handlerFactory"/>, one handler instance) per
-    /// message rather than a shared singleton.
+    /// <see cref="FakeServiceScope"/> on every <see cref="CreateScope"/> call
+    /// — able to lazily resolve either a store (from
+    /// <paramref name="storeFactory"/>, typically the same mock instance
+    /// every call so tests can <c>Verify</c> against it) or a fresh handler
+    /// instance (from <paramref name="handlerFactory"/>) — and records every
+    /// scope it created, so tests can assert one scope per message (and, via
+    /// <paramref name="handlerFactory"/>, one handler instance) rather than a
+    /// shared singleton, alongside the one additional per-partition scope the
+    /// kernel now creates to resolve the store.
     /// </summary>
     private sealed class FakeServiceScopeFactory : IServiceScopeFactory
     {
+        private readonly Func<IInboxMessageStore<TestInboxMessage>> _storeFactory;
         private readonly Func<IInboxMessageHandler<TestInboxMessage>> _handlerFactory;
 
-        public FakeServiceScopeFactory(Func<IInboxMessageHandler<TestInboxMessage>> handlerFactory) =>
+        public FakeServiceScopeFactory(
+            Func<IInboxMessageStore<TestInboxMessage>> storeFactory,
+            Func<IInboxMessageHandler<TestInboxMessage>> handlerFactory)
+        {
+            _storeFactory = storeFactory;
             _handlerFactory = handlerFactory;
+        }
 
         public List<FakeServiceScope> CreatedScopes { get; } = new();
 
         public IServiceScope CreateScope()
         {
-            var scope = new FakeServiceScope(_handlerFactory());
+            var scope = new FakeServiceScope(_storeFactory, _handlerFactory);
             CreatedScopes.Add(scope);
             return scope;
         }
@@ -270,10 +302,10 @@ public class InboxProcessorBaseTests
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var lockService = new AlwaysAcquiringLockService();
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var options = new InboxProcessorOptions { PartitionCount = 3 };
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), options);
 
         await processor.RunTickAsync(CancellationToken.None);
@@ -290,9 +322,9 @@ public class InboxProcessorBaseTests
     {
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
         var lockService = new NeverAcquiringLockService();
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -309,10 +341,10 @@ public class InboxProcessorBaseTests
         // partitions its lock — no work happens anywhere, and no exception
         // escapes the tick.
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var lockService = new NeverAcquiringLockService();
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 4 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -334,9 +366,9 @@ public class InboxProcessorBaseTests
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
@@ -357,9 +389,9 @@ public class InboxProcessorBaseTests
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("downstream refused it"));
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -387,10 +419,10 @@ public class InboxProcessorBaseTests
             .ThrowsAsync(new InvalidOperationException("concurrency conflict persisting completion"));
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -429,15 +461,19 @@ public class InboxProcessorBaseTests
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)null!);
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
         await act.Should().NotThrowAsync("a misbehaving store returning null must degrade to an empty batch, not NRE");
-        scopeFactory.CreatedScopes.Should().BeEmpty();
+        scopeFactory.CreatedScopes.Should().HaveCount(1,
+            "the partition-level scope resolving the store is still created to claim the batch, even though it turns out empty; " +
+            "no per-message handler scope is created since there is nothing to dispatch");
+        scopeFactory.CreatedScopes.Should().OnlyContain(s => s.Disposed,
+            "the per-partition store scope must be disposed once that partition's processing returns");
     }
 
     [Fact]
@@ -457,9 +493,9 @@ public class InboxProcessorBaseTests
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -484,9 +520,9 @@ public class InboxProcessorBaseTests
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
         handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
@@ -516,10 +552,10 @@ public class InboxProcessorBaseTests
         handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("boom"));
         handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -551,7 +587,7 @@ public class InboxProcessorBaseTests
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var seenHandlerInstances = new List<IInboxMessageHandler<TestInboxMessage>>();
-        var scopeFactory = new FakeServiceScopeFactory(() =>
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () =>
         {
             var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
             handler.Setup(h => h.HandleAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
@@ -559,12 +595,13 @@ public class InboxProcessorBaseTests
             return handler.Object;
         });
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
 
-        scopeFactory.CreatedScopes.Should().HaveCount(2, "each message must be dispatched from its own fresh DI scope");
+        scopeFactory.CreatedScopes.Should().HaveCount(3,
+            "one per-partition scope resolves the store, plus each of the two messages must be dispatched from its own fresh DI scope");
         seenHandlerInstances.Should().HaveCount(2).And.OnlyHaveUniqueItems(
             "a distinct handler instance must be resolved per message, never a shared/leaked instance");
         scopeFactory.CreatedScopes.Should().OnlyContain(s => s.Disposed,
@@ -587,7 +624,7 @@ public class InboxProcessorBaseTests
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
-        var scopeFactory = new FakeServiceScopeFactory(() =>
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () =>
         {
             var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
             handler.Setup(h => h.HandleAsync(It.IsAny<TestInboxMessage>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
@@ -606,7 +643,7 @@ public class InboxProcessorBaseTests
                 return Task.CompletedTask;
             });
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
@@ -637,9 +674,9 @@ public class InboxProcessorBaseTests
                 cts.Cancel();
                 throw new OperationCanceledException(ct);
             });
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(cts.Token);
@@ -675,9 +712,9 @@ public class InboxProcessorBaseTests
                 lockService.CancelLockOwnedToken();
                 throw new OperationCanceledException(ct);
             });
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 1 });
 
         using var ambientCts = new CancellationTokenSource();
@@ -719,10 +756,10 @@ public class InboxProcessorBaseTests
                 lockService.CancelLockOwnedToken();
                 throw new OperationCanceledException(ct);
             });
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
 
         using var ambientCts = new CancellationTokenSource();
@@ -748,12 +785,12 @@ public class InboxProcessorBaseTests
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var lockService = new SelectivelyThrowingLockService(
             throwingPartitionId: 1, new InvalidOperationException("lock backend unreachable"), throwSynchronously: false);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 4 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -783,12 +820,12 @@ public class InboxProcessorBaseTests
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var lockService = new SelectivelyThrowingLockService(
             throwingPartitionId: 1, new InvalidOperationException("lock backend unreachable"), throwSynchronously: true);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 4 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -814,10 +851,10 @@ public class InboxProcessorBaseTests
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("database unreachable"));
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
@@ -843,10 +880,10 @@ public class InboxProcessorBaseTests
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("nope"));
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             logger.Object, new InboxProcessorOptions { PartitionCount = 1 });
 
         await processor.RunTickAsync(CancellationToken.None);
@@ -872,10 +909,10 @@ public class InboxProcessorBaseTests
                 await Task.Delay(20);
                 return (IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>();
             });
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var lockService = new SerializingLockService();
         var processor = new TestInboxProcessor(
-            store.Object, lockService, scopeFactory, ActivitySource, TimeProvider.System,
+            lockService, scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 4 });
 
         await Task.WhenAll(
@@ -898,7 +935,7 @@ public class InboxProcessorBaseTests
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
-        var scopeFactory = new FakeServiceScopeFactory(() => handler.Object);
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
 
         var capturedTags = new List<KeyValuePair<string, object?>>();
         var capturedKinds = new List<ActivityKind>();
@@ -915,7 +952,7 @@ public class InboxProcessorBaseTests
         ActivitySource.AddActivityListener(listener);
 
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(), new InboxProcessorOptions { PartitionCount = 4 });
 
         await processor.RunTickAsync(CancellationToken.None);
@@ -937,9 +974,9 @@ public class InboxProcessorBaseTests
                 Interlocked.Increment(ref tickCount);
                 return (IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>();
             });
-        var scopeFactory = new FakeServiceScopeFactory(() => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
         var processor = new TestInboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
             NullLoggerLike(),
             new InboxProcessorOptions { PartitionCount = 1, PollingInterval = TimeSpan.FromMilliseconds(10) });
 
@@ -958,6 +995,62 @@ public class InboxProcessorBaseTests
         await processor.StopAsync(CancellationToken.None);
 
         tickCount.Should().BeGreaterThanOrEqualTo(2);
+    }
+
+    [Fact]
+    public async Task Registering_the_processor_as_a_singleton_hosted_service_alongside_a_scoped_store_builds_and_dispatches_safely()
+    {
+        // Regression test for the fixed captive-dependency defect: in
+        // production this base class is registered via AddHostedService,
+        // which is always a singleton, while IInboxMessageStore<TMessage> is
+        // (and must remain) registered scoped -- e.g. so its real
+        // implementation gets a fresh, per-partition-scoped DbContext. This
+        // base class used to ctor-inject IInboxMessageStore<TMessage>
+        // directly; under a real Microsoft.Extensions.DependencyInjection
+        // container built with ValidateScopes/ValidateOnBuild enabled (the
+        // same strict validation a real ASP.NET Core composition root
+        // applies), that shape would fail outright at
+        // BuildServiceProvider(...) with "Cannot consume scoped service ...
+        // from singleton ...". Deliberately uses a real ServiceCollection/
+        // ServiceProvider here -- not the FakeServiceScopeFactory the rest
+        // of this file uses -- specifically so that container-level captive-
+        // dependency validation actually runs and would catch a regression
+        // back to the ctor-injected shape.
+        var resolvedStoreInstances = new ConcurrentBag<IInboxMessageStore<TestInboxMessage>>();
+        var services = new ServiceCollection();
+        services.AddSingleton<IDistributedLockService>(new AlwaysAcquiringLockService());
+        services.AddSingleton(ActivitySource);
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton(NullLoggerLike());
+        services.AddHostedService<TestInboxProcessor>();
+        services.AddScoped<IInboxMessageStore<TestInboxMessage>>(_ =>
+        {
+            var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+            store.Setup(s => s.ClaimBatchForPartitionAsync(It.IsAny<int>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
+            resolvedStoreInstances.Add(store.Object);
+            return store.Object;
+        });
+        services.AddScoped<IInboxMessageHandler<TestInboxMessage>>(_ => Mock.Of<IInboxMessageHandler<TestInboxMessage>>());
+
+        using var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateScopes = true,
+            ValidateOnBuild = true,
+        });
+        var processor = provider.GetServices<Microsoft.Extensions.Hosting.IHostedService>()
+            .Should().ContainSingle()
+            .Which.Should().BeOfType<TestInboxProcessor>()
+            .Subject;
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        // Default InboxProcessorOptions.PartitionCount is 4 (no options were
+        // registered, and the ctor's optional parameter defaults to null).
+        resolvedStoreInstances.Should().HaveCount(4,
+            "each of the four partitions must resolve its own fresh scoped store instance from its own DI scope");
+        resolvedStoreInstances.Distinct().Should().HaveCount(4,
+            "the four per-partition store instances must be genuinely distinct — never the same captured/shared instance reused across partitions");
     }
 
     /// <summary>
