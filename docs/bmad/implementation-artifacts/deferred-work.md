@@ -58,6 +58,18 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-5-1-payment-store-and-idempotency-key-handling.md`
   summary: Replace the temporary OutboxProcessingOptions lock/poll consumer placeholders when Story 5.4 builds the forwarding processor.
   evidence: Story 5.1 consumes PartitionCount only; LockExpirySeconds and PollingIntervalMs remain intentionally unread until the kernel-backed Payments outbox processor exists.
+
+## Deferred from: code review of story-5-1-payment-store-and-idempotency-key-handling (2026-08-30)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-1-payment-store-and-idempotency-key-handling.md`
+  summary: Three demo `.http` files (`demo-requests.http`, `payment-idempotency-tests.http`, `CoreBankDemo.PaymentsAPI/CoreBankDemo.http`) still `POST /api/payments`, which this story's demolition deletes.
+  evidence: Blind-hunter flagged the dead requests; the endpoint path is frozen and unchanged, so these self-heal once Story 5.2 restores `POST /api/payments` — matches this project's established pattern of transitional `.http` staleness during incremental rebuild (see the two earlier PaymentsAPI `.http`-file entries above).
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-1-payment-store-and-idempotency-key-handling.md`
+  summary: The deleted legacy `PaymentsController`'s rich `Payment.Received` span tags (`payment.from_account`, `payment.to_account`, `payment.amount`, `outcome`, etc.) have no replacement in the rebuilt handler; only ambient trace-context propagation (`TraceParent`/`TraceState` persistence) survives.
+  evidence: Blind-hunter flagged the lost tagging. The `AddServiceDefaults` ActivitySource-list drop itself is correct (no new `ActivitySource` is created anywhere in `PaymentStorageHandler`, confirmed by the explicit "never a second ActivitySource" comment later added to `Program.cs`), but no later story (through 5.6, checked in the current repo) has re-added descriptive per-payment span tags either.
+- source_spec: `docs/bmad/implementation-artifacts/spec-5-1-payment-store-and-idempotency-key-handling.md`
+  summary: `PaymentRequest.FromAccount == request.ToAccount` (self-transfer) is not rejected anywhere in the payment-storage path.
+  evidence: Edge-case-hunter flagged the missing guard. The deleted legacy `PaymentsController` never validated this either (pre-existing, not introduced by this story), and deciding whether/where to reject self-transfers (PaymentsAPI intake vs. CoreBankAPI transaction processing) is a broader business-rule question outside this story's narrow payment-store/idempotency scope.
 - source_spec: `docs/bmad/implementation-artifacts/spec-6-2-renewable-redis-distributed-locking.md`
   summary: "`CoreBankDemo.AppHost/AppHost.cs` still sets `Features__UseDapr` (`\"true\"`/`\"false\"`) on the PaymentsAPI resource in both the DevProxy and non-DevProxy branches, even though ADR-008 (accepted before story 6.2 began) states these overrides `are not permitted` and explicitly lists their removal from `AppHost.cs` as one of its own Code Map items."
   evidence: Blind-hunter flagged the live contradiction while reviewing story 6.2's diff of `AppHost.cs`. Not this story's fault or scope — ADR-008 predates story 6.2's work and is about the PaymentsAPI-to-CoreBankAPI HTTP integration (story 5.3's concern), not locking; its own Code Map already tracks this cleanup as outstanding.

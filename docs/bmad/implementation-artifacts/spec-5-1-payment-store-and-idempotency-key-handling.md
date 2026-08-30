@@ -2,7 +2,7 @@
 title: 'Story 5.1: Payment store and idempotency-key handling'
 type: 'feature'
 created: '2026-08-28'
-status: 'done'
+status: 'in-progress'
 review_loop_iteration: 2
 baseline_commit: '74fd01083d06b29c77f8f981b30d3723d3559909'
 context:
@@ -70,6 +70,15 @@ context:
 - Given concurrent duplicate storage through independent repositories against one SQLite database, when both attempts complete, then exactly one row exists and both results identify the persisted winner.
 - Given missing or non-four partition configuration, when payment-storage service validation runs, then validation fails before handling payments.
 - Given `dotnet test CoreBankDemo.Rebuild.slnf`, when Story 5.1 is complete, then PaymentsAPI builds in the filter and clears the real >=90% line gate.
+
+### Review Findings
+
+- [ ] [Review][Decision] Amount is always rounded to 2 decimals regardless of currency — `decimal.Round(request.Amount, 2, MidpointRounding.ToEven)` in `PaymentStorageHandler.StoreAsync` and `entity.Property(e => e.Amount).HasPrecision(18, 2)` in `PaymentsDbContext` unconditionally assume a 2-decimal currency. This is explicitly mandated by this story's frozen "Always" constraint, so it cannot be patched without renegotiating the spec, but it is a real correctness gap for any future currency with a different number of minor units (e.g. JPY has 0 decimal places, BHD/KWD have 3). Needs a human call on whether currency-aware precision should be introduced (and when) or the 2-decimal assumption should stand as a permanent, documented demo-scope limitation. [`CoreBankDemo.PaymentsAPI/Handlers/PaymentStorageHandler.cs:68`, `CoreBankDemo.PaymentsAPI/PaymentsDbContext.cs:29`]
+- [ ] [Review][Patch] Magic literal `4` hardcoded twice in the partition-count startup validation predicate, with no named constant explaining why 4 is the only legal value. [`CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs:25-26`]
+- [ ] [Review][Patch] `AddPaymentStorage` calls `services.AddLogging()` unconditionally, mixing general logging-provider setup into a narrowly-named payment-storage registration method (harmless/idempotent, but misplaced). [`CoreBankDemo.PaymentsAPI/PaymentStorageServiceCollectionExtensions.cs:30`]
+- [x] [Review][Defer] Three demo `.http` files (`demo-requests.http`, `payment-idempotency-tests.http`, `CoreBankDemo.PaymentsAPI/CoreBankDemo.http`) still `POST /api/payments`, which this diff deletes; they will 404 until Story 5.2 restores the (frozen, unchanged-path) endpoint — deferred, pre-existing pattern in this project of transitional demo-file staleness during incremental rebuild.
+- [x] [Review][Defer] `Program.cs` dropped the deleted `PaymentsController`'s rich `Payment.Received` span tags (`payment.from_account`, `payment.amount`, `outcome`, etc.); no replacement exists yet. The `AddServiceDefaults` ActivitySource-list drop itself is correct (no new `ActivitySource` is created anywhere in this diff), but the descriptive per-payment span tagging is a minor, real observability regression during the transitional window — deferred, pre-existing gap not yet closed by later stories either.
+- [x] [Review][Defer] `PaymentRequest.FromAccount == request.ToAccount` (self-transfer) is not rejected anywhere in the payment-storage path — deferred, pre-existing: the deleted legacy `PaymentsController` never validated this either, and it is a broader business-rule question outside this story's payment-store/idempotency scope.
 
 ## Spec Change Log
 
