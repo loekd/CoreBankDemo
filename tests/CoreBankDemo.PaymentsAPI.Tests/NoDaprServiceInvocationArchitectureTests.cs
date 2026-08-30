@@ -13,10 +13,8 @@ namespace CoreBankDemo.PaymentsAPI.Tests;
 /// code (<c>DaprClient.PublishEventAsync</c>, Dapr ASP.NET subscription
 /// wiring, sidecars, pubsub components) keeps passing untouched.
 /// <para>
-/// Scope mirrors the spec's own verification command: every
-/// <c>CoreBankDemo.*</c> project directory plus <c>tests/</c> and (if it
-/// ever exists) <c>scripts/</c> -- i.e. production source, live
-/// configuration, scripts, and AppHosts. <c>docs/</c> (ADRs, specs, epics,
+/// Scope covers every <c>CoreBankDemo.*</c> project directory, executable
+/// test/demo scripts, and live repository configuration. <c>docs/</c> (ADRs, specs, epics,
 /// planning artifacts) is deliberately out of scope: those are historical
 /// or currently-accurate <em>records</em> of the decision, not executable
 /// or configuration surface, and are audited separately by the story's
@@ -32,41 +30,58 @@ namespace CoreBankDemo.PaymentsAPI.Tests;
 public class NoDaprServiceInvocationArchitectureTests
 {
     /// <summary>
-    /// This test's own file name -- excluded from the scan because it must
+    /// This test's exact path -- excluded from the scan because it must
     /// name every forbidden signal literally in order to guard against it.
     /// </summary>
-    private const string GuardFileName = "NoDaprServiceInvocationArchitectureTests.cs";
+    private const string GuardRelativePath =
+        "tests/CoreBankDemo.PaymentsAPI.Tests/NoDaprServiceInvocationArchitectureTests.cs";
 
     private static readonly (string Description, Regex Pattern)[] ForbiddenSignals =
     [
-        ("Dapr service-invocation feature flag (config-bound form)",
-            new Regex(@"Features:UseDapr", RegexOptions.Compiled)),
-        ("Dapr service-invocation feature flag (environment-variable form)",
-            new Regex(@"Features__UseDapr", RegexOptions.Compiled)),
+        ("Dapr service-invocation feature flag or configuration key",
+            new Regex(@"\bUseDapr\b", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("Dapr CoreBank client (alternate production client name)",
-            new Regex(@"DaprCoreBankApiClient", RegexOptions.Compiled)),
+            new Regex(@"DaprCoreBankApiClient", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("Dapr invocation SDK API",
             new Regex(@"InvokeMethodWithResponseAsync|InvokeMethodAsync|CreateInvokeMethodRequest|" +
-                       @"CreateInvokeHttpClient|DaprInvokeHandler", RegexOptions.Compiled)),
+                       @"CreateInvokeHttpClient|InvokeMethodGrpcAsync|CreateInvocationInvoker|" +
+                       @"DaprInvokeHandler|InvocationHandler|InvocationInterceptor",
+                RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("Dapr service-invocation HTTP route",
-            new Regex(@"/v1\.0/invoke/", RegexOptions.Compiled)),
+            new Regex(@"/v1\.0/invoke/", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
         ("Dapr service-invocation header",
             new Regex(@"dapr-app-id", RegexOptions.Compiled | RegexOptions.IgnoreCase)),
     ];
 
     /// <summary>Extensions that can hold executable source, live configuration, or scripts.</summary>
     private static readonly string[] ScannedExtensions =
-        [".cs", ".json", ".yaml", ".yml", ".http", ".sh", ".ps1", ".csproj", ".props"];
+    [
+        ".cs", ".json", ".yaml", ".yml", ".http", ".sh", ".ps1", ".js",
+        ".csproj", ".props", ".targets", ".config", ".toml", ".env", ".cmd", ".bat"
+    ];
 
     private static readonly string[] ExcludedDirectorySegments = ["bin", "obj", ".git", "node_modules"];
+    private static readonly string[] AdditionalScopedRootNames =
+        ["tests", "scripts", "dapr", ".config", ".devcontainer", "k6"];
 
     [Fact]
     public void No_forbidden_dapr_service_invocation_signal_exists_in_scanned_files()
     {
         var repoRoot = FindRepoRoot();
         var violations = new List<string>();
+        var scannedFiles = EnumerateScannedFiles(repoRoot).ToList();
 
-        foreach (var file in EnumerateScannedFiles(repoRoot))
+        scannedFiles.Should().NotBeEmpty("the architecture guard must never pass without scanning the repository");
+        scannedFiles.Should().Contain(
+            file => Path.GetRelativePath(repoRoot, file)
+                .StartsWith($"CoreBankDemo.AppHost{Path.DirectorySeparatorChar}", StringComparison.Ordinal),
+            "the AppHost is a required part of the service-invocation boundary");
+        scannedFiles.Should().Contain(
+            file => Path.GetRelativePath(repoRoot, file)
+                .StartsWith($"CoreBankDemo.PaymentsAPI{Path.DirectorySeparatorChar}", StringComparison.Ordinal),
+            "PaymentsAPI is a required part of the service-invocation boundary");
+
+        foreach (var file in scannedFiles)
         {
             var text = File.ReadAllText(file);
             var relativePath = Path.GetRelativePath(repoRoot, file);
@@ -86,36 +101,67 @@ public class NoDaprServiceInvocationArchitectureTests
             "ADR-013, story 6.7)");
     }
 
+    [Fact]
+    public void AppHost_keeps_the_corebank_reference_outside_the_devproxy_branch()
+    {
+        var repoRoot = FindRepoRoot();
+        var appHostPath = Path.Combine(repoRoot, "CoreBankDemo.AppHost", "AppHost.cs");
+        var source = File.ReadAllText(appHostPath);
+        const string coreBankReference = "paymentsApi.WithReference(coreBankApi);";
+        const string devProxyBranch = "if (devProxy is not null)";
+
+        source.Split(coreBankReference, StringSplitOptions.None)
+            .Should().HaveCount(2, "PaymentsAPI must have exactly one CoreBankAPI reference");
+        source.IndexOf(coreBankReference, StringComparison.Ordinal)
+            .Should().BeLessThan(source.IndexOf(devProxyBranch, StringComparison.Ordinal),
+                "the CoreBankAPI reference must apply to both normal and DevProxy orchestration");
+    }
+
     private static IEnumerable<string> EnumerateScannedFiles(string repoRoot)
     {
         var scopedRoots = Directory
             .GetDirectories(repoRoot, "CoreBankDemo.*", SearchOption.TopDirectoryOnly)
-            .Concat([Path.Combine(repoRoot, "tests"), Path.Combine(repoRoot, "scripts")])
+            .Concat(AdditionalScopedRootNames.Select(name => Path.Combine(repoRoot, name)))
             .Where(Directory.Exists);
+
+        foreach (var file in Directory.EnumerateFiles(repoRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            if (ShouldScanFile(repoRoot, file))
+            {
+                yield return file;
+            }
+        }
 
         foreach (var root in scopedRoots)
         {
             foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             {
-                if (Path.GetFileName(file) == GuardFileName)
+                if (ShouldScanFile(repoRoot, file))
                 {
-                    continue;
+                    yield return file;
                 }
-
-                if (!ScannedExtensions.Contains(Path.GetExtension(file), StringComparer.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                var segments = file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                if (segments.Any(s => ExcludedDirectorySegments.Contains(s, StringComparer.OrdinalIgnoreCase)))
-                {
-                    continue;
-                }
-
-                yield return file;
             }
         }
+    }
+
+    private static bool ShouldScanFile(string repoRoot, string file)
+    {
+        var relativePath = Path.GetRelativePath(repoRoot, file);
+        var normalizedRelativePath = relativePath.Replace(Path.DirectorySeparatorChar, '/');
+        if (string.Equals(normalizedRelativePath, GuardRelativePath, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var segments = relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (segments.Any(segment =>
+                ExcludedDirectorySegments.Contains(segment, StringComparer.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        return ScannedExtensions.Contains(Path.GetExtension(file), StringComparer.OrdinalIgnoreCase)
+               || string.Equals(Path.GetFileName(file), "Dockerfile", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string FindRepoRoot()

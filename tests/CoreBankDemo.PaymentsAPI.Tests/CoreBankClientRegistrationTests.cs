@@ -27,9 +27,11 @@ public class CoreBankClientRegistrationTests
         services.AddCoreBankApiClient();
 
         using var provider = services.BuildServiceProvider();
-        var client = provider.GetRequiredService<ICoreBankApiClient>();
+        using var scope = provider.CreateScope();
+        var clients = scope.ServiceProvider.GetServices<ICoreBankApiClient>();
 
-        client.Should().BeOfType<KiotaCoreBankApiClient>();
+        clients.Should().ContainSingle()
+            .Which.Should().BeOfType<KiotaCoreBankApiClient>();
     }
 
     [Fact]
