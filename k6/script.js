@@ -43,6 +43,9 @@ export const options = {
     setupTimeout: '2m',
     teardownTimeout: `${TEARDOWN_TIMEOUT_SECONDS}s`,
     thresholds: {
+        // A single failed named check is a failed run. This covers setup,
+        // submission, drain, endpoint, parsing, and final state gates.
+        'checks': ['rate==1'],
         // All requests must complete without unexpected HTTP errors
         'http_req_failed': ['rate<0.01'],
         // 95% of payment submissions under 2s
@@ -151,10 +154,24 @@ export function teardown(data) {
 
     // First, verify that messages were actually created in the outbox
     const paymentsOutboxCheck = http.get(`${SUPPORT_URL}/payments/outbox`);
-    if (paymentsOutboxCheck.status === 200) {
-        const messages = JSON.parse(paymentsOutboxCheck.body);
+    const outboxEndpointOk = check(paymentsOutboxCheck, {
+        'state gate: payments outbox endpoint returned 200': (r) => r.status === 200,
+    });
+    if (outboxEndpointOk) {
+        let messages;
+        try {
+            messages = JSON.parse(paymentsOutboxCheck.body);
+        } catch (error) {
+            check(null, { 'state gate: payments outbox returned valid JSON': () => false });
+            console.error(`Payments outbox returned malformed JSON: ${error.message}`);
+            return;
+        }
+        check(null, { 'state gate: payments outbox returned valid JSON': () => true });
         console.log(`Payments outbox has ${messages.length} messages (showing up to 50 most recent)`);
-        if (messages.length === 0) {
+        const hasMessages = check(messages, {
+            'state gate: payments outbox contains submitted messages': (value) => Array.isArray(value) && value.length > 0,
+        });
+        if (!hasMessages) {
             console.error('ERROR: No outbox messages found! Payments API is not creating outbox entries.');
             console.error('This means the API endpoint is returning 202 but not actually queuing transactions.');
             console.error('Check that the Payments API is running on the correct port and k6 is hitting the right endpoint.');
@@ -162,6 +179,7 @@ export function teardown(data) {
         }
     } else {
         console.error(`Failed to check payments outbox: status=${paymentsOutboxCheck.status}`);
+        return;
     }
 
     // Poll /assert/drain until all messages are processed (max 5 minutes)
@@ -174,7 +192,15 @@ export function teardown(data) {
     while (Date.now() < deadline) {
         const drainRes = http.get(`${SUPPORT_URL}/assert/drain`);
         if (drainRes.status === 200) {
-            const body = JSON.parse(drainRes.body);
+            let body;
+            try {
+                body = JSON.parse(drainRes.body);
+            } catch (error) {
+                check(null, { 'state gate: drain endpoint returned valid JSON': () => false });
+                console.error(`Drain endpoint returned malformed JSON: ${error.message}`);
+                return;
+            }
+            check(null, { 'state gate: drain endpoint returned valid JSON': () => true });
             pollCount++;
 
             // Log every poll for first 10, then every 5th poll
@@ -191,8 +217,9 @@ export function teardown(data) {
                 break;
             }
         } else {
+            check(drainRes, { 'state gate: drain endpoint returned 200': (r) => r.status === 200 });
             console.error(`Drain check failed: status=${drainRes.status}, body=${drainRes.body.substring(0, 200)}`);
-            // Continue polling even on errors (chaos testing might cause transient failures)
+            return;
         }
         sleep(pollMs / 1000);
     }
@@ -203,19 +230,27 @@ export function teardown(data) {
 
         const paymentsOutbox = http.get(`${SUPPORT_URL}/payments/outbox`);
         if (paymentsOutbox.status === 200) {
-            const messages = JSON.parse(paymentsOutbox.body);
-            console.error(`  Payments Outbox: ${messages.length} recent messages`);
-            if (messages.length > 0) {
-                console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+            try {
+                const messages = JSON.parse(paymentsOutbox.body);
+                console.error(`  Payments Outbox: ${messages.length} recent messages`);
+                if (messages.length > 0) {
+                    console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+                }
+            } catch (error) {
+                console.error(`  Payments Outbox: malformed JSON in diagnostic response: ${error.message}`);
             }
         }
 
         const coreBankInbox = http.get(`${SUPPORT_URL}/corebank/inbox`);
         if (coreBankInbox.status === 200) {
-            const messages = JSON.parse(coreBankInbox.body);
-            console.error(`  CoreBank Inbox: ${messages.length} recent messages`);
-            if (messages.length > 0) {
-                console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+            try {
+                const messages = JSON.parse(coreBankInbox.body);
+                console.error(`  CoreBank Inbox: ${messages.length} recent messages`);
+                if (messages.length > 0) {
+                    console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+                }
+            } catch (error) {
+                console.error(`  CoreBank Inbox: malformed JSON in diagnostic response: ${error.message}`);
             }
         }
     }
@@ -231,7 +266,7 @@ export function teardown(data) {
 
     // Run the full assertion suite
     const assertRes = http.get(`${SUPPORT_URL}/assert/results?expectedUnique=${UNIQUE_COUNT}`);
-    const assertOk = check(assertRes, {
+    check(assertRes, {
         'assert endpoint returned 200': (r) => r.status === 200,
         'assert: not 404 (endpoint exists)': (r) => r.status !== 404,
         'assert: not 500 (no server error)': (r) => r.status !== 500,
@@ -242,7 +277,15 @@ export function teardown(data) {
         return;
     }
 
-    const result = JSON.parse(assertRes.body);
+    let result;
+    try {
+        result = JSON.parse(assertRes.body);
+    } catch (error) {
+        check(null, { 'state gate: assert endpoint returned valid JSON': () => false });
+        console.error(`Assert endpoint returned malformed JSON: ${error.message}`);
+        return;
+    }
+    check(null, { 'state gate: assert endpoint returned valid JSON': () => true });
     console.log('\n========== ASSERTION RESULTS ==========');
     console.log(JSON.stringify(result, null, 2));
     console.log('========================================\n');
@@ -256,6 +299,8 @@ export function teardown(data) {
         'all submitted transactions processed': (r) => r.checks.allSubmittedProcessed.passed === true,
         'balance conservation':           (r) => r.checks.balanceConservation.passed === true,
         'balances correct':               (r) => r.checks.balancesCorrect.passed === true,
+        'stage cardinality N/N/3N/3N':     (r) => r.checks.stageCardinality.passed === true,
+        'canonical account set exact':     (r) => r.checks.canonicalAccountSet.passed === true,
     });
 
     if (!result.allPassed) {
@@ -271,4 +316,3 @@ export function teardown(data) {
         console.log('✓ All exactly-once guarantees and balance correctness verified successfully');
     }
 }
-

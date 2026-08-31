@@ -1086,6 +1086,9 @@ public class OutboxProcessorBaseTests
 
         capturedTags.Should().ContainSingle(t => t.Key == "IdempotencyKey" && Equals(t.Value, "tagged-message"));
         capturedTags.Should().ContainSingle(t => t.Key == "PartitionId" && Equals(t.Value, 2));
+        capturedTags.Should().ContainSingle(t => t.Key == "messaging.store.name" && Equals(t.Value, "PaymentsOutbox"));
+        capturedTags.Should().ContainSingle(t => t.Key == "messaging.message.id" && Equals(t.Value, message.Id.ToString()));
+        capturedTags.Should().ContainSingle(t => t.Key == "messaging.partition.id" && Equals(t.Value, 2));
         capturedKinds.Should().ContainSingle(k => k == ActivityKind.Producer,
             "an outbox message being delivered is producing work on behalf of the trace that created it (AD-8)");
     }

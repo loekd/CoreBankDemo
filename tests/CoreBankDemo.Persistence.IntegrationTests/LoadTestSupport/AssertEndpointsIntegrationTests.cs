@@ -276,6 +276,37 @@ public sealed class AssertEndpointsIntegrationTests(PostgresContainerFixture fix
         result.Summary.TotalBalance.Should().Be(LoadTestConstants.InitialBalance);
     }
 
+    [Fact]
+    public async Task Results_reports_green_four_store_cardinality_and_exact_account_set()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var coreBank = CreateCoreBankContext();
+        await using var payments = CreatePaymentsContext();
+        SeedLoadAccounts(coreBank, Enumerable.Range(1, LoadTestConstants.AccountCount).ToArray());
+        coreBank.InboxMessages.Add(CompletedTransfer("key-1", 1, 2, 0m));
+        payments.OutboxMessages.Add(CompletedOutbox("key-1"));
+        for (var index = 0; index < 3; index++)
+        {
+            coreBank.MessagingOutboxMessages.Add(CoreBankOutbox($"event-{index}", MessageConstants.Status.Completed));
+            var paymentsInbox = PaymentsApiTestData.Inbox($"event-{index}", "BalanceUpdated", $"account-{index}");
+            paymentsInbox.Status = MessageConstants.Status.Completed;
+            payments.InboxMessages.Add(paymentsInbox);
+        }
+
+        await coreBank.SaveChangesAsync(cancellationToken);
+        await payments.SaveChangesAsync(cancellationToken);
+
+        var result = await new LoadTestAssertionService(coreBank, payments).GetResultsAsync(1, cancellationToken);
+
+        result.Checks.StageCardinality.Passed.Should().BeTrue();
+        result.Checks.CanonicalAccountSet.Passed.Should().BeTrue();
+        result.Summary.PaymentsOutbox.Should().Be(new MessageStoreSummary(1, 1, 0, 0));
+        result.Summary.CoreBankInbox.Should().Be(new MessageStoreSummary(1, 1, 0, 0));
+        result.Summary.CoreBankOutbox.Should().Be(new MessageStoreSummary(3, 3, 0, 0));
+        result.Summary.PaymentsInbox.Should().Be(new MessageStoreSummary(3, 3, 0, 0));
+        result.AllPassed.Should().BeTrue();
+    }
+
     private static string AccountNumber(int i) => $"NL{i:D2}LOAD{i:D10}";
 
     private static List<Account> SeedLoadAccounts(CoreBankDbContext coreBank, params int[] accountIndexes)

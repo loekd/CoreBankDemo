@@ -1,3 +1,4 @@
+using CoreBankDemo.LoadTestInitializer;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -23,6 +24,8 @@ try
         throw new HttpRequestException(
             $"Load-test reset failed with status {(int)response.StatusCode}: {responseBody}");
     }
+
+    ResetResponseValidator.Validate(responseBody);
 }
 finally
 {

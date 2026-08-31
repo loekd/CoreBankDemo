@@ -62,7 +62,7 @@ public class DaprEventPublisherTests
             })
             .Returns(Task.CompletedTask);
 
-        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-1", payload, traceParent: null,
+        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-1", payload, traceParent: null, traceState: null,
             TestContext.Current.CancellationToken);
 
         capturedPubSub.Should().Be("custom-pubsub");
@@ -81,7 +81,7 @@ public class DaprEventPublisherTests
             .Callback<string, string, object, Dictionary<string, string>, CancellationToken>((_, _, _, metadata, _) => capturedMetadata = metadata)
             .Returns(Task.CompletedTask);
 
-        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, traceParent: null,
+        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, traceParent: null, traceState: null,
             TestContext.Current.CancellationToken);
 
         capturedMetadata.Should().NotBeNull();
@@ -103,7 +103,8 @@ public class DaprEventPublisherTests
 
         await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { },
             traceParent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-            TestContext.Current.CancellationToken);
+            traceState: null,
+            cancellationToken: TestContext.Current.CancellationToken);
 
         capturedMetadata!["cloudevent.traceparent"].Should().Be("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
     }
@@ -122,7 +123,7 @@ public class DaprEventPublisherTests
             .Callback<string, string, object, Dictionary<string, string>, CancellationToken>((_, _, _, metadata, _) => capturedMetadata = metadata)
             .Returns(Task.CompletedTask);
 
-        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, traceParent,
+        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, traceParent, null,
             TestContext.Current.CancellationToken);
 
         capturedMetadata.Should().NotBeNull();
@@ -141,7 +142,7 @@ public class DaprEventPublisherTests
             .Callback<string, string, object, Dictionary<string, string>, CancellationToken>((_, _, _, _, ct) => capturedToken = ct)
             .Returns(Task.CompletedTask);
 
-        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, cts.Token);
+        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, null, cts.Token);
 
         capturedToken.Should().Be(cts.Token);
     }
@@ -155,7 +156,7 @@ public class DaprEventPublisherTests
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("pubsub unreachable"));
 
-        var act = async () => await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null,
+        var act = async () => await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, null,
             TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("pubsub unreachable");
@@ -173,7 +174,7 @@ public class DaprEventPublisherTests
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
-        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null,
+        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, null,
             TestContext.Current.CancellationToken);
 
         var measurement = listener.Measurements.Should()
@@ -201,7 +202,7 @@ public class DaprEventPublisherTests
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
-        await sut.PublishAsync(cloudEventType, "corebank-api", "tx-42", new { }, null, TestContext.Current.CancellationToken);
+        await sut.PublishAsync(cloudEventType, "corebank-api", "tx-42", new { }, null, null, TestContext.Current.CancellationToken);
 
         listener.Measurements.Should().ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingDeliveriesInstrumentName)
             .Which.Tags["messaging.message.type"].Should().Be(expectedMessageType);
@@ -217,7 +218,7 @@ public class DaprEventPublisherTests
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("pubsub unreachable"));
 
-        var act = async () => await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null,
+        var act = async () => await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, null,
             TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("pubsub unreachable");
@@ -238,9 +239,26 @@ public class DaprEventPublisherTests
             .ThrowsAsync(new OperationCanceledException(cts.Token));
 
         var act = () => sut.PublishAsync(
-            "com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, cts.Token);
+            "com.corebank.transaction.completed", "corebank-api", "tx-42", new { }, null, null, cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         listener.Measurements.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PublishAsync_includes_cloudevent_tracestate_when_supplied()
+    {
+        var (daprClient, _, sut, _) = CreateSut();
+        Dictionary<string, string>? capturedMetadata = null;
+        daprClient
+            .Setup(c => c.PublishEventAsync<object>(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object>(), It.IsAny<Dictionary<string, string>>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, object, Dictionary<string, string>, CancellationToken>((_, _, _, metadata, _) => capturedMetadata = metadata)
+            .Returns(Task.CompletedTask);
+
+        await sut.PublishAsync("com.corebank.transaction.completed", "corebank-api", "tx-42", new { },
+            traceParent: null, traceState: "vendor=value", cancellationToken: TestContext.Current.CancellationToken);
+
+        capturedMetadata!["cloudevent.tracestate"].Should().Be("vendor=value");
     }
 }

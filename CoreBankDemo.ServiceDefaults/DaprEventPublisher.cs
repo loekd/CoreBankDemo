@@ -33,6 +33,7 @@ public sealed class DaprEventPublisher(
         string subject,
         object payload,
         string? traceParent,
+        string? traceState,
         CancellationToken cancellationToken = default)
     {
         var metadata = new Dictionary<string, string>
@@ -45,6 +46,11 @@ public sealed class DaprEventPublisher(
         if (!string.IsNullOrWhiteSpace(traceParent))
         {
             metadata["cloudevent.traceparent"] = traceParent;
+        }
+
+        if (!string.IsNullOrWhiteSpace(traceState))
+        {
+            metadata["cloudevent.tracestate"] = traceState;
         }
 
         var pubSubName = options.Value.PubSubName;

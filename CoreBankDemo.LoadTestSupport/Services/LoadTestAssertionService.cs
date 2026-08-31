@@ -73,6 +73,26 @@ public sealed record BalancesCorrectCheck(
     string Detail,
     IReadOnlyList<BalanceDiscrepancy> Discrepancies);
 
+/// <summary>Status counts for one durable message store.</summary>
+public sealed record MessageStoreSummary(int Total, int Completed, int Failed, int NonTerminal);
+
+/// <summary>Expected and actual message counts at each processing stage.</summary>
+public sealed record StageCardinalityCheck(
+    bool Passed,
+    string Detail,
+    int? ExpectedUnique,
+    MessageStoreSummary PaymentsOutbox,
+    MessageStoreSummary CoreBankInbox,
+    MessageStoreSummary CoreBankOutbox,
+    MessageStoreSummary PaymentsInbox);
+
+/// <summary>Proof that the database contains exactly the ten seeded load-test accounts.</summary>
+public sealed record CanonicalAccountSetCheck(
+    bool Passed,
+    string Detail,
+    IReadOnlyList<string> Missing,
+    IReadOnlyList<string> Unexpected);
+
 /// <summary>The full set of five-invariant assertion checks run against one seeded dataset.</summary>
 public sealed record AssertionChecks(
     AssertionCheck NoFailedMessages,
@@ -81,7 +101,9 @@ public sealed record AssertionChecks(
     AssertionCheck ExpectedUniqueProcessed,
     AssertionCheck AllSubmittedProcessed,
     AssertionCheck BalanceConservation,
-    BalancesCorrectCheck BalancesCorrect);
+    BalancesCorrectCheck BalancesCorrect,
+    StageCardinalityCheck StageCardinality,
+    CanonicalAccountSetCheck CanonicalAccountSet);
 
 /// <summary>Aggregate counts and totals backing the assertion checks in <see cref="AssertionChecks"/>.</summary>
 public sealed record AssertionSummary(
@@ -95,7 +117,11 @@ public sealed record AssertionSummary(
     int CompletedUniqueKeys,
     decimal TotalBalance,
     decimal ExpectedTotalBalance,
-    int AccountCount);
+    int AccountCount,
+    MessageStoreSummary PaymentsOutbox,
+    MessageStoreSummary CoreBankInbox,
+    MessageStoreSummary CoreBankOutbox,
+    MessageStoreSummary PaymentsInbox);
 
 /// <summary>Raw completed-transaction data behind the balance replay, for troubleshooting a failed assertion run.</summary>
 public sealed record AssertionDebugInfo(IReadOnlyList<CompletedTransaction> CompletedTransactions);
@@ -175,10 +201,15 @@ public sealed class LoadTestAssertionService(CoreBankDbContext coreBankDb, Payme
     /// </summary>
     public async Task<AssertionResult> GetResultsAsync(int? expectedUnique, CancellationToken ct = default)
     {
-        var completedCount = await coreBankDb.InboxMessages.CountAsync(m => m.Status == Status.Completed, ct);
-        var failedCount = await coreBankDb.InboxMessages.CountAsync(m => m.Status == Status.Failed, ct);
-        var pendingCount = await coreBankDb.InboxMessages
-            .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
+        var paymentsOutboxStatuses = await paymentsDb.OutboxMessages.Select(m => m.Status).ToListAsync(ct);
+        var coreBankInboxStatuses = await coreBankDb.InboxMessages.Select(m => m.Status).ToListAsync(ct);
+        var coreBankOutboxStatuses = await coreBankDb.MessagingOutboxMessages.Select(m => m.Status).ToListAsync(ct);
+        var paymentsInboxStatuses = await paymentsDb.InboxMessages.Select(m => m.Status).ToListAsync(ct);
+
+        var paymentsOutboxSummary = Summarize(paymentsOutboxStatuses);
+        var coreBankInboxSummary = Summarize(coreBankInboxStatuses);
+        var coreBankOutboxSummary = Summarize(coreBankOutboxStatuses);
+        var paymentsInboxSummary = Summarize(paymentsInboxStatuses);
 
         var completedInbox = await coreBankDb.InboxMessages
             .Where(m => m.Status == Status.Completed)
@@ -191,36 +222,40 @@ public sealed class LoadTestAssertionService(CoreBankDbContext coreBankDb, Payme
             .Select(g => new DuplicateKeyInfo(g.Key, g.Count()))
             .ToListAsync(ct);
 
-        var totalOutbox = await paymentsDb.OutboxMessages.CountAsync(ct);
-        var outboxCompleted = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == Status.Completed, ct);
-        var outboxPending = await paymentsDb.OutboxMessages
-            .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
         var outboxUniqueKeys = await paymentsDb.OutboxMessages
             .Select(m => m.IdempotencyKey)
             .Distinct()
             .CountAsync(ct);
 
+        // Intentionally broad filter (not StartsWith("NL") as well): CanonicalAccountSetCheck
+        // below does the exact-match validation against the 10 canonical account numbers, so
+        // any stray "contains LOAD" account is reported as unexpected rather than silently
+        // dropped from the balance/conservation totals.
         var loadTestAccounts = await coreBankDb.Accounts
-            .Where(a => a.AccountNumber.StartsWith("NL") && a.AccountNumber.Contains("LOAD"))
+            .Where(a => a.AccountNumber.Contains("LOAD"))
             .OrderBy(a => a.AccountNumber)
             .Select(a => new LoadTestAccountBalance(a.AccountNumber, a.Balance))
             .ToListAsync(ct);
 
         var request = new ComputeAssertionRequest(
             ExpectedUnique: expectedUnique,
-            CompletedCount: completedCount,
-            FailedCount: failedCount,
-            PendingCount: pendingCount,
+            PaymentsOutbox: paymentsOutboxSummary,
+            CoreBankInbox: coreBankInboxSummary,
+            CoreBankOutbox: coreBankOutboxSummary,
+            PaymentsInbox: paymentsInboxSummary,
             CompletedTransactions: completedInbox,
             DuplicateKeys: duplicateKeys,
-            TotalOutbox: totalOutbox,
-            OutboxCompleted: outboxCompleted,
-            OutboxPending: outboxPending,
             OutboxUniqueKeys: outboxUniqueKeys,
             LoadTestAccounts: loadTestAccounts);
 
         return LoadTestAssertionCalculator.ComputeAssertionResult(request);
     }
+
+    private static MessageStoreSummary Summarize(IReadOnlyCollection<string> statuses) => new(
+        statuses.Count,
+        statuses.Count(status => status == Status.Completed),
+        statuses.Count(status => status == Status.Failed),
+        statuses.Count(status => status != Status.Completed && status != Status.Failed));
 }
 
 /// <summary>
@@ -233,14 +268,12 @@ public sealed class LoadTestAssertionService(CoreBankDbContext coreBankDb, Payme
 /// </summary>
 internal sealed record ComputeAssertionRequest(
     int? ExpectedUnique,
-    int CompletedCount,
-    int FailedCount,
-    int PendingCount,
+    MessageStoreSummary PaymentsOutbox,
+    MessageStoreSummary CoreBankInbox,
+    MessageStoreSummary CoreBankOutbox,
+    MessageStoreSummary PaymentsInbox,
     IReadOnlyList<CompletedTransaction> CompletedTransactions,
     IReadOnlyList<DuplicateKeyInfo> DuplicateKeys,
-    int TotalOutbox,
-    int OutboxCompleted,
-    int OutboxPending,
     int OutboxUniqueKeys,
     IReadOnlyList<LoadTestAccountBalance> LoadTestAccounts);
 
@@ -263,9 +296,8 @@ public static class LoadTestAssertionCalculator
     /// </summary>
     internal static AssertionResult ComputeAssertionResult(ComputeAssertionRequest request)
     {
-        var (expectedUnique, completedCount, failedCount, pendingCount, completedTransactions,
-            duplicateKeys, totalOutbox, outboxCompleted, outboxPending, outboxUniqueKeys,
-            loadTestAccounts) = request;
+        var (expectedUnique, paymentsOutbox, coreBankInbox, coreBankOutbox, paymentsInbox,
+            completedTransactions, duplicateKeys, outboxUniqueKeys, loadTestAccounts) = request;
 
         var completedUniqueKeys = completedTransactions
             .Select(t => t.IdempotencyKey)
@@ -294,8 +326,15 @@ public static class LoadTestAssertionCalculator
 
         var balancesCorrect = balanceDiscrepancies.Count == 0;
 
-        var noFailedMessages = new AssertionCheck(failedCount == 0, $"{failedCount} failed inbox message(s)");
-        var noPendingMessages = new AssertionCheck(pendingCount == 0, $"{pendingCount} still pending/processing");
+        var failedCount = paymentsOutbox.Failed + coreBankInbox.Failed + coreBankOutbox.Failed + paymentsInbox.Failed;
+        var pendingCount = paymentsOutbox.NonTerminal + coreBankInbox.NonTerminal
+            + coreBankOutbox.NonTerminal + paymentsInbox.NonTerminal;
+        var noFailedMessages = new AssertionCheck(
+            failedCount == 0,
+            $"{failedCount} failed message(s); Failed: PaymentsOutbox={paymentsOutbox.Failed}, CoreBankInbox={coreBankInbox.Failed}, CoreBankOutbox={coreBankOutbox.Failed}, PaymentsInbox={paymentsInbox.Failed}");
+        var noPendingMessages = new AssertionCheck(
+            pendingCount == 0,
+            $"{pendingCount} still pending/processing; NonTerminal: PaymentsOutbox={paymentsOutbox.NonTerminal}, CoreBankInbox={coreBankInbox.NonTerminal}, CoreBankOutbox={coreBankOutbox.NonTerminal}, PaymentsInbox={paymentsInbox.NonTerminal}");
         var noDuplicateProcessing = new NoDuplicateProcessingCheck(
             duplicateKeys.Count == 0,
             duplicateKeys.Count == 0
@@ -308,8 +347,8 @@ public static class LoadTestAssertionCalculator
                 ? $"ExpectedUnique={expectedUnique.Value}, CompletedUnique={completedUniqueKeys}"
                 : $"CompletedUnique={completedUniqueKeys}");
         var allSubmittedProcessed = new AssertionCheck(
-            completedCount == totalOutbox,
-            $"OutboxTotal={totalOutbox}, InboxCompleted={completedCount}");
+            coreBankInbox.Completed == paymentsOutbox.Total,
+            $"OutboxTotal={paymentsOutbox.Total}, InboxCompleted={coreBankInbox.Completed}");
         var balanceConservation = new AssertionCheck(
             balanceConserved,
             $"Total={totalBalance:F2}, Expected={expectedTotalBalance:F2}");
@@ -320,6 +359,38 @@ public static class LoadTestAssertionCalculator
                 : $"{balanceDiscrepancies.Count} account(s) have incorrect balances",
             balanceDiscrepancies);
 
+        var cardinalityPassed = !expectedUnique.HasValue ||
+            (paymentsOutbox.Total == expectedUnique.Value
+             && paymentsOutbox.Completed == expectedUnique.Value
+             && coreBankInbox.Total == expectedUnique.Value
+             && coreBankInbox.Completed == expectedUnique.Value
+             && coreBankOutbox.Total == expectedUnique.Value * 3
+             && coreBankOutbox.Completed == expectedUnique.Value * 3
+             && paymentsInbox.Total == expectedUnique.Value * 3
+             && paymentsInbox.Completed == expectedUnique.Value * 3);
+        var stageCardinality = new StageCardinalityCheck(
+            cardinalityPassed,
+            expectedUnique.HasValue
+                ? $"Expected N/N/3N/3N={expectedUnique.Value}/{expectedUnique.Value}/{expectedUnique.Value * 3}/{expectedUnique.Value * 3}; Actual={paymentsOutbox.Total}/{coreBankInbox.Total}/{coreBankOutbox.Total}/{paymentsInbox.Total}"
+                : "ExpectedUnique was not supplied",
+            expectedUnique,
+            paymentsOutbox,
+            coreBankInbox,
+            coreBankOutbox,
+            paymentsInbox);
+
+        var expectedAccounts = Enumerable.Range(1, LoadTestAccountCount)
+            .Select(i => $"NL{i:D2}LOAD{i:D10}")
+            .ToHashSet(StringComparer.Ordinal);
+        var actualAccounts = loadTestAccounts.Select(account => account.AccountNumber).ToHashSet(StringComparer.Ordinal);
+        var missingAccounts = expectedAccounts.Except(actualAccounts).Order().ToArray();
+        var unexpectedAccounts = actualAccounts.Except(expectedAccounts).Order().ToArray();
+        var canonicalAccountSet = new CanonicalAccountSetCheck(
+            missingAccounts.Length == 0 && unexpectedAccounts.Length == 0,
+            $"Expected {LoadTestAccountCount} canonical accounts; actual={actualAccounts.Count}, missing={missingAccounts.Length}, unexpected={unexpectedAccounts.Length}",
+            missingAccounts,
+            unexpectedAccounts);
+
         var checks = new AssertionChecks(
             noFailedMessages,
             noPendingMessages,
@@ -327,7 +398,9 @@ public static class LoadTestAssertionCalculator
             expectedUniqueProcessed,
             allSubmittedProcessed,
             balanceConservation,
-            balancesCorrectCheck);
+            balancesCorrectCheck,
+            stageCardinality,
+            canonicalAccountSet);
 
         var allPassed =
             noFailedMessages.Passed &&
@@ -336,20 +409,26 @@ public static class LoadTestAssertionCalculator
             expectedUniqueProcessed.Passed &&
             allSubmittedProcessed.Passed &&
             balanceConservation.Passed &&
-            balancesCorrectCheck.Passed;
+            balancesCorrectCheck.Passed &&
+            stageCardinality.Passed &&
+            canonicalAccountSet.Passed;
 
         var summary = new AssertionSummary(
-            totalOutbox,
-            outboxCompleted,
-            outboxPending,
-            completedCount,
-            failedCount,
-            pendingCount,
+            paymentsOutbox.Total,
+            paymentsOutbox.Completed,
+            paymentsOutbox.NonTerminal,
+            coreBankInbox.Completed,
+            coreBankInbox.Failed,
+            coreBankInbox.NonTerminal,
             outboxUniqueKeys,
             completedUniqueKeys,
             totalBalance,
             expectedTotalBalance,
-            loadTestAccounts.Count);
+            loadTestAccounts.Count,
+            paymentsOutbox,
+            coreBankInbox,
+            coreBankOutbox,
+            paymentsInbox);
 
         return new AssertionResult(allPassed, checks, summary, new AssertionDebugInfo(completedTransactions));
     }

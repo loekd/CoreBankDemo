@@ -31,6 +31,7 @@ public class DaprOutboxDeliveryStrategyTests
                 && payload.Status == message.TransactionStatus
                 && payload.ProcessedAt == new DateTimeOffset(OccurredAt)),
             message.TraceParent,
+            message.TraceState,
             TestContext.Current.CancellationToken), Times.Once);
     }
 
@@ -50,6 +51,7 @@ public class DaprOutboxDeliveryStrategyTests
             It.IsAny<string>(),
             It.Is<TransactionCompletedEvent>(payload =>
                 payload.ProcessedAt == new DateTimeOffset(message.EventOccurredAt.ToUniversalTime())),
+            It.IsAny<string?>(),
             It.IsAny<string?>(),
             TestContext.Current.CancellationToken), Times.Once);
     }
@@ -75,6 +77,7 @@ public class DaprOutboxDeliveryStrategyTests
                 && payload.ProcessedAt == new DateTimeOffset(OccurredAt)
                 && payload.ErrorReason == null),
             message.TraceParent,
+            message.TraceState,
             TestContext.Current.CancellationToken), Times.Once);
     }
 
@@ -100,6 +103,7 @@ public class DaprOutboxDeliveryStrategyTests
                 && payload.NewBalance == 87.50m
                 && payload.Currency == message.Currency),
             message.TraceParent,
+            message.TraceState,
             TestContext.Current.CancellationToken), Times.Once);
     }
 
@@ -121,6 +125,7 @@ public class DaprOutboxDeliveryStrategyTests
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<object>(),
+                It.IsAny<string?>(),
                 It.IsAny<string?>(),
                 It.IsAny<CancellationToken>()),
             Times.Never);
@@ -144,6 +149,7 @@ public class DaprOutboxDeliveryStrategyTests
                 It.IsAny<string>(),
                 It.IsAny<object>(),
                 It.IsAny<string?>(),
+                It.IsAny<string?>(),
                 It.IsAny<CancellationToken>()),
             Times.Never);
     }
@@ -159,9 +165,10 @@ public class DaprOutboxDeliveryStrategyTests
                 It.IsAny<string>(),
                 It.IsAny<object>(),
                 It.IsAny<string?>(),
+                It.IsAny<string?>(),
                 It.IsAny<CancellationToken>()))
-            .Callback<string, string, string, object, string?, CancellationToken>(
-                (_, _, _, payload, _, _) =>
+            .Callback<string, string, string, object, string?, string?, CancellationToken>(
+                (_, _, _, payload, _, _, _) =>
                     publishedTimes.Add(((TransactionCompletedEvent)payload).ProcessedAt))
             .ThrowsAsync(new InvalidOperationException("transport unavailable"));
         var message = NewMessage(Constants.TransactionCompleted);
@@ -198,6 +205,7 @@ public class DaprOutboxDeliveryStrategyTests
         NewBalance = 87.50m,
         Currency = "EUR",
         TransactionStatus = MessageConstants.Status.Completed,
-        TraceParent = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+        TraceParent = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+        TraceState = "vendor=value"
     };
 }

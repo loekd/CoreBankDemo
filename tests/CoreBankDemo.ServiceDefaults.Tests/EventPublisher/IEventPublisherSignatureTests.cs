@@ -6,16 +6,9 @@ using Xunit;
 namespace CoreBankDemo.ServiceDefaults.Tests.EventPublisher;
 
 /// <summary>
-/// Story 3.3: <see cref="IEventPublisher.PublishAsync"/>'s parameter list is
-/// mandated verbatim by epics.md — <c>(string type, string source, string
-/// subject, object payload, string? traceParent, CancellationToken
-/// cancellationToken = default)</c> — and is deliberately call-site-simple:
-/// no <c>pubsubName</c>/<c>topicName</c> parameters (those are DI-bound via
-/// <c>MessagingOutboxProcessingOptions</c>), no <c>id</c>/<c>tracestate</c>
-/// parameters (Ask-First resolution: deliberate scope decision, not an
-/// oversight — see the story spec's Boundaries &amp; Constraints). This
-/// reflection guard is a permanent regression check against that exact
-/// contract.
+/// Reflection guard for the internal publisher port. ADR-017 adds
+/// <c>traceState</c> to Story 3.3's original call-site-simple contract while
+/// transport configuration remains DI-bound.
 /// </summary>
 public class IEventPublisherSignatureTests
 {
@@ -30,11 +23,11 @@ public class IEventPublisherSignatureTests
     }
 
     [Fact]
-    public void PublishAsync_takes_exactly_the_six_parameters_epics_md_mandates()
+    public void PublishAsync_takes_the_seven_parameters_required_by_ADR_017()
     {
         var parameters = Method.GetParameters();
 
-        parameters.Should().HaveCount(6);
+        parameters.Should().HaveCount(7);
 
         parameters[0].Name.Should().Be("type");
         parameters[0].ParameterType.Should().Be(typeof(string));
@@ -52,17 +45,22 @@ public class IEventPublisherSignatureTests
         parameters[4].ParameterType.Should().Be(typeof(string));
         new NullabilityInfoContext().Create(parameters[4]).ReadState.Should().Be(NullabilityState.Nullable);
 
-        parameters[5].Name.Should().Be("cancellationToken");
-        parameters[5].ParameterType.Should().Be(typeof(CancellationToken));
-        parameters[5].HasDefaultValue.Should().BeTrue();
+        parameters[5].Name.Should().Be("traceState");
+        parameters[5].ParameterType.Should().Be(typeof(string));
+        new NullabilityInfoContext().Create(parameters[5]).ReadState.Should().Be(NullabilityState.Nullable);
+
+        parameters[6].Name.Should().Be("cancellationToken");
+        parameters[6].ParameterType.Should().Be(typeof(CancellationToken));
+        parameters[6].HasDefaultValue.Should().BeTrue();
     }
 
     [Fact]
-    public void PublishAsync_does_not_declare_pubsubName_topicName_id_or_tracestate_parameters()
+    public void PublishAsync_does_not_declare_transport_configuration_or_envelope_id_parameters()
     {
         var names = Method.GetParameters().Select(p => p.Name).ToArray();
 
-        names.Should().NotContain(new[] { "pubsubName", "topicName", "id", "tracestate", "traceState" });
+        names.Should().NotContain(new[] { "pubsubName", "topicName", "id" });
+        names.Should().Contain("traceState");
     }
 
     [Fact]

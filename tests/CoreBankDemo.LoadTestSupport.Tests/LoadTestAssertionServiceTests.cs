@@ -36,19 +36,21 @@ public class LoadTestAssertionServiceTests
         int outboxCompleted = 0,
         int outboxPending = 0,
         int outboxUniqueKeys = 0,
-        IReadOnlyList<LoadTestAccountBalance>? loadTestAccounts = null) =>
+        IReadOnlyList<LoadTestAccountBalance>? loadTestAccounts = null)
+    {
+        var downstreamCount = (expectedUnique ?? 0) * 3;
+        return
         LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
             ExpectedUnique: expectedUnique,
-            CompletedCount: completedCount,
-            FailedCount: failedCount,
-            PendingCount: pendingCount,
+            PaymentsOutbox: new MessageStoreSummary(totalOutbox, outboxCompleted, 0, outboxPending),
+            CoreBankInbox: new MessageStoreSummary(completedCount + failedCount + pendingCount, completedCount, failedCount, pendingCount),
+            CoreBankOutbox: new MessageStoreSummary(downstreamCount, downstreamCount, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(downstreamCount, downstreamCount, 0, 0),
             CompletedTransactions: completedTransactions ?? [],
             DuplicateKeys: duplicateKeys ?? [],
-            TotalOutbox: totalOutbox,
-            OutboxCompleted: outboxCompleted,
-            OutboxPending: outboxPending,
             OutboxUniqueKeys: outboxUniqueKeys,
             LoadTestAccounts: loadTestAccounts ?? UntouchedAccounts()));
+    }
 
     [Fact]
     public void Untouched_accounts_pass_every_check_with_zero_activity()
@@ -289,5 +291,61 @@ public class LoadTestAssertionServiceTests
         var result = Compute(expectedUnique: 1, completedCount: 1, completedTransactions: transactions, totalOutbox: 1);
 
         result.Debug.CompletedTransactions.Should().BeEquivalentTo(transactions);
+    }
+
+    [Fact]
+    public void Failed_row_in_any_store_fails_the_terminal_state_gate()
+    {
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 0,
+            PaymentsOutbox: new MessageStoreSummary(0, 0, 0, 0),
+            CoreBankInbox: new MessageStoreSummary(0, 0, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(1, 0, 1, 0),
+            PaymentsInbox: new MessageStoreSummary(0, 0, 0, 0),
+            CompletedTransactions: [],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 0,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.NoFailedMessages.Passed.Should().BeFalse();
+        result.Checks.NoFailedMessages.Detail.Should().Contain("CoreBankOutbox=1");
+        result.AllPassed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Green_stage_counts_and_exact_accounts_pass_new_acceptance_checks()
+    {
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 2,
+            PaymentsOutbox: new MessageStoreSummary(2, 2, 0, 0),
+            CoreBankInbox: new MessageStoreSummary(2, 2, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(6, 6, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(6, 6, 0, 0),
+            CompletedTransactions:
+            [
+                new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "key-1"),
+                new CompletedTransaction(AccountNumber(2), AccountNumber(1), 1m, "key-2")
+            ],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 2,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.StageCardinality.Passed.Should().BeTrue();
+        result.Checks.CanonicalAccountSet.Passed.Should().BeTrue();
+        result.AllPassed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Missing_or_unexpected_load_account_fails_exact_account_check()
+    {
+        var accounts = UntouchedAccounts();
+        accounts.RemoveAt(0);
+        accounts.Add(new LoadTestAccountBalance("NL99LOAD0000000099", InitialBalance));
+
+        var result = Compute(expectedUnique: 0, loadTestAccounts: accounts);
+
+        result.Checks.CanonicalAccountSet.Passed.Should().BeFalse();
+        result.Checks.CanonicalAccountSet.Missing.Should().Contain(AccountNumber(1));
+        result.Checks.CanonicalAccountSet.Unexpected.Should().Contain("NL99LOAD0000000099");
     }
 }

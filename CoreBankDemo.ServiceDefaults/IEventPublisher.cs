@@ -8,14 +8,8 @@ namespace CoreBankDemo.ServiceDefaults;
 /// callers stay call-site-simple.
 /// </summary>
 /// <remarks>
-/// Story 3.3: this signature is fixed verbatim by epics.md and is
-/// non-negotiable: <c>PublishAsync(type, source, subject, payload,
-/// traceParent, cancellationToken)</c>. Deliberately omits
-/// <c>cloudevent.id</c>/<c>cloudevent.tracestate</c> parameters — the
-/// Messaging kernel dedupes on its own composite key, not the Dapr envelope
-/// id, so this isn't a correctness gap (see the story spec's "Ask First"
-/// resolution). See <c>IEventPublisherSignatureTests</c> for the permanent
-/// reflection guard.
+/// ADR-017 extends the original story 3.3 port with W3C tracestate so the
+/// complete persisted trace context crosses the Dapr pub/sub hop.
 /// </remarks>
 public interface IEventPublisher
 {
@@ -33,6 +27,7 @@ public interface IEventPublisher
     /// whitespace to omit trace propagation entirely — an implementation must
     /// not send an empty-string traceparent.
     /// </param>
+    /// <param name="traceState">W3C tracestate to propagate, or null/whitespace to omit.</param>
     /// <param name="cancellationToken">Ambient cancellation token.</param>
     Task PublishAsync(
         string type,
@@ -40,5 +35,6 @@ public interface IEventPublisher
         string subject,
         object payload,
         string? traceParent,
+        string? traceState,
         CancellationToken cancellationToken = default);
 }

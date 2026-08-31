@@ -40,6 +40,7 @@ internal sealed class DaprOutboxDeliveryStrategy(IEventPublisher publisher)
             message.TransactionId,
             payload,
             message.TraceParent,
+            message.TraceState,
             cancellationToken);
     }
 

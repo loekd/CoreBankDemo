@@ -37,7 +37,7 @@ var pubsub = builder.AddDaprPubSub("pubsub", new DaprComponentOptions
     LocalPath = Path.Combine(daprComponentsPath, "pubsub-redis.yaml")
 }).WaitFor(redis);
 
-var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
+var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api", launchProfileName: "loadtest")
     .WithReplicas(2)
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
@@ -62,7 +62,7 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     .WaitFor(jaeger)
     .WaitFor(pubsub);
 
-var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
+var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api", launchProfileName: "loadtest")
     .WithReplicas(2)
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
@@ -91,7 +91,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     .WaitFor(jaeger)
     .WaitFor(pubsub);
 
-var loadTestSupport = builder.AddProject<Projects.CoreBankDemo_LoadTestSupport>("loadtest-support")
+var loadTestSupport = builder.AddProject<Projects.CoreBankDemo_LoadTestSupport>("loadtest-support", launchProfileName: "loadtest")
     .WithReference(paymentsDb)
     .WithReference(coreBankDb)
     .WithReference(redis)
@@ -114,13 +114,11 @@ var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "10
 var vuCount = builder.Configuration["LoadTest:VuCount"] ?? "10";
 
 builder.AddContainer("k6", "grafana/k6")
-    .WithArgs(
-        "run",
-        "--env", $"TRANSACTION_COUNT={transactionCount}",
-        "--env", $"VU_COUNT={vuCount}",
-        "--env", "PAYMENTS_API_URL=http://host.docker.internal:5295",
-        "--env", "LOAD_TEST_SUPPORT_URL=http://host.docker.internal:5181",
-        "/scripts/script.js")
+    .WithArgs("run", "/scripts/script.js")
+    .WithEnvironment("TRANSACTION_COUNT", transactionCount)
+    .WithEnvironment("VU_COUNT", vuCount)
+    .WithEnvironment("PAYMENTS_API_URL", paymentsApi.GetEndpoint("http"))
+    .WithEnvironment("LOAD_TEST_SUPPORT_URL", loadTestSupport.GetEndpoint("load-test"))
     .WithBindMount(k6ScriptPath, "/scripts", isReadOnly: true)
     .WaitForCompletion(initializer);
 

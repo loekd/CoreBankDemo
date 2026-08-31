@@ -183,6 +183,12 @@ public sealed class AssertEndpointsHttpIntegrationTests(PostgresContainerFixture
         var mcpNode = JsonNode.Parse(mcpJson);
         JsonNode.DeepEquals(restNode, mcpNode).Should()
             .BeTrue($"REST and MCP must produce field-for-field identical JSON.\nREST: {restJson}\nMCP: {mcpJson}");
+        restNode!["checks"]!["stageCardinality"].Should().NotBeNull();
+        restNode["checks"]!["canonicalAccountSet"].Should().NotBeNull();
+        restNode["summary"]!["paymentsOutbox"].Should().NotBeNull();
+        restNode["summary"]!["coreBankInbox"].Should().NotBeNull();
+        restNode["summary"]!["coreBankOutbox"].Should().NotBeNull();
+        restNode["summary"]!["paymentsInbox"].Should().NotBeNull();
     }
 
     private static string AccountNumber(int i) => $"NL{i:D2}LOAD{i:D10}";

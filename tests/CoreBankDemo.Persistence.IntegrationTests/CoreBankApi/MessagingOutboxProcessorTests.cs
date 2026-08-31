@@ -49,6 +49,7 @@ public class MessagingOutboxProcessorTests(PostgresContainerFixture fixture) : C
             row.TransactionId,
             It.IsAny<TransactionCompletedEvent>(),
             row.TraceParent,
+            row.TraceState,
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -62,6 +63,7 @@ public class MessagingOutboxProcessorTests(PostgresContainerFixture fixture) : C
                 It.IsAny<string>(),
                 It.IsAny<string>(),
                 It.IsAny<object>(),
+                It.IsAny<string?>(),
                 It.IsAny<string?>(),
                 It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("transport unavailable"));

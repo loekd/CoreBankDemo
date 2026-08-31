@@ -448,6 +448,9 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
 
         activity?.SetTag("IdempotencyKey", message.IdempotencyKey);
         activity?.SetTag("PartitionId", message.PartitionId);
+        activity?.SetTag("messaging.store.name", StoreName.ToString());
+        activity?.SetTag("messaging.message.id", message.Id.ToString());
+        activity?.SetTag("messaging.partition.id", message.PartitionId);
         activity?.SetTag(
             "queue_duration_ms",
             (_timeProvider.GetUtcNow().UtcDateTime - message.CreatedAt).TotalMilliseconds);

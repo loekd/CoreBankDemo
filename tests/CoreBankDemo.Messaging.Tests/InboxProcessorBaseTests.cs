@@ -1196,6 +1196,9 @@ public class InboxProcessorBaseTests
 
         capturedTags.Should().ContainSingle(t => t.Key == "IdempotencyKey" && Equals(t.Value, "tagged-message"));
         capturedTags.Should().ContainSingle(t => t.Key == "PartitionId" && Equals(t.Value, 2));
+        capturedTags.Should().ContainSingle(t => t.Key == "messaging.store.name" && Equals(t.Value, "PaymentsInbox"));
+        capturedTags.Should().ContainSingle(t => t.Key == "messaging.message.id" && Equals(t.Value, message.Id.ToString()));
+        capturedTags.Should().ContainSingle(t => t.Key == "messaging.partition.id" && Equals(t.Value, 2));
         capturedKinds.Should().ContainSingle(k => k == ActivityKind.Consumer,
             "an inbox message being handled is consuming work handed off by the trace that sent it (AD-8)");
     }
