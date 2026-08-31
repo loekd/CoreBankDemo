@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-21-2026 16:00
-last_updated: 08-30-2026 18:47
+last_updated: 08-30-2026 19:05
 project: CoreBankDemo
 project_key: NOKEY
 tracking_system: file-system
@@ -57,7 +57,7 @@ development_status:
   3-4-service-wiring-defaults: done
   epic-3-retrospective: done
 
-  epic-4: in-progress
+  epic-4: done
   4-1-domain-model-dbcontext-and-seeding: done
   4-2-transaction-validation: done
   4-3-account-repository-and-transaction-executor: done
@@ -81,7 +81,7 @@ development_status:
   6-2-renewable-redis-distributed-locking: done
   6-3-replicated-local-api-topology: done
   6-4-chaos-opt-in-and-demo-smoke: backlog
-  6-5-opentelemetry-business-metrics: review
+  6-5-opentelemetry-business-metrics: done
   6-6-remove-sqlite-with-postgresql-testcontainers: done
   6-7-eliminate-dapr-service-invocation: done
   epic-6-retrospective: optional
