@@ -142,3 +142,18 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-6-3-replicated-local-api-topology.md`
   summary: Prevent incompatible `BusinessMetrics.StoreName` and `StoreKind` combinations.
   evidence: The typed metrics API accepts both enums independently and can emit impossible store-name/store-kind series if a caller pairs them incorrectly.
+
+## Deferred from: story 7.1 (assertion API realignment)
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-7-1-assertion-api-realignment.md`
+  summary: Fix `CoreBankDemo.LoadTestSupport/Properties/launchSettings.json`'s `applicationUrl` from `http://localhost:5180` to `5181` to match Aspire's AppHost wiring.
+  evidence: Explicitly out of scope per this story's Boundaries & Constraints ("Never" list); confirmed still present by reading the file during story 7.1's implementation.
+- source_spec: `docs/bmad/implementation-artifacts/spec-7-1-assertion-api-realignment.md`
+  summary: Extend `NoFailedMessages` in `LoadTestAssertionService.GetResultsAsync` to check `paymentsDb.OutboxMessages`, `paymentsDb.InboxMessages`, and `coreBankDb.MessagingOutboxMessages`, not only `coreBankDb.InboxMessages`.
+  evidence: Blind-hunter review of the story 7.1 diff found `failedCount` is computed exclusively from `coreBankDb.InboxMessages` — a permanently `Failed` row in the other three stores is invisible to the assertion suite. Pre-existing (unchanged by this story's diff, matches `main`), but it undermines invariant 4 (terminal-state completeness) that Story 7.3's full acceptance run depends on; recommend fixing before or alongside Story 7.3.
+- source_spec: `docs/bmad/implementation-artifacts/spec-7-1-assertion-api-realignment.md`
+  summary: Confirm whether `LoadTestAssertionService`'s duplicate-key `GroupBy` check in `GetResultsAsync` is intentional defense-in-depth or removable dead code, and document the decision.
+  evidence: Blind-hunter review found `coreBankDb.InboxMessages.IdempotencyKey` carries a unique index (confirmed by the new integration test's own setup), so the `GroupBy(...).Where(g => g.Count() > 1)` duplicate check can structurally never return a result against the real schema. Pre-existing, not introduced by this story.
+- source_spec: `docs/bmad/implementation-artifacts/spec-7-1-assertion-api-realignment.md`
+  summary: Decide whether `AssertionResult.Debug.CompletedTransactions` needs a row cap (matching `InboxEndpoints`/`OutboxEndpoints`'s existing 50-row cap) and apply it consistently to both REST and MCP.
+  evidence: Edge-case-hunter review found the shared `AssertionResult` now exposes the full completed-transaction list to `get_assertion_results` (MCP) with no size bound, unlike this story's own capped inspection endpoints. Needs a product decision — REST's failure-diagnostic use may need the full list — rather than a blind cap, so left for follow-up.

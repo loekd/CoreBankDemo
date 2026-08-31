@@ -2,6 +2,7 @@ using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.LoadTestSupport;
 using CoreBankDemo.LoadTestSupport.Endpoints;
 using CoreBankDemo.LoadTestSupport.McpTools;
+using CoreBankDemo.LoadTestSupport.Services;
 using CoreBankDemo.PaymentsAPI;
 
 namespace CoreBankDemo.LoadTestSupport;
@@ -26,6 +27,7 @@ public class Program
         builder.Services.AddScoped<ILoadTestDatabaseResetter, LoadTestDatabaseResetter>();
         builder.Services.AddSingleton<DatabaseResetState>();
         builder.Services.AddScoped<DatabaseResetCoordinator>();
+        builder.Services.AddScoped<LoadTestAssertionService>();
 
 // MCP server — exposes load test tools to AI agents via Streamable HTTP
         builder.Services.AddMcpServer()

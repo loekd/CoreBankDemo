@@ -1,7 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Include>[CoreBankDemo.LoadTestSupport]CoreBankDemo.LoadTestSupport.DatabaseResetCoordinator*</Include>
+    <!-- LoadTestAssertionService itself is EF-backed (CoreBankDbContext/
+         PaymentsDbContext constructor deps) and is measured by the
+         persistence integration tier instead, via $(PersistenceTierFilters)
+         in tests/Directory.Build.props — only its pure, Docker-free half
+         (LoadTestAssertionCalculator) belongs to this project's filter. -->
+    <Include>[CoreBankDemo.LoadTestSupport]CoreBankDemo.LoadTestSupport.DatabaseResetCoordinator*,[CoreBankDemo.LoadTestSupport]CoreBankDemo.LoadTestSupport.Services.LoadTestAssertionCalculator*</Include>
   </PropertyGroup>
 
   <ItemGroup>
