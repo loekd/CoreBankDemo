@@ -66,10 +66,10 @@ The MCP endpoint is available at `{LoadTestSupport_URL}/mcp`. When running via t
 | `reset_database` | ⚠️ Destructive: truncates all inbox/outbox tables and resets account balances to 10M EUR |
 | `poll_until_drained` | Waits until all messages are processed (polls internally every 2s, configurable timeout) |
 | `get_assertion_results` | Runs the full assertion suite: exactly-once, no duplicates, balance conservation |
-| `get_corebank_inbox` | Returns recent CoreBank inbox messages with optional status filter |
-| `get_corebank_outbox` | Returns recent CoreBank outbox messages (domain events) |
-| `get_payments_inbox` | Returns recent Payments inbox messages (received events) |
-| `get_payments_outbox` | Returns recent Payments outbox messages (queued payments) |
+| `get_corebank_inbox` | Returns the 50 most recent CoreBank inbox messages, newest first |
+| `get_corebank_outbox` | Returns the 50 most recent CoreBank outbox messages (domain events), newest first |
+| `get_payments_inbox` | Returns the 50 most recent Payments inbox messages (received events), newest first |
+| `get_payments_outbox` | Returns the 50 most recent Payments outbox messages (queued payments), newest first |
 
 ### Intended Agent Workflow
 

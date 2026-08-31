@@ -183,10 +183,10 @@ curl -s -X POST http://localhost:5181/ \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_corebank_inbox","arguments":{"limit":20,"status":"Failed"}}}'
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_corebank_inbox","arguments":{}}}'
 ```
 
-All `get_*` tools accept `limit` (1–100, default 20) and optional `status` filter (Pending/Processing/Completed/Failed).
+All `get_*` tools take no arguments and return the 50 most recent rows, newest first — identical to their REST counterparts.
 
 ## 6. Analyze traces
 

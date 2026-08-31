@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using CoreBankDemo.CoreBankAPI;
@@ -25,36 +26,30 @@ public sealed class LoadTestTools
         "load test account balances to 10,000,000 EUR. Call this BEFORE starting a load test " +
         "to ensure a clean baseline. This cannot be undone.")]
     public static async Task<string> ResetDatabase(
-        CoreBankDbContext coreBankDb,
-        PaymentsDbContext paymentsDb,
+        IServiceProvider serviceProvider,
         CancellationToken ct)
     {
         try
         {
-            await paymentsDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"OutboxMessages\" RESTART IDENTITY CASCADE", ct);
-            await paymentsDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"InboxMessages\" RESTART IDENTITY CASCADE", ct);
-            await coreBankDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"InboxMessages\" RESTART IDENTITY CASCADE", ct);
-            await coreBankDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"MessagingOutboxMessages\" RESTART IDENTITY CASCADE", ct);
-
-            var accountCount = await coreBankDb.Database.ExecuteSqlRawAsync(
-                "UPDATE \"Accounts\" SET \"Balance\" = {0}, \"UpdatedAt\" = NULL WHERE \"AccountNumber\" LIKE '%LOAD%'",
-                InitialBalance);
+            // DatabaseResetCoordinator is internal (its constructor's internal
+            // dependencies must stay that way — see DatabaseResetCoordinator.cs),
+            // so it can't be a direct parameter of this public MCP tool method
+            // (CS0051). Resolve it from DI instead; the type argument here is a
+            // method-body detail, not part of this method's public signature.
+            var coordinator = serviceProvider.GetRequiredService<DatabaseResetCoordinator>();
+            var result = await coordinator.ResetAndReleaseAsync(ct);
 
             return JsonSerializer.Serialize(new
             {
-                success = true,
-                accountsReset = accountCount,
-                initialBalancePerAccount = InitialBalance,
-                totalBalance = accountCount * InitialBalance
-            });
+                message = "Database reset complete",
+                accountsReset = result.AccountsReset,
+                totalBalance = result.TotalBalance,
+                initialBalancePerAccount = InitialBalance
+            }, McpJsonOptions);
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { error = "reset_failed", detail = ex.Message });
+            return JsonSerializer.Serialize(new { error = "reset_failed", detail = ex.Message }, McpJsonOptions);
         }
     }
 
@@ -182,142 +177,58 @@ public sealed class LoadTestTools
     }
 
     [McpServerTool(Name = "get_corebank_inbox")]
-    [Description("Returns recent CoreBank inbox messages. Use to inspect message processing status after a load test.")]
+    [Description("Returns the 50 most recent CoreBank inbox messages, newest first. Use to inspect message processing status after a load test.")]
     public static async Task<string> GetCoreBankInbox(
         CoreBankDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.InboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.InboxMessages
             .OrderByDescending(m => m.ReceivedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.IdempotencyKey,
-                m.Status,
-                m.FromAccount,
-                m.ToAccount,
-                m.Amount,
-                m.ReceivedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 
     [McpServerTool(Name = "get_corebank_outbox")]
-    [Description("Returns recent CoreBank outbox messages (domain events published after transaction processing).")]
+    [Description("Returns the 50 most recent CoreBank outbox messages (domain events published after transaction processing), newest first.")]
     public static async Task<string> GetCoreBankOutbox(
         CoreBankDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.MessagingOutboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.MessagingOutboxMessages
             .OrderByDescending(m => m.CreatedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.TransactionId,
-                m.Status,
-                m.EventType,
-                m.CreatedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 
     [McpServerTool(Name = "get_payments_inbox")]
-    [Description("Returns recent Payments inbox messages (events received from CoreBank after transaction processing).")]
+    [Description("Returns the 50 most recent Payments inbox messages (events received from CoreBank after transaction processing), newest first.")]
     public static async Task<string> GetPaymentsInbox(
         PaymentsDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.InboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.InboxMessages
             .OrderByDescending(m => m.ReceivedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.IdempotencyKey,
-                m.Status,
-                m.EventType,
-                m.ReceivedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 
     [McpServerTool(Name = "get_payments_outbox")]
-    [Description("Returns recent Payments outbox messages (payment requests queued for forwarding to CoreBank via Kiota HTTP).")]
+    [Description("Returns the 50 most recent Payments outbox messages (payment requests queued for forwarding to CoreBank via Kiota HTTP), newest first.")]
     public static async Task<string> GetPaymentsOutbox(
         PaymentsDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.OutboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.OutboxMessages
             .OrderByDescending(m => m.CreatedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.IdempotencyKey,
-                m.Status,
-                m.FromAccount,
-                m.ToAccount,
-                m.Amount,
-                m.CreatedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 }
