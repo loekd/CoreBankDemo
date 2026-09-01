@@ -336,6 +336,50 @@ public class ScenarioValidatorTests
     }
 
     [Fact]
+    public void Validate_SendHttpToParameterizedEndpointWithoutPathParamRef_Fails()
+    {
+        var cue = ValidCue() with
+        {
+            Actions = [new ScenarioActionDefinition { Kind = ActionKind.SendHttp, EndpointId = KnownEndpoints.CoreBankTransactionsStatus, Method = "GET" }],
+        };
+        var scenario = ValidScenario(cue);
+
+        var result = ScenarioValidator.Validate(scenario);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.Contains("PathParamRef"));
+    }
+
+    [Fact]
+    public void Validate_SendHttpToParameterizedEndpointWithPathParamRef_Succeeds()
+    {
+        var cue = ValidCue() with
+        {
+            Actions = [new ScenarioActionDefinition { Kind = ActionKind.SendHttp, EndpointId = KnownEndpoints.CoreBankTransactionsStatus, Method = "GET", PathParamRef = "FirstTransactionId" }],
+        };
+        var scenario = ValidScenario(cue);
+
+        var result = ScenarioValidator.Validate(scenario);
+
+        result.IsValid.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Validate_AssertHttpEndpointModeToParameterizedEndpointWithoutPathParamRef_Fails()
+    {
+        var cue = ValidCue() with
+        {
+            Actions = [new ScenarioActionDefinition { Kind = ActionKind.AssertHttp, EndpointId = KnownEndpoints.CoreBankTransactionsStatus, CaptureJsonPath = "$.status", ExpectedValue = "Completed" }],
+        };
+        var scenario = ValidScenario(cue);
+
+        var result = ScenarioValidator.Validate(scenario);
+
+        result.IsValid.Should().BeFalse();
+        result.Errors.Should().Contain(e => e.Contains("PathParamRef"));
+    }
+
+    [Fact]
     public void Validate_UnrecognizedActionKind_Fails()
     {
         var cue = ValidCue() with { Actions = [new ScenarioActionDefinition { Kind = (ActionKind)999 }] };

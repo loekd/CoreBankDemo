@@ -23,5 +23,6 @@ public interface IHttpActionExecutor
         string? bodyJson,
         string? idempotencyKey,
         CancellationToken ct,
-        IReadOnlyDictionary<string, string>? query = null);
+        IReadOnlyDictionary<string, string>? query = null,
+        string? pathParameter = null);
 }

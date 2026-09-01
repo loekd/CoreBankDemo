@@ -11,9 +11,10 @@ public sealed class HttpActionExecutor(HttpClient httpClient) : IHttpActionExecu
         string? bodyJson,
         string? idempotencyKey,
         CancellationToken ct,
-        IReadOnlyDictionary<string, string>? query = null)
+        IReadOnlyDictionary<string, string>? query = null,
+        string? pathParameter = null)
     {
-        var (url, defaultMethod) = EndpointResolver.EndpointFor(endpointId);
+        var (url, defaultMethod) = EndpointResolver.EndpointFor(endpointId, pathParameter);
         if (query is { Count: > 0 })
         {
             url += "?" + string.Join("&", query.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));

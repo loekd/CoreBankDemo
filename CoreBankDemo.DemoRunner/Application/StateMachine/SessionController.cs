@@ -307,6 +307,18 @@ public sealed class SessionController
                     return ActionOutcome.Passed($"Topology '{action.ProfileName}' already selected.");
                 }
 
+                // Only one topology's ports (e.g. corebank-api) can be bound on this host
+                // at a time, and the talk deliberately moves from the Regular profile to
+                // the LoadTest profile mid-session. Stop any other topology this runner
+                // owns before switching so the new profile's ports are free; an attached
+                // (unowned) topology is never stopped (ADR-015) and a real port conflict
+                // with one surfaces as a normal failed-closed health/start failure.
+                foreach (var other in State.Topologies.Values.Where(h => h.IsOwned && h.ProfileName != action.ProfileName!).ToList())
+                {
+                    await _process.StopOwnedAsync(other, ct);
+                    State.Topologies.Remove(other.ProfileName);
+                }
+
                 var attached = await _process.TryAttachAsync(action.ProfileName!, ct);
                 if (attached is not null)
                 {
@@ -346,7 +358,8 @@ public sealed class SessionController
                     ? action.BodyJson
                     : action.BodyJson?.Replace("{{IDEMPOTENCY_KEY}}", idempotencyKey, StringComparison.Ordinal);
 
-                var result = await _http.SendAsync(action.EndpointId!, action.Method!, body, idempotencyKey, ct);
+                var pathParameter = ResolvePathParameter(cue, action);
+                var result = await _http.SendAsync(action.EndpointId!, action.Method!, body, idempotencyKey, ct, pathParameter: pathParameter);
 
                 if (result.IsAmbiguous)
                 {
@@ -383,7 +396,8 @@ public sealed class SessionController
 
             case ActionKind.AssertHttp:
             {
-                var result = await _http.SendAsync(action.EndpointId!, "GET", null, null, ct);
+                var pathParameter = ResolvePathParameter(cue, action);
+                var result = await _http.SendAsync(action.EndpointId!, "GET", null, null, ct, pathParameter: pathParameter);
                 if (result.IsAmbiguous)
                 {
                     return ActionOutcome.Ambiguous($"{action.EndpointId} assertion timed out: {result.ErrorSummary}");
@@ -423,6 +437,10 @@ public sealed class SessionController
                 return ActionOutcome.FailedResult($"Unrecognized action kind '{action.Kind}'.");
         }
     }
+
+    /// <summary>Resolves a parameterized known endpoint's single path parameter from an earlier capture; never from raw scenario data (ADR-015).</summary>
+    private static string? ResolvePathParameter(CueRuntimeState cue, ScenarioActionDefinition action) =>
+        action.PathParamRef is null ? null : cue.Captures.GetValueOrDefault(action.PathParamRef);
 
     private Task JournalAsync(CueRuntimeState cue, string? phase, CancellationToken ct) =>
         _journal.AppendAsync(

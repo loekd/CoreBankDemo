@@ -127,6 +127,10 @@ public static class ScenarioValidator
                 {
                     yield return $"{Prefix("Method")} is required.";
                 }
+                if (RequiresPathParameter(action.EndpointId) && string.IsNullOrWhiteSpace(action.PathParamRef))
+                {
+                    yield return $"{Prefix("PathParamRef")} is required for endpoint '{action.EndpointId}'.";
+                }
                 break;
 
             case ActionKind.AssertHttp:
@@ -139,6 +143,10 @@ public static class ScenarioValidator
                 if (hasEndpointMode && !KnownEndpoints.All.Contains(action.EndpointId!))
                 {
                     yield return $"{Prefix("EndpointId")} must be one of the known endpoints.";
+                }
+                if (hasEndpointMode && RequiresPathParameter(action.EndpointId) && string.IsNullOrWhiteSpace(action.PathParamRef))
+                {
+                    yield return $"{Prefix("PathParamRef")} is required for endpoint '{action.EndpointId}'.";
                 }
                 break;
 
@@ -168,4 +176,7 @@ public static class ScenarioValidator
                 break;
         }
     }
+
+    /// <summary>Known endpoints whose URL is parameterized (e.g. an id path segment) and therefore require <see cref="ScenarioActionDefinition.PathParamRef"/>.</summary>
+    private static bool RequiresPathParameter(string? endpointId) => endpointId == KnownEndpoints.CoreBankTransactionsStatus;
 }

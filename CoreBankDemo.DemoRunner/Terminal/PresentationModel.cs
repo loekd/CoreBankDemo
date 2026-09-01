@@ -62,7 +62,7 @@ public static class PresentationModelBuilder
             CanInvestigate: current.Status == CueStatus.Failed && current.Definition.InvestigateActions.Count > 0,
             controller.LastLoadWorkflowResult?.Invariants);
 
-        var confidenceRows = confidence.Select(kv => new ConfidenceRowViewModel(kv.Key, SymbolForHealth(kv.Value), kv.Key)).ToList();
+        var confidenceRows = confidence.Select(kv => new ConfidenceRowViewModel(kv.Key, SymbolForHealth(kv.Value), FriendlyResourceLabel(kv.Key))).ToList();
 
         return new SessionViewModel(
             state.ScenarioName,
@@ -92,5 +92,23 @@ public static class PresentationModelBuilder
         HealthStatus.Healthy => "●",
         HealthStatus.Unhealthy => "✗",
         _ => "◐",
+    };
+
+    /// <summary>
+    /// Speaker-facing display names for the confidence pane (UX Blueprint: "Payments API",
+    /// "CoreBank API", "Dapr pub/sub", "Load harness", ...) instead of raw compiled resource
+    /// ids. Presentation-only — never changes which resource is probed (ADR-015).
+    /// </summary>
+    private static string FriendlyResourceLabel(string resourceName) => resourceName switch
+    {
+        Application.Scenarios.KnownResources.PaymentsApi => "Payments API",
+        Application.Scenarios.KnownResources.CoreBankApi => "CoreBank API",
+        Application.Scenarios.KnownResources.Postgres => "Postgres",
+        Application.Scenarios.KnownResources.Redis => "Redis",
+        Application.Scenarios.KnownResources.Dapr => "Dapr pub/sub",
+        Application.Scenarios.KnownResources.Jaeger => "Jaeger",
+        Application.Scenarios.KnownResources.LoadTestSupport => "Load harness",
+        Application.Scenarios.KnownResources.AspireDashboard => "Aspire dashboard",
+        _ => resourceName,
     };
 }

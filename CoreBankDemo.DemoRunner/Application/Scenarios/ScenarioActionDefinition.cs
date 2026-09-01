@@ -37,6 +37,14 @@ public sealed record ScenarioActionDefinition
     /// <summary>JSONPath-like dotted/bracket path (e.g. "$.transactionId") used with <see cref="CaptureAs"/> or assertHttp.</summary>
     public string? CaptureJsonPath { get; init; }
 
+    /// <summary>
+    /// References a value captured by an earlier action (<see cref="CaptureAs"/>) to use
+    /// as the single path parameter of a parameterized known endpoint (e.g.
+    /// <c>corebank.transactions.status</c>'s <c>{idempotencyKey}</c> segment). The scenario
+    /// never supplies a URL directly — only this compiled-endpoint parameter (ADR-015).
+    /// </summary>
+    public string? PathParamRef { get; init; }
+
     // assertHttp — mode A: call EndpointId and compare an extracted field
     public string? ExpectedValue { get; init; }
 

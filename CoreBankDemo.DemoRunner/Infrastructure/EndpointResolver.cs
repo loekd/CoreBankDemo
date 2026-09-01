@@ -32,17 +32,25 @@ public static class EndpointResolver
         _ => throw new ArgumentOutOfRangeException(nameof(resourceName), resourceName, "Unknown resource."),
     };
 
-    public static (string Url, HttpMethod Method) EndpointFor(string endpointId) => endpointId switch
+    public static (string Url, HttpMethod Method) EndpointFor(string endpointId, string? pathParameter = null) => endpointId switch
     {
         KnownEndpoints.PaymentsSubmit => ($"{PaymentsApiBaseUrl}/api/payments", HttpMethod.Post),
         KnownEndpoints.PaymentsInbox => ($"{PaymentsApiBaseUrl}/api/inbox", HttpMethod.Get),
         KnownEndpoints.CoreBankTransactionsProcess => ($"{CoreBankApiBaseUrl}/api/transactions/process", HttpMethod.Post),
+        KnownEndpoints.CoreBankTransactionsStatus => (
+            $"{CoreBankApiBaseUrl}/api/transactions/{Uri.EscapeDataString(RequirePathParameter(endpointId, pathParameter))}",
+            HttpMethod.Get),
         KnownEndpoints.LoadTestSupportReset => ($"{LoadTestSupportBaseUrl}/reset", HttpMethod.Post),
         KnownEndpoints.LoadTestSupportDrain => ($"{LoadTestSupportBaseUrl}/assert/drain", HttpMethod.Get),
         KnownEndpoints.LoadTestSupportAssert => ($"{LoadTestSupportBaseUrl}/assert/results", HttpMethod.Get),
         KnownEndpoints.LoadTestSupportCoreBankInbox => ($"{LoadTestSupportBaseUrl}/corebank/inbox", HttpMethod.Get),
         _ => throw new ArgumentOutOfRangeException(nameof(endpointId), endpointId, "Unknown endpoint."),
     };
+
+    private static string RequirePathParameter(string endpointId, string? pathParameter) =>
+        string.IsNullOrWhiteSpace(pathParameter)
+            ? throw new ArgumentException($"Endpoint '{endpointId}' requires a path parameter (scenario action must set PathParamRef to a prior capture).", nameof(pathParameter))
+            : pathParameter;
 
     public static string LinkFor(string linkId) => linkId switch
     {

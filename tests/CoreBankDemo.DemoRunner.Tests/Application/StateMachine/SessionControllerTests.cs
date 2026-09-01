@@ -152,7 +152,7 @@ public class SessionControllerTests
         string? secondKey = null;
         var callIndex = 0;
         harness.Http.Setup(h => h.SendAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyDictionary<string, string>?>()))
-            .Returns((string _, string _, string? _, string? key, CancellationToken _, IReadOnlyDictionary<string, string>? _) =>
+            .Returns((string _, string _, string? _, string? key, CancellationToken _, IReadOnlyDictionary<string, string>? _, string? _) =>
             {
                 if (callIndex++ == 0)
                 {
@@ -228,7 +228,7 @@ public class SessionControllerTests
         var keys = new List<string?>();
         var attempt = 0;
         harness.Http.Setup(h => h.SendAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyDictionary<string, string>?>()))
-            .Returns((string _, string _, string? _, string? key, CancellationToken _, IReadOnlyDictionary<string, string>? _) =>
+            .Returns((string _, string _, string? _, string? key, CancellationToken _, IReadOnlyDictionary<string, string>? _, string? _) =>
             {
                 keys.Add(key);
                 attempt++;
@@ -550,6 +550,47 @@ public class SessionControllerTests
     }
 
     [Fact]
+    public async Task SelectTopology_SwitchingToADifferentOwnedProfile_StopsThePreviousOwnedTopologyFirst()
+    {
+        var harness = new SessionControllerHarness();
+        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a", actions:
+        [
+            new ScenarioActionDefinition { Kind = ActionKind.SelectTopology, ProfileName = KnownTopologyProfiles.Regular },
+            new ScenarioActionDefinition { Kind = ActionKind.SelectTopology, ProfileName = KnownTopologyProfiles.LoadTest },
+        ]));
+        var controller = harness.Build(scenario);
+
+        var result = await controller.RunCurrentAsync(CancellationToken.None);
+
+        result.Status.Should().Be(CueStatus.Passed);
+        harness.Process.Verify(p => p.StopOwnedAsync(It.Is<TopologyHandle>(h => h.ProfileName == KnownTopologyProfiles.Regular), It.IsAny<CancellationToken>()), Times.Once,
+            "the Regular and LoadTest AppHosts bind the same corebank-api port, so switching profiles must free it first");
+        controller.State.Topologies.Should().NotContainKey(KnownTopologyProfiles.Regular);
+        controller.State.Topologies.Should().ContainKey(KnownTopologyProfiles.LoadTest);
+    }
+
+    [Fact]
+    public async Task SelectTopology_SwitchingAwayFromAnAttachedProfile_NeverStopsIt()
+    {
+        var harness = new SessionControllerHarness();
+        harness.Process.Setup(p => p.TryAttachAsync(KnownTopologyProfiles.Regular, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TopologyHandle(KnownTopologyProfiles.Regular, false, null, "attached"));
+        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a", actions:
+        [
+            new ScenarioActionDefinition { Kind = ActionKind.SelectTopology, ProfileName = KnownTopologyProfiles.Regular },
+            new ScenarioActionDefinition { Kind = ActionKind.SelectTopology, ProfileName = KnownTopologyProfiles.LoadTest },
+        ]));
+        var controller = harness.Build(scenario);
+
+        var result = await controller.RunCurrentAsync(CancellationToken.None);
+
+        result.Status.Should().Be(CueStatus.Passed);
+        harness.Process.Verify(p => p.StopOwnedAsync(It.IsAny<TopologyHandle>(), It.IsAny<CancellationToken>()), Times.Never,
+            "an attached (unowned) topology is never stopped, even when the session moves on to a different profile");
+        controller.State.Topologies.Should().ContainKey(KnownTopologyProfiles.Regular);
+    }
+
+    [Fact]
     public async Task SelectTopology_ExistingHealthyTopologyIsAttachable_AttachesInsteadOfStarting()
     {
         var harness = new SessionControllerHarness();
@@ -600,6 +641,32 @@ public class SessionControllerTests
         var result = await controller.RunCurrentAsync(CancellationToken.None);
 
         result.Status.Should().Be(CueStatus.Failed);
+    }
+
+    [Fact]
+    public async Task RunInvestigateAsync_SendHttpWithPathParamRef_ResolvesPathParameterFromEarlierCapture()
+    {
+        var harness = new SessionControllerHarness();
+        string? capturedPathParameter = null;
+        harness.Http
+            .Setup(h => h.SendAsync(KnownEndpoints.CoreBankTransactionsProcess, It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyDictionary<string, string>?>(), It.IsAny<string?>()))
+            .ReturnsAsync(HttpActionResult.Ok(202, """{"transactionId":"deterministic-key"}"""));
+        harness.Http
+            .Setup(h => h.SendAsync(KnownEndpoints.CoreBankTransactionsStatus, It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyDictionary<string, string>?>(), It.IsAny<string?>()))
+            .Callback((string _, string _, string? _, string? _, CancellationToken _, IReadOnlyDictionary<string, string>? _, string? pathParameter) => capturedPathParameter = pathParameter)
+            .ReturnsAsync(HttpActionResult.Ok(200, """{"status":"Completed"}"""));
+
+        var scenario = TestScenarios.Build(TestScenarios.SimpleCue(
+            "s42",
+            actions: [new ScenarioActionDefinition { Kind = ActionKind.SendHttp, EndpointId = KnownEndpoints.CoreBankTransactionsProcess, Method = "POST", CaptureAs = "FirstTransactionId", CaptureJsonPath = "$.transactionId" }],
+            investigate: [new ScenarioActionDefinition { Kind = ActionKind.SendHttp, EndpointId = KnownEndpoints.CoreBankTransactionsStatus, Method = "GET", PathParamRef = "FirstTransactionId" }]));
+        var controller = harness.Build(scenario);
+        await controller.RunCurrentAsync(CancellationToken.None);
+
+        var outcomes = await controller.RunInvestigateAsync(CancellationToken.None);
+
+        outcomes.Should().ContainSingle(o => o.Success);
+        capturedPathParameter.Should().Be("deterministic-key");
     }
 
     [Fact]

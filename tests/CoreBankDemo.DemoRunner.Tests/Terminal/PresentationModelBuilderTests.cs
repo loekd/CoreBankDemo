@@ -81,4 +81,25 @@ public class PresentationModelBuilderTests
         model.Confidence.Single(c => c.ResourceName == "corebank-api").Symbol.Should().Be("✗");
         model.Confidence.Single(c => c.ResourceName == "postgres").Symbol.Should().Be("◐");
     }
+
+    [Fact]
+    public void Build_ConfidenceRows_UseSpeakerFacingFriendlyLabelsNotRawResourceIds()
+    {
+        var harness = new SessionControllerHarness();
+        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a"));
+        var controller = harness.Build(scenario);
+
+        var model = PresentationModelBuilder.Build(controller, new Dictionary<string, HealthStatus>
+        {
+            [KnownResources.PaymentsApi] = HealthStatus.Healthy,
+            [KnownResources.CoreBankApi] = HealthStatus.Healthy,
+            [KnownResources.Dapr] = HealthStatus.Healthy,
+            [KnownResources.LoadTestSupport] = HealthStatus.Healthy,
+        });
+
+        model.Confidence.Single(c => c.ResourceName == KnownResources.PaymentsApi).Label.Should().Be("Payments API");
+        model.Confidence.Single(c => c.ResourceName == KnownResources.CoreBankApi).Label.Should().Be("CoreBank API");
+        model.Confidence.Single(c => c.ResourceName == KnownResources.Dapr).Label.Should().Be("Dapr pub/sub");
+        model.Confidence.Single(c => c.ResourceName == KnownResources.LoadTestSupport).Label.Should().Be("Load harness");
+    }
 }

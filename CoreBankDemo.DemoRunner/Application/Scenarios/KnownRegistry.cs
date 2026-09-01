@@ -40,6 +40,15 @@ public static class KnownEndpoints
     public const string PaymentsSubmit = "payments.submit";
     public const string PaymentsInbox = "payments.inbox";
     public const string CoreBankTransactionsProcess = "corebank.transactions.process";
+
+    /// <summary>
+    /// <c>GET /api/transactions/{idempotencyKey}</c> — the durable inspection endpoint
+    /// behind the slide-42 Inbox cue's Investigate action. Requires a path parameter
+    /// resolved from a prior capture (<see cref="ScenarioActionDefinition.PathParamRef"/>);
+    /// it never accepts a scenario-supplied URL (ADR-015).
+    /// </summary>
+    public const string CoreBankTransactionsStatus = "corebank.transactions.status";
+
     public const string LoadTestSupportReset = "loadtestsupport.reset";
     public const string LoadTestSupportDrain = "loadtestsupport.drain";
     public const string LoadTestSupportAssert = "loadtestsupport.assert";
@@ -47,7 +56,7 @@ public static class KnownEndpoints
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(
     [
-        PaymentsSubmit, PaymentsInbox, CoreBankTransactionsProcess,
+        PaymentsSubmit, PaymentsInbox, CoreBankTransactionsProcess, CoreBankTransactionsStatus,
         LoadTestSupportReset, LoadTestSupportDrain, LoadTestSupportAssert, LoadTestSupportCoreBankInbox,
     ], StringComparer.Ordinal);
 }

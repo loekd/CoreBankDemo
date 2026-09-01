@@ -55,6 +55,12 @@
         }
       ],
       "investigateActions": [
+        {
+          "kind": "sendHttp",
+          "endpointId": "corebank.transactions.status",
+          "method": "GET",
+          "pathParamRef": "FirstTransactionId"
+        },
         { "kind": "openKnownUrl", "linkId": "jaeger" }
       ]
     },
