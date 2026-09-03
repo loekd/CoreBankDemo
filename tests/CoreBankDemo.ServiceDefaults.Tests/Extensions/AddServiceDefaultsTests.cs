@@ -86,7 +86,7 @@ public class AddServiceDefaultsTests
         using var meterProvider = provider.GetRequiredService<MeterProvider>();
         var metrics = provider.GetRequiredService<BusinessMetrics>();
 
-        metrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored);
+        metrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored, BusinessMetrics.PaymentScheme.Standard);
         meterProvider.ForceFlush();
 
         exporter.InstrumentNames.Should().Contain(BusinessMetrics.PaymentIntakeInstrumentName);

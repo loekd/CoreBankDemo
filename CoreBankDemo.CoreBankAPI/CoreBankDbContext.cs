@@ -1,5 +1,6 @@
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Outbox;
+using CoreBankDemo.Messaging;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI;
@@ -33,6 +34,12 @@ public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : Db
         {
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => e.IdempotencyKey).IsUnique();
+            // Spec: add-instant-payment-rail, review loop 1. Was missing here
+            // (PaymentsDbContext's entities already had it) -- without it, a
+            // concurrent inline claim and a background batch claim could both
+            // "win" the same row, since EF would never detect the race via
+            // optimistic concurrency on SaveChanges.
+            MessageRepositoryBase<InboxMessage, CoreBankDbContext>.ConfigureConcurrencyToken(entity);
             entity.HasIndex(e => new { e.PartitionId, e.Status, e.ReceivedAt }); // Partition-based query index
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.ReceivedAt);

@@ -108,7 +108,7 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
     }
 
     public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-        TransactionSubmissionRequest request, CancellationToken cancellationToken)
+        TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
     {
         // A null request is a programmer error, not a transport outcome --
         // it must throw immediately rather than fall into ExecuteAsync's
@@ -127,7 +127,17 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
                     TransactionId = request.TransactionId
                 };
                 var response = await client.Api.Transactions.Process
-                    .PostAsync(body, ConfigureTraceContext, ct)
+                    .PostAsync(
+                        body,
+                        configuration =>
+                        {
+                            ConfigureTraceContext(configuration);
+                            if (executeInline)
+                            {
+                                configuration.Headers.Add("X-Execute-Mode", "inline");
+                            }
+                        },
+                        ct)
                     .ConfigureAwait(false);
 
                 if (response?.TransactionId is null

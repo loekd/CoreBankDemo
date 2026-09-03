@@ -38,4 +38,23 @@ public interface IOutboxMessageStore<TMessage>
     /// </summary>
     Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
         TMessage message, string errorMessage, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Claims exactly the row identified by <paramref name="id"/>, if it is
+    /// currently <c>Pending</c> — the instant-payment-rail inline delivery
+    /// path's claim (spec: add-instant-payment-rail): reuses the same
+    /// optimistic-concurrency transition <see cref="ClaimBatchForPartitionAsync"/>
+    /// uses (<c>Status</c> as a concurrency token), so an inline claim and a
+    /// concurrent background batch claim can never both win the same row —
+    /// exactly-once stays a property of the claim itself, never the
+    /// receiver's dedupe. See
+    /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.TryClaimByIdAsync"/>.
+    /// </summary>
+    /// <returns>
+    /// The claimed, now-<c>Processing</c> row on success; <see langword="null"/>
+    /// when no such row exists, it is not currently <c>Pending</c> (already
+    /// claimed by a concurrent caller, or already terminal), or a concurrent
+    /// caller won the claim race for it.
+    /// </returns>
+    Task<TMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default);
 }

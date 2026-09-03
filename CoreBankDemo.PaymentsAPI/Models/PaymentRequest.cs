@@ -23,5 +23,17 @@ public record PaymentRequest(
     [StringLength(3, MinimumLength = 3, ErrorMessage = "Currency must be exactly 3 characters")]
     [RegularExpression(@"^[A-Z]{3}$", ErrorMessage = "Currency must be 3 uppercase letters")]
     [DefaultValue("EUR")]
-    string Currency
+    string Currency,
+
+    /// <summary>
+    /// Payment rail (spec: add-instant-payment-rail). Optional, closed set of
+    /// <see cref="PaymentSchemes.Standard"/> (default) and
+    /// <see cref="PaymentSchemes.Instant"/>. Absent or <c>standard</c>
+    /// reproduces today's store-and-forward behaviour byte-identically; an
+    /// unrecognized value fails validation with a <c>400</c>, never silently
+    /// falling back to <c>standard</c>.
+    /// </summary>
+    [AllowedValues(PaymentSchemes.Standard, PaymentSchemes.Instant, ErrorMessage = "Scheme must be 'standard' or 'instant'")]
+    [DefaultValue(PaymentSchemes.Standard)]
+    string Scheme = PaymentSchemes.Standard
 );

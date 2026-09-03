@@ -1,7 +1,9 @@
+using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
+using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -30,6 +32,7 @@ public class PaymentsControllerTests
     private const string TransactionId = "txn-abc";
 
     private readonly Mock<IPaymentStorageHandler> _handler = new(MockBehavior.Strict);
+    private readonly Mock<IInstantPaymentForwardingHandler> _instantHandler = new(MockBehavior.Strict);
     private readonly BusinessMetrics _businessMetrics = new();
 
     private static PaymentRequest ValidRequest() => new(FromAccount, ToAccount, 50m, "EUR");
@@ -39,7 +42,8 @@ public class PaymentsControllerTests
         string transactionId = TransactionId,
         string status = "Pending",
         decimal amount = 50m,
-        string currency = "EUR") => new(
+        string currency = "EUR",
+        string? responsePayload = null) => new(
         Guid.NewGuid(),
         idempotencyKey,
         transactionId,
@@ -51,7 +55,8 @@ public class PaymentsControllerTests
         status,
         CreatedAt: new DateTime(2026, 8, 28, 12, 0, 0, DateTimeKind.Utc),
         TraceParent: null,
-        TraceState: null);
+        TraceState: null,
+        ResponsePayload: responsePayload);
 
     private PaymentsController CreateController(string? idempotencyKeyHeader = null)
     {
@@ -61,7 +66,7 @@ public class PaymentsControllerTests
             httpContext.Request.Headers["Idempotency-Key"] = idempotencyKeyHeader;
         }
 
-        return new PaymentsController(_handler.Object, _businessMetrics)
+        return new PaymentsController(_handler.Object, _instantHandler.Object, _businessMetrics)
         {
             ControllerContext = new ControllerContext { HttpContext = httpContext }
         };
@@ -260,6 +265,319 @@ public class PaymentsControllerTests
         var act = () => controller.ProcessPayment(ValidRequest(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    // ---- Spec: add-instant-payment-rail -- scheme=instant branching ----
+
+    private static PaymentRequest InstantRequest() =>
+        new(FromAccount, ToAccount, 50m, "EUR", PaymentSchemes.Instant);
+
+    [Fact]
+    public async Task ProcessPayment_forwards_a_freshly_stored_instant_payment_and_maps_completed_to_200()
+    {
+        var snapshot = Snapshot(idempotencyKey: "key-3", transactionId: "txn-3", status: "Pending", amount: 12.34m, currency: "EUR");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Stored, snapshot, []));
+        var processedAt = new DateTimeOffset(2026, 8, 28, 12, 0, 5, TimeSpan.Zero);
+        _instantHandler
+            .Setup(h => h.ForwardAsync(snapshot, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new InstantForwardResult(InstantDeliveryOutcome.Completed, processedAt));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        var response = ok.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.PaymentId.Should().Be("key-3");
+        response.TransactionId.Should().Be("txn-3");
+        response.Status.Should().Be("Completed");
+        response.Amount.Should().Be(12.34m);
+        response.Currency.Should().Be("EUR");
+        response.ProcessedAt.Should().Be(processedAt);
+    }
+
+    [Fact]
+    public async Task ProcessPayment_maps_a_business_rejection_on_the_instant_rail_to_200_with_failed_status()
+    {
+        var snapshot = Snapshot(status: "Pending");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Stored, snapshot, []));
+        var processedAt = DateTimeOffset.UtcNow;
+        _instantHandler
+            .Setup(h => h.ForwardAsync(snapshot, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new InstantForwardResult(InstantDeliveryOutcome.Rejected, processedAt));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        ok.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Failed");
+    }
+
+    [Fact]
+    public async Task ProcessPayment_maps_a_deferred_instant_forward_to_202_exactly_like_the_standard_rail()
+    {
+        var snapshot = Snapshot(idempotencyKey: "key-4", transactionId: "txn-4", status: "Pending");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Stored, snapshot, []));
+        _instantHandler
+            .Setup(h => h.ForwardAsync(snapshot, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new InstantForwardResult(InstantDeliveryOutcome.Deferred, DateTimeOffset.UtcNow));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        accepted.Location.Should().Be("/api/payments/txn-4");
+        var response = accepted.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Pending");
+    }
+
+    [Fact]
+    public async Task ProcessPayment_never_forwards_a_standard_scheme_payment()
+    {
+        var snapshot = Snapshot(status: "Pending");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Stored, snapshot, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<AcceptedResult>();
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_completed_instant_duplicate_as_200_without_a_second_forward_attempt()
+    {
+        var winner = Snapshot(idempotencyKey: "key-5", transactionId: "txn-5", status: "Completed", amount: 5m, currency: "EUR");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        var response = ok.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Completed");
+        response.PaymentId.Should().Be("key-5");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_pending_instant_duplicate_as_202_without_a_forward_attempt()
+    {
+        var winner = Snapshot(status: "Pending");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<AcceptedResult>();
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    // ---- Review loop 1: duplicate replay derives Status from the persisted
+    // ResponsePayload, never the raw kernel Status column (AD-11), and never
+    // leaks the internal "Processing" wire word. ----
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_completed_instant_duplicate_business_rejection_as_200_failed()
+    {
+        // The row's raw kernel Status is Completed either way (AD-11:
+        // transport-state-only) -- only the persisted ResponsePayload
+        // distinguishes a business rejection from a business success.
+        var payload = JsonSerializer.Serialize(
+            new TransactionSubmission("txn-6", "Failed", DateTimeOffset.UtcNow));
+        var winner = Snapshot(
+            idempotencyKey: "key-6", transactionId: "txn-6", status: "Completed", responsePayload: payload);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        var response = ok.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Failed");
+        response.PaymentId.Should().Be("key-6");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_completed_instant_duplicate_success_as_200_completed_from_payload()
+    {
+        var payload = JsonSerializer.Serialize(
+            new TransactionSubmission("txn-7", "Completed", DateTimeOffset.UtcNow));
+        var winner = Snapshot(
+            idempotencyKey: "key-7", transactionId: "txn-7", status: "Completed", responsePayload: payload);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        ok.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Completed");
+    }
+
+    [Fact]
+    public async Task ProcessPayment_falls_back_to_the_raw_status_when_a_completed_duplicates_payload_is_missing()
+    {
+        // Defensive: should not happen going forward (every completed
+        // delivery now populates ResponsePayload), but a duplicate replay
+        // must never crash over a null/corrupt payload.
+        var winner = Snapshot(idempotencyKey: "key-8", transactionId: "txn-8", status: "Completed", responsePayload: null);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        ok.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Completed");
+    }
+
+    [Fact]
+    public async Task ProcessPayment_falls_back_to_the_raw_status_when_a_completed_duplicates_payload_is_corrupt()
+    {
+        var winner = Snapshot(
+            idempotencyKey: "key-9", transactionId: "txn-9", status: "Completed", responsePayload: "{not-valid-json");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        ok.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Completed");
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_an_instant_duplicate_still_claimed_as_202_pending_not_processing()
+    {
+        // The matrix only ever documents the wire word "Pending" for a
+        // not-yet-delivered instant duplicate -- the row's internal
+        // "Processing" value (a live claim in flight) must never leak onto
+        // the wire (review loop 1).
+        var winner = Snapshot(idempotencyKey: "key-10", transactionId: "txn-10", status: "Processing");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        var response = accepted.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Pending");
+        response.PaymentId.Should().Be("key-10");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_permanently_failed_instant_duplicate_as_202_failed_not_pending()
+    {
+        // Review loop 2: a row whose transport retries were exhausted
+        // (MarkAsFailedWithRetryAsync's terminal transition) must never be
+        // masked as still-in-flight "Pending" -- it is genuinely given up on.
+        var winner = Snapshot(idempotencyKey: "key-11", transactionId: "txn-11", status: "Failed");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        var response = accepted.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Failed");
+        response.PaymentId.Should().Be("key-11");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_completed_instant_duplicates_actual_settlement_processed_at()
+    {
+        // Review loop 2: ProcessedAt must come from the same deserialized
+        // TransactionSubmission as Status -- the row's CreatedAt is when the
+        // payment was accepted, not when CoreBank actually settled it.
+        var settledAt = new DateTimeOffset(2026, 9, 3, 8, 30, 0, TimeSpan.Zero);
+        var payload = JsonSerializer.Serialize(new TransactionSubmission("txn-12", "Completed", settledAt));
+        var winner = Snapshot(
+            idempotencyKey: "key-12", transactionId: "txn-12", status: "Completed", responsePayload: payload);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        var response = ok.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.ProcessedAt.Should().Be(settledAt);
+        response.ProcessedAt.Should().NotBe(new DateTimeOffset(DateTime.SpecifyKind(winner.CreatedAt, DateTimeKind.Utc)));
+    }
+
+    [Fact]
+    public async Task ProcessPayment_falls_back_to_created_at_for_processed_at_when_a_completed_duplicates_payload_is_missing()
+    {
+        var winner = Snapshot(idempotencyKey: "key-13", transactionId: "txn-13", status: "Completed", responsePayload: null);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        var response = ok.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.ProcessedAt.Should().Be(new DateTimeOffset(DateTime.SpecifyKind(winner.CreatedAt, DateTimeKind.Utc)));
+    }
+
+    [Fact]
+    public async Task ProcessPayment_standard_rail_duplicate_still_surfaces_the_raw_status_verbatim()
+    {
+        // Standard rail must stay byte-identical to baseline: even an
+        // internal "Processing" value is reproduced verbatim (never
+        // normalized), because that normalization is a NEW instant-rail wire
+        // promise, not a standard-rail behaviour change.
+        var winner = Snapshot(status: "Processing");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        accepted.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Processing");
     }
 
     private static IEnumerable<string> GetErrors(object? value)

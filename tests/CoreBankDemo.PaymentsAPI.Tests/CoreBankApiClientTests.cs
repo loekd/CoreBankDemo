@@ -242,6 +242,48 @@ public class CoreBankApiClientTests
     }
 
     [Fact]
+    public async Task ProcessTransactionAsync_omits_the_execute_mode_header_by_default()
+    {
+        using var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            request.Headers.Contains("X-Execute-Mode").Should().BeFalse();
+            return JsonResponse(HttpStatusCode.Accepted, new
+            {
+                transactionId = "txn-1",
+                status = "Pending",
+                processedAt = DateTimeOffset.UtcNow
+            });
+        });
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_carries_the_execute_mode_inline_header_only_when_requested()
+    {
+        var processedAt = new DateTimeOffset(2026, 8, 29, 10, 0, 0, TimeSpan.Zero);
+        using var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            request.Headers.GetValues("X-Execute-Mode").Should().ContainSingle().Which.Should().Be("inline");
+            return JsonResponse(HttpStatusCode.OK, new
+            {
+                transactionId = "txn-1",
+                status = "Completed",
+                processedAt
+            });
+        });
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+        result.Value.Should().Be(new TransactionSubmission("txn-1", "Completed", processedAt));
+    }
+
+    [Fact]
     public async Task ProcessTransactionAsync_maps_200_replayed_duplicate_to_success()
     {
         var processedAt = new DateTimeOffset(2026, 8, 29, 10, 0, 0, TimeSpan.Zero);

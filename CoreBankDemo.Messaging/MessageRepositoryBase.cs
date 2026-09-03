@@ -468,6 +468,66 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     }
 
     /// <summary>
+    /// Claims exactly the row identified by <paramref name="id"/> if it is
+    /// currently <c>Pending</c> (spec: add-instant-payment-rail's inline
+    /// delivery path) — never a batch, never partition-scoped: the caller
+    /// already knows which row it wants to deliver inline, right after
+    /// storing it. Reuses the same concurrency-token transition
+    /// <see cref="ClaimBatchForPartitionAsync"/> uses: <c>Status</c> is an EF
+    /// Core concurrency token (<see cref="ConfigureConcurrencyToken"/>), so a
+    /// concurrent background batch claim racing this call cannot both win —
+    /// one save succeeds, the other observes
+    /// <see cref="DbUpdateConcurrencyException"/> and reports no claim. A row
+    /// that is not currently <c>Pending</c> — already <c>Processing</c> under
+    /// a live claim, or already terminal (<c>Completed</c>/<c>Failed</c>) —
+    /// is reported as not-claimable without attempting a save; this
+    /// deliberately never reaches for the stale-claim-reclaim window
+    /// <see cref="ClaimBatchForPartitionAsync"/> applies to <c>Processing</c>
+    /// rows, since a row an inline caller just inserted moments ago is never
+    /// legitimately stale.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="id"/> is <see cref="Guid.Empty"/>.</exception>
+    public virtual async Task<TMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), id, "id must not be Guid.Empty.");
+        }
+
+        var message = await Messages.FirstOrDefaultAsync(m => m.Id == id, cancellationToken).ConfigureAwait(false);
+        if (message is null || message.Status != MessageConstants.Status.Pending)
+        {
+            return null;
+        }
+
+        message.Status = MessageConstants.Status.Processing;
+
+        try
+        {
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return message;
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            // Lost the claim race to a concurrent claimer (e.g. the
+            // background processor's own batch claim reached this row
+            // first). Detach so the tracker doesn't try to resend a stale
+            // update -- not this call's row to deliver.
+            foreach (var entry in ex.Entries)
+            {
+                entry.State = EntityState.Detached;
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            DbContext.Entry(message).State = EntityState.Detached;
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Looks up a single row by <paramref name="id"/>, or <see langword="null"/>
     /// if none exists.
     /// </summary>

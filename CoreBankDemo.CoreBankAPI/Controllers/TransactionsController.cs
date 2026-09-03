@@ -16,6 +16,13 @@ namespace CoreBankDemo.CoreBankAPI.Controllers;
 [Route("api/[controller]")]
 public class TransactionsController(ITransactionIntakeHandler handler, BusinessMetrics businessMetrics) : ControllerBase
 {
+    /// <summary>
+    /// Optional inline-execution opt-in (spec: add-instant-payment-rail).
+    /// Absent reproduces today's deferred-execution behaviour exactly.
+    /// </summary>
+    private const string ExecuteModeHeader = "X-Execute-Mode";
+    private const string ExecuteModeInline = "inline";
+
     [HttpPost("process")]
     public async Task<IActionResult> ProcessTransaction(
         [FromBody] TransactionRequest request, CancellationToken cancellationToken)
@@ -26,10 +33,13 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
             return BadRequest(new { Errors = errors });
         }
 
+        var executeInline = string.Equals(
+            Request.Headers[ExecuteModeHeader].FirstOrDefault(), ExecuteModeInline, StringComparison.OrdinalIgnoreCase);
+
         TransactionIntakeResult result;
         try
         {
-            result = await handler.ProcessAsync(request, cancellationToken);
+            result = await handler.ProcessAsync(request, cancellationToken, executeInline);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -56,6 +66,7 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
             result.Outcome switch
             {
                 TransactionIntakeOutcome.Accepted => BusinessMetrics.DeliveryOutcome.Succeeded,
+                TransactionIntakeOutcome.InlineCompleted => BusinessMetrics.DeliveryOutcome.Succeeded,
                 TransactionIntakeOutcome.Replayed => BusinessMetrics.DeliveryOutcome.Duplicate,
                 TransactionIntakeOutcome.InFlight => BusinessMetrics.DeliveryOutcome.Duplicate,
                 TransactionIntakeOutcome.TransportFailed => BusinessMetrics.DeliveryOutcome.Failed,
@@ -66,6 +77,12 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
         {
             TransactionIntakeOutcome.Accepted =>
                 Accepted($"/api/transactions/{request.TransactionId}", result.Response),
+            // Inline execution committed within this request (spec:
+            // add-instant-payment-rail): the final TransactionResponse is
+            // already known, so this answers 200 instead of 202 -- unlike
+            // Accepted above.
+            TransactionIntakeOutcome.InlineCompleted =>
+                Ok(result.Response),
             TransactionIntakeOutcome.Replayed =>
                 Ok(result.Response),
             // AD-11: an in-flight duplicate reports current status with 202,

@@ -4,7 +4,7 @@ using Microsoft.Extensions.Configuration;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
-var daprComponentsPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "dapr", "components"));
+var daprComponentsPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "dapr", "components-loadtest"));
 var k6ScriptPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "k6"));
 
 var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0")
@@ -24,7 +24,7 @@ var coreBankDb = postgres.AddDatabase("corebankdb");
 var redisPassword = builder.AddParameter("redis-password", "myredispassword123", secret: false);
 #pragma warning disable ASPIRECERTIFICATES001
 var redis = builder.AddRedis("redis", password: redisPassword)
-    .WithHostPort(6379)
+    .WithHostPort(6381)
     .WithEndpointProxySupport(false)
     .WithoutHttpsCertificate()
     .WithImageTag("7.4-alpine")

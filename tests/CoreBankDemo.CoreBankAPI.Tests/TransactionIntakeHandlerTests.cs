@@ -25,14 +25,24 @@ public class TransactionIntakeHandlerTests
 
     private readonly FakeTimeProvider _timeProvider = new();
     private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
+    private readonly Mock<IInboxMessageStore<InboxMessage>> _inboxStore = new(MockBehavior.Strict);
+    private readonly Mock<IInboxMessageHandler<InboxMessage>> _executionHandler = new(MockBehavior.Strict);
     private readonly BusinessMetrics _businessMetrics = new();
 
     private TransactionIntakeHandler CreateHandler(int partitionCount = 4) =>
         new(_repository.Object,
+            _inboxStore.Object,
+            _executionHandler.Object,
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
             NullLogger<TransactionIntakeHandler>.Instance,
             _businessMetrics);
+
+    /// <summary>Sets up a successful inline claim of whatever row <see cref="_repository"/>'s <c>StoreIfNewAsync</c> stores.</summary>
+    private void SetUpSuccessfulClaimOf(Func<InboxMessage?> stored) =>
+        _inboxStore
+            .Setup(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(stored);
 
     private static TransactionRequest ValidRequest(string transactionId = TransactionId) =>
         new(FromAccount, ToAccount, 50m, "EUR", transactionId);
@@ -297,6 +307,165 @@ public class TransactionIntakeHandlerTests
         listener.Measurements.Should().ContainSingle(
             m => m.InstrumentName == "corebankdemo.transaction.intake")
             .Which.Tags["outcome"].Should().Be("transport_failed");
+    }
+
+    // ---- Spec: add-instant-payment-rail -- X-Execute-Mode: inline ----
+
+    [Fact]
+    public async Task ProcessAsync_reproduces_deferred_behaviour_exactly_when_execute_inline_is_omitted()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        _inboxStore.VerifyNoOtherCalls();
+        _executionHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_executes_inline_and_returns_the_committed_response_when_it_commits()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        var committedResponse = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow());
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ResponsePayload = JsonSerializer.Serialize(committedResponse);
+            })
+            .Returns(Task.CompletedTask);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InlineCompleted);
+        result.Response.Should().Be(committedResponse);
+        result.Errors.Should().BeNull();
+        _inboxStore.Verify(s => s.TryClaimByIdAsync(stored!.Id, It.IsAny<CancellationToken>()), Times.Once);
+        _executionHandler.Verify(h => h.HandleAsync(stored!, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_back_to_pending_and_never_executes_when_the_inline_claim_is_lost()
+    {
+        // A concurrent background batch-claim already owns the row (spec:
+        // add-instant-payment-rail, review loop 1) -- the execution handler
+        // must never be invoked without owning the claim.
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _inboxStore
+            .Setup(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
+        _executionHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_back_to_pending_when_inline_execution_throws()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("ledger transaction rolled back"));
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_back_to_pending_when_inline_execution_completes_without_a_deserializable_response()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        // Defensive edge case: handler returns normally but never actually
+        // committed (should not happen given AD-5's atomic commit).
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_propagates_caller_cancellation_from_inline_execution_unchanged()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var expected = new OperationCanceledException(cancellation.Token);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(expected);
+        await cancellation.CancelAsync();
+
+        var handler = CreateHandler();
+
+        var act = () => handler.ProcessAsync(ValidRequest(), cancellation.Token, executeInline: true);
+
+        var assertion = await act.Should().ThrowAsync<OperationCanceledException>();
+        assertion.Which.Should().BeSameAs(expected);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_never_executes_inline_for_a_duplicate()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Pending);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
+        _inboxStore.VerifyNoOtherCalls();
+        _executionHandler.VerifyNoOtherCalls();
     }
 
     [Fact]

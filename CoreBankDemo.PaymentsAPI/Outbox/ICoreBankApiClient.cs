@@ -18,8 +18,14 @@ internal interface ICoreBankApiClient
     Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
         string accountNumber, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Submits <paramref name="request"/>. <paramref name="executeInline"/>
+    /// carries <c>X-Execute-Mode: inline</c> on the wire only when
+    /// <see langword="true"/> (spec: add-instant-payment-rail) -- absent
+    /// (the default) reproduces today's deferred-execution request exactly.
+    /// </summary>
     Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-        TransactionSubmissionRequest request, CancellationToken cancellationToken);
+        TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false);
 
     Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
         string idempotencyKey, CancellationToken cancellationToken);

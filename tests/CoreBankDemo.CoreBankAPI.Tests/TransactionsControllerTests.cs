@@ -181,6 +181,85 @@ public class TransactionsControllerTests
             .Which.Tags["outcome"].Should().Be("failed");
     }
 
+    // ---- Spec: add-instant-payment-rail -- X-Execute-Mode: inline ----
+
+    [Fact]
+    public async Task ProcessTransaction_passes_execute_inline_false_when_the_header_is_absent()
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Pending, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), false))
+            .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.Accepted, response, null));
+
+        var controller = CreateController();
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        _handler.Verify(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), false), Times.Once);
+    }
+
+    [Theory]
+    [InlineData("inline")]
+    [InlineData("INLINE")]
+    [InlineData("Inline")]
+    public async Task ProcessTransaction_passes_execute_inline_true_for_the_case_insensitive_header_value(string headerValue)
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), true))
+            .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null));
+        var controller = CreateController();
+        controller.Request.Headers["X-Execute-Mode"] = headerValue;
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        _handler.Verify(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), true), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessTransaction_treats_an_unrecognized_execute_mode_value_as_deferred()
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Pending, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), false))
+            .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.Accepted, response, null));
+        var controller = CreateController();
+        controller.Request.Headers["X-Execute-Mode"] = "async";
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        _handler.Verify(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), false), Times.Once);
+    }
+
+    [Fact]
+    public async Task ProcessTransaction_maps_inline_completed_outcome_to_200_ok_with_the_committed_response()
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), true))
+            .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null));
+        var controller = CreateController();
+        controller.Request.Headers["X-Execute-Mode"] = "inline";
+
+        var result = await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        ok.Value.Should().Be(response);
+    }
+
+    [Fact]
+    public async Task ProcessTransaction_records_a_succeeded_delivery_metric_for_inline_completed()
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), true))
+            .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null));
+        using var listener = new MetricsTestListener(_businessMetrics);
+        var controller = CreateController();
+        controller.Request.Headers["X-Execute-Mode"] = "inline";
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries")
+            .Which.Tags["outcome"].Should().Be("succeeded");
+    }
+
     [Fact]
     public async Task GetTransactionStatus_returns_not_found_when_the_handler_reports_not_found()
     {

@@ -51,6 +51,7 @@ public class BusinessMetricsTests
             BusinessMetrics.MessagingItemsProcessedInstrumentName,
             BusinessMetrics.MessagingQueueDurationInstrumentName,
             BusinessMetrics.MessagingDeliveriesInstrumentName,
+            BusinessMetrics.PaymentInstantDurationInstrumentName,
         ]);
 
         published.Should().OnlyContain(p => !string.IsNullOrWhiteSpace(p.Unit));
@@ -63,24 +64,72 @@ public class BusinessMetricsTests
         published.Single(p => p.Name == BusinessMetrics.MessagingItemsProcessedInstrumentName).Unit.Should().Be("{item}");
         published.Single(p => p.Name == BusinessMetrics.MessagingQueueDurationInstrumentName).Unit.Should().Be("ms");
         published.Single(p => p.Name == BusinessMetrics.MessagingDeliveriesInstrumentName).Unit.Should().Be("{delivery}");
+        published.Single(p => p.Name == BusinessMetrics.PaymentInstantDurationInstrumentName).Unit.Should().Be("ms");
     }
 
     [Theory]
     [InlineData(BusinessMetrics.PaymentOutcome.Stored, "stored")]
     [InlineData(BusinessMetrics.PaymentOutcome.Duplicate, "duplicate")]
     [InlineData(BusinessMetrics.PaymentOutcome.ValidationFailed, "validation_failed")]
-    public void RecordPaymentIntake_emits_exactly_one_measurement_with_only_the_outcome_tag(
+    public void RecordPaymentIntake_emits_exactly_one_measurement_with_the_outcome_and_scheme_tags(
         BusinessMetrics.PaymentOutcome outcome, string expectedTag)
     {
         using var metrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(metrics);
 
-        metrics.RecordPaymentIntake(outcome);
+        metrics.RecordPaymentIntake(outcome, BusinessMetrics.PaymentScheme.Standard);
 
         var measurement = listener.Measurements.Should().ContainSingle().Which;
         measurement.InstrumentName.Should().Be(BusinessMetrics.PaymentIntakeInstrumentName);
         measurement.Value.Should().Be(1L);
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["outcome"] = expectedTag,
+            ["payment.scheme"] = "standard"
+        });
+    }
+
+    [Theory]
+    [InlineData(BusinessMetrics.PaymentScheme.Standard, "standard")]
+    [InlineData(BusinessMetrics.PaymentScheme.Instant, "instant")]
+    public void RecordPaymentIntake_tags_the_payment_scheme(
+        BusinessMetrics.PaymentScheme scheme, string expectedTag)
+    {
+        using var metrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(metrics);
+
+        metrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored, scheme);
+
+        listener.Measurements.Should().ContainSingle().Which.Tags["payment.scheme"].Should().Be(expectedTag);
+    }
+
+    [Theory]
+    [InlineData(BusinessMetrics.InstantPaymentOutcome.Settled, "settled")]
+    [InlineData(BusinessMetrics.InstantPaymentOutcome.Rejected, "rejected")]
+    [InlineData(BusinessMetrics.InstantPaymentOutcome.Deferred, "deferred")]
+    public void RecordInstantPaymentDuration_emits_exactly_one_measurement_with_only_the_outcome_tag(
+        BusinessMetrics.InstantPaymentOutcome outcome, string expectedTag)
+    {
+        using var metrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(metrics);
+
+        metrics.RecordInstantPaymentDuration(outcome, TimeSpan.FromMilliseconds(123));
+
+        var measurement = listener.Measurements.Should().ContainSingle().Which;
+        measurement.InstrumentName.Should().Be(BusinessMetrics.PaymentInstantDurationInstrumentName);
+        measurement.Value.Should().Be(123d);
         measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?> { ["outcome"] = expectedTag });
+    }
+
+    [Fact]
+    public void RecordInstantPaymentDuration_clamps_a_negative_duration_to_zero()
+    {
+        using var metrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(metrics);
+
+        metrics.RecordInstantPaymentDuration(BusinessMetrics.InstantPaymentOutcome.Deferred, TimeSpan.FromMilliseconds(-50));
+
+        listener.Measurements.Should().ContainSingle().Which.Value.Should().Be(0d);
     }
 
     [Theory]

@@ -9,10 +9,19 @@ using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
 
-/// <summary>Outcome of <see cref="TransactionIntakeHandler.ProcessAsync"/> (spec-4-4).</summary>
+/// <summary>Outcome of <see cref="TransactionIntakeHandler.ProcessAsync"/> (spec-4-4; spec: add-instant-payment-rail).</summary>
 public enum TransactionIntakeOutcome
 {
     Accepted,
+
+    /// <summary>
+    /// A new command was stored AND its inline execution committed within
+    /// the same request (<c>X-Execute-Mode: inline</c>) -- maps to
+    /// <c>200 OK</c> with the final <see cref="TransactionResponse"/>, unlike
+    /// <see cref="Accepted"/> which always maps to <c>202</c>.
+    /// </summary>
+    InlineCompleted,
+
     Replayed,
     InFlight,
     TransportFailed
@@ -59,19 +68,31 @@ public sealed record TransactionStatusResult(
 /// </summary>
 public interface ITransactionIntakeHandler
 {
-    Task<TransactionIntakeResult> ProcessAsync(TransactionRequest request, CancellationToken cancellationToken);
+    /// <summary>
+    /// <paramref name="executeInline"/> reproduces today's deferred-execution
+    /// behaviour exactly when <see langword="false"/> (the default). When
+    /// <see langword="true"/> and this call stores a brand-new command row,
+    /// it also invokes the same execution handler the background inbox
+    /// processor uses, inline within this request (spec:
+    /// add-instant-payment-rail) -- see <see cref="TransactionIntakeOutcome.InlineCompleted"/>.
+    /// </summary>
+    Task<TransactionIntakeResult> ProcessAsync(
+        TransactionRequest request, CancellationToken cancellationToken, bool executeInline = false);
 
     Task<TransactionStatusResult> GetStatusAsync(string transactionId, CancellationToken cancellationToken);
 }
 
 internal sealed class TransactionIntakeHandler(
     IInboxMessageRepository repository,
+    IInboxMessageStore<InboxMessage> inboxStore,
+    IInboxMessageHandler<InboxMessage> executionHandler,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
     ILogger<TransactionIntakeHandler> logger,
     BusinessMetrics businessMetrics) : ITransactionIntakeHandler
 {
-    public async Task<TransactionIntakeResult> ProcessAsync(TransactionRequest request, CancellationToken cancellationToken)
+    public async Task<TransactionIntakeResult> ProcessAsync(
+        TransactionRequest request, CancellationToken cancellationToken, bool executeInline = false)
     {
         EnrichActivityWithRequest(request);
 
@@ -112,6 +133,16 @@ internal sealed class TransactionIntakeHandler(
                 request.TransactionId, partitionId);
             Activity.Current?.SetTag("outcome", "accepted");
             businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.Accepted);
+
+            if (executeInline)
+            {
+                var inlineResult = await TryExecuteInlineAsync(message, cancellationToken).ConfigureAwait(false);
+                if (inlineResult is not null)
+                {
+                    return inlineResult;
+                }
+            }
+
             var response = new TransactionResponse(request.TransactionId, MessageConstants.Status.Pending, now);
             return new TransactionIntakeResult(TransactionIntakeOutcome.Accepted, response, null);
         }
@@ -205,6 +236,84 @@ internal sealed class TransactionIntakeHandler(
         var response = new TransactionResponse(
             existing.TransactionId, existing.Status, new DateTimeOffset(existing.ReceivedAt, TimeSpan.Zero));
         return new TransactionIntakeResult(TransactionIntakeOutcome.InFlight, response, null);
+    }
+
+    /// <summary>
+    /// Attempts inline execution of a just-stored, brand-new
+    /// <paramref name="message"/> via the same
+    /// <see cref="IInboxMessageHandler{TMessage}"/> the background inbox
+    /// processor uses -- no second execution code path (spec: add-instant-
+    /// payment-rail's boundaries; AD-5's atomic ledger/inbox/event commit is
+    /// entirely owned by that handler, unchanged here).
+    ///
+    /// <para>
+    /// Review loop 1: claims <paramref name="message"/>'s row via
+    /// <see cref="IInboxMessageStore{TMessage}.TryClaimByIdAsync"/> (mirroring
+    /// the Payments-side <c>IOutboxMessageStore&lt;OutboxMessage&gt;.TryClaimByIdAsync</c>)
+    /// before ever invoking the execution handler. The background
+    /// <c>InboxProcessorBase</c> protects its own claim with a partition-level
+    /// distributed lock before it ever calls the same handler; without an
+    /// equivalent guard here, a background poll tick landing on this row
+    /// between <c>StoreIfNewAsync</c>'s commit (which makes the row visible to
+    /// every other connection) and this call could execute the same ledger
+    /// mutation twice. The claim's own optimistic-concurrency transition
+    /// (<c>Status</c> as an EF concurrency token) makes that race impossible:
+    /// exactly one caller can ever win it.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// The <see cref="TransactionIntakeOutcome.InlineCompleted"/> result when
+    /// execution committed; <see langword="null"/> when the claim could not be
+    /// won (a concurrent background batch claim already owns the row),
+    /// execution threw (the transaction rolled back, the row is left exactly
+    /// as storage left it -- <c>Pending</c> -- for the background processor to
+    /// drain), or, defensively, when it returned without a deserializable
+    /// cached response.
+    /// </returns>
+    private async Task<TransactionIntakeResult?> TryExecuteInlineAsync(
+        InboxMessage message, CancellationToken cancellationToken)
+    {
+        var claimed = await inboxStore.TryClaimByIdAsync(message.Id, cancellationToken).ConfigureAwait(false);
+        if (claimed is null)
+        {
+            logger.LogInformation(
+                "Inline execution for transaction {TransactionId} could not claim its row (already claimed); leaving it for the inbox processor",
+                message.TransactionId);
+            return null;
+        }
+
+        try
+        {
+            await executionHandler.HandleAsync(claimed, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Inline execution failed for transaction {TransactionId}; leaving the row Pending for the inbox processor",
+                claimed.TransactionId);
+            return null;
+        }
+
+        if (claimed.Status != MessageConstants.Status.Completed ||
+            !TryDeserializeResponse(claimed.ResponsePayload, out var response) ||
+            response is null)
+        {
+            // Defensive only (should not happen given AD-5's atomic commit):
+            // never crash the request just because the just-committed
+            // response could not be read back.
+            logger.LogWarning(
+                "Inline execution for transaction {TransactionId} did not yield a deserializable committed response; leaving the row Pending",
+                claimed.TransactionId);
+            return null;
+        }
+
+        Activity.Current?.SetTag("outcome", "inline_completed");
+        return new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null);
     }
 
     private bool TryDeserializeResponse(string? responsePayload, out TransactionResponse? response)

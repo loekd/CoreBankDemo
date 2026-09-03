@@ -254,6 +254,120 @@ public class HttpForwardOutboxDeliveryStrategyTests
         listener.Measurements.Should().BeEmpty();
     }
 
+    // ---- Spec: add-instant-payment-rail -- ICoreBankTransactionForwarder ----
+
+    [Fact]
+    public async Task ForwardAsync_returns_the_submission_and_carries_execute_inline_only_when_requested()
+    {
+        var submission = new TransactionSubmission("forward-key", "Completed", DateTimeOffset.UtcNow);
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(submission)
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
+
+        var result = await strategy.ForwardAsync(Message(), executeInline: true, TestContext.Current.CancellationToken);
+
+        result.Should().Be(submission);
+        client.SubmitExecuteInlineFlags.Should().Equal(true);
+    }
+
+    // ---- Review loop 1: ResponsePayload is populated on every completed
+    // delivery, not only the instant rail. ----
+
+    [Fact]
+    public async Task ForwardAsync_persists_the_serialized_submission_onto_the_message_on_success()
+    {
+        var submission = new TransactionSubmission("forward-key", "Failed", DateTimeOffset.UtcNow);
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(submission)
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
+        var message = Message();
+        message.ResponsePayload.Should().BeNull();
+
+        await strategy.ForwardAsync(message, executeInline: true, TestContext.Current.CancellationToken);
+
+        message.ResponsePayload.Should().NotBeNullOrEmpty();
+        var roundTripped = System.Text.Json.JsonSerializer.Deserialize<TransactionSubmission>(message.ResponsePayload!);
+        roundTripped.Should().Be(submission);
+    }
+
+    [Fact]
+    public async Task DeliverAsync_also_persists_the_serialized_submission_for_the_background_path()
+    {
+        var submission = new TransactionSubmission("forward-key", "Completed", DateTimeOffset.UtcNow);
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(submission)
+        };
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
+        var message = Message();
+
+        await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
+
+        var roundTripped = System.Text.Json.JsonSerializer.Deserialize<TransactionSubmission>(message.ResponsePayload!);
+        roundTripped.Should().Be(submission);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_never_persists_a_response_payload_when_submission_fails()
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.Timeout)
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
+        var message = Message();
+
+        var act = () => strategy.ForwardAsync(message, executeInline: true, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        message.ResponsePayload.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task DeliverAsync_always_forwards_with_execute_inline_false()
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, true, null, null)),
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(
+                new TransactionSubmission("forward-key", "Pending", DateTimeOffset.UtcNow))
+        };
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
+
+        await strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+
+        client.SubmitExecuteInlineFlags.Should().Equal(false);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_throws_on_a_business_rejection_at_account_validation_regardless_of_execute_inline()
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            ValidateResult = CoreBankResult<AccountValidation>.Success(
+                new AccountValidation(ToAccount, false, null, null))
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, BusinessMetrics);
+
+        var act = () => strategy.ForwardAsync(Message(), executeInline: true, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        client.SubmitCalls.Should().BeEmpty();
+    }
+
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient
     {
         public CoreBankResult<AccountValidation>? ValidateResult { get; set; }
@@ -286,11 +400,14 @@ public class HttpForwardOutboxDeliveryStrategyTests
             string accountNumber, CancellationToken cancellationToken) =>
             throw new NotSupportedException("Not used by the forwarding strategy.");
 
+        public List<bool> SubmitExecuteInlineFlags { get; } = new();
+
         public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
         {
             SubmitCalls.Add(request);
             SubmitCancellationTokens.Add(cancellationToken);
+            SubmitExecuteInlineFlags.Add(executeInline);
             return SubmitThrows is not null
                 ? Task.FromException<CoreBankResult<TransactionSubmission>>(SubmitThrows)
                 : Task.FromResult(SubmitResult!);

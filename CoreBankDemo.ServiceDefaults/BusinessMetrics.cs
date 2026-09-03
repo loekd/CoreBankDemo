@@ -36,6 +36,7 @@ public sealed class BusinessMetrics : IDisposable
     public const string MessagingItemsProcessedInstrumentName = "corebankdemo.messaging.items.processed";
     public const string MessagingQueueDurationInstrumentName = "corebankdemo.messaging.queue.duration";
     public const string MessagingDeliveriesInstrumentName = "corebankdemo.messaging.deliveries";
+    public const string PaymentInstantDurationInstrumentName = "corebankdemo.payment.instant.duration";
 
     /// <summary>Outcome of payments intake (spec-6-5 metric contract).</summary>
     public enum PaymentOutcome
@@ -43,6 +44,35 @@ public sealed class BusinessMetrics : IDisposable
         Stored,
         Duplicate,
         ValidationFailed
+    }
+
+    /// <summary>
+    /// Payment rail a request declared (spec: add-instant-payment-rail's
+    /// metric contract) -- closed two-value set, always derived from
+    /// PaymentsAPI's own already-validated closed <c>Scheme</c> set, never
+    /// copied from request data verbatim.
+    /// </summary>
+    public enum PaymentScheme
+    {
+        Standard,
+        Instant
+    }
+
+    /// <summary>
+    /// Authoritative outcome of one instant-rail request's inline attempt
+    /// (spec: add-instant-payment-rail's metric contract):
+    /// <see cref="Settled"/> is a committed business success,
+    /// <see cref="Rejected"/> is a committed business rejection (still a
+    /// successfully processed message per AD-11), and <see cref="Deferred"/>
+    /// covers everything that falls back to the background rail (budget
+    /// exhaustion, a transport failure, the row already being claimed, or the
+    /// instant rail being disabled).
+    /// </summary>
+    public enum InstantPaymentOutcome
+    {
+        Settled,
+        Rejected,
+        Deferred
     }
 
     /// <summary>Outcome of CoreBank transaction intake (spec-6-5 metric contract).</summary>
@@ -148,6 +178,7 @@ public sealed class BusinessMetrics : IDisposable
     private readonly Counter<long> _itemsProcessed;
     private readonly Histogram<double> _queueDuration;
     private readonly Counter<long> _deliveries;
+    private readonly Histogram<double> _instantPaymentDuration;
 
     /// <summary>
     /// Exposed only for <see cref="System.Diagnostics.Metrics.MeterListener"/>-based
@@ -199,11 +230,19 @@ public sealed class BusinessMetrics : IDisposable
             MessagingDeliveriesInstrumentName,
             unit: "{delivery}",
             description: "Concrete HTTP/Dapr send or receive attempts, by transport outcome.");
+
+        _instantPaymentDuration = _meter.CreateHistogram<double>(
+            PaymentInstantDurationInstrumentName,
+            unit: "ms",
+            description: "Elapsed time of one instant-rail request's inline attempt, from claim to conclusion or budget expiry.");
     }
 
     /// <summary>Records one payments-intake outcome. Recorded after the handler outcome is known.</summary>
-    public void RecordPaymentIntake(PaymentOutcome outcome) =>
-        _paymentIntake.Add(1, new KeyValuePair<string, object?>("outcome", ToTag(outcome)));
+    public void RecordPaymentIntake(PaymentOutcome outcome, PaymentScheme scheme) =>
+        _paymentIntake.Add(
+            1,
+            new KeyValuePair<string, object?>("outcome", ToTag(outcome)),
+            new KeyValuePair<string, object?>("payment.scheme", ToTag(scheme)));
 
     /// <summary>Records one CoreBank transaction-intake outcome. Recorded after the handler outcome is known.</summary>
     public void RecordTransactionIntake(TransactionIntakeOutcome outcome) =>
@@ -244,6 +283,21 @@ public sealed class BusinessMetrics : IDisposable
             new KeyValuePair<string, object?>("messaging.store.kind", ToTag(storeKind)));
     }
 
+    /// <summary>
+    /// Records one instant-rail request's inline-attempt duration, tagged by
+    /// its authoritative outcome. Recorded exactly once per instant-rail
+    /// request -- when the inline attempt concludes (settled/rejected) or the
+    /// budget/attempts are exhausted (deferred) -- never for a request
+    /// abandoned solely because the caller cancelled.
+    /// </summary>
+    public void RecordInstantPaymentDuration(InstantPaymentOutcome outcome, TimeSpan duration)
+    {
+        var milliseconds = Math.Max(0d, duration.TotalMilliseconds);
+        _instantPaymentDuration.Record(
+            milliseconds,
+            new KeyValuePair<string, object?>("outcome", ToTag(outcome)));
+    }
+
     /// <summary>Records one concrete HTTP/Dapr send or receive attempt outcome.</summary>
     public void RecordDelivery(DeliveryDirection direction, Transport transport, MessageType messageType, DeliveryOutcome outcome) =>
         _deliveries.Add(
@@ -258,6 +312,21 @@ public sealed class BusinessMetrics : IDisposable
         PaymentOutcome.Stored => "stored",
         PaymentOutcome.Duplicate => "duplicate",
         PaymentOutcome.ValidationFailed => "validation_failed",
+        _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)
+    };
+
+    private static string ToTag(PaymentScheme scheme) => scheme switch
+    {
+        PaymentScheme.Standard => "standard",
+        PaymentScheme.Instant => "instant",
+        _ => throw new ArgumentOutOfRangeException(nameof(scheme), scheme, null)
+    };
+
+    private static string ToTag(InstantPaymentOutcome outcome) => outcome switch
+    {
+        InstantPaymentOutcome.Settled => "settled",
+        InstantPaymentOutcome.Rejected => "rejected",
+        InstantPaymentOutcome.Deferred => "deferred",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)
     };
 

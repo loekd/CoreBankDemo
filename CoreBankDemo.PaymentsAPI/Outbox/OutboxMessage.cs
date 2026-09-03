@@ -20,4 +20,16 @@ public class OutboxMessage : IOutboxMessage
     public required string ToAccount { get; set; }
     public decimal Amount { get; set; }
     public required string Currency { get; set; }
+
+    /// <summary>
+    /// Serialized delivery outcome (mirrors CoreBank's own
+    /// <c>InboxMessage.ResponsePayload</c>), populated on every completed
+    /// delivery -- inline and background alike -- by
+    /// <see cref="HttpForwardOutboxDeliveryStrategy.ForwardAsync"/> (spec:
+    /// add-instant-payment-rail, review loop 1). <c>Status</c> above is
+    /// transport-state-only (AD-11) and never distinguishes a committed
+    /// business success from a committed business rejection; this payload is
+    /// what lets a duplicate replay recover that distinction.
+    /// </summary>
+    public string? ResponsePayload { get; set; }
 }

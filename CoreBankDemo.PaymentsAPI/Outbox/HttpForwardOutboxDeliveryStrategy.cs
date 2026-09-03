@@ -1,7 +1,41 @@
+using System.Text.Json;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
+
+/// <summary>
+/// Reusable validate-then-submit sequence against CoreBankAPI (spec:
+/// add-instant-payment-rail's code map: "reuse the existing claim, deliver
+/// and complete paths for the inline attempt ... do not copy it"). Extracted
+/// from <see cref="HttpForwardOutboxDeliveryStrategy"/> so the instant-rail
+/// forwarding handler shares exactly this logic -- including its AD-11
+/// retry-outcome classification and its <c>corebankdemo.messaging.deliveries</c>
+/// metric -- rather than reimplementing it: <see cref="HttpForwardOutboxDeliveryStrategy"/>
+/// implements this interface itself and is registered under both it and
+/// <see cref="IOutboxDeliveryStrategy{TMessage}"/> from the same scoped
+/// instance. Unlike <see cref="IOutboxDeliveryStrategy{TMessage}.DeliverAsync"/>
+/// (kernel-owned success/failure classification only -- AD-11), this returns
+/// the actual <see cref="TransactionSubmission"/> so a caller that needs
+/// CoreBank's committed business status (not just "did transport succeed")
+/// can read it.
+/// </summary>
+internal interface ICoreBankTransactionForwarder
+{
+    /// <summary>
+    /// Validates <paramref name="message"/>'s destination account, then
+    /// submits it. <paramref name="executeInline"/> carries
+    /// <c>X-Execute-Mode: inline</c> on the submission call only. Returns the
+    /// submission on success (AD-11: any 2xx, including a business rejection
+    /// -- CoreBank's <c>TransactionResponse.Status</c> distinguishes those,
+    /// not this method's return path). Throws on any transport failure --
+    /// never a business-rejection outcome, see AD-11 -- so a caller inherits
+    /// the exact same retry-outcome classification
+    /// <see cref="HttpForwardOutboxDeliveryStrategy.DeliverAsync"/> already
+    /// has.
+    /// </summary>
+    Task<TransactionSubmission> ForwardAsync(OutboxMessage message, bool executeInline, CancellationToken cancellationToken);
+}
 
 /// <summary>
 /// Forwards a stored payment to CoreBankAPI (story 5.4): validates the
@@ -37,9 +71,13 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// </para>
 /// </summary>
 internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient client, BusinessMetrics businessMetrics)
-    : IOutboxDeliveryStrategy<OutboxMessage>
+    : IOutboxDeliveryStrategy<OutboxMessage>, ICoreBankTransactionForwarder
 {
-    public async Task DeliverAsync(OutboxMessage message, CancellationToken cancellationToken = default)
+    public Task DeliverAsync(OutboxMessage message, CancellationToken cancellationToken = default) =>
+        ForwardAsync(message, executeInline: false, cancellationToken);
+
+    public async Task<TransactionSubmission> ForwardAsync(
+        OutboxMessage message, bool executeInline, CancellationToken cancellationToken)
     {
         var validation = await client
             .ValidateAccountAsync(message.ToAccount, cancellationToken)
@@ -71,7 +109,8 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient clien
                     message.Amount,
                     message.Currency,
                     message.TransactionId),
-                cancellationToken)
+                cancellationToken,
+                executeInline)
             .ConfigureAwait(false);
 
         // Story 6.5: this is the sole concrete HTTP-send boundary for the
@@ -95,6 +134,19 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient clien
             throw RetryOutcomeException(
                 "Transaction submission", submission.RetryReason, submission.StatusCode);
         }
+
+        // Review loop 1: persisted on EVERY completed delivery -- both this
+        // background path (executeInline: false) and the instant-rail inline
+        // path (executeInline: true) -- never an instant-only special case.
+        // Mutates the same tracked entity the caller will next persist via
+        // MarkAsCompletedAsync, so both fields commit together in one
+        // SaveChanges call. AD-11's Status column stays transport-state-only;
+        // this is what lets a later duplicate replay recover the actual
+        // business outcome (settled vs. rejected) instead of always reading
+        // back "Completed".
+        message.ResponsePayload = JsonSerializer.Serialize(submission.Value!);
+
+        return submission.Value!;
     }
 
     /// <summary>

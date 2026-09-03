@@ -137,6 +137,9 @@ public class OutboxProcessorBaseTests
             CancellationToken cancellationToken = default) =>
             Task.FromResult(MessageTransitionOutcome.Applied);
 
+        public Task<TestOutboxEventMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<TestOutboxEventMessage?>(null);
+
         public ValueTask DisposeAsync()
         {
             IsDisposed = true;

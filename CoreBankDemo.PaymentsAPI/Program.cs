@@ -25,8 +25,20 @@ builder.Services.AddCoreBankApiClient();
 // depends on OutboxRepository directly (messaging-patterns skill).
 builder.Services.AddScoped<IOutboxMessageStore<OutboxMessage>>(
     sp => sp.GetRequiredService<OutboxRepository>());
-builder.Services.AddScoped<IOutboxDeliveryStrategy<OutboxMessage>, HttpForwardOutboxDeliveryStrategy>();
+
+// Spec: add-instant-payment-rail. HttpForwardOutboxDeliveryStrategy now also
+// implements ICoreBankTransactionForwarder (the extracted validate+submit
+// sequence); expose the same scoped instance under both ports so the instant
+// forwarding handler and the background outbox processor share one
+// implementation rather than each getting a distinct instance.
+builder.Services.AddScoped<HttpForwardOutboxDeliveryStrategy>();
+builder.Services.AddScoped<IOutboxDeliveryStrategy<OutboxMessage>>(
+    sp => sp.GetRequiredService<HttpForwardOutboxDeliveryStrategy>());
+builder.Services.AddScoped<ICoreBankTransactionForwarder>(
+    sp => sp.GetRequiredService<HttpForwardOutboxDeliveryStrategy>());
 builder.Services.AddHostedService<PaymentsOutboxProcessor>();
+
+builder.Services.AddInstantPaymentRail(builder.Configuration);
 
 builder.Services.AddPaymentIntake();
 

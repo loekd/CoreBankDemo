@@ -28,7 +28,8 @@ public sealed record PaymentSnapshot(
     string Status,
     DateTime CreatedAt,
     string? TraceParent,
-    string? TraceState);
+    string? TraceState,
+    string? ResponsePayload = null);
 
 public sealed record PaymentStorageResult(
     PaymentStorageOutcome Outcome,
@@ -57,9 +58,11 @@ internal sealed class PaymentStorageHandler(
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        var scheme = ToMetricScheme(request.Scheme);
+
         if (idempotencyKey is not null && (idempotencyKey.Length is < 1 or > 100))
         {
-            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.ValidationFailed);
+            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.ValidationFailed, scheme);
             return new PaymentStorageResult(
                 PaymentStorageOutcome.ValidationFailed,
                 null,
@@ -97,7 +100,7 @@ internal sealed class PaymentStorageHandler(
                 "Stored payment {IdempotencyKey} in partition {PartitionId}",
                 key,
                 partitionId);
-            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored);
+            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored, scheme);
             return new PaymentStorageResult(PaymentStorageOutcome.Stored, ToSnapshot(message), []);
         }
 
@@ -109,9 +112,20 @@ internal sealed class PaymentStorageHandler(
             ?? throw new InvalidOperationException(
                 $"Payment store reported duplicate idempotency key '{key}', but no persisted winner was found.");
 
-        businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Duplicate);
+        businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Duplicate, scheme);
         return new PaymentStorageResult(PaymentStorageOutcome.Duplicate, ToSnapshot(winner), []);
     }
+
+    /// <summary>
+    /// Maps the request's already-validated closed <c>Scheme</c> string (see
+    /// <see cref="PaymentSchemes"/>) onto the metric contract's closed
+    /// <see cref="BusinessMetrics.PaymentScheme"/> vocabulary -- never copies
+    /// the raw string into a metric attribute.
+    /// </summary>
+    private static BusinessMetrics.PaymentScheme ToMetricScheme(string scheme) =>
+        string.Equals(scheme, PaymentSchemes.Instant, StringComparison.Ordinal)
+            ? BusinessMetrics.PaymentScheme.Instant
+            : BusinessMetrics.PaymentScheme.Standard;
 
     private static PaymentSnapshot ToSnapshot(OutboxMessage message) => new(
         message.Id,
@@ -125,5 +139,6 @@ internal sealed class PaymentStorageHandler(
         message.Status,
         message.CreatedAt,
         message.TraceParent,
-        message.TraceState);
+        message.TraceState,
+        message.ResponsePayload);
 }

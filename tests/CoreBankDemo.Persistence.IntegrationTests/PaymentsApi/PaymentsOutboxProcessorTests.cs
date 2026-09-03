@@ -258,7 +258,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             throw new NotSupportedException("Not used by the forwarding processor.");
 
         public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
         {
             _submittedTransactionIds.Enqueue(request.TransactionId);
             return Task.FromResult(CoreBankResult<TransactionSubmission>.Success(
@@ -285,7 +285,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             throw new NotSupportedException("Not used by the forwarding processor.");
 
         public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
         {
             SubmitAttempted = true;
             return Task.FromResult(CoreBankResult<TransactionSubmission>.Success(
@@ -321,7 +321,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             throw new NotSupportedException("Not used by the forwarding processor.");
 
         public async Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
         {
             CallStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
@@ -378,7 +378,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             throw new NotSupportedException("Not used by the forwarding processor.");
 
         public async Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
-            TransactionSubmissionRequest request, CancellationToken cancellationToken)
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
         {
             _submittedTransactionIds.Enqueue(request.TransactionId);
 
