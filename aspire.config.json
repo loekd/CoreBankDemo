@@ -1,5 +1,5 @@
 {
   "appHost": {
-    "path": "CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj"
+    "path": "CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj"
   }
 }

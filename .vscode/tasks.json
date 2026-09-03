@@ -28,6 +28,18 @@
             "Debug"
         ],
         "problemMatcher": "$msCompile"
+    },
+    {
+        "label": "run-load-test-apphost",
+        "command": "aspire",
+        "type": "process",
+        "args": [
+            "start",
+            "--apphost",
+            "${workspaceFolder}/CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj",
+            "--non-interactive"
+        ],
+        "problemMatcher": []
     }
 ]
 }
