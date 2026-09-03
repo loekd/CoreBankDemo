@@ -651,6 +651,10 @@ The `CoreBankDemo.LoadTests` project is a complete Aspire-orchestrated load test
    - Configurable VUs (default: 10) submit transactions concurrently
    - Configurable transaction count (default: 1000 unique transactions)
    - ~10% are deliberate retries with duplicate idempotency keys
+   - ~20% carry `scheme=instant` (deterministic by key index, stable across a
+     transaction's retry), exercising the opt-in instant payment rail
+     alongside the standard rail under real concurrent load; the remaining
+     ~80% omit `scheme` and use the standard rail exactly as before
    - Total iterations = unique count + retry count
 
 3. **Drain Phase**
