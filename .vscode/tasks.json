@@ -16,6 +16,18 @@
             "kind": "build",
             "isDefault": true
         }
+    },
+    {
+        "label": "build-demo-runner",
+        "command": "dotnet",
+        "type": "process",
+        "args": [
+            "build",
+            "${workspaceFolder}/CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj",
+            "--configuration",
+            "Debug"
+        ],
+        "problemMatcher": "$msCompile"
     }
 ]
 }
