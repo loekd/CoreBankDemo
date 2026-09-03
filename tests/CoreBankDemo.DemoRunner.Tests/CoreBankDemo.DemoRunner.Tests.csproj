@@ -5,18 +5,11 @@
          design note: Terminal.Gui rendering and the real process/HTTP/file adapters in
          Infrastructure/ are exercised through fakes here, not measured directly — same
          boundary other projects draw around Program.cs/hosting wiring). -->
-    <Include>[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.Application.*,[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.Terminal.PresentationModel,[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.CliOptions,[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.RehearsalRunner</Include>
+    <Include>[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.Application.*,[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.Terminal.PresentationModelBuilder,[CoreBankDemo.DemoRunner]CoreBankDemo.DemoRunner.CliOptions</Include>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\CoreBankDemo.DemoRunner\CoreBankDemo.DemoRunner.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Loaded directly by ScenarioLoaderTests to prove the checked-in scenario itself validates. -->
-    <Content Include="..\..\CoreBankDemo.DemoRunner\Scenarios\mission-critical-talk-v7.json" Link="Scenarios\mission-critical-talk-v7.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
   </ItemGroup>
 
 </Project>

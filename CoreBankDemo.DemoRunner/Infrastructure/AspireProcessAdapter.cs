@@ -1,159 +1,149 @@
-using System.Diagnostics;
-using System.Collections.Concurrent;
+using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
-using CoreBankDemo.DemoRunner.Application.Scenarios;
+using System.Text.Json;
 
 namespace CoreBankDemo.DemoRunner.Infrastructure;
 
-/// <summary>
-/// Owns starting/stopping the exact known Aspire AppHost project as a tracked child
-/// process tree, and detects an attachable, fingerprint-verified existing topology.
-/// Never targets an arbitrary process path and never stops an unowned process (ADR-015).
-/// </summary>
-public sealed class AspireProcessAdapter(HttpClient httpClient, string repositoryRoot) : IProcessAdapter
+public sealed class AspireProcessAdapter(string repositoryRoot) : IProcessAdapter
 {
-    private static readonly IReadOnlyDictionary<string, string> AppHostProjectPaths = new Dictionary<string, string>(StringComparer.Ordinal)
-    {
-        [KnownTopologyProfiles.Regular] = "CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj",
-        [KnownTopologyProfiles.LoadTest] = "CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj",
-    };
+    private static readonly TimeSpan CommandTimeout = TimeSpan.FromMinutes(2);
+    private readonly Dictionary<TopologyProfile, string> _ownedStarts = [];
 
-    private readonly Dictionary<string, Process> _owned = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, BoundedOutputBuffer> _output = new(StringComparer.Ordinal);
-
-    public Task<TopologyHandle> StartOwnedAsync(string profileName, CancellationToken ct)
+    public async Task<TopologyHandle> StartOwnedAsync(TopologyProfile profile, CancellationToken ct)
     {
-        if (!AppHostProjectPaths.TryGetValue(profileName, out var relativePath))
+        if (profile == TopologyProfile.None)
         {
-            throw new ArgumentOutOfRangeException(nameof(profileName), profileName, "Not a known Aspire profile.");
+            throw new ArgumentOutOfRangeException(nameof(profile));
         }
 
-        var projectPath = Path.Combine(repositoryRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        var process = new Process
+        var result = await CommandRunner.RunAsync(
+            "aspire",
+            [
+                "start",
+                "--apphost",
+                ProfileRegistry.ProjectPath(repositoryRoot, profile),
+                "--format",
+                "Json",
+                "--non-interactive",
+                "--nologo",
+            ],
+            repositoryRoot,
+            CommandTimeout,
+            ct);
+        if (!result.Succeeded)
         {
-            StartInfo = new ProcessStartInfo("dotnet", $"run --project \"{projectPath}\"")
-            {
-                WorkingDirectory = repositoryRoot,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-            },
-            EnableRaisingEvents = true,
-        };
+            throw new InvalidOperationException(
+                JournalRedaction.Apply(string.IsNullOrWhiteSpace(result.StandardError)
+                    ? "Aspire start failed."
+                    : result.StandardError));
+        }
 
-        var output = new BoundedOutputBuffer();
-        process.OutputDataReceived += (_, args) => output.Add(args.Data);
-        process.ErrorDataReceived += (_, args) => output.Add(args.Data);
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        _owned[profileName] = process;
-        _output[profileName] = output;
-
-        return Task.FromResult(new TopologyHandle(profileName, IsOwned: true, process.Id, Fingerprint: $"owned:{process.Id}"));
+        var detail = JournalRedaction.Apply(result.StandardOutput);
+        _ownedStarts[profile] = detail;
+        return new TopologyHandle(
+            profile,
+            true,
+            TryReadProcessId(result.StandardOutput),
+            $"owned:{profile}:{detail.GetHashCode(StringComparison.Ordinal)}");
     }
 
     public string GetRecentOutput(TopologyHandle handle) =>
-        _output.TryGetValue(handle.ProfileName, out var output) ? output.ToString() : string.Empty;
-
-    public async Task<TopologyHandle?> TryAttachAsync(string profileName, CancellationToken ct)
-    {
-        var ports = profileName == KnownTopologyProfiles.LoadTest
-            ? EndpointResolver.LoadTestProfilePorts
-            : EndpointResolver.RegularProfilePorts;
-
-        var fingerprints = new List<string>();
-        foreach (var (resource, _) in ports)
-        {
-            try
-            {
-                var url = EndpointResolver.HealthUrlFor(resource);
-                using var response = await httpClient.GetAsync(url, ct);
-                if (!response.IsSuccessStatusCode)
-                {
-                    // A partially healthy graph is never attachable.
-                    return null;
-                }
-
-                fingerprints.Add($"{resource}:{(int)response.StatusCode}");
-            }
-            catch (HttpRequestException)
-            {
-                return null;
-            }
-        }
-
-        return new TopologyHandle(profileName, IsOwned: false, ProcessId: null, Fingerprint: string.Join(",", fingerprints));
-    }
+        _ownedStarts.TryGetValue(handle.Profile, out var output) ? output : string.Empty;
 
     public async Task StopOwnedAsync(TopologyHandle handle, CancellationToken ct)
     {
-        if (!handle.IsOwned || !_owned.TryGetValue(handle.ProfileName, out var process))
+        if (!handle.IsOwned || !_ownedStarts.ContainsKey(handle.Profile))
         {
-            // Never stop or restart an attached (unowned) process.
             return;
+        }
+
+        if (handle.ProcessId is { } ownedPid)
+        {
+            var runningPid = await FindRunningAppHostPidAsync(handle.Profile, ct);
+            if (runningPid != ownedPid)
+            {
+                throw new InvalidOperationException(
+                    $"Ownership verification failed for {handle.Profile}; expected AppHost PID {ownedPid}, found {runningPid?.ToString() ?? "none"}.");
+            }
+        }
+
+        var result = await CommandRunner.RunAsync(
+            "aspire",
+            [
+                "stop",
+                "--apphost",
+                ProfileRegistry.ProjectPath(repositoryRoot, handle.Profile),
+                "--non-interactive",
+                "--nologo",
+            ],
+            repositoryRoot,
+            CommandTimeout,
+            ct);
+        if (!result.Succeeded)
+        {
+            throw new InvalidOperationException(
+                JournalRedaction.Apply(string.IsNullOrWhiteSpace(result.StandardError)
+                    ? "Aspire stop failed."
+                    : result.StandardError));
+        }
+
+        _ownedStarts.Remove(handle.Profile);
+    }
+
+    private async Task<int?> FindRunningAppHostPidAsync(TopologyProfile profile, CancellationToken ct)
+    {
+        var result = await CommandRunner.RunAsync(
+            "aspire",
+            ["ps", "--format", "Json", "--non-interactive", "--nologo"],
+            repositoryRoot,
+            CommandTimeout,
+            ct);
+        if (!result.Succeeded)
+        {
+            throw new InvalidOperationException(JournalRedaction.Apply(result.StandardError));
         }
 
         try
         {
-            if (!process.HasExited)
+            using var document = JsonDocument.Parse(result.StandardOutput);
+            foreach (var item in document.RootElement.EnumerateArray())
             {
-                RequestGracefulStop(process);
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
-                try
+                if (!item.TryGetProperty("appHostPath", out var path)
+                    || !item.TryGetProperty("appHostPid", out var pid)
+                    || !pid.TryGetInt32(out var value))
                 {
-                    await process.WaitForExitAsync(timeoutCts.Token);
+                    continue;
                 }
-                catch (OperationCanceledException)
+
+                if (string.Equals(
+                        Path.GetFullPath(path.GetString() ?? string.Empty),
+                        Path.GetFullPath(ProfileRegistry.ProjectPath(repositoryRoot, profile)),
+                        StringComparison.Ordinal))
                 {
-                    process.Kill(entireProcessTree: true);
+                    return value;
                 }
             }
+
+            return null;
         }
-        finally
+        catch (JsonException ex)
         {
-            _owned.Remove(handle.ProfileName);
-            _output.Remove(handle.ProfileName);
-            process.Dispose();
+            throw new InvalidOperationException("Could not verify owned AppHost PID from Aspire ps output.", ex);
         }
     }
 
-    private static void RequestGracefulStop(Process process)
+    private static int? TryReadProcessId(string json)
     {
-        if (OperatingSystem.IsWindows())
+        try
         {
-            process.CloseMainWindow();
-            return;
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("appHostPid", out var pid) && pid.TryGetInt32(out var value)
+                ? value
+                : null;
         }
-
-        using var signal = Process.Start(new ProcessStartInfo("kill", $"-INT {process.Id}")
+        catch (JsonException)
         {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        });
-        signal?.WaitForExit();
-    }
-
-    private sealed class BoundedOutputBuffer
-    {
-        private const int MaximumLines = 200;
-        private readonly ConcurrentQueue<string> _lines = new();
-
-        public void Add(string? line)
-        {
-            if (string.IsNullOrEmpty(line))
-            {
-                return;
-            }
-
-            _lines.Enqueue(JournalRedaction.Apply(line));
-            while (_lines.Count > MaximumLines)
-            {
-                _lines.TryDequeue(out _);
-            }
+            return null;
         }
-
-        public override string ToString() => string.Join(Environment.NewLine, _lines);
     }
 }

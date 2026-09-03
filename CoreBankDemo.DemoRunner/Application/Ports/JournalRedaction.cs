@@ -3,13 +3,11 @@ using System.Text.RegularExpressions;
 namespace CoreBankDemo.DemoRunner.Application.Ports;
 
 /// <summary>
-/// Bounds and redacts journal/evidence text before it is persisted. Kept in Application
-/// so it is unit-testable independent of the file-based journal implementation
-/// (ADR-015: journals hold facts and bounded evidence, never secrets or unbounded raw output).
+/// Bounds and redacts session evidence before display or explicit export.
 /// </summary>
 public static partial class JournalRedaction
 {
-    public const int MaxLength = 500;
+    public const int MaxLength = 8192;
 
     public static string Apply(string text)
     {
@@ -17,6 +15,6 @@ public static partial class JournalRedaction
         return SecretLikePattern().Replace(bounded, "[redacted]");
     }
 
-    [GeneratedRegex(@"(?i)(authorization|bearer|idempotency-key)\s*[:=]\s*[^;]+")]
+    [GeneratedRegex(@"(?i)(authorization|bearer|idempotency-key|password|secret|token)\s*[:=]\s*[^;\r\n,}]+")]
     private static partial Regex SecretLikePattern();
 }

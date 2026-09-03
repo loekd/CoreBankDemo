@@ -1,40 +1,50 @@
 namespace CoreBankDemo.DemoRunner;
 
-/// <summary>Binds only the five documented flags — nothing else (ADR-015 code map).</summary>
-public sealed record CliOptions(bool Doctor, bool Show, bool Rehearse, string ScenarioName, bool Resume)
+public sealed record CliOptions(bool Doctor, bool Help, IReadOnlyList<string> Errors)
 {
-    public const string DefaultScenarioName = "mission-critical-talk-v7";
+    public bool IsValid => Errors.Count == 0;
 
     public static CliOptions Parse(IReadOnlyList<string> args)
     {
         var doctor = false;
-        var show = false;
-        var rehearse = false;
-        var resume = false;
-        var scenarioName = DefaultScenarioName;
-
-        for (var i = 0; i < args.Count; i++)
+        var help = false;
+        var errors = new List<string>();
+        foreach (var argument in args)
         {
-            switch (args[i])
+            switch (argument)
             {
                 case "--doctor":
                     doctor = true;
                     break;
+                case "--help":
+                case "-h":
+                    help = true;
+                    break;
                 case "--show":
-                    show = true;
-                    break;
                 case "--rehearse":
-                    rehearse = true;
-                    break;
+                case "--scenario":
                 case "--resume":
-                    resume = true;
+                    errors.Add($"'{argument}' was retired. Run the reusable console without scenario arguments.");
                     break;
-                case "--scenario" when i + 1 < args.Count:
-                    scenarioName = args[++i];
+                default:
+                    errors.Add($"Unknown argument '{argument}'.");
                     break;
             }
         }
 
-        return new CliOptions(doctor, show, rehearse, scenarioName, resume);
+        return new CliOptions(doctor, help, errors);
     }
+
+    public static string HelpText =>
+        """
+        CoreBankDemo DemoRunner — reusable terminal operator console
+
+        Usage:
+          dotnet run --project CoreBankDemo.DemoRunner
+          dotnet run --project CoreBankDemo.DemoRunner -- --doctor
+
+        Options:
+          --doctor   Print local prerequisites and detected topology state; start nothing.
+          --help     Show this help.
+        """;
 }

@@ -162,6 +162,21 @@ public sealed class LoadTestDatabaseResetterTests(
         var first = await coordinator.ResetAndReleaseAsync(cancellationToken);
         await Task.WhenAll(waits);
         var generation = await redisDatabase.StringGetAsync(RedisProcessorStartGate.GenerationKey);
+
+        payments.OutboxMessages.Add(new CoreBankDemo.PaymentsAPI.Outbox.OutboxMessage
+        {
+            IdempotencyKey = "between-runs",
+            TransactionId = "between-runs",
+            FromAccount = "NL01LOAD0000000001",
+            ToAccount = "NL02LOAD0000000002",
+            Amount = 1m,
+            Currency = "EUR",
+            PartitionId = 0,
+            Status = CoreBankDemo.Messaging.MessageConstants.Status.Pending,
+            CreatedAt = TimeProvider.System.GetUtcNow().UtcDateTime,
+        });
+        await payments.SaveChangesAsync(cancellationToken);
+
         var second = await coordinator.ResetAndReleaseAsync(cancellationToken);
 
         second.Should().Be(first);

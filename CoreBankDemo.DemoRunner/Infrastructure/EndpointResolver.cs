@@ -1,63 +1,60 @@
-using CoreBankDemo.DemoRunner.Application.Scenarios;
+using CoreBankDemo.DemoRunner.Application;
 
 namespace CoreBankDemo.DemoRunner.Infrastructure;
 
 /// <summary>
 /// The single source of truth mapping known resource/endpoint/link ids to their real
-/// local URLs. Scenario data never supplies a URL directly — only these compiled ids
-/// (ADR-015). Ports match the documented values in <c>docs/bmad/constraints.md</c> and
-/// the brownfield README.
+/// local URLs. Operator input never supplies a URL directly (ADR-015).
 /// </summary>
 public static class EndpointResolver
 {
-    private const string PaymentsApiBaseUrl = "http://127.0.0.1:5294";
+    private const string RegularPaymentsApiBaseUrl = "http://127.0.0.1:5294";
+    private const string LoadPaymentsApiBaseUrl = "http://127.0.0.1:5295";
     private const string CoreBankApiBaseUrl = "http://127.0.0.1:5032";
     private const string LoadTestSupportBaseUrl = "http://localhost:5181";
     private const string JaegerBaseUrl = "http://localhost:16686";
-    private const string AspireDashboardBaseUrl = "http://localhost:15888";
 
-    public static string HealthUrlFor(string resourceName) => resourceName switch
+    public static string HealthUrlFor(string resourceName, TopologyProfile profile = TopologyProfile.Regular) => resourceName switch
     {
-        KnownResources.PaymentsApi => $"{PaymentsApiBaseUrl}/health",
+        KnownResources.PaymentsApi => $"{PaymentsBaseUrl(profile)}/health",
         KnownResources.CoreBankApi => $"{CoreBankApiBaseUrl}/health",
         KnownResources.LoadTestSupport => $"{LoadTestSupportBaseUrl}/health",
         KnownResources.Jaeger => $"{JaegerBaseUrl}/",
-        KnownResources.AspireDashboard => $"{AspireDashboardBaseUrl}/",
         // Postgres, Redis, and Dapr are not directly HTTP-probed by the console
         // (ADR-015 forbids connecting to their sockets); their confidence status is
         // reported via the owning API's health check instead.
         KnownResources.Postgres => $"{CoreBankApiBaseUrl}/health",
         KnownResources.Redis => $"{CoreBankApiBaseUrl}/health",
-        KnownResources.Dapr => $"{CoreBankApiBaseUrl}/health",
         _ => throw new ArgumentOutOfRangeException(nameof(resourceName), resourceName, "Unknown resource."),
     };
 
-    public static (string Url, HttpMethod Method) EndpointFor(string endpointId, string? pathParameter = null) => endpointId switch
+    public static (string Url, HttpMethod Method) EndpointFor(
+        TopologyProfile profile,
+        string endpointId,
+        string? pathParameter = null) => endpointId switch
     {
-        KnownEndpoints.PaymentsSubmit => ($"{PaymentsApiBaseUrl}/api/payments", HttpMethod.Post),
-        KnownEndpoints.PaymentsInbox => ($"{PaymentsApiBaseUrl}/api/inbox", HttpMethod.Get),
-        KnownEndpoints.CoreBankTransactionsProcess => ($"{CoreBankApiBaseUrl}/api/transactions/process", HttpMethod.Post),
-        KnownEndpoints.CoreBankTransactionsStatus => (
+        KnownEndpoints.PaymentsSubmit => ($"{PaymentsBaseUrl(profile)}/api/payments", HttpMethod.Post),
+        KnownEndpoints.TransactionOutcome => (
             $"{CoreBankApiBaseUrl}/api/transactions/{Uri.EscapeDataString(RequirePathParameter(endpointId, pathParameter))}",
             HttpMethod.Get),
-        KnownEndpoints.LoadTestSupportReset => ($"{LoadTestSupportBaseUrl}/reset", HttpMethod.Post),
-        KnownEndpoints.LoadTestSupportDrain => ($"{LoadTestSupportBaseUrl}/assert/drain", HttpMethod.Get),
-        KnownEndpoints.LoadTestSupportAssert => ($"{LoadTestSupportBaseUrl}/assert/results", HttpMethod.Get),
-        KnownEndpoints.LoadTestSupportCoreBankInbox => ($"{LoadTestSupportBaseUrl}/corebank/inbox", HttpMethod.Get),
+        KnownEndpoints.LoadReset when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/reset", HttpMethod.Post),
+        KnownEndpoints.LoadDrain when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/assert/drain", HttpMethod.Get),
+        KnownEndpoints.LoadAssert when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/assert/results", HttpMethod.Get),
+        KnownEndpoints.PaymentsOutbox when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/payments/outbox", HttpMethod.Get),
+        KnownEndpoints.PaymentsInbox when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/payments/inbox", HttpMethod.Get),
+        KnownEndpoints.CoreBankInbox when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/corebank/inbox", HttpMethod.Get),
+        KnownEndpoints.CoreBankOutbox when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/corebank/outbox", HttpMethod.Get),
         _ => throw new ArgumentOutOfRangeException(nameof(endpointId), endpointId, "Unknown endpoint."),
     };
 
     private static string RequirePathParameter(string endpointId, string? pathParameter) =>
         string.IsNullOrWhiteSpace(pathParameter)
-            ? throw new ArgumentException($"Endpoint '{endpointId}' requires a path parameter (scenario action must set PathParamRef to a prior capture).", nameof(pathParameter))
+            ? throw new ArgumentException($"Endpoint '{endpointId}' requires a path parameter.", nameof(pathParameter))
             : pathParameter;
 
     public static string LinkFor(string linkId) => linkId switch
     {
-        KnownLinks.AspireDashboard => $"{AspireDashboardBaseUrl}/",
         KnownLinks.Jaeger => $"{JaegerBaseUrl}/",
-        KnownLinks.RepoGitHub => "https://github.com/loekd/CoreBankDemo",
-        KnownLinks.DevContainerDocs => "https://docs.github.com/en/codespaces/overview",
         _ => throw new ArgumentOutOfRangeException(nameof(linkId), linkId, "Unknown link."),
     };
 
@@ -66,12 +63,15 @@ public static class EndpointResolver
         [KnownResources.PaymentsApi] = 5294,
         [KnownResources.CoreBankApi] = 5032,
         [KnownResources.Jaeger] = 16686,
-        [KnownResources.AspireDashboard] = 15888,
     };
 
     public static readonly IReadOnlyDictionary<string, int> LoadTestProfilePorts = new Dictionary<string, int>
     {
+        [KnownResources.PaymentsApi] = 5295,
         [KnownResources.LoadTestSupport] = 5181,
         [KnownResources.CoreBankApi] = 5032,
     };
+
+    private static string PaymentsBaseUrl(TopologyProfile profile) =>
+        profile == TopologyProfile.LoadTests ? LoadPaymentsApiBaseUrl : RegularPaymentsApiBaseUrl;
 }

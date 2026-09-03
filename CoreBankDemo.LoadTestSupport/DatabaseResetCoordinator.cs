@@ -62,11 +62,6 @@ internal sealed class DatabaseResetCoordinator(
         await state.Mutex.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (state.Result is not null)
-            {
-                return state.Result;
-            }
-
             if (state.ReleaseFailure is not null)
             {
                 throw new InvalidOperationException(
@@ -74,13 +69,15 @@ internal sealed class DatabaseResetCoordinator(
                     state.ReleaseFailure);
             }
 
-            if (await startGatePublisher.HasReleaseGenerationAsync(cancellationToken).ConfigureAwait(false))
+            var alreadyReleased = state.Result is not null
+                || await startGatePublisher.HasReleaseGenerationAsync(cancellationToken).ConfigureAwait(false);
+            var result = await resetter.ResetAsync(cancellationToken).ConfigureAwait(false);
+            if (alreadyReleased)
             {
-                throw new InvalidOperationException(
-                    "Processors were already released; restart the load-test AppHost before resetting databases.");
+                state.Result = result;
+                return result;
             }
 
-            var result = await resetter.ResetAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 await startGatePublisher.ReleaseAsync(cancellationToken).ConfigureAwait(false);

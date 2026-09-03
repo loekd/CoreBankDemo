@@ -1,3 +1,4 @@
+using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
 
 namespace CoreBankDemo.DemoRunner.Infrastructure;
@@ -7,19 +8,24 @@ public sealed class HealthMonitor(HttpClient httpClient, TimeProvider time) : IH
 {
     public async Task<HealthStatus> CheckAsync(string resourceName, CancellationToken ct)
     {
+        return await CheckAsync(resourceName, TopologyProfile.Regular, ct);
+    }
+
+    public async Task<HealthStatus> CheckAsync(string resourceName, TopologyProfile profile, CancellationToken ct)
+    {
         try
         {
-            var url = EndpointResolver.HealthUrlFor(resourceName);
+            var url = EndpointResolver.HealthUrlFor(resourceName, profile);
             using var response = await httpClient.GetAsync(url, ct);
             return response.IsSuccessStatusCode ? HealthStatus.Healthy : HealthStatus.Unhealthy;
         }
         catch (HttpRequestException)
         {
-            return HealthStatus.Unhealthy;
+            return HealthStatus.Unreachable;
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
         {
-            return HealthStatus.Unknown;
+            return HealthStatus.Unreachable;
         }
     }
 

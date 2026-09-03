@@ -230,13 +230,9 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
         restNode["accountsReset"]!.GetValue<int>().Should().Be(2);
         restNode["totalBalance"]!.GetValue<decimal>().Should().Be(2 * LoadTestConstants.InitialBalance);
 
-        // DatabaseResetState is a singleton shared by this test's host, so this
-        // second call — through MCP, using the same coordinator instance as the
-        // REST call above — replays the cached result rather than resetting
-        // again. That is the existing DatabaseResetCoordinator idempotent-replay
-        // guarantee, now proven reachable through MCP: both calls' JSON is built
-        // from literally the same DatabaseResetResult, so field-for-field
-        // equality here also proves the two JSON-shaping code paths agree.
+        // The second call resets again but must not publish a second processor
+        // release generation. The unchanged result shape proves the REST and MCP
+        // paths stay field-for-field equivalent.
         using var scope = _host!.Services.CreateScope();
         var mcpJson = await LoadTestTools.ResetDatabase(scope.ServiceProvider, cancellationToken);
 
@@ -257,7 +253,7 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
     }
 
     [Fact]
-    public async Task ResetDatabase_called_twice_through_mcp_stays_idempotent()
+    public async Task ResetDatabase_called_twice_through_mcp_resets_twice_but_releases_once()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         using var scope = _host!.Services.CreateScope();
@@ -270,13 +266,8 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
     }
 
     [Fact]
-    public async Task ResetDatabase_when_the_coordinator_throws_returns_error_json_without_crashing()
+    public async Task ResetDatabase_after_existing_release_generation_resets_without_releasing_again()
     {
-        // Story 7.2 I/O Matrix: "reset_database when the coordinator throws ...
-        // MCP call does not crash the tool invocation ... Returns {error, detail}".
-        // Forces DatabaseResetCoordinator's own "already released" guard by
-        // reporting an existing release generation, rather than reimplementing
-        // that failure mode here.
         _publisher.Setup(p => p.HasReleaseGenerationAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         var cancellationToken = TestContext.Current.CancellationToken;
         using var scope = _host!.Services.CreateScope();
@@ -284,8 +275,8 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
         var json = await LoadTestTools.ResetDatabase(scope.ServiceProvider, cancellationToken);
 
         var node = JsonNode.Parse(json)!.AsObject();
-        node["error"]!.GetValue<string>().Should().Be("reset_failed");
-        node["detail"]!.GetValue<string>().Should().Contain("already released");
+        node.ContainsKey("error").Should().BeFalse();
+        node["message"]!.GetValue<string>().Should().Be("Database reset complete");
         _publisher.Verify(p => p.ReleaseAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
 

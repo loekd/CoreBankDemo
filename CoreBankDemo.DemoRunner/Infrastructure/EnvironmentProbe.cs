@@ -47,7 +47,20 @@ public sealed class EnvironmentProbe : IEnvironmentProbe
             process.Start();
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
-            await process.WaitForExitAsync(timeoutCts.Token);
+            try
+            {
+                await process.WaitForExitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    await process.WaitForExitAsync(CancellationToken.None);
+                }
+
+                return false;
+            }
             return process.ExitCode == 0;
         }
         catch (Exception ex) when (ex is Win32Exception or OperationCanceledException or InvalidOperationException)

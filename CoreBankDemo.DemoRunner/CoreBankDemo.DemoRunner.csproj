@@ -16,10 +16,4 @@
     <PackageReference Include="Terminal.Gui" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Content Include="Scenarios\mission-critical-talk-v7.json">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-  </ItemGroup>
-
 </Project>

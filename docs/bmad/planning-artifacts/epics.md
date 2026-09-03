@@ -660,33 +660,46 @@ As the demo owner, I want the end-to-end load test green, so that the rebuild is
 **Then** all five invariants pass; failures are triaged as code-bug vs harness-mismatch (harness adapts unless an invariant is genuinely violated)
 **And** a trace analysis (`corebank-trace-analysis` skill) shows intact traces across both hops.
 
-### Story 7.4: Presentation-safe terminal demo console
+### Story 7.4: Reusable terminal demo operator console
 
-As the speaker, I want a mouse-enabled terminal control room for my talks, so that I can preflight, rehearse, and run each live cue from one dependable place without juggling request files, terminals, configuration, and dashboards (NFR-5; human scope amendment 2026-08-29).
+As the demo operator, I want one reusable terminal console for topology control, payment demonstrations, recovery, load testing, and evidence, so that I can run different talks and answer unplanned audience questions without depending on a slide queue or juggling terminals, request files, and dashboards (NFR-5; human scope amendments 2026-08-29 and 2026-09-03).
 
 **Acceptance Criteria:**
 
-**Given** the standalone `CoreBankDemo.DemoRunner` console project
+**Given** the standalone `CoreBankDemo.DemoRunner` project
 **When** it starts locally
-**Then** it validates the selected talk scenario and prerequisites before launching or explicitly attaching to the required Aspire topology
-**And** it presents a three-pane terminal UI (talk cues, current cue, system confidence) with complete mouse and keyboard operation, responsive layout, and safe Run, Retry, Details, open-dashboard, and Stop actions.
+**Then** it opens a capability-driven Terminal.Gui shell with Operations, Resources, Evidence/Results, and Load Test one keypress away
+**And** it does not require or restore a talk scenario, slide anchor, cue checkpoint, rehearsal proof pack, or prior Passed state.
 
-**Given** the checked-in `MissionCriticalTalk-v7` scenario derived from the author's 55-slide deck
-**When** Show or Rehearsal mode reaches the live cues
-**Then** the runner pre-arms and gates “Inbox at work” (slide 42), the Aspire/k6 resilience proof (slides 45–52), and the development-environment hand-off (slide 53)
-**And** the load proof makes the deck's Run → Wait → Assert → Investigate phases and their evidence visible without inventing a second acceptance workflow.
+**Given** either the Regular or LoadTests AppHost
+**When** the operator starts, attaches, stops, or switches topology
+**Then** DemoRunner distinguishes Owned from Attached, shows the real Aspire graph, and resolves transitions only from supported Aspire CLI state
+**And** whole-AppHost Stop/Switch are forbidden when attached, while a fresh fingerprint match permits individually confirmed, allow-listed resource Start/Stop/Restart commands.
 
-**Given** any action is running, failed, cancelled, or ambiguous
-**When** the speaker tries to advance
-**Then** Next remains unavailable, duplicate activation is suppressed, and the current cue offers concise Retry, Details, or restart-from-checkpoint choices
-**And** the runner never embeds banking logic, connects directly to stores, mutates checked-in configuration, executes scenario-supplied shell commands, fakes live success, or stops an unowned process.
+**Given** the Operations workspace
+**When** the operator submits a standard or instant payment
+**Then** standard remains truthful `202 Pending`, instant shows committed `200 Completed`/`Failed` or durable fallback `202 Pending`, and Generated/Supplied/Omitted idempotency modes are explicit
+**And** stable-key resend, outcome query, bounded bursts, live counters, cancellation, and keyless ambiguity follow the Story 7.4 spec without automatic unsafe retries.
 
-**Given** Stories 7.1–7.3 are not yet done
-**When** Story 7.4 implementation proceeds
-**Then** the scenario model, state machine, process ownership, allow-listed adapters, TUI, and load-workflow presentation contract may be implemented and tested through ports and fakes
-**And** live LoadTestSupport binding, a successful five-invariant rehearsal proof pack, and Story 7.4 completion remain blocked until Stories 7.1–7.3 are done
-**When** Story 7.3 establishes the accepted load workflow
-**Then** Story 7.4 binds to those exact endpoints and evidence semantics, completes the live rehearsal and presentation-terminal dress rehearsal, and introduces no parallel assertion path.
+**Given** the Evidence/Results workspace
+**When** operations span topology switches or multiple runs
+**Then** bounded redacted request/response detail remains inspectable and every record is visibly labeled with its originating profile and run generation
+**And** a relaunch rehydrates only live Aspire/HTTP state and begins with empty operation history.
+
+**Given** the LoadTests topology
+**When** the operator confirms a load run
+**Then** DemoRunner uses the accepted Reset → Run → Wait → Assert → Investigate workflow, with Reset only as Run's first internal phase
+**And** all five invariants plus inline-instant-settlement evidence are shown independently from the existing k6/LoadTestSupport authority, with no parallel assertion path.
+
+**Given** any mutation is in flight or a destructive action is requested
+**When** the operator interacts by keyboard or mouse
+**Then** duplicate mutations are suppressed globally, read-only inspection remains available, the active burst's Cancel remains available, and destructive confirmation defaults focus to Cancel and requires explicit `Y`
+**And** all states remain text/symbol/color distinguishable and operable at 80×24 without requiring mouse input.
+
+**Given** the project graph and adapters
+**When** the implementation is inspected
+**Then** DemoRunner contains no banking implementation dependency, direct store/container integration, arbitrary command/URL, scenario-supplied shell, or private Aspire dashboard API
+**And** the existing `.http` files remain the supported manual fallback.
 
 ---
 

@@ -375,8 +375,10 @@ reported green. There is no SQLite or EF Core InMemory fallback anywhere in this
 The project includes comprehensive load tests that validate the system under concurrent load:
 
 ```bash
-# Run load tests with k6
-dotnet run --project CoreBankDemo.LoadTests
+# Start the disposable load-test topology and wait for the accepted k6 resource
+aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
+aspire wait loadtest-support --non-interactive
+aspire wait k6 --non-interactive
 ```
 
 **What it tests:**
@@ -401,43 +403,48 @@ The load test uses disposable PostgreSQL and Redis instances, seeded with 10 tes
 
 ## Presentation Console (DemoRunner)
 
-`CoreBankDemo.DemoRunner` is a standalone, mouse-and-keyboard terminal control room for rehearsing and running this talk reliably (Story 7.4, ADR-015). It is a local operator tool only: it references no banking implementation project, connects to no database/Redis/Dapr/container socket directly, and is never a prerequisite for development, tests, or the banking services themselves. It drives the exact same Payments/CoreBank/LoadTestSupport HTTP surface as `demo-requests.http` and `payment-idempotency-tests.http` — those files remain the supported, unchanged fallback whenever the runner is unavailable.
+`CoreBankDemo.DemoRunner` is a standalone, mouse-and-keyboard terminal operator console for live demonstrations (Story 7.4, ADR-015). It is a local tool only: it references no banking implementation project, connects to no database/Redis/Dapr/container socket directly, and is never a prerequisite for development, tests, or the banking services themselves. It uses only known HTTP endpoints and supported Aspire CLI operations. `demo-requests.http` and `payment-idempotency-tests.http` remain the supported fallback whenever the console is unavailable.
 
 ### One-command start
 
 ```bash
-# Pre-show prerequisite report — never starts an AppHost or sends a business request
-dotnet run --project CoreBankDemo.DemoRunner -- --doctor --scenario mission-critical-talk-v7
+# Open the reusable operator console
+dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj
 
-# Speaker-paced live control room
-dotnet run --project CoreBankDemo.DemoRunner -- --show --scenario mission-critical-talk-v7
-
-# Unattended pass through every actionable cue, producing a timestamped proof pack
-dotnet run --project CoreBankDemo.DemoRunner -- --rehearse --scenario mission-critical-talk-v7
-
-# Resume from the last proven checkpoint after Ctrl+C, a crash, or a runner restart
-dotnet run --project CoreBankDemo.DemoRunner -- --show --scenario mission-critical-talk-v7 --resume
+# Print prerequisites and current port state; starts nothing
+dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj -- --doctor
 ```
 
-### Shortcuts (full keyboard parity — mouse is never required)
+The console has four capability-driven workspaces:
+
+1. **Operations** — submit standard or instant payments, choose Generated/Supplied/Omitted idempotency, resend a stable key, query outcomes, and run cancellable bounded bursts.
+2. **Resources** — start or attach Regular/LoadTests, stop or switch only runner-owned AppHosts, and run confirmed allow-listed resource Start/Stop/Restart commands against a freshly fingerprinted graph.
+3. **Evidence/Results** — inspect bounded redacted request/response evidence with topology and generation provenance, optionally wrap the raw view, and explicitly export the current session.
+4. **Load Test** — run the accepted Reset → Run → Wait → Assert → Investigate workflow and read the five invariants plus inline-instant-settlement evidence.
+
+### Shortcuts
 
 | Key | Action |
 |---|---|
-| `Enter` | Run the current cue |
-| `Ctrl+R` | Retry the current cue |
-| `N` | Next (only enabled once the current cue has Passed) |
-| `I` | Investigate (only enabled after a Failed cue, when the cue offers extra diagnostics) |
+| `1` | Operations |
+| `2` | Resources |
+| `3` | Evidence/Results |
+| `4` | Load Test |
+| `R` | Refresh live Aspire state |
 | `Q` | Quit (stops only child processes this session started; never touches an attached/unowned topology) |
 
-### Recovery and rehearsal fallback
+All mouse actions have keyboard equivalents. Destructive actions open a modal with **Cancel focused**; uppercase `Y` confirms and Escape cancels. At 80×24 the navigation rail compacts but remains visible.
 
-- A cue is never marked Passed on a guess: failed/ambiguous/cancelled cues keep **Next** disabled and offer **Retry**/**Details**. Retrying reuses the same deterministic idempotency key, so it is always safe to press.
-- If a live cue cannot be recovered inside the talk window, the speaker may show the most recent fully-successful rehearsal proof pack instead — always visibly labelled **REHEARSAL** with its timestamp, source commit, and scenario version. It never replaces or recolors the live cue's Failed state.
-- Local run artifacts (journal, captured output, rehearsal proof packs) live under the gitignored `.demo-runner-artifacts/` directory at the repo root and are never checked in.
+### Recovery and evidence
+
+- Resource and topology transitions resolve only from fresh Aspire snapshots. `Unknown` and `Unreachable` are distinct and disable mutation.
+- Generated and supplied idempotency keys are stable for **Resend same key**. Omitted-key ambiguity is labeled `Ambiguous — not yet reconciled` and is never retried automatically.
+- Evidence is session-local and never restored on relaunch. Explicit exports are written under the gitignored `.demo-runner-exports/` directory.
+- A topology switch retains earlier evidence with its original profile and run-generation label.
 
 ### Manual fallback
 
-If the runner is unavailable for any reason, the talk remains fully runnable by hand: use `demo-requests.http` / `payment-idempotency-tests.http` directly against the regular AppHost, and the **load-test**/**aspire-launch** skills (or `aspire` CLI) for the resilience proof. Banking behavior is identical either way — the runner only adds preflight checks, evidence gating, and a proof pack on top of the same requests.
+If the console is unavailable, use `demo-requests.http` / `payment-idempotency-tests.http` directly against the regular AppHost and the load-test/Aspire workflow for the acceptance proof. Banking behavior is unchanged.
 
 ## Architecture & Technical Details
 

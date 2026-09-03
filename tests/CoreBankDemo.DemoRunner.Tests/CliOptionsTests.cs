@@ -7,52 +7,45 @@ namespace CoreBankDemo.DemoRunner.Tests;
 public class CliOptionsTests
 {
     [Fact]
-    public void Parse_NoArgs_DefaultsToShowFalseAndDefaultScenario()
+    public void Parse_NoArguments_StartsConsole()
     {
         var options = CliOptions.Parse([]);
 
+        options.IsValid.Should().BeTrue();
         options.Doctor.Should().BeFalse();
-        options.Show.Should().BeFalse();
-        options.Rehearse.Should().BeFalse();
-        options.Resume.Should().BeFalse();
-        options.ScenarioName.Should().Be(CliOptions.DefaultScenarioName);
+        options.Help.Should().BeFalse();
     }
 
     [Theory]
-    [InlineData("--doctor")]
+    [InlineData("--doctor", true, false)]
+    [InlineData("--help", false, true)]
+    [InlineData("-h", false, true)]
+    public void Parse_SupportedOptions_AreRecognized(string value, bool doctor, bool help)
+    {
+        var options = CliOptions.Parse([value]);
+
+        options.Doctor.Should().Be(doctor);
+        options.Help.Should().Be(help);
+        options.Errors.Should().BeEmpty();
+    }
+
+    [Theory]
     [InlineData("--show")]
     [InlineData("--rehearse")]
+    [InlineData("--scenario")]
     [InlineData("--resume")]
-    public void Parse_EachFlag_IsRecognizedIndependently(string flag)
+    public void Parse_RetiredCueOptions_AreRejected(string value)
     {
-        var options = CliOptions.Parse([flag]);
+        var options = CliOptions.Parse([value]);
 
-        (options.Doctor || options.Show || options.Rehearse || options.Resume).Should().BeTrue();
+        options.IsValid.Should().BeFalse();
+        options.Errors.Single().Should().Contain("retired");
     }
 
     [Fact]
-    public void Parse_ScenarioFlag_OverridesDefaultName()
+    public void Parse_UnknownOption_IsRejected()
     {
-        var options = CliOptions.Parse(["--scenario", "my-other-talk"]);
-
-        options.ScenarioName.Should().Be("my-other-talk");
-    }
-
-    [Fact]
-    public void Parse_CombinedFlags_AllApply()
-    {
-        var options = CliOptions.Parse(["--rehearse", "--scenario", "talk-x", "--resume"]);
-
-        options.Rehearse.Should().BeTrue();
-        options.Resume.Should().BeTrue();
-        options.ScenarioName.Should().Be("talk-x");
-    }
-
-    [Fact]
-    public void Parse_ScenarioFlagWithoutValue_IsIgnoredSafely()
-    {
-        var act = () => CliOptions.Parse(["--scenario"]);
-
-        act.Should().NotThrow();
+        CliOptions.Parse(["--shell"]).Errors.Single().Should().Contain("Unknown");
+        CliOptions.HelpText.Should().Contain("reusable terminal operator console");
     }
 }

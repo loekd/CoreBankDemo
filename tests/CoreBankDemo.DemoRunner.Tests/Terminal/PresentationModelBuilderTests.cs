@@ -1,10 +1,7 @@
 using AwesomeAssertions;
-using CoreBankDemo.DemoRunner.Application.Ports;
-using CoreBankDemo.DemoRunner.Application.Scenarios;
-using CoreBankDemo.DemoRunner.Application.StateMachine;
+using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
-using Moq;
 using Xunit;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
@@ -12,94 +9,100 @@ namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 public class PresentationModelBuilderTests
 {
     [Fact]
-    public async Task Build_AvailableCue_ShowsRunEnabledAndNextDisabled()
+    public void Build_EmptyState_ShowsFourWorkspacesAndColdPlaceholders()
     {
-        var harness = new SessionControllerHarness();
-        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a"), TestScenarios.SimpleCue("b"));
-        var controller = harness.Build(scenario);
+        var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty);
 
-        var model = PresentationModelBuilder.Build(controller, new Dictionary<string, HealthStatus> { ["payments-api"] = HealthStatus.Healthy });
-
-        model.Current.CanRun.Should().BeTrue();
-        model.Current.CanNext.Should().BeFalse();
-        model.Current.CanRetry.Should().BeFalse();
-        model.Cues.Should().HaveCount(2);
-        model.Cues[0].StatusSymbol.Should().Be("○");
-        model.Cues[1].StatusSymbol.Should().Be("○");
-        await Task.CompletedTask;
+        model.Navigation.Should().HaveCount(4);
+        model.Navigation.Should().Contain(item => item.Shortcut == "1" && item.Label == "Operations");
+        model.EvidenceStrip.Should().Be("No actions yet this session.");
+        model.LoadResults.Should().HaveCount(6);
+        model.LoadResults.Should().OnlyContain(value => value.Contains("not yet observed"));
     }
 
     [Fact]
-    public async Task Build_PassedCue_ShowsNextEnabledAndCorrectSymbol()
+    public void Build_ResourceStates_UseSymbolTextAndStableActions()
     {
-        var harness = new SessionControllerHarness();
-        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a"), TestScenarios.SimpleCue("b"));
-        var controller = harness.Build(scenario);
-        await controller.RunCurrentAsync(CancellationToken.None);
-
-        var model = PresentationModelBuilder.Build(controller, new Dictionary<string, HealthStatus>());
-
-        model.Current.CanNext.Should().BeTrue();
-        model.Cues[0].StatusSymbol.Should().Be("✓");
-    }
-
-    [Fact]
-    public async Task Build_FailedCue_ShowsRetryEnabledAndFailSymbol()
-    {
-        var harness = new SessionControllerHarness();
-        harness.Http.Setup(h => h.SendAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>(), It.IsAny<IReadOnlyDictionary<string, string>?>()))
-            .ReturnsAsync(HttpActionResult.Error(500, "boom"));
-        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a", actions:
-        [
-            new ScenarioActionDefinition { Kind = ActionKind.SendHttp, EndpointId = KnownEndpoints.PaymentsSubmit, Method = "POST" },
-        ]));
-        var controller = harness.Build(scenario);
-        await controller.RunCurrentAsync(CancellationToken.None);
-
-        var model = PresentationModelBuilder.Build(controller, new Dictionary<string, HealthStatus>());
-
-        model.Current.CanRetry.Should().BeTrue();
-        model.Current.CanNext.Should().BeFalse();
-        model.Cues[0].StatusSymbol.Should().Be("✗");
-    }
-
-    [Fact]
-    public void Build_ConfidenceRows_MapHealthStatusToSymbol()
-    {
-        var harness = new SessionControllerHarness();
-        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a"));
-        var controller = harness.Build(scenario);
-
-        var model = PresentationModelBuilder.Build(controller, new Dictionary<string, HealthStatus>
+        var resources = new[]
         {
-            ["payments-api"] = HealthStatus.Healthy,
-            ["corebank-api"] = HealthStatus.Unhealthy,
-            ["postgres"] = HealthStatus.Unknown,
-        });
+            new ResourceSnapshot(KnownResources.CoreBankApi, ResourceCondition.Healthy, "Healthy", ["http://core"], 2),
+            new ResourceSnapshot(KnownResources.PaymentsApi, ResourceCondition.Stopped, "Stopped", []),
+            new ResourceSnapshot(KnownResources.Redis, ResourceCondition.Unreachable, "Unreachable", []),
+            new ResourceSnapshot(KnownResources.Postgres, ResourceCondition.Failed, "Failed", []),
+        };
+        var snapshot = OperatorHarness.Snapshot(TopologyProfile.Regular, resources: resources);
+        var state = OperatorConsoleState.Empty with
+        {
+            Profile = TopologyProfile.Regular,
+            Ownership = TopologyOwnership.Attached,
+            RunGeneration = 3,
+            Topology = snapshot,
+            ResourceAuthorityAvailable = true,
+        };
 
-        model.Confidence.Single(c => c.ResourceName == "payments-api").Symbol.Should().Be("●");
-        model.Confidence.Single(c => c.ResourceName == "corebank-api").Symbol.Should().Be("✗");
-        model.Confidence.Single(c => c.ResourceName == "postgres").Symbol.Should().Be("◐");
+        var model = PresentationModelBuilder.Build(state);
+
+        model.TopologyBar.Should().Contain("Regular").And.Contain("Attached");
+        model.Resources.Should().Contain(row => row.Name == KnownResources.CoreBankApi && row.Symbol == "●" && row.NextAction == "Stop");
+        model.Resources.Should().Contain(row => row.Name == KnownResources.PaymentsApi && row.Symbol == "○" && row.NextAction == "Start");
+        model.Resources.Should().Contain(row => row.Name == KnownResources.Redis && row.State == "Unreachable" && !row.CanMutate);
+        model.Resources.Should().Contain(row => row.Name == KnownResources.Postgres && row.Symbol == "✕" && row.NextAction == "Restart");
     }
 
     [Fact]
-    public void Build_ConfidenceRows_UseSpeakerFacingFriendlyLabelsNotRawResourceIds()
+    public void Build_EvidenceAndLoadResults_ShowProvenanceAndIndividualVerdicts()
     {
-        var harness = new SessionControllerHarness();
-        var scenario = TestScenarios.Build(TestScenarios.SimpleCue("a"));
-        var controller = harness.Build(scenario);
-
-        var model = PresentationModelBuilder.Build(controller, new Dictionary<string, HealthStatus>
+        var evidence = new EvidenceRecord(
+            7,
+            DateTimeOffset.UnixEpoch,
+            TopologyProfile.LoadTests,
+            4,
+            EvidenceKind.LoadTest,
+            "Load workflow passed",
+            "accepted load workflow",
+            "load",
+            null,
+            TimeSpan.FromSeconds(2),
+            "raw",
+            true);
+        var result = LoadWorkflowResult.Success(
+            [new InvariantResult("Exactly-once processing", true, "ok")],
+            new InlineSettlementResult(true, "count=20"),
+            "raw");
+        var state = OperatorConsoleState.Empty with
         {
-            [KnownResources.PaymentsApi] = HealthStatus.Healthy,
-            [KnownResources.CoreBankApi] = HealthStatus.Healthy,
-            [KnownResources.Dapr] = HealthStatus.Healthy,
-            [KnownResources.LoadTestSupport] = HealthStatus.Healthy,
-        });
+            Profile = TopologyProfile.LoadTests,
+            Ownership = TopologyOwnership.Owned,
+            RunGeneration = 4,
+            Evidence = [evidence],
+            SelectedEvidence = evidence,
+            LastLoadResult = result,
+        };
 
-        model.Confidence.Single(c => c.ResourceName == KnownResources.PaymentsApi).Label.Should().Be("Payments API");
-        model.Confidence.Single(c => c.ResourceName == KnownResources.CoreBankApi).Label.Should().Be("CoreBank API");
-        model.Confidence.Single(c => c.ResourceName == KnownResources.Dapr).Label.Should().Be("Dapr pub/sub");
-        model.Confidence.Single(c => c.ResourceName == KnownResources.LoadTestSupport).Label.Should().Be("Load harness");
+        var model = PresentationModelBuilder.Build(state);
+
+        model.Evidence.Single().Provenance.Should().Contain("LoadTests · generation 4");
+        model.SelectedEvidenceDetail.Should().Contain("raw");
+        model.LoadResults.Should().Contain(value => value.Contains("Inline instant settlement"));
+        model.CanStopOrSwitch.Should().BeTrue();
+        model.CanUseLoadTest.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Build_ActiveBurst_LeavesOnlyBurstCancelFlagEnabled()
+    {
+        var state = OperatorConsoleState.Empty with
+        {
+            ActiveMutation = new ActiveMutation(MutationKind.PaymentBurst, "burst", DateTimeOffset.UnixEpoch),
+            Burst = new BurstProgress(10, 3, 3, 0, 0, false),
+            CanResendLastPayment = true,
+        };
+
+        var model = PresentationModelBuilder.Build(state);
+
+        model.IsBusy.Should().BeTrue();
+        model.CanCancelBurst.Should().BeTrue();
+        model.CanResend.Should().BeFalse();
+        model.BurstStatus.Should().Contain("3/10");
     }
 }

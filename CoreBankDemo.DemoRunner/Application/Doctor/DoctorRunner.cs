@@ -1,5 +1,4 @@
 using CoreBankDemo.DemoRunner.Application.Ports;
-using CoreBankDemo.DemoRunner.Application.Scenarios;
 
 namespace CoreBankDemo.DemoRunner.Application.Doctor;
 
@@ -9,53 +8,65 @@ public sealed record DoctorCheckResult(string Name, bool Passed, string Remediat
     public static DoctorCheckResult Fail(string name, string remediation) => new(name, false, remediation);
 }
 
-public sealed record DoctorReport(IReadOnlyList<DoctorCheckResult> Checks, TalkScenarioDefinition? Scenario)
+public sealed record DoctorReport(IReadOnlyList<DoctorCheckResult> Checks)
 {
-    public bool AllPassed => Checks.All(c => c.Passed);
+    public bool AllPassed => Checks.All(check => check.Passed);
 }
 
-/// <summary>
-/// Runs the pre-show prerequisite report. Never starts an AppHost process or sends a
-/// business request — only reads local prerequisite state, per the doctor I/O-matrix row.
-/// </summary>
-public sealed class DoctorRunner(IEnvironmentProbe environment, IHealthMonitor health)
+public sealed record DoctorPortRequirement(TopologyProfile Profile, string ResourceName, int Port);
+
+public sealed class DoctorRunner(
+    IEnvironmentProbe environment,
+    IHealthMonitor health,
+    IAspireAdapter aspire)
 {
-    public async Task<DoctorReport> RunAsync(string scenarioPath, IReadOnlyDictionary<string, int> requiredPorts, CancellationToken ct)
+    public async Task<DoctorReport> RunAsync(
+        IReadOnlyList<DoctorPortRequirement> requiredPorts,
+        CancellationToken ct)
     {
-        var checks = new List<DoctorCheckResult>();
-
-        var loadResult = ScenarioLoader.LoadFromFile(scenarioPath);
-        checks.Add(loadResult.IsValid
-            ? DoctorCheckResult.Ok("Scenario valid")
-            : DoctorCheckResult.Fail("Scenario valid", string.Join(" | ", loadResult.Errors)));
-
-        checks.Add(await environment.IsDotnetSdkAvailableAsync(ct)
-            ? DoctorCheckResult.Ok(".NET SDK available")
-            : DoctorCheckResult.Fail(".NET SDK available", "Install the .NET 10 SDK and ensure 'dotnet' is on PATH."));
-
-        checks.Add(await environment.IsAspireCliAvailableAsync(ct)
-            ? DoctorCheckResult.Ok("Aspire CLI available")
-            : DoctorCheckResult.Fail("Aspire CLI available", "Install the Aspire CLI ('dotnet tool install -g aspire.cli' or see aspire docs)."));
-
-        checks.Add(await environment.IsContainerRuntimeAvailableAsync(ct)
-            ? DoctorCheckResult.Ok("Container runtime available")
-            : DoctorCheckResult.Fail("Container runtime available", "Start Docker (or your configured container runtime) before the talk."));
-
-        foreach (var (resourceName, port) in requiredPorts)
+        var checks = new List<DoctorCheckResult>
         {
-            var isFree = await environment.IsPortFreeAsync(port, ct);
-            if (isFree)
+            await environment.IsDotnetSdkAvailableAsync(ct)
+                ? DoctorCheckResult.Ok(".NET SDK available")
+                : DoctorCheckResult.Fail(".NET SDK available", "Install the .NET 10 SDK and ensure 'dotnet' is on PATH."),
+            await environment.IsAspireCliAvailableAsync(ct)
+                ? DoctorCheckResult.Ok("Aspire CLI available")
+                : DoctorCheckResult.Fail("Aspire CLI available", "Install the Aspire CLI and ensure 'aspire' is on PATH."),
+            await environment.IsContainerRuntimeAvailableAsync(ct)
+                ? DoctorCheckResult.Ok("Container runtime available")
+                : DoctorCheckResult.Fail("Container runtime available", "Start Docker or the configured container runtime."),
+        };
+
+        foreach (var requirement in requiredPorts)
+        {
+            if (await environment.IsPortFreeAsync(requirement.Port, ct))
             {
-                checks.Add(DoctorCheckResult.Ok($"Port {port} ({resourceName})", "free — ready to Start"));
+                checks.Add(DoctorCheckResult.Ok(
+                    $"Port {requirement.Port} ({requirement.Profile}/{requirement.ResourceName})",
+                    "free — Start available"));
                 continue;
             }
 
-            var probeStatus = await health.CheckAsync(resourceName, ct);
+            var probeStatus = await health.CheckAsync(requirement.ResourceName, requirement.Profile, ct);
             checks.Add(probeStatus == HealthStatus.Healthy
-                ? DoctorCheckResult.Ok($"Port {port} ({resourceName})", "occupied by a healthy matching resource — Attach available")
-                : DoctorCheckResult.Fail($"Port {port} ({resourceName})", $"Port {port} is occupied by an unrecognized or unhealthy process. Free it before starting."));
+                ? DoctorCheckResult.Ok($"Port {requirement.Port} ({requirement.Profile}/{requirement.ResourceName})", "occupied by a healthy known endpoint — Attach may be available after fingerprint verification")
+                : DoctorCheckResult.Fail($"Port {requirement.Port} ({requirement.Profile}/{requirement.ResourceName})", "occupied by an unknown or unhealthy process"));
         }
 
-        return new DoctorReport(checks, loadResult.Scenario);
+        var discovered = await aspire.DiscoverAsync(ct);
+        foreach (var profile in KnownTopologyProfiles.All)
+        {
+            var snapshot = discovered.FirstOrDefault(item => item.Profile == profile);
+            checks.Add(snapshot switch
+            {
+                null => DoctorCheckResult.Ok($"{profile} topology", "not running — Start available"),
+                { IsReady: true } => DoctorCheckResult.Ok($"{profile} topology", "running, healthy, fingerprint verified — Attach available"),
+                _ => DoctorCheckResult.Fail(
+                    $"{profile} topology",
+                    snapshot.ErrorSummary ?? "A partial or unhealthy graph is running; inspect Aspire before attaching."),
+            });
+        }
+
+        return new DoctorReport(checks);
     }
 }

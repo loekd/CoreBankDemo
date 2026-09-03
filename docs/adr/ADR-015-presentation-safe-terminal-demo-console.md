@@ -1,19 +1,23 @@
-# ADR-015: Presentation-safe terminal demo console
+# ADR-015: Reusable terminal demo operator console
 
 **Date:** 2026-08-29
 **Status:** Accepted
-**Deciders:** Architecture team (human scope amendment 2026-08-29, Story 7.4)
+**Deciders:** Architecture team (human scope amendments 2026-08-29 and 2026-09-03, Story 7.4)
 **Supersedes:** None
 
 ## Context
 
-Running the conference demo asks the speaker to coordinate several fragile surfaces by hand: an Aspire process, health checks, `.http` requests, DevProxy fault configuration, logs, and browser dashboards. A missed prerequisite, a double-clicked action, a stale process, or a hidden assertion failure can derail the narrative even when the banking system itself is correct.
+Running a conference demo asks the operator to coordinate several fragile surfaces by hand: Aspire processes, health checks, `.http` requests, standard and instant payments, DevProxy fault configuration, load testing, logs, and browser dashboards. A missed prerequisite, duplicate action, stale process, or hidden assertion failure can derail the demonstration even when the banking system itself is correct.
 
-The PRD's broad "no UI" non-goal targets a banking-product UI. The user has explicitly requested a mouse-enabled terminal console for presentation tooling — a narrower, human-approved amendment that does not authorize a banking UI, a new banking endpoint, or a change to the external contract frozen by AD-1/ADR-008. This ADR records the boundary and rules a standalone console must follow so the exception cannot creep into the banking runtime.
+The first Story 7.4 implementation interpreted this need as a scenario-driven cue player tied to one slide deck. Operational use showed that model was too rigid: the same safe capabilities must support multiple talks and unplanned audience questions. The user explicitly replaced the cue queue, slide anchors, `Next` gating, checkpoint resume, and rehearsal-proof fallback with a reusable capability-driven operator console.
+
+The PRD's broad "no UI" non-goal targets a banking-product UI. The mouse-enabled terminal console remains a narrower, human-approved presentation-tool exception that does not authorize a banking UI, a new banking endpoint, or a change to the external contract frozen by AD-1/ADR-008.
 
 ## Decision
 
-Add a standalone .NET 10 console project, `CoreBankDemo.DemoRunner`, that operates entirely outside the banking runtime as a local operator tool. It never becomes a prerequisite for development, tests, or the banking services themselves.
+Maintain the standalone .NET 10 `CoreBankDemo.DemoRunner`, but organize it as a reusable operator console rather than a talk-scenario runtime. Its primary information architecture is **Operations**, **Resources**, **Evidence/Results**, and **Load Test**, with a persistent topology bar and evidence strip. Named talks validate capability coverage but never define navigation.
+
+DemoRunner operates entirely outside the banking runtime and never becomes a prerequisite for development, tests, or the banking services themselves.
 
 ### Standalone local-tool boundary
 
@@ -21,30 +25,34 @@ Add a standalone .NET 10 console project, `CoreBankDemo.DemoRunner`, that operat
 
 ### Terminal.Gui as the pinned TUI adapter
 
-Terminal.Gui's stable v2 line is the only UI package, pinned centrally at **2.4.17** in `Directory.Packages.props` (one version for the whole repo, consistent with existing central package management). The package boundary stays thin: `Terminal/` renders immutable presentation-state view models and emits user intents onto the application's command channel; it contains no scenario, process, or HTTP logic. This keeps the state machine, pre-arm logic, and evidence gating unit-testable without a real terminal — Terminal.Gui rendering is exercised only behind a thin, fake-able adapter interface.
+Terminal.Gui's stable v2 line is the only UI package, pinned centrally at **2.4.17** in `Directory.Packages.props` (one version for the whole repo, consistent with existing central package management). The package boundary stays thin: `Terminal/` renders immutable presentation-state view models and emits user intents onto the application's command channel; it contains no process or HTTP logic. This keeps application state, authority rules, and evidence handling unit-testable without a real terminal — Terminal.Gui rendering is exercised only behind a thin, fake-able adapter interface.
 
-### Allow-listed scenario-action model, not arbitrary shell execution
+### Typed capability model, not scenarios or arbitrary commands
 
-Scenario files (e.g. `mission-critical-talk-v7.json`) are data, never scripts. A cue's `actions` array may only contain a closed set of strongly typed action kinds: `selectTopology`, `waitForHealth`, `sendHttp`, `runAcceptedLoadWorkflow`, `assertHttp`, `openKnownUrl`, `speakerPause`. The scenario loader deserializes into a closed discriminated union and **rejects unknown action kinds or unknown fields** at validation time, before any process starts. No action kind may carry a process path, shell text, database statement, or arbitrary URL — `openKnownUrl` resolves only against a compiled allow-list of known dashboard/link targets (Aspire dashboard, Jaeger, repo/dev-environment links), and `sendHttp`/`assertHttp` resolve only against a compiled allow-list of known local endpoints (PaymentsAPI, CoreBankAPI, LoadTestSupport). Starting a known Aspire profile (`selectTopology`) is application configuration selecting between two known `AppHost` project paths, not a scenario-supplied command.
+The application accepts typed operator intents for a closed set of capabilities: select/start/attach/stop/switch a known AppHost profile; inspect a known topology; start/stop/restart an allow-listed Aspire resource; submit/query a payment through known local endpoints; run/cancel a bounded payment burst; execute the accepted load workflow; inspect/export evidence; and open a known dashboard URL.
 
-### Process ownership, attach, cleanup, journaling, redaction
+There is no scenario-provided process path, shell text, database statement, unrestricted URL, or arbitrary executable. `mission-critical-talk-v7.json`, cue/slide navigation, `--scenario`, `--show`, `--rehearse`, and `--resume` are retired from the supported product path.
+
+### Process ownership, attach, cleanup, and evidence
 
 - **Ownership:** the process adapter starts the exact known AppHost project (`CoreBankDemo.AppHost` or `CoreBankDemo.LoadTests`) as a tracked child process tree and records that PID tree as *owned* for the session.
-- **Attach:** if the expected ports are already occupied by a healthy, fingerprint-matching topology (same known service set responding on the documented ports/health routes), the runner offers an explicit Attach action instead of starting a second instance. Attached processes are marked *unowned* and are never stopped, restarted, or treated as a healthy match without fingerprint verification; an unknown or partially healthy graph is rejected outright.
+- **Attach:** if a healthy topology matches the expected resource/service/endpoint fingerprint, the runner offers explicit Attach instead of starting a second instance. Attached processes remain *unowned*: whole-AppHost Stop and Switch are forbidden. A fresh fingerprint match separately grants **resource-command authority** for allow-listed `aspire resource <resource> start|stop|restart` operations. Every disruptive resource command is individually confirmed; fingerprint loss or stale/unparseable state revokes that authority until a fresh match succeeds.
 - **Cleanup:** on normal exit, cancellation, or Ctrl+C, only owned child trees receive graceful cancellation (SIGINT/close-then-wait) before forced termination; unowned/attached processes are never touched. No broad process-name or port-based kill command is ever issued.
-- **Journal:** a local, append-only, gitignored journal records facts only — `session`, `scenarioVersion`, `sourceCommit`, `slideAnchor`, `cue`, `phase`, `state`, `timestamp`, and a bounded evidence summary. It never records secrets, credentials, or unbounded raw response/log bodies; captured output is truncated and redacted (e.g. `Idempotency-Key`/`Authorization` header values are never persisted verbatim). An interrupted `Running` cue recovers as **Ambiguous**, never as `Passed`, on next launch.
+- **Session evidence:** operation records are bounded and redacted and carry topology/profile plus run-generation provenance. They may be exported explicitly, but are not a recovery journal. On relaunch DemoRunner re-reads live Aspire/HTTP state and starts with empty operation history; it never restores a prior Passed state or checkpoint.
 
-### Fail-closed cue gate improves reliability without claiming infallibility
+### Truthful operational state improves reliability without claiming infallibility
 
-"Cannot fail" is a presentation-safety contract, not a false availability guarantee: the underlying banking system can still fail. The console's job is to catch common problems before the talk (`--doctor`), refuse to advance the narrative on unproven evidence (`Next` stays disabled until the current cue's assertion passes), make failures visible in plain language with bounded diagnostic detail, and preserve the last proven checkpoint. Assertions, health probes, and timeouts are first-class typed results — never inferred from elapsed wall-clock time or by pattern-matching log text — so a truthful failure is always distinguishable from a truthful pass.
+"Presentation safe" is not an availability guarantee. Assertions, health probes, resource transitions, payment outcomes, ambiguity, and timeouts are typed results and are never inferred from elapsed time or log text. `202 Pending` is durable uncertainty, not failure. Old evidence remains visible only with unmistakable topology/generation provenance. A failed live operation is never replaced or recolored by previous evidence.
 
-### Slide/talk anchors are presentation metadata, not a runtime dependency
+### Single mutation lock and destructive confirmation
 
-Each cue stores a `slideAnchor` (e.g. `42`, `45-52`, `53`) and a short speaker note as descriptive metadata sourced from the author's deck. The scenario schema does not parse, embed, or require the PDF at runtime; the anchor exists purely to align the operator's screen with what the speaker is saying. Future talks add a new validated scenario file rather than forking the runner or coupling it to a specific deck format.
+Only one mutating operation may be in flight across the console. Read-only inspection remains available, and the active burst's own Cancel is the sole exception. Resource Stop/Restart, whole-AppHost Stop/Switch, and Load Test Run require a modal naming the exact target and command. Cancel receives initial focus; `Y` confirms and Escape cancels. There is no hold gesture or double-Enter confirmation.
 
-### Rehearsal fallback is labelled evidence, never a substitute live success
+### Payment and load-test semantics remain owned by their existing contracts
 
-If a live cue cannot be recovered safely within the talk window (Retry and topology recovery both fail), the speaker may choose to display the most recent **fully successful rehearsal proof pack** as reference evidence. That evidence is always rendered with a visible `REHEARSAL` label, its timestamp, source commit, and scenario version, and it never recolors, journals, or reports the live cue as `Passed`. Promotion of a proof pack to "last known good" happens only after a complete rehearsal run (all cues, all five load invariants, cleanup) passes end-to-end.
+Payment operations present ADR-018 exactly: standard is `202 Pending`; instant is committed `200 Completed`/`Failed` or truthful `202 Pending`. Generated and supplied idempotency keys remain stable for resend; omitted-key ambiguity is never retried automatically.
+
+The Load Test workspace is an adapter over the accepted Reset → Run → Wait → Assert → Investigate workflow. Reset is Run's first internal phase and applies only to disposable LoadTests state. DemoRunner displays the five invariants and inline-instant-settlement evidence from k6/LoadTestSupport; it does not create another assertion authority.
 
 ### `.http` files remain the supported fallback and behavioral oracle
 
@@ -53,31 +61,31 @@ If a live cue cannot be recovered safely within the talk window (Retry and topol
 ## Implementation
 
 - `CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj` — standalone net10.0 executable; `Terminal.Gui` package reference only, version resolved centrally.
-- `CoreBankDemo.DemoRunner/Program.cs` — composition root; `--doctor`/`--show`/`--rehearse`/`--scenario`/`--resume` argument binding only.
-- `CoreBankDemo.DemoRunner/Scenarios/mission-critical-talk-v7.json` — checked-in, versioned, schema-validated scenario data.
-- `CoreBankDemo.DemoRunner/Application/` — scenario validation, the cue/phase state machine, the Run→Wait→Assert→Investigate load workflow, checkpoint policy, and the session controller behind ports for process, HTTP, health, browser, proof pack, journal, and time.
-- `CoreBankDemo.DemoRunner/Infrastructure/` — the owned Aspire child-process adapter, HTTP/LoadTestSupport action executor, health monitor, browser opener, proof-pack writer, bounded/redacted journal.
-- `CoreBankDemo.DemoRunner/Terminal/` — Terminal.Gui views/layouts/bindings/theme, no scenario or process logic.
-- `tests/CoreBankDemo.DemoRunner.Tests/` — state-machine, validation, pre-arm, idempotency, ownership, recovery, provenance, and redaction tests using fakes/Moq.
+- `CoreBankDemo.DemoRunner/Program.cs` — composition root and ordinary operator-console CLI binding only.
+- `CoreBankDemo.DemoRunner/Application/` — typed topology/resource/payment/burst/evidence/load state and commands behind process, Aspire, HTTP, health, browser, export, and time ports.
+- `CoreBankDemo.DemoRunner/Infrastructure/` — owned Aspire process lifecycle, supported Aspire state/resource CLI, allow-listed HTTP/LoadTestSupport operations, health monitor, browser opener, and bounded/redacted evidence export.
+- `CoreBankDemo.DemoRunner/Terminal/` — the four-workspace Terminal.Gui shell, bindings, responsive layout, confirmation modal, and theme; no process/HTTP/business logic.
+- `tests/CoreBankDemo.DemoRunner.Tests/` — application-state, ownership/authority, resource transition, payment/idempotency, burst/cancellation, evidence provenance, load workflow, recovery, redaction, and presentation-model tests.
 - `Directory.Packages.props` pins `Terminal.Gui` at `2.4.17`; `CoreBankDemo.sln`/`CoreBankDemo.Rebuild.slnf` add both projects to the ordinary gate.
-- `.gitignore` excludes only the generated local artifacts directory (journals, captured output, rehearsal proof packs).
+- `.gitignore` excludes only generated local artifacts such as captured output and explicit evidence exports.
 
-Story 7.4 owns this implementation, reusing Story 7.1–7.3's accepted LoadTestSupport/k6 workflow and evidence sources for the load cue rather than inventing a parallel assertion path.
+Story 7.4 owns this implementation and reuses the accepted LoadTestSupport/k6 workflow and evidence sources rather than inventing a parallel assertion path.
 
 ## Consequences
 
 ### Positive
 
-- The speaker gets one dependable, testable control surface instead of five fragile manual surfaces, without touching the banking contract.
-- The allow-listed action model and closed project-graph boundary make "no banking logic in the runner" a static, checkable fact rather than a review convention.
-- Fail-closed gating and labelled rehearsal fallback keep the demo honest under real failure, which is a stronger, more credible story for a resilience talk than hiding failures.
+- The operator gets one reusable, testable control surface instead of a deck-specific script and several manual surfaces, without touching the banking contract.
+- The typed capability model and closed project-graph boundary make "no banking logic in the runner" a static, checkable fact.
+- Live-state rehydration and provenance-labeled evidence keep the console truthful without pretending a previous rehearsal proves the current run.
 
 ### Negative / Trade-offs
 
 - A second console UI package (Terminal.Gui) enters the dependency graph solely for this local tool.
-- The scenario action allow-list must be extended (not bypassed) for future talks that need a genuinely new capability, which is slower than ad-hoc shell scripting but is the point.
-- Maintaining an owned/attached process distinction and fingerprint verification adds implementation surface beyond a naive "just run it" script.
+- The capability allow-list must be extended, not bypassed, when a future demonstration needs a genuinely new operation.
+- Maintaining separate whole-AppHost ownership and attached-resource command authority adds state and verification complexity.
+- Retiring cue/checkpoint/proof-pack behavior is a deliberate breaking change to DemoRunner's local CLI and saved artifacts.
 
 ## Key takeaway
 
-> A presentation console can safely narrow the PRD's "no UI" non-goal only by staying outside the banking runtime, acting through allow-listed actions and a fingerprinted process boundary, and refusing — visibly and truthfully — to advance past unproven evidence.
+> A reusable presentation console can safely narrow the PRD's "no UI" non-goal only by staying outside the banking runtime, exposing typed allow-listed capabilities, separating process ownership from verified resource authority, and presenting live state and evidence truthfully.

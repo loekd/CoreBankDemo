@@ -1,7 +1,7 @@
 namespace CoreBankDemo.DemoRunner.Application.Ports;
 
-/// <summary>Opens a known local URL (<see cref="Scenarios.KnownLinks"/>) in the OS default browser.</summary>
+/// <summary>Opens an allow-listed local dashboard URL in the OS default browser.</summary>
 public interface IBrowserLauncher
 {
-    Task<bool> OpenAsync(string linkId, CancellationToken ct);
+    Task<bool> OpenAsync(string linkId, string? verifiedUrl, CancellationToken ct);
 }

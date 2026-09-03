@@ -1,6 +1,8 @@
 using AwesomeAssertions;
+using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Doctor;
 using CoreBankDemo.DemoRunner.Application.Ports;
+using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Moq;
 using Xunit;
 
@@ -8,102 +10,81 @@ namespace CoreBankDemo.DemoRunner.Tests.Application.Doctor;
 
 public class DoctorRunnerTests
 {
-    private static (Mock<IEnvironmentProbe> Environment, Mock<IHealthMonitor> Health, DoctorRunner Runner) CreateAllHealthy()
+    [Fact]
+    public async Task RunAsync_AllPrerequisitesAndFreePorts_PassesWithoutHealthCalls()
     {
         var environment = new Mock<IEnvironmentProbe>();
-        environment.Setup(e => e.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        environment.Setup(e => e.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        environment.Setup(e => e.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
-        environment.Setup(e => e.IsPortFreeAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(true);
-
+        environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsPortFreeAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(true);
         var health = new Mock<IHealthMonitor>();
-        health.Setup(h => h.CheckAsync(It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync(HealthStatus.Healthy);
+        var aspire = new FakeAspireAdapter();
 
-        return (environment, health, new DoctorRunner(environment.Object, health.Object));
+        var report = await new DoctorRunner(environment.Object, health.Object, aspire)
+            .RunAsync([new DoctorPortRequirement(TopologyProfile.Regular, "payments-api", 5294)], CancellationToken.None);
+
+        report.AllPassed.Should().BeTrue();
+        report.Checks.Should().HaveCount(6);
+        health.VerifyNoOtherCalls();
     }
 
-    private static string WriteScenario(string json)
+    [Theory]
+    [InlineData(HealthStatus.Healthy, true)]
+    [InlineData(HealthStatus.Unhealthy, false)]
+    [InlineData(HealthStatus.Unknown, false)]
+    [InlineData(HealthStatus.Unreachable, false)]
+    public async Task RunAsync_OccupiedPort_RequiresHealthyKnownEndpoint(HealthStatus status, bool expected)
     {
-        var directory = Path.Combine(AppContext.BaseDirectory, "doctor-fixtures");
-        Directory.CreateDirectory(directory);
-        var path = Path.Combine(directory, $"doctor-test-{Guid.NewGuid():N}.json");
-        File.WriteAllText(path, json);
-        return path;
+        var environment = new Mock<IEnvironmentProbe>();
+        environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsPortFreeAsync(5294, It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        var health = new Mock<IHealthMonitor>();
+        health.Setup(probe => probe.CheckAsync("payments-api", TopologyProfile.Regular, It.IsAny<CancellationToken>())).ReturnsAsync(status);
+        var aspire = new FakeAspireAdapter();
+
+        var report = await new DoctorRunner(environment.Object, health.Object, aspire)
+            .RunAsync([new DoctorPortRequirement(TopologyProfile.Regular, "payments-api", 5294)], CancellationToken.None);
+
+        report.Checks.Single(check => check.Name.StartsWith("Port ", StringComparison.Ordinal)).Passed.Should().Be(expected);
     }
 
-    private const string ValidScenarioJson = """
+    [Fact]
+    public async Task RunAsync_MissingPrerequisites_ReportsEveryFailure()
+    {
+        var environment = new Mock<IEnvironmentProbe>();
+        environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        var health = new Mock<IHealthMonitor>();
+        var aspire = new FakeAspireAdapter();
+
+        var report = await new DoctorRunner(environment.Object, health.Object, aspire)
+            .RunAsync([], CancellationToken.None);
+
+        report.AllPassed.Should().BeFalse();
+        report.Checks.Take(3).Should().OnlyContain(check => !check.Passed);
+    }
+
+    [Fact]
+    public async Task RunAsync_PartialTopology_FailsPreflightWithReason()
+    {
+        var environment = new Mock<IEnvironmentProbe>();
+        environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        var health = new Mock<IHealthMonitor>();
+        var aspire = new FakeAspireAdapter
         {
-          "schemaVersion": 1,
-          "name": "Test",
-          "scenarioVersion": "v1",
-          "requiredProfile": "Regular",
-          "cues": [ { "id": "c", "slideAnchor": "1", "title": "T", "speakerNote": "N", "actions": [ { "kind": "speakerPause", "note": "n" } ] } ]
-        }
-        """;
+            Discovered = [OperatorHarness.Snapshot(TopologyProfile.Regular) with { IsFingerprintMatch = false, ErrorSummary = "partial" }],
+        };
 
-    [Fact]
-    public async Task RunAsync_EverythingHealthy_AllPassed()
-    {
-        var (_, _, runner) = CreateAllHealthy();
-        var path = WriteScenario(ValidScenarioJson);
-
-        var report = await runner.RunAsync(path, new Dictionary<string, int> { ["payments-api"] = 5294 }, CancellationToken.None);
-
-        report.AllPassed.Should().BeTrue();
-        report.Checks.Should().Contain(c => c.Name == "Scenario valid" && c.Passed);
-    }
-
-    [Fact]
-    public async Task RunAsync_InvalidScenario_ReportsFailedCheckAndNeverThrows()
-    {
-        var (_, _, runner) = CreateAllHealthy();
-        var path = WriteScenario("{ not valid json");
-
-        var report = await runner.RunAsync(path, new Dictionary<string, int>(), CancellationToken.None);
+        var report = await new DoctorRunner(environment.Object, health.Object, aspire)
+            .RunAsync([], CancellationToken.None);
 
         report.AllPassed.Should().BeFalse();
-        report.Checks.Single(c => c.Name == "Scenario valid").Passed.Should().BeFalse();
-    }
-
-    [Fact]
-    public async Task RunAsync_MissingAspireCli_FailsWithRemediation()
-    {
-        var (environment, _, runner) = CreateAllHealthy();
-        environment.Setup(e => e.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        var path = WriteScenario(ValidScenarioJson);
-
-        var report = await runner.RunAsync(path, new Dictionary<string, int>(), CancellationToken.None);
-
-        report.AllPassed.Should().BeFalse();
-        var check = report.Checks.Single(c => c.Name == "Aspire CLI available");
-        check.Passed.Should().BeFalse();
-        check.Remediation.Should().NotBeNullOrEmpty();
-    }
-
-    [Fact]
-    public async Task RunAsync_PortOccupiedByHealthyResource_PassesAsAttachable()
-    {
-        var (environment, health, runner) = CreateAllHealthy();
-        environment.Setup(e => e.IsPortFreeAsync(5294, It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        health.Setup(h => h.CheckAsync("payments-api", It.IsAny<CancellationToken>())).ReturnsAsync(HealthStatus.Healthy);
-        var path = WriteScenario(ValidScenarioJson);
-
-        var report = await runner.RunAsync(path, new Dictionary<string, int> { ["payments-api"] = 5294 }, CancellationToken.None);
-
-        report.AllPassed.Should().BeTrue();
-        report.Checks.Single(c => c.Name.Contains("5294")).Remediation.Should().Contain("Attach available");
-    }
-
-    [Fact]
-    public async Task RunAsync_PortOccupiedByUnhealthyResource_Fails()
-    {
-        var (environment, health, runner) = CreateAllHealthy();
-        environment.Setup(e => e.IsPortFreeAsync(5294, It.IsAny<CancellationToken>())).ReturnsAsync(false);
-        health.Setup(h => h.CheckAsync("payments-api", It.IsAny<CancellationToken>())).ReturnsAsync(HealthStatus.Unhealthy);
-        var path = WriteScenario(ValidScenarioJson);
-
-        var report = await runner.RunAsync(path, new Dictionary<string, int> { ["payments-api"] = 5294 }, CancellationToken.None);
-
-        report.AllPassed.Should().BeFalse();
+        report.Checks.Should().Contain(check => check.Name.Contains("Regular") && check.Remediation == "partial");
     }
 }

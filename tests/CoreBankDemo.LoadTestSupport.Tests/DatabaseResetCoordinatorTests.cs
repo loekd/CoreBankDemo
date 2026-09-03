@@ -72,7 +72,7 @@ public class DatabaseResetCoordinatorTests
     }
 
     [Fact]
-    public async Task Repeated_reset_returns_the_first_result_without_touching_open_processors()
+    public async Task Repeated_reset_resets_again_without_releasing_processors_again()
     {
         var resetter = new Mock<ILoadTestDatabaseResetter>();
         resetter.Setup(r => r.ResetAsync(It.IsAny<CancellationToken>()))
@@ -87,24 +87,26 @@ public class DatabaseResetCoordinatorTests
         await coordinator.ResetAndReleaseAsync(TestContext.Current.CancellationToken);
         await coordinator.ResetAndReleaseAsync(TestContext.Current.CancellationToken);
 
-        resetter.Verify(r => r.ResetAsync(It.IsAny<CancellationToken>()), Times.Once);
+        resetter.Verify(r => r.ResetAsync(It.IsAny<CancellationToken>()), Times.Exactly(2));
         publisher.Verify(p => p.ReleaseAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task Existing_release_generation_prevents_reset_after_support_service_restart()
+    public async Task Existing_release_generation_allows_reset_after_support_service_restart_without_releasing_again()
     {
-        var resetter = new Mock<ILoadTestDatabaseResetter>(MockBehavior.Strict);
+        var resetter = new Mock<ILoadTestDatabaseResetter>();
+        resetter.Setup(r => r.ResetAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new DatabaseResetResult(10, 100_000_000m));
         var publisher = new Mock<IProcessorStartGatePublisher>(MockBehavior.Strict);
         publisher.Setup(p => p.HasReleaseGenerationAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         var coordinator = CreateCoordinator(resetter.Object, publisher.Object);
 
-        var act = () => coordinator.ResetAndReleaseAsync(TestContext.Current.CancellationToken);
+        var result = await coordinator.ResetAndReleaseAsync(TestContext.Current.CancellationToken);
 
-        await act.Should().ThrowAsync<InvalidOperationException>()
-            .WithMessage("*already released*");
-        resetter.VerifyNoOtherCalls();
+        result.Should().Be(new DatabaseResetResult(10, 100_000_000m));
+        resetter.Verify(r => r.ResetAsync(It.IsAny<CancellationToken>()), Times.Once);
+        publisher.Verify(p => p.ReleaseAsync(It.IsAny<CancellationToken>()), Times.Never);
         publisher.VerifyAll();
     }
 
