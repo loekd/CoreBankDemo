@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # CoreBankDemo.Rebuild.slnf runs both Docker-free tests (tier 1) and the
+      # PostgreSQL Testcontainers persistence tests (tier 2, ADR-016) and enforces
+      # the >=90% line-coverage gate via coverlet.msbuild (ADR-012). Docker ships
+      # preinstalled and running on ubuntu-latest, which tier 2 needs.
+      - name: Restore
+        run: dotnet restore CoreBankDemo.Rebuild.slnf
+
+      - name: Build
+        run: dotnet build CoreBankDemo.Rebuild.slnf --no-restore --configuration Debug
+
+      - name: Test (unit + PostgreSQL integration, >=90% coverage gate)
+        run: dotnet test CoreBankDemo.Rebuild.slnf --no-build --configuration Debug
