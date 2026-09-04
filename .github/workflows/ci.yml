@@ -29,6 +29,13 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # PaymentsAPI generates its CoreBank client at build time from the checked-in
+      # OpenAPI contract via the repo-pinned Kiota CLI (ADR-013). The MSBuild target
+      # only invokes the already-restored tool, so `dotnet tool restore` must run
+      # first or the build fails with "kiota command not found".
+      - name: Restore .NET tools
+        run: dotnet tool restore
+
       # CoreBankDemo.Rebuild.slnf runs both Docker-free tests (tier 1) and the
       # PostgreSQL Testcontainers persistence tests (tier 2, ADR-016) and enforces
       # the >=90% line-coverage gate via coverlet.msbuild (ADR-012). Docker ships
