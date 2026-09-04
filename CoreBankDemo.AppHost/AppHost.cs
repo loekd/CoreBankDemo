@@ -24,15 +24,20 @@ var jaegerOtlpGrpcEndpoint = jaeger.GetEndpoint("otlp-grpc");
 // Add PostgreSQL for Payments API and Core Bank API with fixed connection string and persistent lifetime
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
 var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5432)
+    // Story 6.6 (ADR-016): the PostgreSQL major version is pinned explicitly
+    // rather than inherited from Aspire's implicit default, and must stay in
+    // lockstep with the persistence integration tier's pinned image
+    // (tests/CoreBankDemo.Persistence.IntegrationTests/Infrastructure/PostgresImage.cs).
+    .WithImageTag("18.3")
     .WithLifetime(ContainerLifetime.Persistent)
     .WithPgAdmin();
 
 var paymentsDb = postgres.AddDatabase("paymentsdb");
 var coreBankDb = postgres.AddDatabase("corebankdb");
 
-// Add Redis for Dapr components (pub/sub + lock store)
+// Add Redis for Dapr pub/sub and direct distributed locking
 // Use a parameter with default value so Dapr YAML can use the same password
-var redisPassword = builder.AddParameter("redis-password", secret: false);
+var redisPassword = builder.AddParameter("redis-password", "myredispassword123", secret: false);
 #pragma warning disable ASPIRECERTIFICATES001
 var redis = builder
     .AddRedis("redis", password: redisPassword)
@@ -54,18 +59,19 @@ var pubsub = builder.AddDaprPubSub("pubsub", new DaprComponentOptions
     LocalPath = Path.Combine(daprComponentsPath, "pubsub-redis.yaml")
 }).WaitFor(redis);
 
-// Add Dapr lock store component (Redis-backed)
-var lockStore = builder.AddDaprComponent("lockstore", "lock.redis", new DaprComponentOptions
-{
-    LocalPath = Path.Combine(daprComponentsPath, "lockstore-redis.yaml")
-}).WaitFor(redis);
+// Story 6.2 (ADR-011): partition locking now goes directly through
+// DistributedLock.Redis over the shared "redis" resource below — no Dapr
+// lock component. Dapr remains the pub/sub adapter only.
 
 // Core Bank API (Legacy System) with Dapr sidecar
 // Ports are defined in launchSettings.json (5032)
 // Runs at 127.0.0.1 instead of localhost, so it will be proxied.
 var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("corebank-api")
+    .WithReplicas(2)
     .WithReference(coreBankDb)
     .WaitFor(coreBankDb)
+    .WithReference(redis)
+    .WaitFor(redis)
     .WithHttpHealthCheck("/health")
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithDaprSidecar(opt =>
@@ -81,12 +87,10 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
             Config = Path.Combine(daprComponentsPath, "otel-config.yaml"),
         });
         opt.WithReference(pubsub);
-        opt.WithReference(lockStore);
     })
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(jaeger)
-    .WaitFor(pubsub)
-    .WaitFor(lockStore);
+    .WaitFor(pubsub);
 
 // Payments API (Main Service) with Dapr sidecar
 // Ports are defined in launchSettings.json (5294)
@@ -103,11 +107,13 @@ if (useDevProxy)
 }
 
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api")
+    .WithReplicas(2)
     .WithReference(paymentsDb)
     .WaitFor(paymentsDb)
+    .WithReference(redis)
+    .WaitFor(redis)
     .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
-    .WithHttpEndpoint(name: "load-test", port: 5295)
     .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(coreBankApi)
@@ -124,24 +130,41 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
             Config = Path.Combine(daprComponentsPath, "otel-config.yaml"),
         });
         opt.WithReference(pubsub);
-        opt.WithReference(lockStore);
     });
+
+// Story 6.7 (ADR-008): PaymentsAPI always reaches CoreBankAPI through the
+// single Kiota-backed HTTP client over the logical "corebank-api" endpoint --
+// there is no transport selector. DevProxy only changes whether that same
+// HTTP request path is additionally routed through the proxy for fault
+// injection; it never switches to a different client or transport.
+paymentsApi.WithReference(coreBankApi);
 
 if (devProxy is not null)
 {
+    const string devProxyUrl = "http://127.0.0.1:8000";
+    // Exclude the Dapr sidecar's pub/sub gRPC port (localhost:50001) from
+    // proxying; the Kiota HTTP call to CoreBankAPI is unaffected and still
+    // proxied.
+    const string noProxy = "localhost";
+
+    // Both casings, deliberately. .NET's HttpEnvironmentProxy reads the
+    // lowercase names *first* and only falls back to the uppercase ones, so
+    // in any environment that already exports a lowercase http_proxy -- every
+    // dev container, sandbox, and corporate-proxy setup does -- the inherited
+    // value silently wins over the uppercase pair below. PaymentsAPI then
+    // bypasses Dev Proxy entirely and sends its CoreBankAPI calls to that
+    // outer proxy, which answers 403 for a loopback address it has no rule
+    // for; account validation fails, the outbox row exhausts its retries, and
+    // the payment never settles. Setting both casings makes the value chosen
+    // here the value that actually applies.
     paymentsApi
-        .WithReference(coreBankApi)
-        .WithEnvironment("Features__UseDapr", "false")  //override any other config because Dapr sidecar circumvents proxy
-        .WithEnvironment("HTTP_PROXY", "http://127.0.0.1:8000")
-        .WithEnvironment("HTTPS_PROXY", "http://127.0.0.1:8000")
-        .WithEnvironment("NO_PROXY", "localhost") // Exclude Dapr sidecar gRPC (localhost:50001) from proxy
+        .WithEnvironment("HTTP_PROXY", devProxyUrl)
+        .WithEnvironment("HTTPS_PROXY", devProxyUrl)
+        .WithEnvironment("NO_PROXY", noProxy)
+        .WithEnvironment("http_proxy", devProxyUrl)
+        .WithEnvironment("https_proxy", devProxyUrl)
+        .WithEnvironment("no_proxy", noProxy)
         .WaitFor(devProxy);
-}
-else
-{
-    paymentsApi
-        .WithReference(coreBankApi)    
-        .WithEnvironment("Features__UseDapr", "true");
 }
 
 builder.Build().Run();

@@ -1,14 +1,6 @@
 #!/bin/bash
 set -e
 
-# Install Aspire CLI (idempotent - checks if already installed)
-if ! command -v aspire &> /dev/null; then
-  echo "Installing Aspire CLI..."
-  curl -sSL https://aspire.dev/install.sh | bash
-else
-  echo "Aspire CLI already installed, skipping."
-fi
-
 # Install DevProxy (idempotent - checks if already installed)
 if ! command -v devproxy &> /dev/null; then
   echo "Installing DevProxy..."
@@ -21,19 +13,6 @@ else
   echo "DevProxy already installed, skipping."
 fi
 
-# Install Dapr CLI (idempotent - checks if already installed)
-if ! command -v dapr &> /dev/null; then
-  echo "Installing Dapr CLI..."
-  DAPR_VERSION=$(curl -s https://api.github.com/repos/dapr/cli/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/v//')
-  if [ -n "$DAPR_VERSION" ]; then
-    curl -sL "https://github.com/dapr/cli/releases/download/v${DAPR_VERSION}/dapr_linux_amd64.tar.gz" | sudo tar -xz -C /usr/local/bin/
-    sudo chmod +x /usr/local/bin/dapr
-  else
-    echo "WARNING: Could not resolve Dapr version (GitHub API blocked?). Skipping Dapr install."
-  fi
-else
-  echo "Dapr CLI already installed, skipping."
-fi
 
 # Initialize Dapr runtime (downloads daprd and other binaries)
 echo "Checking Dapr runtime..."
@@ -47,19 +26,50 @@ fi
 dotnet restore
 dotnet tool restore
 
-# Dev cert setup (idempotent - dotnet dev-certs checks internally)
-echo "Setting up HTTPS dev certificate..."
-if [ -f "/home/vscode/.aspnet/https-host/aspnetapp.pfx" ]; then
-  dotnet dev-certs https --import /home/vscode/.aspnet/https-host/aspnetapp.pfx --password "" || true
-else
-  dotnet dev-certs https --trust || true
+# Dev certificate setup
+echo "Setting up HTTPS development certificate..."
+
+HOST_PFX="/home/vscode/.aspnet/https-host/localhost-sbx.pfx"
+PASSWORD_FILE="/home/vscode/.aspnet/https-host/localhost-sbx.password"
+SYSTEM_CERT="/usr/local/share/ca-certificates/aspnet-dev.crt"
+TEMP_CERT="$(mktemp)"
+
+if [ ! -r "$HOST_PFX" ] || [ ! -r "$PASSWORD_FILE" ]; then
+  echo "Sandbox HTTPS certificate or password file is missing." >&2
+  exit 1
 fi
 
-# Export and trust system-wide (only if cert file is missing or stale)
-if [ ! -f "/usr/local/share/ca-certificates/aspnet-dev.crt" ]; then
-  dotnet dev-certs https -ep /tmp/aspnet-dev.crt --format PEM
-  sudo cp /tmp/aspnet-dev.crt /usr/local/share/ca-certificates/aspnet-dev.crt
-  sudo update-ca-certificates
-else
-  echo "System dev certificate already present, skipping."
-fi
+CERT_PASSWORD="$(cat "$PASSWORD_FILE")"
+
+# Make the mounted Mac certificate the certificate used by Kestrel/Aspire.
+dotnet dev-certs https \
+  --clean \
+  --import "$HOST_PFX" \
+  --password "$CERT_PASSWORD"
+
+unset CERT_PASSWORD
+
+# Extract only the public certificate from that exact PFX.
+openssl pkcs12 \
+  -in "$HOST_PFX" \
+  -passin "file:$PASSWORD_FILE" \
+  -clcerts \
+  -nokeys |
+  openssl x509 \
+    -outform PEM \
+    -out "$TEMP_CERT"
+
+# Trust it for Linux service-to-service traffic, including Aspire's
+# Dashboard -> AppHost gRPC connection.
+sudo install -m 0644 "$TEMP_CERT" "$SYSTEM_CERT"
+rm -f "$TEMP_CERT"
+
+# --fresh ensures a renewed Mac certificate replaces the previous one.
+sudo update-ca-certificates --fresh
+
+# Fail postCreate if Linux still doesn't trust the certificate.
+openssl verify \
+  -CAfile /etc/ssl/certs/ca-certificates.crt \
+  "$SYSTEM_CERT"
+
+echo "HTTPS development certificate imported and trusted."

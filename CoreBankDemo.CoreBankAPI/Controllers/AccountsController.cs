@@ -1,46 +1,35 @@
 using System.ComponentModel.DataAnnotations;
 using CoreBankDemo.CoreBankAPI.Inbox;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.CoreBankAPI.Models;
+using Microsoft.AspNetCore.Mvc;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
+/// <summary>
+/// Account read-surface HTTP endpoints (spec-4-5). Thin by design (conventions
+/// skill, AD-2): bind, check <see cref="ModelState"/>, call
+/// <see cref="IAccountQueryHandler"/>, map its result to an
+/// <see cref="IActionResult"/> — no lookup, validity computation, or response
+/// assembly here; all of that lives in the handler.
+/// </summary>
 [ApiController]
 [Route("api/[controller]")]
-public class AccountsController : ControllerBase
+public class AccountsController(IAccountQueryHandler handler) : ControllerBase
 {
-    private readonly CoreBankDbContext _dbContext;
-
-    public AccountsController(CoreBankDbContext dbContext)
-    {
-        _dbContext = dbContext;
-    }
-
     [HttpPost("validate")]
-    public async Task<IActionResult> ValidateAccount([FromBody] AccountValidationRequest request, CancellationToken cancellationToken = default)
+    public async Task<IActionResult> ValidateAccount(
+        [FromBody] AccountValidationRequest request, CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid)
         {
-            var errors = ModelState.Values
-                .SelectMany(v => v.Errors)
-                .Select(e => e.ErrorMessage)
-                .ToList();
+            var errors = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage);
             return BadRequest(new { Errors = errors });
         }
 
-        var account = await _dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == request.AccountNumber, cancellationToken);
+        var response = await handler.ValidateAsync(request, cancellationToken);
 
-        var isValid = account != null && account.IsActive;
-
-        var response = new AccountValidationResponse(
-            request.AccountNumber,
-            isValid,
-            account?.AccountHolderName,
-            account?.Balance
-        );
-
+        // Always 200 — legacy never 4xx's a "not valid" business outcome;
+        // validity is reported in the body, not via status code.
         return Ok(response);
     }
 
@@ -49,33 +38,21 @@ public class AccountsController : ControllerBase
         [FromRoute]
         [StringLength(34, MinimumLength = 15, ErrorMessage = "AccountNumber must be between 15 and 34 characters")]
         string accountNumber,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid)
         {
-            var errors = ModelState.Values
-                .SelectMany(v => v.Errors)
-                .Select(e => e.ErrorMessage)
-                .ToList();
+            var errors = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage);
             return BadRequest(new { Errors = errors });
         }
 
-        var account = await _dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == accountNumber, cancellationToken);
+        var result = await handler.GetDetailsAsync(accountNumber, cancellationToken);
 
-        if (account == null)
+        if (!result.Found)
+        {
             return NotFound(new { Errors = new[] { $"Account {accountNumber} not found" } });
+        }
 
-        var response = new AccountDetailsResponse(
-            account.AccountNumber,
-            account.AccountHolderName,
-            account.Balance,
-            account.Currency,
-            account.IsActive,
-            new DateTimeOffset(account.CreatedAt, TimeSpan.Zero),
-            account.UpdatedAt.HasValue ? new DateTimeOffset(account.UpdatedAt.Value, TimeSpan.Zero) : null
-        );
-
-        return Ok(response);
+        return Ok(result.Response);
     }
 }

@@ -4,7 +4,21 @@
         <TargetFramework>net10.0</TargetFramework>
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
-        <NoWarn>CA1873</NoWarn>
+    </PropertyGroup>
+
+    <!-- Kiota-generated CoreBank client (story 5.3). Generation source is the
+         checked-in OpenAPI description owned by CoreBankAPI; output lives
+         entirely beneath the intermediate output path (never committed) and
+         is regenerated only when that description changes, keeping repeat
+         builds incremental. -->
+    <PropertyGroup>
+        <KiotaContractPath>$(MSBuildThisFileDirectory)..\CoreBankDemo.CoreBankAPI\OpenApi\corebank-api.json</KiotaContractPath>
+        <KiotaClassName>CoreBankApiKiotaClient</KiotaClassName>
+        <KiotaNamespace>CoreBankDemo.PaymentsAPI.GeneratedClients.CoreBank</KiotaNamespace>
+        <!-- Deliberately NOT resolved from $(IntermediateOutputPath) here: at
+             this point in project evaluation IntermediateOutputPath hasn't
+             picked up its TargetFramework-specific segment yet. Both targets
+             below compute the real path themselves at execution time. -->
     </PropertyGroup>
 
     <ItemGroup>
@@ -13,6 +27,8 @@
         <PackageReference Include="Dapr.AspNetCore" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
         <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
+        <PackageReference Include="Microsoft.Kiota.Bundle" />
+        <PackageReference Include="Polly.Core" />
         <PackageReference Include="Microsoft.EntityFrameworkCore.Design">
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
           <PrivateAssets>all</PrivateAssets>
@@ -24,5 +40,48 @@
         <ProjectReference Include="..\CoreBankDemo.ServiceDefaults\CoreBankDemo.ServiceDefaults.csproj" />
         <ProjectReference Include="..\CoreBankDemo.Messaging\CoreBankDemo.Messaging.csproj" />
     </ItemGroup>
+
+    <ItemGroup>
+      <InternalsVisibleTo Include="CoreBankDemo.PaymentsAPI.Tests" />
+      <InternalsVisibleTo Include="CoreBankDemo.Persistence.IntegrationTests" />
+      <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+    </ItemGroup>
+
+    <!-- Runs the pinned Kiota CLI (.config/dotnet-tools.json) against the
+         checked-in corebank-api.json. Inputs/Outputs make this incremental:
+         skipped whenever none of the inputs changed since the last
+         generation. Besides the contract itself, the project file
+         (KiotaClassName/KiotaNamespace and this target's own command-line
+         arguments live there) and the tool manifest (pins the Kiota CLI
+         version actually invoked) are also watched, so bumping either one
+         forces regeneration too, this target only ever *invokes* the
+         already-restored tool (via `dotnet tool run`); it deliberately does
+         not run `dotnet tool restore` itself, so a manifest version bump
+         still requires the normal explicit `dotnet tool restore` before the
+         next build, same as any other tool-version change. The clean-output
+         flag makes CoreBank contract changes (e.g. a removed operation)
+         unable to leave stale generated files behind. -->
+    <Target Name="GenerateKiotaCoreBankClient"
+            Inputs="$(KiotaContractPath);$(MSBuildProjectFullPath);$(MSBuildThisFileDirectory)../.config/dotnet-tools.json"
+            Outputs="$(IntermediateOutputPath)Kiota/kiota-lock.json">
+        <!-- No trailing separator before the closing quote in the output
+             argument: on Exec's non-Windows /bin/sh, a trailing backslash
+             immediately before a double quote escapes the quote instead of
+             terminating the argument, corrupting the command line. Forward
+             slashes avoid that pitfall on every OS this repo builds on. -->
+        <Exec Command="dotnet tool run kiota generate --openapi &quot;$(KiotaContractPath)&quot; --language csharp --class-name $(KiotaClassName) --namespace-name $(KiotaNamespace) --output &quot;$(IntermediateOutputPath)Kiota&quot; --clean-output --log-level Warning"
+              WorkingDirectory="$(MSBuildThisFileDirectory)" />
+    </Target>
+
+    <!-- No Inputs/Outputs here on purpose: this target must always run so the
+         generated sources are added to @(Compile) even when the target above
+         was skipped as up to date. -->
+    <Target Name="IncludeKiotaCoreBankClientSources"
+            BeforeTargets="BeforeCompile;CoreCompile"
+            DependsOnTargets="GenerateKiotaCoreBankClient">
+        <ItemGroup>
+            <Compile Include="$(IntermediateOutputPath)Kiota/**/*.cs" Exclude="@(Compile)" />
+        </ItemGroup>
+    </Target>
 
 </Project>

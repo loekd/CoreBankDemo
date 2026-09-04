@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Coverage scoped to the target assembly only (gate lives in tests/Directory.Build.props) -->
+    <Include>[CoreBankDemo.ServiceDefaults]*</Include>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.ServiceDefaults\CoreBankDemo.ServiceDefaults.csproj" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+  </ItemGroup>
+
+</Project>

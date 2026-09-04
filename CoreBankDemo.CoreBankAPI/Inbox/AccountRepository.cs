@@ -2,51 +2,27 @@ using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
 
-public record AccountValidationResult(bool IsValid, List<string> Errors);
-
-public interface IAccountRepository
+internal interface IAccountRepository
 {
-    Task<AccountValidationResult> ValidateTransactionRequestAsync(
-        string fromAccount,
-        string toAccount,
-        decimal amount,
-        string currency,
-        CancellationToken cancellationToken);
+    Task<Account?> LockForUpdateAsync(string accountNumber, CancellationToken cancellationToken);
+    Task<Account?> FindByAccountNumberAsync(string accountNumber, CancellationToken cancellationToken);
 }
 
-public class AccountRepository(CoreBankDbContext dbContext) : IAccountRepository
+internal sealed class AccountRepository(CoreBankDbContext dbContext) : IAccountRepository
 {
-    public async Task<AccountValidationResult> ValidateTransactionRequestAsync(
-        string fromAccount,
-        string toAccount,
-        decimal amount,
-        string currency,
-        CancellationToken cancellationToken)
-    {
+    /// <summary>
+    /// Pessimistic row lock on the account (ADR-016): proved directly against
+    /// real PostgreSQL with competing connections by
+    /// <c>CoreBankDemo.Persistence.IntegrationTests</c>, never excluded from
+    /// coverage and never re-routed through a provider-neutral load.
+    /// </summary>
+    public Task<Account?> LockForUpdateAsync(string accountNumber, CancellationToken cancellationToken) =>
+        dbContext.Accounts
+            .FromSqlInterpolated($"SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {accountNumber} FOR UPDATE")
+            .FirstOrDefaultAsync(cancellationToken);
 
-        var from = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == fromAccount, cancellationToken);
-
-        var to = await dbContext.Accounts
-            .FirstOrDefaultAsync(a => a.AccountNumber == toAccount, cancellationToken);
-
-        var errors = new List<string>();
-
-        if (from == null)
-            errors.Add($"Source account {fromAccount} not found");
-        else if (!from.IsActive)
-            errors.Add($"Source account {fromAccount} is not active");
-        else if (from.Balance < amount)
-            errors.Add($"Insufficient funds. Available: {from.Balance} {from.Currency}, Required: {amount} {currency}");
-        else if (from.Currency != currency)
-            errors.Add($"Currency mismatch. Account currency: {from.Currency}, Transaction currency: {currency}");
-
-        if (to == null)
-            errors.Add($"Destination account {toAccount} not found");
-        else if (!to.IsActive)
-            errors.Add($"Destination account {toAccount} is not active");
-
-        return new AccountValidationResult(errors.Count == 0, errors);
-    }
+    public Task<Account?> FindByAccountNumberAsync(string accountNumber, CancellationToken cancellationToken) =>
+        dbContext.Accounts.FirstOrDefaultAsync(
+            account => account.AccountNumber == accountNumber,
+            cancellationToken);
 }
-

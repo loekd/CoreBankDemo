@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Coverage scoped to the target assembly only (gate lives in tests/Directory.Build.props) -->
+    <Include>[CoreBankDemo.CoreBankAPI]*</Include>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.CoreBankAPI\CoreBankDemo.CoreBankAPI.csproj" />
+  </ItemGroup>
+
+</Project>

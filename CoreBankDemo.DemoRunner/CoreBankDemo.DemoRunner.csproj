@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Story 7.4 / ADR-015: standalone presentation console. Deliberately carries
+       no ProjectReference to any banking implementation project, Messaging, or
+       DbContext — only the pinned Terminal.Gui UI package and the BCL. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CoreBankDemo.DemoRunner</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Terminal.Gui" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="CoreBankDemo.DemoRunner.Tests" />
+  </ItemGroup>
+
+</Project>

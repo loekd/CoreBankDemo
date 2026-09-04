@@ -1,34 +1,53 @@
 namespace CoreBankDemo.Messaging;
 
+/// <summary>
+/// Maps an idempotency key to a partition id (AD-4): FNV-1a over the key's
+/// chars, then <c>Math.Abs(hash) % partitionCount</c>. The algorithm is
+/// behavior-identical to the legacy kernel — existing rows depend on identical
+/// partition assignment, so it must never change (pinned by known-vector tests).
+/// </summary>
 public static class PartitionHelper
 {
     /// <summary>
-    /// Computes a consistent partition ID for a given key using FNV-1a hash algorithm.
+    /// Computes a deterministic partition id for <paramref name="key"/>,
+    /// in the range [0, <paramref name="partitionCount"/>).
     /// </summary>
-    /// <param name="key">The key to hash (e.g., MessageId or IdempotencyKey)</param>
-    /// <param name="partitionCount">Total number of partitions</param>
-    /// <returns>Partition ID between 0 and partitionCount-1</returns>
+    /// <param name="key">The idempotency key to hash. Casing is significant. Never throws for any non-null key.</param>
+    /// <param name="partitionCount">Total number of partitions; must be positive.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="key"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is not positive.</exception>
     public static int GetPartitionId(string key, int partitionCount)
     {
-        if (string.IsNullOrEmpty(key))
-            throw new ArgumentException("Key cannot be null or empty", nameof(key));
+        // Legacy threw ArgumentException for null; ArgumentNullException is an
+        // intentional, spec-sanctioned refinement (no compatible caller relies
+        // on the legacy type — legacy rejected such keys before storing rows).
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(partitionCount);
 
-        if (partitionCount <= 0)
-            throw new ArgumentException("Partition count must be greater than 0", nameof(partitionCount));
-
-        var hash = ComputeFnv1aHash(key);
-        return Math.Abs(hash) % partitionCount;
+        return MapHashToPartition(ComputeFnv1aHash(key), partitionCount);
     }
 
     /// <summary>
-    /// FNV-1a (Fowler-Noll-Vo) hash algorithm for consistent, uniform distribution.
+    /// <c>Math.Abs(hash) % partitionCount</c> — exact legacy mapping — with one
+    /// repair: <see cref="int.MinValue"/> (where Math.Abs overflows) maps to 0.
+    /// Legacy would have crashed on such a key, so no stored row can depend on
+    /// a different mapping for it.
+    /// </summary>
+    internal static int MapHashToPartition(int hash, int partitionCount) =>
+        hash == int.MinValue ? 0 : Math.Abs(hash) % partitionCount;
+
+    /// <summary>
+    /// 32-bit FNV-1a over the chars of the string (not UTF-8 bytes), in
+    /// unchecked int arithmetic — exact legacy algorithm. An empty key hashes
+    /// to the offset basis, yielding a deterministic id (spec I/O matrix;
+    /// the legacy helper rejected empty keys instead).
     /// </summary>
     private static int ComputeFnv1aHash(string key)
     {
         unchecked
         {
-            const int fnvPrime = 16777619;
-            int hash = (int)2166136261;
+            const int fnvPrime = 16777619;      // 0x01000193
+            int hash = (int)2166136261;         // FNV offset basis 0x811C9DC5
 
             foreach (char c in key)
             {

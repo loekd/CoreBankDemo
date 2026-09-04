@@ -1,8 +1,9 @@
 # ADR-006: Retry with exponential backoff using Polly
 
 **Date:** 2026-05-23  
-**Status:** Accepted  
-**Deciders:** Architecture team  
+**Status:** Accepted
+**Deciders:** Architecture team
+**Superseded in part by:** ADR-008 and ADR-013 replace the named HTTP client implementation; the resilience-pipeline decision remains accepted
 
 ## Context
 

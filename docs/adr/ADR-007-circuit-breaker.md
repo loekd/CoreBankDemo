@@ -1,8 +1,9 @@
 # ADR-007: Circuit breaker to prevent cascading failures
 
 **Date:** 2026-05-23  
-**Status:** Accepted  
-**Deciders:** Architecture team  
+**Status:** Accepted
+**Deciders:** Architecture team
+**Superseded in part by:** ADR-008 and ADR-013 replace the named HTTP client implementation; the circuit-breaker decision remains accepted
 
 ## Context
 

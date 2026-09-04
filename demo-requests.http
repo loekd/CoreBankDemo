@@ -22,6 +22,22 @@ Content-Type: application/json
   "currency": "EUR"
 }
 
+### 2b. Process Payment on the instant rail (scheme=instant, spec: add-instant-payment-rail)
+### CoreBank healthy within budget -> 200 OK with a committed status (Completed/Failed)
+### instead of the standard rail's 202 Accepted. Fixed Idempotency-Key so a
+### repeat send replays the cached snapshot rather than executing twice.
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-instant-001
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 25.00,
+  "currency": "EUR",
+  "scheme": "instant"
+}
+
 ### ===== STAGE 1: RETRY & CIRCUIT BREAKER =====
 ### (Enable GenericRandomErrorPlugin in devproxy.json first)
 

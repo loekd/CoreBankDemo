@@ -315,9 +315,7 @@ To reset state, delete the database containers or clear the tables.
 
 The load test configuration uses a hardcoded Redis password (`myredispassword123`) in the following files:
 - `CoreBankDemo.LoadTests/AppHost.cs`
-- `dapr/components/lockstore-redis.yaml`
 - `dapr/components/pubsub-redis.yaml`
-- `dapr/components-loadtest/lockstore-redis.yaml`
 - `dapr/components-loadtest/pubsub-redis.yaml`
 
 This is intentional — the Redis instance is **disposable and local-only**, spun up and torn down by Aspire for each load test run. The password has no security implications outside that ephemeral container. Do not use these credentials for any real environment.
@@ -348,13 +346,39 @@ lsof -ti:8000 | xargs kill  # Dev Proxy
 # Databases are automatically created on startup
 ```
 
+## Automated Tests
+
+Tests are split into three tiers (see [ADR-016](docs/adr/ADR-016-postgresql-testcontainers-persistence-testing.md)):
+
+```bash
+# Tier 1 — fast unit tests. No Docker required.
+dotnet test CoreBankDemo.UnitTests.slnf
+
+# Tier 2 — persistence integration tests against a real, disposable PostgreSQL
+# container (postgres:18.3). Requires a running container runtime.
+dotnet test CoreBankDemo.IntegrationTests.slnf
+
+# Full gate — runs both tiers and enforces the >=90% line-coverage threshold.
+dotnet test CoreBankDemo.Rebuild.slnf
+```
+
+Tier 3 is the k6/Aspire acceptance harness described under **Load Testing** below.
+
+The persistence tier starts **one** PostgreSQL container per test assembly on a
+Testcontainers-generated host port (never a fixed port, so it cannot collide with a running
+AppHost) and gives every test its own freshly created database. If no container runtime is
+available the integration target fails with remediation instructions — it is never skipped or
+reported green. There is no SQLite or EF Core InMemory fallback anywhere in this repository.
+
 ## Load Testing
 
 The project includes comprehensive load tests that validate the system under concurrent load:
 
 ```bash
-# Run load tests with k6
-dotnet run --project CoreBankDemo.LoadTests
+# Start the disposable load-test topology and wait for the accepted k6 resource
+aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
+aspire wait loadtest-support --non-interactive
+aspire wait k6 --non-interactive
 ```
 
 **What it tests:**
@@ -376,6 +400,51 @@ dotnet run --project CoreBankDemo.LoadTests
 The load test uses disposable PostgreSQL and Redis instances, seeded with 10 test accounts (€10M each). See [CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md) for details.
 
 **MCP Integration:** The LoadTestSupport service exposes an MCP server at `http://localhost:5181/` for agent-based orchestration. See `mcp-config.example.json` and [CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md) for connection instructions.
+
+## Presentation Console (DemoRunner)
+
+`CoreBankDemo.DemoRunner` is a standalone, mouse-and-keyboard terminal operator console for live demonstrations (Story 7.4, ADR-015). It is a local tool only: it references no banking implementation project, connects to no database/Redis/Dapr/container socket directly, and is never a prerequisite for development, tests, or the banking services themselves. It uses only known HTTP endpoints and supported Aspire CLI operations. `demo-requests.http` and `payment-idempotency-tests.http` remain the supported fallback whenever the console is unavailable.
+
+### One-command start
+
+```bash
+# Open the reusable operator console
+dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj
+
+# Print prerequisites and current port state; starts nothing
+dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj -- --doctor
+```
+
+The console has four capability-driven workspaces:
+
+1. **Operations** — submit standard or instant payments, choose Generated/Supplied/Omitted idempotency, resend a stable key, query outcomes, and run cancellable bounded bursts.
+2. **Resources** — start or attach Regular/LoadTests, stop or switch only runner-owned AppHosts, and run confirmed allow-listed resource Start/Stop/Restart commands against a freshly fingerprinted graph.
+3. **Evidence/Results** — inspect bounded redacted request/response evidence with topology and generation provenance, optionally wrap the raw view, and explicitly export the current session.
+4. **Load Test** — run the accepted Reset → Run → Wait → Assert → Investigate workflow and read the five invariants plus inline-instant-settlement evidence.
+
+### Shortcuts
+
+| Key | Action |
+|---|---|
+| `1` | Operations |
+| `2` | Resources |
+| `3` | Evidence/Results |
+| `4` | Load Test |
+| `R` | Refresh live Aspire state |
+| `Q` | Quit (stops only child processes this session started; never touches an attached/unowned topology) |
+
+All mouse actions have keyboard equivalents. Destructive actions open a modal with **Cancel focused**; uppercase `Y` confirms and Escape cancels. At 80×24 the navigation rail compacts but remains visible.
+
+### Recovery and evidence
+
+- Resource and topology transitions resolve only from fresh Aspire snapshots. `Unknown` and `Unreachable` are distinct and disable mutation.
+- Generated and supplied idempotency keys are stable for **Resend same key**. Omitted-key ambiguity is labeled `Ambiguous — not yet reconciled` and is never retried automatically.
+- Evidence is session-local and never restored on relaunch. Explicit exports are written under the gitignored `.demo-runner-exports/` directory.
+- A topology switch retains earlier evidence with its original profile and run-generation label.
+
+### Manual fallback
+
+If the console is unavailable, use `demo-requests.http` / `payment-idempotency-tests.http` directly against the regular AppHost and the load-test/Aspire workflow for the acceptance proof. Banking behavior is unchanged.
 
 ## Architecture & Technical Details
 

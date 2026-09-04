@@ -1,8 +1,9 @@
 # ADR-002: Transactional Outbox for guaranteed message delivery
 
 **Date:** 2026-05-23  
-**Status:** Accepted  
-**Deciders:** Architecture team  
+**Status:** Accepted
+**Deciders:** Architecture team
+**Superseded in part by:** ADR-009 replaces the older processor generic shape/path with the shared kernel and delivery-strategy design
 
 ## Context
 

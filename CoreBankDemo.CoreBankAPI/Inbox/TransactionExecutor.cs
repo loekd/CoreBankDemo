@@ -1,109 +1,90 @@
-using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.Messaging;
-using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
 
-public interface ITransactionExecutor
+internal interface ITransactionExecutor
 {
-    Task<(Account? FromAccount, Account? ToAccount)> LoadAccountsAsync(
-        CoreBankDbContext dbContext,
-        InboxMessage message,
+    Task<TransactionExecutionResult> ExecuteAsync(
+        string fromAccountNumber,
+        string toAccountNumber,
+        decimal amount,
+        string transactionId,
         CancellationToken cancellationToken);
-
-    (decimal NewFromBalance, decimal NewToBalance) ApplySuccessfulTransaction(
-        InboxMessage message,
-        Account fromAccount,
-        Account toAccount);
-
-    Task SaveAsync(CoreBankDbContext dbContext, CancellationToken cancellationToken);
-
-    void PrepareFailedTransaction(InboxMessage message, string? error);
 }
 
-public class TransactionExecutor(TimeProvider timeProvider) : ITransactionExecutor
+internal sealed class TransactionExecutor(IAccountRepository accountRepository, TimeProvider timeProvider) : ITransactionExecutor
 {
-    public async Task<(Account? FromAccount, Account? ToAccount)> LoadAccountsAsync(
-        CoreBankDbContext dbContext,
-        InboxMessage message,
+    public async Task<TransactionExecutionResult> ExecuteAsync(
+        string fromAccountNumber,
+        string toAccountNumber,
+        decimal amount,
+        string transactionId,
         CancellationToken cancellationToken)
     {
-        // Lock accounts in consistent alphabetical order to prevent deadlocks when
-        // concurrent transactions involve the same accounts in opposite directions.
-        var (firstKey, secondKey) = string.Compare(message.FromAccount, message.ToAccount, StringComparison.Ordinal) < 0
-            ? (message.FromAccount, message.ToAccount)
-            : (message.ToAccount, message.FromAccount);
+        var (fromAccount, toAccount) = await LoadAccountsAsync(
+            fromAccountNumber,
+            toAccountNumber,
+            cancellationToken);
 
-        // SELECT FOR UPDATE acquires row-level locks for the duration of the transaction,
-        // preventing lost updates when multiple partitions process messages concurrently.
-        await dbContext.Accounts
-            .FromSqlRaw("SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {0} FOR UPDATE", firstKey)
-            .FirstOrDefaultAsync(cancellationToken);
+        var validationResult = TransactionValidator.Validate(
+            fromAccountNumber,
+            toAccountNumber,
+            amount,
+            fromAccount,
+            toAccount);
 
-        await dbContext.Accounts
-            .FromSqlRaw("SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {0} FOR UPDATE", secondKey)
-            .FirstOrDefaultAsync(cancellationToken);
-
-        var fromAccount = dbContext.Accounts.Local.FirstOrDefault(a => a.AccountNumber == message.FromAccount);
-        var toAccount = dbContext.Accounts.Local.FirstOrDefault(a => a.AccountNumber == message.ToAccount);
-
-        return (fromAccount, toAccount);
-    }
-
-    public (decimal NewFromBalance, decimal NewToBalance) ApplySuccessfulTransaction(
-        InboxMessage message,
-        Account fromAccount,
-        Account toAccount)
-    {
         var processedAt = timeProvider.GetUtcNow();
-        var transactionId = EnsureTransactionId(message);
+        if (!validationResult.IsValid)
+        {
+            return new TransactionExecutionResult(
+                false,
+                new TransactionResponse(transactionId, MessageConstants.Status.Failed, processedAt),
+                validationResult.Error,
+                null,
+                null);
+        }
 
-        UpdateAccountBalances(fromAccount, toAccount, message.Amount, processedAt);
-        UpdateMessageForSuccess(message, transactionId, processedAt);
-
-        return (fromAccount.Balance, toAccount.Balance);
-    }
-
-    public Task SaveAsync(CoreBankDbContext dbContext, CancellationToken cancellationToken)
-        => dbContext.SaveChangesAsync(cancellationToken);
-
-    public void PrepareFailedTransaction(InboxMessage message, string? error)
-    {
-        var failedAt = timeProvider.GetUtcNow();
-        var transactionId = EnsureTransactionId(message);
-
-        UpdateMessageForFailure(message, transactionId, failedAt, error);
-    }
-
-    private static void UpdateAccountBalances(Account fromAccount, Account toAccount, decimal amount, DateTimeOffset processedAt)
-    {
-        fromAccount.Balance -= amount;
+        fromAccount!.Balance -= amount;
         fromAccount.UpdatedAt = processedAt.UtcDateTime;
-
-        toAccount.Balance += amount;
+        toAccount!.Balance += amount;
         toAccount.UpdatedAt = processedAt.UtcDateTime;
+
+        return new TransactionExecutionResult(
+            true,
+            new TransactionResponse(transactionId, MessageConstants.Status.Completed, processedAt),
+            null,
+            fromAccount.Balance,
+            toAccount.Balance);
     }
 
-    private static void UpdateMessageForSuccess(InboxMessage message, string transactionId, DateTimeOffset processedAt)
+    private async Task<(Account? FromAccount, Account? ToAccount)> LoadAccountsAsync(
+        string fromAccountNumber,
+        string toAccountNumber,
+        CancellationToken cancellationToken)
     {
-        message.TransactionId = transactionId;
-        message.Status = MessageConstants.Status.Completed;
-        message.ProcessedAt = processedAt.UtcDateTime;
-        message.ResponsePayload = JsonSerializer.Serialize(
-            new TransactionResponse(transactionId, MessageConstants.Status.Completed, processedAt));
-    }
+        if (string.Equals(fromAccountNumber, toAccountNumber, StringComparison.Ordinal))
+        {
+            var account = await accountRepository.LockForUpdateAsync(fromAccountNumber, cancellationToken);
+            return (account, account);
+        }
 
-    private static void UpdateMessageForFailure(InboxMessage message, string transactionId, DateTimeOffset failedAt, string? error)
-    {
-        message.TransactionId = transactionId;
-        message.Status = MessageConstants.Status.Failed;
-        message.LastError = error;
-        message.ProcessedAt = failedAt.UtcDateTime;
-    }
+        var fromAccountLocksFirst = string.CompareOrdinal(fromAccountNumber, toAccountNumber) < 0;
+        var firstAccountNumber = fromAccountLocksFirst ? fromAccountNumber : toAccountNumber;
+        var secondAccountNumber = fromAccountLocksFirst ? toAccountNumber : fromAccountNumber;
 
-    private static string EnsureTransactionId(InboxMessage message)
-    {
-        return message.TransactionId ?? Guid.NewGuid().ToString();
+        var firstAccount = await accountRepository.LockForUpdateAsync(firstAccountNumber, cancellationToken);
+        var secondAccount = await accountRepository.LockForUpdateAsync(secondAccountNumber, cancellationToken);
+
+        return fromAccountLocksFirst
+            ? (firstAccount, secondAccount)
+            : (secondAccount, firstAccount);
     }
 }
+
+internal sealed record TransactionExecutionResult(
+    bool Success,
+    TransactionResponse Response,
+    string? ErrorReason,
+    decimal? NewFromBalance,
+    decimal? NewToBalance);

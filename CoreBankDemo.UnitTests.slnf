@@ -1,0 +1,19 @@
+{
+  "solution": {
+    "path": "CoreBankDemo.sln",
+    "projects": [
+      "CoreBankDemo.CoreBankAPI\\CoreBankDemo.CoreBankAPI.csproj",
+      "CoreBankDemo.DemoRunner\\CoreBankDemo.DemoRunner.csproj",
+      "CoreBankDemo.Messaging\\CoreBankDemo.Messaging.csproj",
+      "CoreBankDemo.PaymentsAPI\\CoreBankDemo.PaymentsAPI.csproj",
+      "CoreBankDemo.ServiceDefaults\\CoreBankDemo.ServiceDefaults.csproj",
+      "tests\\CoreBankDemo.CoreBankAPI.Tests\\CoreBankDemo.CoreBankAPI.Tests.csproj",
+      "tests\\CoreBankDemo.DemoRunner.Tests\\CoreBankDemo.DemoRunner.Tests.csproj",
+      "tests\\CoreBankDemo.LoadTestSupport.Tests\\CoreBankDemo.LoadTestSupport.Tests.csproj",
+      "tests\\CoreBankDemo.LoadTestInitializer.Tests\\CoreBankDemo.LoadTestInitializer.Tests.csproj",
+      "tests\\CoreBankDemo.Messaging.Tests\\CoreBankDemo.Messaging.Tests.csproj",
+      "tests\\CoreBankDemo.PaymentsAPI.Tests\\CoreBankDemo.PaymentsAPI.Tests.csproj",
+      "tests\\CoreBankDemo.ServiceDefaults.Tests\\CoreBankDemo.ServiceDefaults.Tests.csproj"
+    ]
+  }
+}

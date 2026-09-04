@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Coverage scope is the shared $(PersistenceTierFilters) list in
+       tests/Directory.Build.props: this assembly owns exactly the
+       provider-sensitive persistence adapters the unit tier excludes, so
+       running both tiers measures every applicable type once at >=90%. -->
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.Messaging\CoreBankDemo.Messaging.csproj" />
+    <ProjectReference Include="..\..\CoreBankDemo.CoreBankAPI\CoreBankDemo.CoreBankAPI.csproj" />
+    <ProjectReference Include="..\..\CoreBankDemo.PaymentsAPI\CoreBankDemo.PaymentsAPI.csproj" />
+    <ProjectReference Include="..\..\CoreBankDemo.LoadTestSupport\CoreBankDemo.LoadTestSupport.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Versions pinned centrally in Directory.Packages.props. -->
+    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="Testcontainers.XunitV3" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+  </ItemGroup>
+
+</Project>

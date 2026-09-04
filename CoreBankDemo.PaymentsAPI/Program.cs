@@ -1,75 +1,89 @@
-using CoreBankDemo.Messaging.Inbox;
-using CoreBankDemo.Messaging.Outbox;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
+using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
-using CoreBankDemo.PaymentsAPI.Controllers;
-using CoreBankDemo.PaymentsAPI.Handlers;
-
 var builder = WebApplication.CreateBuilder(args);
 
-// Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-builder.AddServiceDefaults("CoreBank.PaymentsAPI", new[] { nameof(OutboxProcessor), nameof(TransactionEventHandler), nameof(PaymentsController), nameof(InboxProcessor) });
+// Story 6.2 (ADR-011): register Aspire's Redis client for the shared "redis"
+// resource before AddServiceDefaults, so IDistributedLockService resolves to
+// RedisDistributedLockService rather than the no-op fallback.
+builder.AddRedisClient("redis");
 
-// DB health check so Aspire's WaitFor blocks until the schema is ready
+builder.AddServiceDefaults("CoreBank.PaymentsAPI");
+
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<PaymentsDbContext>("payments-db");
 
-// Add configuration options with validation
-builder.AddOutboxProcessingOptions();
-builder.AddInboxProcessingOptions();
-
-// Add Dapr
-builder.Services.AddControllers().AddDapr();
-builder.Services.AddDaprClient();
-builder.Services.AddOpenApi();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-builder.Services.AddSingleton(TimeProvider.System);
-
-// Database for Outbox and Inbox patterns
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
-builder.Services.AddHttpClient<ICoreBankApiClient, HttpCoreBankApiClient>(client =>
-    {
-        client.BaseAddress = new Uri("http://corebank-api");
-    })
-    .AddServiceDiscovery();
+builder.Services.AddPaymentStorage(builder.Configuration);
+builder.Services.AddCoreBankApiClient();
 
+// Story 5.4: forwarding processor. IOutboxRepository is already scoped by
+// AddPaymentStorage; expose the same instance under the kernel's narrow
+// IOutboxMessageStore<TMessage> port too, so PaymentsOutboxProcessor never
+// depends on OutboxRepository directly (messaging-patterns skill).
+builder.Services.AddScoped<IOutboxMessageStore<OutboxMessage>>(
+    sp => sp.GetRequiredService<OutboxRepository>());
 
-// Outbox: ensure reliable message delivery to CoreBank API
-builder.Services.AddScoped<OutboxMessageRepositoryBase<OutboxMessage, PaymentsDbContext>, OutboxRepository>();
-builder.Services.AddScoped<IOutboxRepository, OutboxRepository>();
-builder.Services.AddHostedService<OutboxProcessor>();
-builder.Services.AddScoped<ITransactionEventHandler, TransactionEventHandler>();
+// Spec: add-instant-payment-rail. HttpForwardOutboxDeliveryStrategy now also
+// implements ICoreBankTransactionForwarder (the extracted validate+submit
+// sequence); expose the same scoped instance under both ports so the instant
+// forwarding handler and the background outbox processor share one
+// implementation rather than each getting a distinct instance.
+builder.Services.AddScoped<HttpForwardOutboxDeliveryStrategy>();
+builder.Services.AddScoped<IOutboxDeliveryStrategy<OutboxMessage>>(
+    sp => sp.GetRequiredService<HttpForwardOutboxDeliveryStrategy>());
+builder.Services.AddScoped<ICoreBankTransactionForwarder>(
+    sp => sp.GetRequiredService<HttpForwardOutboxDeliveryStrategy>());
+builder.Services.AddHostedService<PaymentsOutboxProcessor>();
 
-// Inbox: de-duplicate incoming transaction events
-builder.Services.AddScoped<InboxMessageRepositoryBase<InboxMessage, PaymentsDbContext>, InboxMessageRepository>();
-builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
+builder.Services.AddInstantPaymentRail(builder.Configuration);
+
+builder.Services.AddPaymentIntake();
+
+// Story 5.5: event subscription intake -- durably stores known
+// transaction-events CloudEvent deliveries.
+builder.Services.AddTransactionEventIntake(builder.Configuration);
+
+// Story 5.6: event handling processor. IInboxMessageStore<InboxMessage> is
+// already exposed by AddTransactionEventIntake above (the same
+// InboxMessageRepository instance). TransactionEventHandler records the
+// committed outcome each transaction.completed/failed event carries onto the
+// payment's cached ResponsePayload (never its transport Status) -- the only
+// way a payment whose inline instant attempt was deferred by CoreBank ever
+// learns that it settled -- and enriches the consumer span
+// InboxProcessor's InboxProcessorBase<InboxMessage> restores from each
+// message's persisted TraceParent/TraceState onto the same
+// "CoreBank.PaymentsAPI" ActivitySource already registered by
+// AddServiceDefaults above -- never a second ActivitySource.
+builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionEventHandler>();
 builder.Services.AddHostedService<InboxProcessor>();
 
 var app = builder.Build();
 
-// Ensure database is created
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<PaymentsDbContext>();
-    db.Database.EnsureCreated();
+    await PaymentsDatabaseInitializer.InitializeAsync(db);
 }
 
-// Map default endpoints (health checks, etc.)
 app.MapDefaultEndpoints();
 
-if (app.Environment.IsDevelopment())
+// Story 5.5: unwrap Dapr's structured CloudEvents into the raw event payload
+// before routing, so TransactionEventsController's [FromBody] model binding
+// deserializes the typed contract directly (Dapr.AspNetCore).
+app.UseCloudEvents(new Dapr.CloudEventsMiddlewareOptions
 {
-    app.MapOpenApi();
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+    ForwardCloudEventPropertiesAsHeaders = true,
+    IncludedCloudEventPropertiesAsHeaders = ["type", "id", "source"]
+});
 
-app.UseCloudEvents();
-
-app.MapSubscribeHandler();
-
-app.MapControllers();
+app.MapPaymentIntake();
 
 app.Run();
+
+// Exposed so Microsoft.AspNetCore.Mvc.Testing's WebApplicationFactory<Program>
+// can boot the real entry point in tests (spec-5-5's real-entry-point
+// CloudEvent POST requirement).
+public partial class Program;

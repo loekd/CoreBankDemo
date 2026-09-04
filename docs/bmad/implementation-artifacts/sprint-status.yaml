@@ -1,0 +1,99 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 08-21-2026 16:00
+last_updated: 09-04-2026 05:10
+project: CoreBankDemo
+project_key: NOKEY
+tracking_system: file-system
+story_location: docs/bmad/implementation-artifacts
+development_status:
+  epic-1: done
+  1-1-test-package-versions-and-coverage-gate: done
+  1-2-test-projects-and-rebuild-solution-filter: done
+  1-3-gate-proof: done
+  epic-1-retrospective: done
+
+  epic-2: done
+  2-1-identity-constants-and-message-contracts: done
+  2-2-idempotent-store: done
+  2-3-claiming-retry-and-poison-state-machine: done
+  2-4-outboxprocessorbase-and-delivery-strategy-port: done
+  2-5-inboxprocessorbase-and-handler-dispatch: done
+  2-6-kernel-failure-path-hardening: done
+  epic-2-retrospective: done
+
+  epic-3: done
+  3-1-validated-processing-options: done
+  3-2-distributed-lock-port-and-dapr-implementation: done
+  3-3-cloudevent-types-and-publisher-port: done
+  3-4-service-wiring-defaults: done
+  epic-3-retrospective: done
+
+  epic-4: done
+  4-1-domain-model-dbcontext-and-seeding: done
+  4-2-transaction-validation: done
+  4-3-account-repository-and-transaction-executor: done
+  4-4-idempotent-transaction-intake: done
+  4-5-account-endpoints: done
+  4-6-atomic-inbox-execution-with-event-enqueue: done
+  4-7-event-publishing-processor: done
+  epic-4-retrospective: optional
+
+  epic-5: done
+  5-1-payment-store-and-idempotency-key-handling: done
+  5-2-payment-intake-endpoint: done
+  5-3-contract-generated-kiota-corebank-client: done
+  5-4-forwarding-processor: done
+  5-5-event-subscription-intake: done
+  5-6-event-handling-processor: done
+  epic-5-retrospective: optional
+
+  epic-6: in-progress
+  6-1-aspire-application-graph: backlog
+  6-2-renewable-redis-distributed-locking: done
+  6-3-replicated-local-api-topology: done
+  6-4-chaos-opt-in-and-demo-smoke: backlog
+  6-5-opentelemetry-business-metrics: done
+  6-6-remove-sqlite-with-postgresql-testcontainers: done
+  6-7-eliminate-dapr-service-invocation: done
+  epic-6-retrospective: optional
+
+  epic-7: done
+  7-1-assertion-api-realignment: done
+  7-2-mcp-server-tools: done
+  7-3-k6-run-and-first-full-acceptance-gate: done
+  7-4-reusable-terminal-demo-operator-console: done
+  epic-7-retrospective: optional
+
+  epic-8: backlog
+  8-1-regenerate-architecture-md: backlog
+  8-2-adrs-and-skill-updates: backlog
+  epic-8-retrospective: optional

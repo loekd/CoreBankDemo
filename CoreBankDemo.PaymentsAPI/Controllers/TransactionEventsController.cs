@@ -1,83 +1,78 @@
-using System.Diagnostics;
-using System.Text.Json;
-using Microsoft.AspNetCore.Mvc;
-using CoreBankDemo.PaymentsAPI.Inbox;
-using CoreBankDemo.PaymentsAPI.Outbox;
+using CoreBankDemo.PaymentsAPI.Handlers;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
-using CoreBankDemo.ServiceDefaults.Configuration;
-using Microsoft.Extensions.Options;
-using CoreBankDemo.Messaging;
-using static CoreBankDemo.Messaging.MessageConstants;
+using Microsoft.AspNetCore.Mvc;
 
 namespace CoreBankDemo.PaymentsAPI.Controllers;
 
+/// <summary>
+/// The frozen <c>transaction-events</c> subscription surface (spec-5-5):
+/// routes must stay aligned with both
+/// <c>dapr/components/subscription-transaction-events.yaml</c> and
+/// <c>dapr/components-loadtest/subscription-transaction-events.yaml</c>.
+/// Thin by design (conventions skill): bind the CloudEvent's unwrapped data
+/// (<c>Dapr.AspNetCore</c>'s cloud-events middleware, wired in
+/// <c>Program.cs</c>, already stripped the envelope) and delegate to <see
+/// cref="ITransactionEventIntakeHandler"/> -- no persistence, partitioning,
+/// serialization, or clock logic here. Each known-event action returns 200
+/// only after the handler's storage call completes; the default/unknown
+/// route never stores anything, only logs a warning, and still
+/// acknowledges with 200 so Dapr never redelivers a type this service will
+/// never recognize.
+/// </summary>
 [ApiController]
 public class TransactionEventsController(
-    IInboxMessageRepository inboxRepository,
-    IOptions<InboxProcessingOptions> inboxOptions,
-    TimeProvider timeProvider,
-    ILogger<TransactionEventsController> logger) : ControllerBase
+    ITransactionEventIntakeHandler handler,
+    ILogger<TransactionEventsController> logger,
+    BusinessMetrics businessMetrics) : ControllerBase
 {
-    private readonly InboxProcessingOptions _inboxOptions = inboxOptions.Value;
-
     [HttpPost("events/transactions/completed")]
     public async Task<IActionResult> TransactionCompleted(
-        [FromBody] TransactionCompletedEvent e,
-        CancellationToken cancellationToken = default)
+        [FromBody] TransactionCompletedEvent transactionCompleted,
+        CancellationToken cancellationToken)
     {
-        var idempotencyKey = $"{e.TransactionId}-{nameof(TransactionCompletedEvent)}";
-        await StoreInInbox(idempotencyKey, nameof(TransactionCompletedEvent), JsonSerializer.Serialize(e), cancellationToken);
+        await handler.StoreAsync(transactionCompleted, cancellationToken);
         return Ok();
     }
 
     [HttpPost("events/transactions/failed")]
     public async Task<IActionResult> TransactionFailed(
-        [FromBody] TransactionFailedEvent e,
-        CancellationToken cancellationToken = default)
+        [FromBody] TransactionFailedEvent transactionFailed,
+        CancellationToken cancellationToken)
     {
-        var idempotencyKey = $"{e.TransactionId}-{nameof(TransactionFailedEvent)}";
-        await StoreInInbox(idempotencyKey, nameof(TransactionFailedEvent), JsonSerializer.Serialize(e), cancellationToken);
+        await handler.StoreAsync(transactionFailed, cancellationToken);
         return Ok();
     }
 
     [HttpPost("events/transactions/balance-updated")]
     public async Task<IActionResult> BalanceUpdated(
-        [FromBody] BalanceUpdatedEvent e,
-        CancellationToken cancellationToken = default)
+        [FromBody] BalanceUpdatedEvent balanceUpdated,
+        CancellationToken cancellationToken)
     {
-        var idempotencyKey = $"{e.TransactionId}-{nameof(BalanceUpdatedEvent)}-{e.AccountNumber}";
-        await StoreInInbox(idempotencyKey, nameof(BalanceUpdatedEvent), JsonSerializer.Serialize(e), cancellationToken);
+        await handler.StoreAsync(balanceUpdated, cancellationToken);
         return Ok();
     }
 
     [HttpPost("events/transactions/unknown")]
-    public IActionResult Unknown()
+    public IActionResult Unknown(
+        [FromHeader(Name = "Cloudevent.type")] string? eventType,
+        [FromHeader(Name = "Cloudevent.id")] string? eventId,
+        [FromHeader(Name = "Cloudevent.source")] string? source)
     {
-        logger.LogWarning("Received unknown cloud event type, ignoring");
+        logger.LogWarning(
+            "Received unsupported transaction-events CloudEvent {EventId} of type {EventType} from {EventSource}; acknowledging without storage",
+            eventId,
+            eventType,
+            source);
+        // Story 6.5: the incoming CloudEvent's own type is never used as a
+        // tag (edge-case matrix) -- this route is reached only for a type
+        // this service intentionally does not recognize, so message.type is
+        // always the closed BusinessMetrics.MessageType.Unknown value.
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Received,
+            BusinessMetrics.Transport.Dapr,
+            BusinessMetrics.MessageType.Unknown,
+            BusinessMetrics.DeliveryOutcome.Unknown);
         return Ok();
-    }
-
-    private async Task StoreInInbox(string idempotencyKey, string eventType, string eventPayload, CancellationToken cancellationToken)
-    {
-        var partitionId = PartitionHelper.GetPartitionId(idempotencyKey, _inboxOptions.PartitionCount);
-
-        var message = new InboxMessage
-        {
-            Id = Guid.NewGuid(),
-            IdempotencyKey = idempotencyKey,
-            PartitionId = partitionId,
-            EventType = eventType,
-            EventPayload = eventPayload,
-            ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
-            Status = Status.Pending,
-            TraceParent = Activity.Current?.Id,
-            TraceState = Activity.Current?.TraceStateString
-        };
-
-        var isNew = await inboxRepository.StoreIfNewAsync(message, cancellationToken);
-        if (!isNew)
-        {
-            logger.LogInformation("Duplicate event ignored: {IdempotencyKey}", idempotencyKey);
-        }
     }
 }

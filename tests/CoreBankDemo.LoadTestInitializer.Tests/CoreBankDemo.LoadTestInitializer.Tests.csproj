@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Include>[CoreBankDemo.LoadTestInitializer]CoreBankDemo.LoadTestInitializer.ResetResponseValidator*</Include>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.LoadTestInitializer\CoreBankDemo.LoadTestInitializer.csproj" />
+  </ItemGroup>
+</Project>

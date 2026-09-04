@@ -1,0 +1,25 @@
+# Team override for bmad-build. Committed; applies to every developer.
+# Policy: all feature work happens on a feature branch cut from fresh origin/main
+# and lands on main through a pull request. Keep this file in step with
+# bmad-build.toml, bmad-build-auto.toml and bmad-dev-story.toml.
+
+[workflow]
+
+persistent_facts = [
+  "Version-control policy: every code change is made on a feature branch cut from a freshly fetched origin/main and lands on main through a pull request. Never commit to main directly.",
+]
+
+activation_steps_append = [
+  """
+Feature-branch gate. Complete this before any file in the repository is changed; skip it only when the request reads or reports without changing anything.
+1. Run `git fetch origin main` so `origin/main` is current. If the fetch fails, report the exact error and HALT.
+2. Run `git status --porcelain`. If it prints anything, stop and report the uncommitted changes; do not stash, discard, or commit them on your own, and do not continue until the user has dealt with them.
+3. Choose the branch name: `feature/<epic>-<story>-<slug>` for a story (for example `feature/8-1-priority-tail`), `feature/<slug>` for a one-shot request. Lower-case words joined by hyphens, at most 40 characters after `feature/`.
+4. Run `git branch --show-current`. If it already prints the chosen name, stay on it. Otherwise run `git switch -c <name> origin/main`; if that branch already exists, run `git switch <name>` instead. If the current branch is a different feature branch with commits that are not on origin, say so before switching.
+5. Report the branch you are on in one line, then continue with the workflow.
+""",
+]
+
+on_complete = """
+In the completion summary, name the feature branch that holds the work and state that it lands on main via `git push -u origin <branch>` followed by `gh pr create --base main`. Push or open the pull request only when the user asks for it.
+"""

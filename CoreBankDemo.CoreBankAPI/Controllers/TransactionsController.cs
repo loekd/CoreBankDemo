@@ -1,165 +1,128 @@
-using Microsoft.AspNetCore.Mvc;
-using System.Text.Json;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
-using CoreBankDemo.Messaging;
-using CoreBankDemo.ServiceDefaults.Configuration;
-using Microsoft.Extensions.Options;
-using System.Diagnostics;
+using CoreBankDemo.ServiceDefaults;
+using Microsoft.AspNetCore.Mvc;
 
 namespace CoreBankDemo.CoreBankAPI.Controllers;
 
+/// <summary>
+/// Transaction-intake HTTP surface (spec-4-4). Thin by design (conventions
+/// skill, AD-2): bind, check <see cref="ModelState"/>, call
+/// <see cref="ITransactionIntakeHandler"/>, map its result to an
+/// <see cref="IActionResult"/> — no dedupe branching, payload deserialization,
+/// or activity enrichment here; all of that lives in the handler.
+/// </summary>
 [ApiController]
 [Route("api/[controller]")]
-public class TransactionsController(
-    IInboxMessageRepository inboxRepository,
-    IAccountRepository accountRepository,
-    IOptions<InboxProcessingOptions> inboxOptions,
-    TimeProvider timeProvider)
-    : ControllerBase
+public class TransactionsController(ITransactionIntakeHandler handler, BusinessMetrics businessMetrics) : ControllerBase
 {
-    private readonly InboxProcessingOptions _inboxOptions = inboxOptions.Value;
+    /// <summary>
+    /// Optional inline-execution opt-in (spec: add-instant-payment-rail).
+    /// Absent reproduces today's deferred-execution behaviour exactly.
+    /// </summary>
+    private const string ExecuteModeHeader = "X-Execute-Mode";
+    private const string ExecuteModeInline = "inline";
+
+    /// <summary>
+    /// Optional claim priority for the stored command (see
+    /// <see cref="MessageConstants.Priority"/>). PaymentsAPI sends it for the
+    /// instant rail only; absent, unparsable or non-positive means standard,
+    /// so a caller can never make a command wait *longer* by sending garbage.
+    /// </summary>
+    private const string PaymentPriorityHeader = "X-Payment-Priority";
 
     [HttpPost("process")]
-    public async Task<IActionResult> ProcessTransaction([FromBody] TransactionRequest request, CancellationToken cancellationToken = default)
+    public async Task<IActionResult> ProcessTransaction(
+        [FromBody] TransactionRequest request, CancellationToken cancellationToken)
     {
-        // Enrich the current span (propagated from the Payments outbox via Dapr) with transaction details
-        EnrichCurrentActivity(request);
-
         if (!ModelState.IsValid)
         {
-            var errors = GetModelErrors();
-            Activity.Current?.SetTag("outcome", "invalid_request");
-            Activity.Current?.SetTag("outcome.errors", string.Join(", ", errors));
-            Activity.Current?.SetStatus(ActivityStatusCode.Error, "Invalid request");
+            var errors = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage);
             return BadRequest(new { Errors = errors });
         }
 
-        var validationResult = await accountRepository.ValidateTransactionRequestAsync(
-            request.FromAccount, request.ToAccount, request.Amount, request.Currency, cancellationToken);
+        var executeInline = string.Equals(
+            Request.Headers[ExecuteModeHeader].FirstOrDefault(), ExecuteModeInline, StringComparison.OrdinalIgnoreCase);
+        var priority = int.TryParse(
+            Request.Headers[PaymentPriorityHeader].FirstOrDefault(),
+            System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsedPriority) && parsedPriority > MessageConstants.Priority.Standard
+            ? parsedPriority
+            : MessageConstants.Priority.Standard;
 
-        if (!validationResult.IsValid)
+        TransactionIntakeResult result;
+        try
         {
-            Activity.Current?.SetTag("outcome", "validation_failed");
-            Activity.Current?.SetTag("outcome.errors", string.Join(", ", validationResult.Errors));
-            Activity.Current?.SetStatus(ActivityStatusCode.Error, "Validation failed");
-            return BadRequest(new { Errors = validationResult.Errors });
+            result = await handler.ProcessAsync(request, cancellationToken, executeInline, priority);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            businessMetrics.RecordDelivery(
+                BusinessMetrics.DeliveryDirection.Received,
+                BusinessMetrics.Transport.Http,
+                BusinessMetrics.MessageType.TransactionCommand,
+                BusinessMetrics.DeliveryOutcome.Failed);
+            throw;
         }
 
-        var existing = await inboxRepository.FindByIdempotencyKeyAsync(request.TransactionId, cancellationToken);
-        if (existing != null)
+        // Story 6.5: the concrete HTTP-receive boundary for the transaction
+        // command. Recorded from the already-known intake outcome rather
+        // than re-deriving it, so this can never disagree with the
+        // transaction-intake measurement the handler already recorded.
+        businessMetrics.RecordDelivery(
+            BusinessMetrics.DeliveryDirection.Received,
+            BusinessMetrics.Transport.Http,
+            BusinessMetrics.MessageType.TransactionCommand,
+            result.Outcome switch
+            {
+                TransactionIntakeOutcome.Accepted => BusinessMetrics.DeliveryOutcome.Succeeded,
+                TransactionIntakeOutcome.InlineCompleted => BusinessMetrics.DeliveryOutcome.Succeeded,
+                TransactionIntakeOutcome.Replayed => BusinessMetrics.DeliveryOutcome.Duplicate,
+                TransactionIntakeOutcome.InFlight => BusinessMetrics.DeliveryOutcome.Duplicate,
+                TransactionIntakeOutcome.TransportFailed => BusinessMetrics.DeliveryOutcome.Failed,
+                _ => throw new InvalidOperationException($"Unhandled transaction intake outcome: {result.Outcome}")
+            });
+
+        return result.Outcome switch
         {
-            Activity.Current?.SetTag("outcome", "duplicate");
-            Activity.Current?.SetTag("outcome.existing_status", existing.Status);
-            return HandleExistingInboxMessage(existing);
-        }
-
-        var isNew = await inboxRepository.StoreIfNewAsync(BuildInboxMessage(request), cancellationToken);
-        if (!isNew)
-        {
-            // Lost a concurrent race — load and return the winner's record
-            existing = await inboxRepository.FindByIdempotencyKeyAsync(request.TransactionId, cancellationToken);
-            Activity.Current?.SetTag("outcome", "duplicate");
-            return existing != null
-                ? HandleExistingInboxMessage(existing)
-                : StatusCode(500, new { Errors = new[] { "Failed to store or retrieve transaction" } });
-        }
-
-        Activity.Current?.SetTag("outcome", "accepted");
-        return Accepted($"/api/transactions/{request.TransactionId}", new
-        {
-            TransactionId = request.TransactionId,
-            Status = MessageConstants.Status.Pending,
-            Message = "Transaction accepted for processing"
-        });
-    }
-
-    private static void EnrichCurrentActivity(TransactionRequest request)
-    {
-        var activity = Activity.Current;
-        if (activity == null) return;
-        activity.SetTag("transaction.id", request.TransactionId);
-        activity.SetTag("transaction.from_account", request.FromAccount);
-        activity.SetTag("transaction.to_account", request.ToAccount);
-        activity.SetTag("transaction.amount", request.Amount);
-        activity.SetTag("transaction.currency", request.Currency);
-    }
-
-    private InboxMessage BuildInboxMessage(TransactionRequest request)
-    {
-        var partitionId = PartitionHelper.GetPartitionId(request.TransactionId, _inboxOptions.PartitionCount);
-
-        return new InboxMessage
-        {
-            Id = Guid.NewGuid(),
-            IdempotencyKey = request.TransactionId,
-            PartitionId = partitionId,
-            FromAccount = request.FromAccount,
-            ToAccount = request.ToAccount,
-            Amount = request.Amount,
-            Currency = request.Currency,
-            ReceivedAt = timeProvider.GetUtcNow().UtcDateTime,
-            Status = MessageConstants.Status.Pending,
-            TransactionId = request.TransactionId,
-            TraceParent = Activity.Current?.Id,
-            TraceState = Activity.Current?.TraceStateString
+            TransactionIntakeOutcome.Accepted =>
+                Accepted($"/api/transactions/{request.TransactionId}", result.Response),
+            // Inline execution committed within this request (spec:
+            // add-instant-payment-rail): the final TransactionResponse is
+            // already known, so this answers 200 instead of 202 -- unlike
+            // Accepted above.
+            TransactionIntakeOutcome.InlineCompleted =>
+                Ok(result.Response),
+            TransactionIntakeOutcome.Replayed =>
+                Ok(result.Response),
+            // AD-11: an in-flight duplicate reports current status with 202,
+            // same as a freshly-accepted request.
+            TransactionIntakeOutcome.InFlight =>
+                Accepted($"/api/transactions/{request.TransactionId}", result.Response),
+            TransactionIntakeOutcome.TransportFailed =>
+                BadRequest(new { Errors = result.Errors }),
+            _ => throw new InvalidOperationException($"Unhandled transaction intake outcome: {result.Outcome}")
         };
     }
 
-    private IActionResult HandleExistingInboxMessage(InboxMessage existing)
-    {
-        switch (existing.Status)
-        {
-            case MessageConstants.Status.Completed when !string.IsNullOrEmpty(existing.ResponsePayload):
-            {
-                var cachedResponse = JsonSerializer.Deserialize<TransactionResponse>(existing.ResponsePayload);
-                return cachedResponse is not null
-                    ? Ok(cachedResponse)
-                    : StatusCode(500, new { Errors = new[] { "Failed to deserialize cached response" } });
-            }
-            case MessageConstants.Status.Pending or MessageConstants.Status.Processing:
-                return Accepted($"/api/transactions/{existing.IdempotencyKey}", new
-                {
-                    TransactionId = existing.IdempotencyKey,
-                    Status = existing.Status,
-                    Message = "Transaction is being processed"
-                });
-            case MessageConstants.Status.Failed:
-                return BadRequest(new { Errors = new[] { existing.LastError ?? "Transaction failed" } });
-            default:
-                return StatusCode(500, new { Errors = new[] { "Unknown transaction status" } });
-        }
-    }
-
-    private List<string> GetModelErrors()
-    {
-        return ModelState.Values
-            .SelectMany(v => v.Errors)
-            .Select(e => e.ErrorMessage)
-            .ToList();
-    }
-
     [HttpGet("{idempotencyKey}")]
-    public async Task<IActionResult> GetTransactionStatus(string idempotencyKey, CancellationToken cancellationToken = default)
+    public async Task<IActionResult> GetTransactionStatus(string idempotencyKey, CancellationToken cancellationToken)
     {
-        var message = await inboxRepository.FindByIdempotencyKeyAsync(idempotencyKey, cancellationToken);
+        var result = await handler.GetStatusAsync(idempotencyKey, cancellationToken);
 
-        if (message == null)
-            return NotFound(new { Errors = new[] { "Transaction not found" } });
-
-        if (message.Status == MessageConstants.Status.Completed && !string.IsNullOrEmpty(message.ResponsePayload))
+        if (!result.Found)
         {
-            var response = JsonSerializer.Deserialize<TransactionResponse>(message.ResponsePayload);
-            if (response is not null)
-                return Ok(response);
+            return NotFound(new { Errors = new[] { "Transaction not found" } });
         }
 
-        return Ok(new
-        {
-            IdempotencyKey = message.IdempotencyKey,
-            Status = message.Status,
-            ReceivedAt = message.ReceivedAt,
-            ProcessedAt = message.ProcessedAt
-        });
+        return result.CachedResponse is not null
+            ? Ok(result.CachedResponse)
+            : Ok(result.StatusResponse);
     }
 }

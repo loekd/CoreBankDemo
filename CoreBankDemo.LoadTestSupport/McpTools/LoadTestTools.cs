@@ -1,11 +1,12 @@
 using System.ComponentModel;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.LoadTestSupport.Services;
 using CoreBankDemo.PaymentsAPI;
-using static CoreBankDemo.Messaging.MessageConstants;
 
 namespace CoreBankDemo.LoadTestSupport.McpTools;
 
@@ -13,7 +14,11 @@ namespace CoreBankDemo.LoadTestSupport.McpTools;
 public sealed class LoadTestTools
 {
     private const decimal InitialBalance = LoadTestConstants.InitialBalance;
-    private const int LoadTestAccountCount = LoadTestConstants.AccountCount;
+
+    // Matches ASP.NET Core's minimal-API JSON defaults (camelCase) so
+    // get_assertion_results/poll_until_drained produce structurally
+    // identical output to /assert/results and /assert/drain, per story 7.1.
+    private static readonly JsonSerializerOptions McpJsonOptions = new(JsonSerializerDefaults.Web);
 
     [McpServerTool(Name = "reset_database")]
     [Description(
@@ -21,36 +26,30 @@ public sealed class LoadTestTools
         "load test account balances to 10,000,000 EUR. Call this BEFORE starting a load test " +
         "to ensure a clean baseline. This cannot be undone.")]
     public static async Task<string> ResetDatabase(
-        CoreBankDbContext coreBankDb,
-        PaymentsDbContext paymentsDb,
+        IServiceProvider serviceProvider,
         CancellationToken ct)
     {
         try
         {
-            await paymentsDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"OutboxMessages\" RESTART IDENTITY CASCADE", ct);
-            await paymentsDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"InboxMessages\" RESTART IDENTITY CASCADE", ct);
-            await coreBankDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"InboxMessages\" RESTART IDENTITY CASCADE", ct);
-            await coreBankDb.Database.ExecuteSqlRawAsync(
-                "TRUNCATE TABLE \"MessagingOutboxMessages\" RESTART IDENTITY CASCADE", ct);
-
-            var accountCount = await coreBankDb.Database.ExecuteSqlRawAsync(
-                "UPDATE \"Accounts\" SET \"Balance\" = {0}, \"UpdatedAt\" = NULL WHERE \"AccountNumber\" LIKE '%LOAD%'",
-                InitialBalance);
+            // DatabaseResetCoordinator is internal (its constructor's internal
+            // dependencies must stay that way — see DatabaseResetCoordinator.cs),
+            // so it can't be a direct parameter of this public MCP tool method
+            // (CS0051). Resolve it from DI instead; the type argument here is a
+            // method-body detail, not part of this method's public signature.
+            var coordinator = serviceProvider.GetRequiredService<DatabaseResetCoordinator>();
+            var result = await coordinator.ResetAndReleaseAsync(ct);
 
             return JsonSerializer.Serialize(new
             {
-                success = true,
-                accountsReset = accountCount,
-                initialBalancePerAccount = InitialBalance,
-                totalBalance = accountCount * InitialBalance
-            });
+                message = "Database reset complete",
+                accountsReset = result.AccountsReset,
+                totalBalance = result.TotalBalance,
+                initialBalancePerAccount = InitialBalance
+            }, McpJsonOptions);
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { error = "reset_failed", detail = ex.Message });
+            return JsonSerializer.Serialize(new { error = "reset_failed", detail = ex.Message }, McpJsonOptions);
         }
     }
 
@@ -63,8 +62,7 @@ public sealed class LoadTestTools
         "IMPORTANT: pass minimumExpectedCompleted (e.g. 1000) to avoid false 'drained' results " +
         "when k6 is still submitting payments.")]
     public static async Task<string> PollUntilDrained(
-        CoreBankDbContext coreBankDb,
-        PaymentsDbContext paymentsDb,
+        LoadTestAssertionService assertionService,
         IProgress<ProgressNotificationValue> progress,
         [Description("Minimum number of completed inbox messages required before the system can be " +
                      "considered drained. Use this to prevent false positives when k6 is still " +
@@ -79,81 +77,81 @@ public sealed class LoadTestTools
         int pollCount = 0;
         int totalMessages = 0;
 
-        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        try
         {
-            pollCount++;
-
-            var outboxPending = await paymentsDb.OutboxMessages
-                .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
-            var inboxPending = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
-            var inboxCompleted = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == Status.Completed, ct);
-            var inboxFailed = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == Status.Failed, ct);
-
-            int processed = inboxCompleted + inboxFailed;
-            int currentTotal = processed + outboxPending + inboxPending;
-
-            // Use the higher of observed total or minimumExpectedCompleted for percentage
-            if (currentTotal > totalMessages)
-                totalMessages = currentTotal;
-            int effectiveTotal = Math.Max(totalMessages, minimumExpectedCompleted);
-
-            float percentage = effectiveTotal > 0
-                ? Math.Min(processed * 100f / effectiveTotal, 100f)
-                : 0f;
-
-            bool meetsMinimum = processed >= minimumExpectedCompleted;
-
-            progress.Report(new ProgressNotificationValue
+            while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
             {
-                Progress = percentage,
-                Total = 100,
-                Message = $"Poll {pollCount}: {processed}/{effectiveTotal} processed ({percentage:F0}%), " +
-                          $"outbox pending: {outboxPending}, inbox pending: {inboxPending}" +
-                          (minimumExpectedCompleted > 0 && !meetsMinimum
-                              ? $" [waiting for {minimumExpectedCompleted - processed} more]"
-                              : "")
-            });
+                pollCount++;
 
-            if (outboxPending == 0 && inboxPending == 0 && meetsMinimum)
-            {
-                return JsonSerializer.Serialize(new
+                var drain = await assertionService.CheckDrainAsync(ct);
+
+                int processed = drain.Completed + drain.Failed;
+                int currentTotal = processed + drain.OutboxPending + drain.InboxPending
+                    + drain.CoreBankOutboxPending + drain.PaymentsInboxPending;
+
+                // Use the higher of observed total or minimumExpectedCompleted for percentage
+                if (currentTotal > totalMessages)
+                    totalMessages = currentTotal;
+                int effectiveTotal = Math.Max(totalMessages, minimumExpectedCompleted);
+
+                float percentage = effectiveTotal > 0
+                    ? Math.Min(processed * 100f / effectiveTotal, 100f)
+                    : 0f;
+
+                bool meetsMinimum = processed >= minimumExpectedCompleted;
+
+                progress.Report(new ProgressNotificationValue
                 {
-                    isDrained = true,
-                    pollCount,
-                    outboxPending,
-                    inboxPending,
-                    completed = inboxCompleted,
-                    failed = inboxFailed
+                    Progress = percentage,
+                    Total = 100,
+                    Message = $"Poll {pollCount}: {processed}/{effectiveTotal} processed ({percentage:F0}%), " +
+                              $"outbox pending: {drain.OutboxPending}, inbox pending: {drain.InboxPending}, " +
+                              $"corebank outbox pending: {drain.CoreBankOutboxPending}, " +
+                              $"payments inbox pending: {drain.PaymentsInboxPending}" +
+                              (minimumExpectedCompleted > 0 && !meetsMinimum
+                                  ? $" [waiting for {minimumExpectedCompleted - processed} more]"
+                                  : "")
                 });
+
+                if (drain.IsDrained && meetsMinimum)
+                {
+                    return JsonSerializer.Serialize(new
+                    {
+                        drain.IsDrained,
+                        pollCount,
+                        drain.OutboxPending,
+                        drain.InboxPending,
+                        drain.CoreBankOutboxPending,
+                        drain.PaymentsInboxPending,
+                        drain.Completed,
+                        drain.Failed
+                    }, McpJsonOptions);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            // Timeout reached — return current state
+            var final = await assertionService.CheckDrainAsync(CancellationToken.None);
+
+            return JsonSerializer.Serialize(new
+            {
+                isDrained = false,
+                error = "timeout",
+                detail = $"Not drained after {timeoutSeconds}s ({pollCount} polls)",
+                pollCount,
+                final.OutboxPending,
+                final.InboxPending,
+                final.CoreBankOutboxPending,
+                final.PaymentsInboxPending,
+                final.Completed,
+                final.Failed
+            }, McpJsonOptions);
         }
-
-        // Timeout reached — return current state
-        var finalOutbox = await paymentsDb.OutboxMessages
-            .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, CancellationToken.None);
-        var finalInbox = await coreBankDb.InboxMessages
-            .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, CancellationToken.None);
-        var finalCompleted = await coreBankDb.InboxMessages
-            .CountAsync(m => m.Status == Status.Completed, CancellationToken.None);
-        var finalFailed = await coreBankDb.InboxMessages
-            .CountAsync(m => m.Status == Status.Failed, CancellationToken.None);
-
-        return JsonSerializer.Serialize(new
+        catch (Exception ex)
         {
-            isDrained = false,
-            error = "timeout",
-            detail = $"Not drained after {timeoutSeconds}s ({pollCount} polls)",
-            pollCount,
-            outboxPending = finalOutbox,
-            inboxPending = finalInbox,
-            completed = finalCompleted,
-            failed = finalFailed
-        });
+            return JsonSerializer.Serialize(new { error = "drain_check_failed", detail = ex.Message }, McpJsonOptions);
+        }
     }
 
     [McpServerTool(Name = "get_assertion_results")]
@@ -162,279 +160,75 @@ public sealed class LoadTestTools
         "no failures, balance conservation, and correct per-account balances. " +
         "Call this AFTER poll_until_drained reports isDrained=true.")]
     public static async Task<string> GetAssertionResults(
-        CoreBankDbContext coreBankDb,
-        PaymentsDbContext paymentsDb,
+        LoadTestAssertionService assertionService,
         [Description("Number of unique payments submitted by k6 (e.g. 1000). Used to verify all were processed exactly once.")]
         int expectedUnique,
         CancellationToken ct)
     {
         try
         {
-            var completedCount = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == Status.Completed, ct);
-            var failedCount = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == Status.Failed, ct);
-            var pendingCount = await coreBankDb.InboxMessages
-                .CountAsync(m => m.Status == Status.Pending || m.Status == Status.Processing, ct);
-
-            var completedInbox = await coreBankDb.InboxMessages
-                .Where(m => m.Status == Status.Completed)
-                .Select(m => new { m.FromAccount, m.ToAccount, m.Amount, m.IdempotencyKey })
-                .ToListAsync(ct);
-
-            var duplicateKeys = await coreBankDb.InboxMessages
-                .GroupBy(m => m.IdempotencyKey)
-                .Where(g => g.Count() > 1)
-                .Select(g => new { Key = g.Key, Count = g.Count() })
-                .ToListAsync(ct);
-
-            var totalOutbox = await paymentsDb.OutboxMessages.CountAsync(ct);
-            var outboxCompleted = await paymentsDb.OutboxMessages
-                .CountAsync(m => m.Status == Status.Completed, ct);
-            var completedUniqueKeys = completedInbox
-                .Select(m => m.IdempotencyKey)
-                .Distinct()
-                .Count();
-
-            var loadTestAccounts = await coreBankDb.Accounts
-                .Where(a => a.AccountNumber.StartsWith("NL") && a.AccountNumber.Contains("LOAD"))
-                .OrderBy(a => a.AccountNumber)
-                .ToListAsync(ct);
-
-            var totalBalance = loadTestAccounts.Sum(a => a.Balance);
-            var expectedTotalBalance = LoadTestAccountCount * InitialBalance;
-            var balanceConserved = totalBalance == expectedTotalBalance;
-
-            // Calculate expected per-account balances
-            var expectedBalances = new Dictionary<string, decimal>();
-            for (int i = 1; i <= LoadTestAccountCount; i++)
-                expectedBalances[$"NL{i:D2}LOAD{i:D10}"] = InitialBalance;
-            foreach (var tx in completedInbox)
-            {
-                if (expectedBalances.ContainsKey(tx.FromAccount) && expectedBalances.ContainsKey(tx.ToAccount))
-                {
-                    expectedBalances[tx.FromAccount] -= tx.Amount;
-                    expectedBalances[tx.ToAccount] += tx.Amount;
-                }
-            }
-
-            var balanceDiscrepancies = loadTestAccounts
-                .Where(a => expectedBalances.TryGetValue(a.AccountNumber, out var expected) && a.Balance != expected)
-                .Select(a => new
-                {
-                    account = a.AccountNumber,
-                    expected = expectedBalances[a.AccountNumber],
-                    actual = a.Balance,
-                    difference = a.Balance - expectedBalances[a.AccountNumber]
-                })
-                .ToList();
-
-            var checks = new
-            {
-                noFailedMessages = new { passed = failedCount == 0, detail = $"{failedCount} failed" },
-                noPendingMessages = new { passed = pendingCount == 0, detail = $"{pendingCount} pending" },
-                noDuplicateProcessing = new
-                {
-                    passed = duplicateKeys.Count == 0,
-                    detail = duplicateKeys.Count == 0
-                        ? "No duplicates"
-                        : $"{duplicateKeys.Count} duplicate key(s)"
-                },
-                expectedUniqueProcessed = new
-                {
-                    passed = completedUniqueKeys == expectedUnique,
-                    detail = $"expected={expectedUnique}, actual={completedUniqueKeys}"
-                },
-                allSubmittedProcessed = new
-                {
-                    passed = completedCount == totalOutbox,
-                    detail = $"outbox={totalOutbox}, inboxCompleted={completedCount}"
-                },
-                balanceConservation = new
-                {
-                    passed = balanceConserved,
-                    detail = $"total={totalBalance:F2}, expected={expectedTotalBalance:F2}"
-                },
-                balancesCorrect = new
-                {
-                    passed = balanceDiscrepancies.Count == 0,
-                    detail = balanceDiscrepancies.Count == 0
-                        ? "All balances match"
-                        : $"{balanceDiscrepancies.Count} account(s) mismatched",
-                    discrepancies = balanceDiscrepancies
-                }
-            };
-
-            var allPassed =
-                checks.noFailedMessages.passed &&
-                checks.noPendingMessages.passed &&
-                checks.noDuplicateProcessing.passed &&
-                checks.expectedUniqueProcessed.passed &&
-                checks.allSubmittedProcessed.passed &&
-                checks.balanceConservation.passed &&
-                checks.balancesCorrect.passed;
-
-            return JsonSerializer.Serialize(new
-            {
-                allPassed,
-                checks,
-                summary = new
-                {
-                    totalOutbox,
-                    outboxCompleted,
-                    inboxCompleted = completedCount,
-                    inboxFailed = failedCount,
-                    inboxPending = pendingCount,
-                    completedUniqueKeys,
-                    totalBalance,
-                    expectedTotalBalance,
-                    accountCount = loadTestAccounts.Count
-                }
-            });
+            var result = await assertionService.GetResultsAsync(expectedUnique, ct);
+            return JsonSerializer.Serialize(result, McpJsonOptions);
         }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { error = "assertion_failed", detail = ex.Message });
+            return JsonSerializer.Serialize(new { error = "assertion_failed", detail = ex.Message }, McpJsonOptions);
         }
     }
 
     [McpServerTool(Name = "get_corebank_inbox")]
-    [Description("Returns recent CoreBank inbox messages. Use to inspect message processing status after a load test.")]
+    [Description("Returns the 50 most recent CoreBank inbox messages, newest first. Use to inspect message processing status after a load test.")]
     public static async Task<string> GetCoreBankInbox(
         CoreBankDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.InboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.InboxMessages
             .OrderByDescending(m => m.ReceivedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.IdempotencyKey,
-                m.Status,
-                m.FromAccount,
-                m.ToAccount,
-                m.Amount,
-                m.ReceivedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 
     [McpServerTool(Name = "get_corebank_outbox")]
-    [Description("Returns recent CoreBank outbox messages (domain events published after transaction processing).")]
+    [Description("Returns the 50 most recent CoreBank outbox messages (domain events published after transaction processing), newest first.")]
     public static async Task<string> GetCoreBankOutbox(
         CoreBankDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.MessagingOutboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.MessagingOutboxMessages
             .OrderByDescending(m => m.CreatedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.TransactionId,
-                m.Status,
-                m.EventType,
-                m.CreatedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 
     [McpServerTool(Name = "get_payments_inbox")]
-    [Description("Returns recent Payments inbox messages (events received from CoreBank after transaction processing).")]
+    [Description("Returns the 50 most recent Payments inbox messages (events received from CoreBank after transaction processing), newest first.")]
     public static async Task<string> GetPaymentsInbox(
         PaymentsDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.InboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.InboxMessages
             .OrderByDescending(m => m.ReceivedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.IdempotencyKey,
-                m.Status,
-                m.EventType,
-                m.ReceivedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 
     [McpServerTool(Name = "get_payments_outbox")]
-    [Description("Returns recent Payments outbox messages (payment requests queued for forwarding to CoreBank via Dapr).")]
+    [Description("Returns the 50 most recent Payments outbox messages (payment requests queued for forwarding to CoreBank via Kiota HTTP), newest first.")]
     public static async Task<string> GetPaymentsOutbox(
         PaymentsDbContext db,
-        [Description("Max messages to return (default 20, max 100)")]
-        int limit = 20,
-        [Description("Filter by status: Pending, Processing, Completed, or Failed. Omit for all.")]
-        string? status = null,
         CancellationToken ct = default)
     {
-        limit = Math.Clamp(limit, 1, 100);
-
-        var query = db.OutboxMessages.AsQueryable();
-        if (!string.IsNullOrEmpty(status))
-            query = query.Where(m => m.Status == status);
-
-        var messages = await query
+        var messages = await db.OutboxMessages
             .OrderByDescending(m => m.CreatedAt)
-            .Take(limit)
-            .Select(m => new
-            {
-                m.Id,
-                m.IdempotencyKey,
-                m.Status,
-                m.FromAccount,
-                m.ToAccount,
-                m.Amount,
-                m.CreatedAt,
-                m.ProcessedAt,
-                m.LastError
-            })
+            .Take(50)
             .ToListAsync(ct);
 
-        return JsonSerializer.Serialize(new { count = messages.Count, messages });
+        return JsonSerializer.Serialize(messages, McpJsonOptions);
     }
 }

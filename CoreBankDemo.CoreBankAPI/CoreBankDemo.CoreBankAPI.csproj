@@ -25,4 +25,10 @@
       <ProjectReference Include="..\CoreBankDemo.Messaging\CoreBankDemo.Messaging.csproj" />
     </ItemGroup>
 
+    <ItemGroup>
+      <InternalsVisibleTo Include="CoreBankDemo.CoreBankAPI.Tests" />
+      <InternalsVisibleTo Include="CoreBankDemo.Persistence.IntegrationTests" />
+      <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+    </ItemGroup>
+
 </Project>

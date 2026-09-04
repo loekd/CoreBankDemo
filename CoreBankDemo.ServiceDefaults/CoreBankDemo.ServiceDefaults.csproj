@@ -9,8 +9,30 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="CoreBankDemo.ServiceDefaults.Tests" />
+    <!-- Story 6.5: MeterListener-based tests scope observation to one
+         BusinessMetrics instance's own Meter (multiple instances share
+         MeterName, especially under parallel test execution), via the
+         internal Meter accessor. -->
+    <InternalsVisibleTo Include="CoreBankDemo.CoreBankAPI.Tests" />
+    <InternalsVisibleTo Include="CoreBankDemo.PaymentsAPI.Tests" />
+    <InternalsVisibleTo Include="CoreBankDemo.Messaging.Tests" />
+    <InternalsVisibleTo Include="CoreBankDemo.Persistence.IntegrationTests" />
+    <!-- Moq/Castle DynamicProxy needs this to mock the internal
+         IRedisDistributedLockFactory seam (story 6.2) — same pattern already
+         used by CoreBankAPI/PaymentsAPI for their own internal mocks. -->
+    <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
+  </ItemGroup>
+
+  <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
 
+    <!-- Story 6.2 (ADR-011): Aspire.StackExchange.Redis and DistributedLock.Redis
+         are intentionally NOT PrivateAssets="all" — APIs referencing this project
+         get AddRedisClient(...) and the DistributedLock.Redis types transitively,
+         the same pattern AddServiceDefaults itself already relies on. -->
+    <PackageReference Include="Aspire.StackExchange.Redis" />
+    <PackageReference Include="DistributedLock.Redis" />
     <PackageReference Include="Dapr.Client" />
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" />
     <PackageReference Include="Microsoft.Extensions.ServiceDiscovery" />

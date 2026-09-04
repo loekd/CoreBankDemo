@@ -1,73 +1,51 @@
-using System.Text.Json;
-using CoreBankDemo.Messaging.Inbox;
-using CoreBankDemo.PaymentsAPI.Handlers;
+using System.Diagnostics;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults;
-using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.PaymentsAPI.Inbox;
 
-public class InboxProcessor : InboxProcessorBase<InboxMessage, PaymentsDbContext>
+/// <summary>
+/// Story 5.6's concrete kernel processor for PaymentsAPI's event inbox --
+/// mirrors <see cref="CoreBankDemo.CoreBankAPI.Inbox.InboxProcessor"/>
+/// exactly (messaging-patterns skill's sibling reference), reusing
+/// <see cref="InboxProcessorBase{TMessage}"/> unchanged and specializing only
+/// <see cref="LockNamePrefix"/> and the validated
+/// <see cref="InboxProcessingOptions"/>-to-<see cref="InboxProcessorOptions"/>
+/// mapping. Never reimplements polling, partition fan-out, locking,
+/// claiming, retry, poison classification, completion, or trace restoration
+/// (boundaries).
+/// </summary>
+public class InboxProcessor : InboxProcessorBase<InboxMessage>
 {
     public InboxProcessor(
-        IServiceProvider serviceProvider,
-        ILogger<InboxProcessor> logger,
         IDistributedLockService lockService,
+        IServiceScopeFactory scopeFactory,
+        ActivitySource activitySource,
+        TimeProvider timeProvider,
+        ILogger<InboxProcessor> logger,
+        BusinessMetrics businessMetrics,
         IOptions<InboxProcessingOptions> options,
-        TimeProvider timeProvider)
-        : base(serviceProvider, logger, lockService, options, timeProvider, nameof(InboxProcessor))
+        IProcessorStartGate? startGate = null)
+        : base(
+            lockService,
+            scopeFactory,
+            activitySource,
+            timeProvider,
+            logger,
+            businessMetrics,
+            new InboxProcessorOptions
+            {
+                PartitionCount = options.Value.PartitionCount,
+                LockExpirySeconds = options.Value.LockExpirySeconds,
+                PollingInterval = TimeSpan.FromMilliseconds(options.Value.PollingIntervalMs)
+            },
+            startGate)
     {
     }
 
     protected override string LockNamePrefix => "payments-inbox";
 
-    protected override async Task ProcessMessageAsync(
-        InboxMessage message,
-        IServiceProvider scopedServiceProvider,
-        CancellationToken cancellationToken)
-    {
-        var repository = GetService<IInboxMessageRepository>(scopedServiceProvider);
-        var handler = GetService<ITransactionEventHandler>(scopedServiceProvider);
-
-        await repository.MarkAsProcessingAsync(message, cancellationToken);
-
-        await repository.ExecuteInTransactionAsync(
-            message,
-            ct => DispatchEventAsync(handler, message, ct),
-            cancellationToken);
-
-        var logger = scopedServiceProvider.GetRequiredService<ILogger<InboxProcessor>>();
-        logger.LogInformation(
-            "Successfully processed inbox message {MessageId} with idempotency key {IdempotencyKey}",
-            message.Id, message.IdempotencyKey);
-    }
-
-    private static async Task DispatchEventAsync(
-        ITransactionEventHandler handler,
-        InboxMessage message,
-        CancellationToken cancellationToken)
-    {
-        switch (message.EventType)
-        {
-            case nameof(TransactionCompletedEvent):
-                await handler.HandleAsync(Deserialize<TransactionCompletedEvent>(message), cancellationToken);
-                break;
-
-            case nameof(TransactionFailedEvent):
-                await handler.HandleAsync(Deserialize<TransactionFailedEvent>(message), cancellationToken);
-                break;
-
-            case nameof(BalanceUpdatedEvent):
-                await handler.HandleAsync(Deserialize<BalanceUpdatedEvent>(message), cancellationToken);
-                break;
-
-            default:
-                throw new InvalidOperationException($"Unknown event type: {message.EventType}");
-        }
-    }
-
-    private static T Deserialize<T>(InboxMessage message) =>
-        JsonSerializer.Deserialize<T>(message.EventPayload)
-        ?? throw new InvalidOperationException($"Failed to deserialize {typeof(T).Name} from inbox message {message.Id}");
+    protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsInbox;
 }

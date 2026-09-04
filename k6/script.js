@@ -1,6 +1,7 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import exec from 'k6/execution';
+import { Counter } from 'k6/metrics';
 
 // ---------------------------------------------------------------------------
 // Configuration — override via --env flags or Aspire parameter injection
@@ -34,6 +35,32 @@ const RETRY_RATIO    = 0.10;
 const RETRY_COUNT    = Math.floor(TRANSACTION_COUNT * RETRY_RATIO);
 const UNIQUE_COUNT   = TRANSACTION_COUNT; // we want this many unique transactions processed
 
+// ~20% of unique transactions exercise the opt-in instant rail (scheme=instant),
+// deterministic by keyIndex so a transaction's scheme never changes across its
+// retry (mirrors the RETRY_RATIO pattern above). See spec:
+// add-instant-rail-load-coverage.
+const INSTANT_RATIO   = 0.20;
+const INSTANT_MODULUS = Math.round(1 / INSTANT_RATIO); // keyIndex % INSTANT_MODULUS === 0 -> instant
+
+function isInstantKey(keyIndex) {
+    return keyIndex % INSTANT_MODULUS === 0;
+}
+
+// Proves the instant rail's inline path actually fired at least once --
+// incremented in the default function only for a *fresh* instant-scheme
+// request that received a genuine 200 (settled/rejected inline), never for a
+// 202 (deferred) or a retry. Without this, a full regression of the inline
+// path (e.g. InstantPaymentForwardingHandler always resolving to `Deferred`)
+// would still leave every per-request check() and /assert/results green,
+// since both only look at "some accepted status" / final terminal state --
+// neither is scheme-aware. k6 has no in-script getter for a custom metric's
+// aggregated value (Counter only exposes .add()), so this is asserted via a
+// threshold on the counter itself (see `options.thresholds` below) rather
+// than a check() in teardown() -- a threshold is the k6-native mechanism for
+// "this aggregate, cross-VU value must satisfy X by the end of the run," and
+// like a failed check it fails the whole run (non-zero k6 exit code).
+const instantSettledInlineCounter = new Counter('instant_settled_inline');
+
 // IMPORTANT: __ITER is per-VU. Use scenario.iterationInTest for a deterministic
 // global sequence shared across all VUs.
 
@@ -43,15 +70,23 @@ export const options = {
     setupTimeout: '2m',
     teardownTimeout: `${TEARDOWN_TIMEOUT_SECONDS}s`,
     thresholds: {
+        // A single failed named check is a failed run. This covers setup,
+        // submission, drain, endpoint, parsing, and final state gates.
+        'checks': ['rate==1'],
         // All requests must complete without unexpected HTTP errors
         'http_req_failed': ['rate<0.01'],
         // 95% of payment submissions under 2s
         'http_req_duration{type:payment}': ['p(95)<2000'],
+        // At least one fresh instant-scheme payment must have settled inline
+        // (200) -- proves the instant rail's inline path genuinely fired,
+        // not just that traffic carrying scheme=instant was accepted (spec:
+        // add-instant-rail-load-coverage, review-fix).
+        'instant_settled_inline': ['count>0'],
     },
 };
 
 // ---------------------------------------------------------------------------
-// Setup — called once before load. Resets database and verifies APIs.
+// Setup — called once after the AppHost reset initializer and verifies APIs.
 // ---------------------------------------------------------------------------
 export function setup() {
     console.log(`Starting load test: ${UNIQUE_COUNT} unique transactions, ${VU_COUNT} VUs, ${RETRY_COUNT} intentional retries`);
@@ -80,22 +115,51 @@ export function setup() {
         throw new Error(`Payments API is not reachable at ${PAYMENTS_URL}/health - check that the service is running on the correct port`);
     }
 
-    // Reset database to clean state
-    console.log('Resetting database to clean state...');
-    const resetRes = http.post(`${SUPPORT_URL}/reset`, null, { timeout: '30s' });
-    const resetSuccess = check(resetRes, {
-        'database reset successful': (r) => r.status === 200,
-        'reset: not 404 (endpoint exists)': (r) => r.status !== 404,
-        'reset: not 500 (no server error)': (r) => r.status !== 500,
+    // Deterministic inline proof before concurrent traffic starts. This is
+    // unique transaction index 0 from the normal workload; the default
+    // function skips its fresh submission and still performs its deliberate
+    // retry later. Running it here against the freshly reset empty stores
+    // guarantees the inline rail is exercised without weakening FIFO
+    // partition ordering under the concurrent phase.
+    const probeKey = 'load-test-0000000000';
+    const probeRes = http.post(
+        `${PAYMENTS_URL}/api/payments`,
+        JSON.stringify({
+            fromAccount: ACCOUNTS[0],
+            toAccount: ACCOUNTS[1],
+            amount: 1.00,
+            currency: 'EUR',
+            scheme: 'instant',
+        }),
+        {
+            headers: {
+                'Content-Type': 'application/json',
+                'Idempotency-Key': probeKey,
+            },
+            tags: { type: 'payment' },
+        }
+    );
+    let probeStatus = null;
+    try {
+        probeStatus = JSON.parse(probeRes.body).status;
+    } catch (_) {
+        // The named check below fails closed.
+    }
+    const probeCompleted = check(probeRes, {
+        'setup instant probe settled inline': (r) => r.status === 200 && probeStatus === 'Completed',
     });
-    if (!resetSuccess) {
-        console.error(`Database reset failed: status=${resetRes.status}, body=${resetRes.body ? resetRes.body.substring(0, 200) : 'empty'}`);
-        throw new Error(`Database reset failed - cannot proceed with load test`);
+    if (!probeCompleted) {
+        throw new Error(`Setup instant probe did not settle inline: status=${probeRes.status}, body=${probeRes.body}`);
     }
 
-    if (resetRes.status === 200) {
-        const resetData = JSON.parse(resetRes.body);
-        console.log(`Reset complete: ${resetData.accountsReset} accounts, total balance: €${resetData.totalBalance.toLocaleString()}`);
+    instantSettledInlineCounter.add(1);
+    const evidenceRes = http.post(
+        `${SUPPORT_URL}/run-evidence/inline-settlement`,
+        JSON.stringify({ idempotencyKey: probeKey }),
+        { headers: { 'Content-Type': 'application/json' }, tags: { type: 'run-evidence' } }
+    );
+    if (!check(evidenceRes, { 'setup inline settlement evidence recorded': (r) => r.status === 200 })) {
+        throw new Error(`Setup inline evidence was not recorded: status=${evidenceRes.status}, body=${evidenceRes.body}`);
     }
 
     return { startTime: Date.now() };
@@ -111,17 +175,30 @@ export default function () {
         ? (iterationIndex - UNIQUE_COUNT)
         : iterationIndex;
     const messageId = `load-test-${keyIndex.toString().padStart(10, '0')}`;
+    const isInstant = isInstantKey(keyIndex); // stable across a transaction's retry
+
+    if (!isRetry && keyIndex === 0) {
+        // Submitted once in setup to deterministically prove inline settlement.
+        sleep(0.1);
+        return;
+    }
 
     // Keep account selection tied to key index so retries replay the same shape.
     const fromIdx = keyIndex % ACCOUNTS.length;
     const toIdx   = (fromIdx + 1) % ACCOUNTS.length;
 
-    const payload = JSON.stringify({
+    const paymentBody = {
         fromAccount: ACCOUNTS[fromIdx],
         toAccount:   ACCOUNTS[toIdx],
         amount:      1.00,
         currency:    'EUR',
-    });
+    };
+    // Absent means standard (production default); only set the field for the
+    // instant slice so the standard-rail payload stays byte-identical.
+    if (isInstant) {
+        paymentBody.scheme = 'instant';
+    }
+    const payload = JSON.stringify(paymentBody);
 
     const params = {
         headers: {
@@ -134,22 +211,65 @@ export default function () {
     const res = http.post(`${PAYMENTS_URL}/api/payments`, payload, params);
     //console.log(`Added payment, status=${res.status}, body: ${res.body}`);
     
-    // Detailed checks for better visibility, especially for chaos testing
+    // Detailed checks for better visibility, especially for chaos testing.
+    // Standard-rail checks are byte-identical to before. Instant-rail checks
+    // accept the frozen wire contract's 200 (settled inline) OR 202
+    // (deferred to the background rail) split instead of asserting 202 only
+    // (spec: add-instant-rail-load-coverage) -- never a genuine error status.
     if (isRetry) {
-        check(res, {
-            'retry accepted (202) or conflict (409/202)': (r) => r.status === 202,
-            'retry: not 404 (endpoint exists)': (r) => r.status !== 404,
-            'retry: not 500 (no server error)': (r) => r.status !== 500,
-            'retry: not 503 (service available)': (r) => r.status !== 503,
-        }) || console.error(`Retry payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}`);
+        if (isInstant) {
+            check(res, {
+                'retry (instant): 200 (completed replay) or 202 (still pending)': (r) => r.status === 200 || r.status === 202,
+                'retry (instant): not 404 (endpoint exists)': (r) => r.status !== 404,
+                'retry (instant): not 500 (no server error)': (r) => r.status !== 500,
+                'retry (instant): not 503 (service available)': (r) => r.status !== 503,
+            }) || console.error(`Instant retry payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}`);
+        } else {
+            check(res, {
+                'retry accepted (202) or conflict (409/202)': (r) => r.status === 202,
+                'retry: not 404 (endpoint exists)': (r) => r.status !== 404,
+                'retry: not 500 (no server error)': (r) => r.status !== 500,
+                'retry: not 503 (service available)': (r) => r.status !== 503,
+            }) || console.error(`Retry payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}`);
+        }
     } else {
-        check(res, {
-            'payment accepted (202)': (r) => r.status === 202,
-            'payment: not 400 (valid request)': (r) => r.status !== 400,
-            'payment: not 404 (endpoint exists)': (r) => r.status !== 404,
-            'payment: not 500 (no server error)': (r) => r.status !== 500,
-            'payment: not 503 (service available)': (r) => r.status !== 503,
-        }) || console.error(`Payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}, from=${ACCOUNTS[fromIdx]}, to=${ACCOUNTS[toIdx]}`);
+        if (isInstant) {
+            let parsedStatus = null;
+            try {
+                parsedStatus = JSON.parse(res.body).status;
+            } catch (_) {
+                // The named response checks below report malformed success bodies.
+            }
+            check(res, {
+                'payment (instant): 200 (completed/failed) or 202 (deferred)': (r) => r.status === 200 || r.status === 202,
+                'payment (instant): 200 has committed status': (r) => r.status !== 200 || parsedStatus === 'Completed' || parsedStatus === 'Failed',
+                'payment (instant): not 400 (valid request)': (r) => r.status !== 400,
+                'payment (instant): not 404 (endpoint exists)': (r) => r.status !== 404,
+                'payment (instant): not 500 (no server error)': (r) => r.status !== 500,
+                'payment (instant): not 503 (service available)': (r) => r.status !== 503,
+            }) || console.error(`Instant payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}, from=${ACCOUNTS[fromIdx]}, to=${ACCOUNTS[toIdx]}`);
+            if (res.status === 200 && parsedStatus === 'Completed') {
+                // Real inline settlement observed (not just an accepted 202) --
+                // feeds the 'instant_settled_inline' threshold above.
+                instantSettledInlineCounter.add(1);
+                const evidenceRes = http.post(
+                    `${SUPPORT_URL}/run-evidence/inline-settlement`,
+                    JSON.stringify({ idempotencyKey: messageId }),
+                    { headers: { 'Content-Type': 'application/json' }, tags: { type: 'run-evidence' } }
+                );
+                check(evidenceRes, {
+                    'inline settlement evidence recorded': (r) => r.status === 200,
+                });
+            }
+        } else {
+            check(res, {
+                'payment accepted (202)': (r) => r.status === 202,
+                'payment: not 400 (valid request)': (r) => r.status !== 400,
+                'payment: not 404 (endpoint exists)': (r) => r.status !== 404,
+                'payment: not 500 (no server error)': (r) => r.status !== 500,
+                'payment: not 503 (service available)': (r) => r.status !== 503,
+            }) || console.error(`Payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}, from=${ACCOUNTS[fromIdx]}, to=${ACCOUNTS[toIdx]}`);
+        }
     }
     
     sleep(0.1);
@@ -167,12 +287,50 @@ export default function () {
 export function teardown(data) {
     console.log(`Load phase complete after ${((Date.now() - data.startTime) / 1000).toFixed(1)}s. Waiting for inbox to drain...`);
 
+    // Informational run evidence only -- not a check(). The scheme split
+    // below is computed arithmetically from keyIndex/INSTANT_MODULUS (it
+    // would keep reporting the intended split even if `scheme` were dropped
+    // before serialization); the per-request check() blocks in the default
+    // function gate on every *response status* being a genuine 200/202 for
+    // instant and 202 for standard; and the 'instant_settled_inline'
+    // threshold (see options.thresholds) is what actually proves the inline
+    // path fired at least once, since neither of the other two would notice
+    // a full silent regression to always-deferred (spec:
+    // add-instant-rail-load-coverage, review-fix).
+    const instantUniqueCount  = Math.ceil(UNIQUE_COUNT / INSTANT_MODULUS);
+    const standardUniqueCount = UNIQUE_COUNT - instantUniqueCount;
+    const instantPercent      = UNIQUE_COUNT > 0
+        ? ((instantUniqueCount / UNIQUE_COUNT) * 100).toFixed(1)
+        : '0.0';
+    console.log(
+        `Instant-vs-standard rail split: ${instantUniqueCount}/${UNIQUE_COUNT} unique transactions ` +
+        `(${instantPercent}%) used scheme=instant, ${standardUniqueCount} used the standard rail. ` +
+        `Each instant response was checked as 200 (Completed/Failed) or 202 (deferred); ` +
+        `each standard response was checked as 202 only -- see the 'checks' summary for pass/fail ` +
+        `confirmation, and the 'instant_settled_inline' threshold in THRESHOLDS for proof the inline ` +
+        `path settled at least one payment inline (200), not just accepted instant-scheme traffic.`
+    );
+
     // First, verify that messages were actually created in the outbox
     const paymentsOutboxCheck = http.get(`${SUPPORT_URL}/payments/outbox`);
-    if (paymentsOutboxCheck.status === 200) {
-        const messages = JSON.parse(paymentsOutboxCheck.body);
+    const outboxEndpointOk = check(paymentsOutboxCheck, {
+        'state gate: payments outbox endpoint returned 200': (r) => r.status === 200,
+    });
+    if (outboxEndpointOk) {
+        let messages;
+        try {
+            messages = JSON.parse(paymentsOutboxCheck.body);
+        } catch (error) {
+            check(null, { 'state gate: payments outbox returned valid JSON': () => false });
+            console.error(`Payments outbox returned malformed JSON: ${error.message}`);
+            return;
+        }
+        check(null, { 'state gate: payments outbox returned valid JSON': () => true });
         console.log(`Payments outbox has ${messages.length} messages (showing up to 50 most recent)`);
-        if (messages.length === 0) {
+        const hasMessages = check(messages, {
+            'state gate: payments outbox contains submitted messages': (value) => Array.isArray(value) && value.length > 0,
+        });
+        if (!hasMessages) {
             console.error('ERROR: No outbox messages found! Payments API is not creating outbox entries.');
             console.error('This means the API endpoint is returning 202 but not actually queuing transactions.');
             console.error('Check that the Payments API is running on the correct port and k6 is hitting the right endpoint.');
@@ -180,6 +338,7 @@ export function teardown(data) {
         }
     } else {
         console.error(`Failed to check payments outbox: status=${paymentsOutboxCheck.status}`);
+        return;
     }
 
     // Poll /assert/drain until all messages are processed (max 5 minutes)
@@ -192,7 +351,15 @@ export function teardown(data) {
     while (Date.now() < deadline) {
         const drainRes = http.get(`${SUPPORT_URL}/assert/drain`);
         if (drainRes.status === 200) {
-            const body = JSON.parse(drainRes.body);
+            let body;
+            try {
+                body = JSON.parse(drainRes.body);
+            } catch (error) {
+                check(null, { 'state gate: drain endpoint returned valid JSON': () => false });
+                console.error(`Drain endpoint returned malformed JSON: ${error.message}`);
+                return;
+            }
+            check(null, { 'state gate: drain endpoint returned valid JSON': () => true });
             pollCount++;
 
             // Log every poll for first 10, then every 5th poll
@@ -209,8 +376,9 @@ export function teardown(data) {
                 break;
             }
         } else {
+            check(drainRes, { 'state gate: drain endpoint returned 200': (r) => r.status === 200 });
             console.error(`Drain check failed: status=${drainRes.status}, body=${drainRes.body.substring(0, 200)}`);
-            // Continue polling even on errors (chaos testing might cause transient failures)
+            return;
         }
         sleep(pollMs / 1000);
     }
@@ -221,19 +389,27 @@ export function teardown(data) {
 
         const paymentsOutbox = http.get(`${SUPPORT_URL}/payments/outbox`);
         if (paymentsOutbox.status === 200) {
-            const messages = JSON.parse(paymentsOutbox.body);
-            console.error(`  Payments Outbox: ${messages.length} recent messages`);
-            if (messages.length > 0) {
-                console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+            try {
+                const messages = JSON.parse(paymentsOutbox.body);
+                console.error(`  Payments Outbox: ${messages.length} recent messages`);
+                if (messages.length > 0) {
+                    console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+                }
+            } catch (error) {
+                console.error(`  Payments Outbox: malformed JSON in diagnostic response: ${error.message}`);
             }
         }
 
         const coreBankInbox = http.get(`${SUPPORT_URL}/corebank/inbox`);
         if (coreBankInbox.status === 200) {
-            const messages = JSON.parse(coreBankInbox.body);
-            console.error(`  CoreBank Inbox: ${messages.length} recent messages`);
-            if (messages.length > 0) {
-                console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+            try {
+                const messages = JSON.parse(coreBankInbox.body);
+                console.error(`  CoreBank Inbox: ${messages.length} recent messages`);
+                if (messages.length > 0) {
+                    console.error(`    Sample: ${JSON.stringify(messages[0])}`);
+                }
+            } catch (error) {
+                console.error(`  CoreBank Inbox: malformed JSON in diagnostic response: ${error.message}`);
             }
         }
     }
@@ -249,7 +425,7 @@ export function teardown(data) {
 
     // Run the full assertion suite
     const assertRes = http.get(`${SUPPORT_URL}/assert/results?expectedUnique=${UNIQUE_COUNT}`);
-    const assertOk = check(assertRes, {
+    check(assertRes, {
         'assert endpoint returned 200': (r) => r.status === 200,
         'assert: not 404 (endpoint exists)': (r) => r.status !== 404,
         'assert: not 500 (no server error)': (r) => r.status !== 500,
@@ -260,7 +436,15 @@ export function teardown(data) {
         return;
     }
 
-    const result = JSON.parse(assertRes.body);
+    let result;
+    try {
+        result = JSON.parse(assertRes.body);
+    } catch (error) {
+        check(null, { 'state gate: assert endpoint returned valid JSON': () => false });
+        console.error(`Assert endpoint returned malformed JSON: ${error.message}`);
+        return;
+    }
+    check(null, { 'state gate: assert endpoint returned valid JSON': () => true });
     console.log('\n========== ASSERTION RESULTS ==========');
     console.log(JSON.stringify(result, null, 2));
     console.log('========================================\n');
@@ -274,6 +458,10 @@ export function teardown(data) {
         'all submitted transactions processed': (r) => r.checks.allSubmittedProcessed.passed === true,
         'balance conservation':           (r) => r.checks.balanceConservation.passed === true,
         'balances correct':               (r) => r.checks.balancesCorrect.passed === true,
+        'per-key ordering':                (r) => r.checks.perKeyOrdering.passed === true,
+        'inline instant settlement':       (r) => r.checks.inlineInstantSettlement.passed === true,
+        'stage cardinality N/N/3N/3N':     (r) => r.checks.stageCardinality.passed === true,
+        'canonical account set exact':     (r) => r.checks.canonicalAccountSet.passed === true,
     });
 
     if (!result.allPassed) {
@@ -289,5 +477,3 @@ export function teardown(data) {
         console.log('✓ All exactly-once guarantees and balance correctness verified successfully');
     }
 }
-
-

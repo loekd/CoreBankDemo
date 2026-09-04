@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Include>[CoreBankDemo.PaymentsAPI]*</Include>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CoreBankDemo.PaymentsAPI\CoreBankDemo.PaymentsAPI.csproj" />
+  </ItemGroup>
+
+</Project>

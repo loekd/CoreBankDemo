@@ -2,6 +2,7 @@ using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.LoadTestSupport;
 using CoreBankDemo.LoadTestSupport.Endpoints;
 using CoreBankDemo.LoadTestSupport.McpTools;
+using CoreBankDemo.LoadTestSupport.Services;
 using CoreBankDemo.PaymentsAPI;
 
 namespace CoreBankDemo.LoadTestSupport;
@@ -12,6 +13,7 @@ public class Program
     {
         var builder = WebApplication.CreateBuilder(args);
 
+        builder.AddRedisClient("redis");
         builder.AddServiceDefaults("CoreBank.LoadTestSupport");
 
 // Health checks so Aspire's WaitFor blocks until both schemas are ready
@@ -22,6 +24,11 @@ public class Program
 // Connect to both databases using the actual DbContexts from the APIs
         builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
         builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
+        builder.Services.AddScoped<ILoadTestDatabaseResetter, LoadTestDatabaseResetter>();
+        builder.Services.AddSingleton<DatabaseResetState>();
+        builder.Services.AddScoped<DatabaseResetCoordinator>();
+        builder.Services.AddScoped<LoadTestAssertionService>();
+        builder.Services.AddSingleton<LoadRunEvidenceState>();
 
 // MCP server — exposes load test tools to AI agents via Streamable HTTP
         builder.Services.AddMcpServer()
@@ -41,6 +48,7 @@ public class Program
         app.MapAssertEndpoints();
         app.MapInboxEndpoints();
         app.MapOutboxEndpoints();
+        app.MapRunEvidenceEndpoints();
 
         app.Run();
 

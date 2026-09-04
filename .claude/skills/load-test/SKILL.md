@@ -20,35 +20,15 @@ description: |
 - Never reset the database unless explicitly asked to do so, as this is a destructive operation!
 - **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run a different number of transactions or VUs, use `--` to pass .NET configuration overrides to the AppHost (see below).
 
-## 1. Start both AppHosts
+## 1. Start the disposable LoadTests AppHost
 
-The load test requires **two AppHosts**: the regular AppHost (services + Jaeger) and the LoadTests AppHost (k6 + load-test-support).
-
-First, start the regular AppHost **with DevProxy disabled** (default for load tests):
-
-```bash
-aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive -- --Features:UseDevProxy=false
-```
-
-To run a **chaos/resilience test** with DevProxy fault injection enabled:
-
-```bash
-aspire start --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive -- --Features:UseDevProxy=true
-```
-
-DevProxy injects random HTTP errors (5% rate) and latency (20–200ms) on calls from PaymentsAPI to CoreBankAPI. This is useful for testing retry/resilience behavior but significantly slows throughput.
-
-Wait for `payments-api` to be healthy:
-
-```bash
-aspire wait payments-api --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive
-```
+The acceptance run uses only `CoreBankDemo.LoadTests`. It owns disposable PostgreSQL, Redis, both replicated APIs, Dapr adapters, LoadTestSupport, the reset initializer, telemetry, and k6. Never start `CoreBankDemo.AppHost` for this workflow.
 
 > **Note:** Do NOT add `&` to `aspire start`. The `--non-interactive` flag self-daemonizes the process. Adding `&` runs it in a subshell that may not register the AppHost with the Aspire process registry in time, causing the next `aspire wait` to fail.
 >
 > If `aspire wait` immediately returns "No AppHost is currently running", wait 5 seconds and retry once — the AppHost may still be registering. Only troubleshoot after a second consecutive failure.
 
-Then start the LoadTests AppHost:
+Start the LoadTests AppHost:
 
 ```bash
 aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
@@ -68,7 +48,7 @@ Wait for `loadtest-support` to be healthy:
 aspire wait loadtest-support --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
 ```
 
-The LoadTests AppHost automatically starts LoadTestSupport (MCP server on port 5181) and k6 (load generator). Do NOT run k6 manually.
+The initializer validates reset counts and balances before k6 starts. The AppHost then automatically starts k6. Do not call reset or run k6 manually.
 
 ## MCP Protocol
 
@@ -183,22 +163,21 @@ curl -s -X POST http://localhost:5181/ \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_corebank_inbox","arguments":{"limit":20,"status":"Failed"}}}'
+  -d '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_corebank_inbox","arguments":{}}}'
 ```
 
-All `get_*` tools accept `limit` (1–100, default 20) and optional `status` filter (Pending/Processing/Completed/Failed).
+All `get_*` tools take no arguments and return the 50 most recent rows, newest first — identical to their REST counterparts.
 
-## 6. Analyze traces
+## 6. Produce the final trace/order verdict
 
-After assertions complete (pass or fail), invoke the **corebank-trace-analysis** skill to analyze OpenTelemetry traces from this run. Pass the test start/end timestamps so the skill can scope its queries correctly.
+After assertions complete (pass or fail), run the replicated Inbox and Outbox Tier-2 tests and invoke the **corebank-trace-analysis** skill with the exact run timestamps. Require both replica identities, intact `traceparent`/`tracestate` across both hops, and no overlapping same-store/partition processing spans. A green k6 state gate is not a complete acceptance verdict without this evidence.
 
 ## 7. Stop
 
-See **aspire-launch** skill. Stop both AppHosts (LoadTests first, then regular):
+See **aspire-launch** skill. Stop the single LoadTests AppHost:
 
 ```bash
 aspire stop --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
-aspire stop --apphost CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj --non-interactive
 ```
 
 ## MCP Server Implementation

@@ -2,25 +2,29 @@
   "name": "CoreBank Demo",
   "image": "mcr.microsoft.com/devcontainers/dotnet:dev-10.0",
   "features": {
-    "ghcr.io/devcontainers/features/node:1": {
+    "ghcr.io/devcontainers/features/node:2.1.0": {
       "version": "lts"
     },
-    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+    "ghcr.io/devcontainers/features/docker-in-docker:4.1.0": {
       "version": "latest",
       "enableNonRootDocker": true,
       "moby": true
     },
-    "ghcr.io/grafana/devcontainer-features/k6:1": {}
+    "ghcr.io/grafana/devcontainer-features/k6:1": {},
+    "ghcr.io/dapr/cli/dapr-cli:0": {},
+    "ghcr.io/va-h/devcontainers-features/uv:1": {},
+    "ghcr.io/microsoft/aspire-devcontainer-feature/aspire:2": {}
   },
   "mounts": [
-    "source=${localEnv:HOME}/.aspnet/https,target=/home/vscode/.aspnet/https-host,type=bind,consistency=cached,readonly"
+    "source=/Users/loekd/.aspnet/https,target=/home/vscode/.aspnet/https-host,type=bind,readonly"
   ],
   "customizations": {
     "vscode": {
       "extensions": [
         "ms-dotnettools.csharp",
-        "ms-dotnettools.csdevkit"
-    ]
+        "ms-dotnettools.csdevkit",
+        "humao.rest-client"
+      ]
     }
   },
   "forwardPorts": [5032, 5294, 8000, 15888, 16686, 4317, 5432, 6379],

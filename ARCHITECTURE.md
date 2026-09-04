@@ -1,5 +1,7 @@
 # Architecture Overview
 
+> **Brownfield snapshot:** This document currently describes the pre-rebuild `main` system and may name obsolete implementations such as `Features:UseDapr` and Dapr-backed locking. During the `feature/bmad` rebuild, accepted records in [`docs/adr/`](docs/adr/) and the [architecture spine](docs/bmad/planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md) govern new work. Story 8.1 will regenerate this document from the completed code.
+
 This document provides technical architecture details. For demo instructions and quick start, see [README.md](README.md).
 
 ## System Description
@@ -33,6 +35,13 @@ Formal decision records are maintained in [`docs/adr/`](docs/adr/).
 | [ADR-005](docs/adr/ADR-005-resilience-testing-devproxy-k6.md) | Resilience testing with DevProxy and K6 | Accepted | If you haven't tested your resilience patterns under injected failures and concurrent load, you don't know if they work. |
 | [ADR-006](docs/adr/ADR-006-retry-exponential-backoff.md) | Retry with exponential backoff using Polly | Accepted | Retry at the HTTP layer handles seconds-scale blips; the Outbox handles minutes-scale outages — both layers are needed. |
 | [ADR-007](docs/adr/ADR-007-circuit-breaker.md) | Circuit breaker to prevent cascading failures | Accepted | The circuit breaker protects both the caller and the callee — fail fast, let the downstream recover, and retry from the Outbox later. |
+| [ADR-008](docs/adr/ADR-008-single-http-corebank-integration.md) | Single HTTP integration from PaymentsAPI to CoreBankAPI | Accepted | One Kiota-backed HTTP port handles the forward hop; Dapr remains for events. |
+| [ADR-009](docs/adr/ADR-009-shared-messaging-kernel-delivery-strategies.md) | One messaging kernel with pluggable delivery strategies | Accepted | Transports are strategies; the shared kernel owns processing behavior. |
+| [ADR-010](docs/adr/ADR-010-four-partition-system-invariant.md) | Four partitions as a runtime invariant | Accepted | Production configuration explicitly validates exactly four partitions. |
+| [ADR-011](docs/adr/ADR-011-renewable-redis-distributed-locking.md) | Renewable locking through Aspire-managed Redis | Accepted | Finite Redis leases renew while healthy and signal ownership loss. |
+| [ADR-012](docs/adr/ADR-012-three-tier-testing-and-coverage-gate.md) | Three test tiers and an enforced coverage gate | Accepted | Use the cheapest tier that can honestly prove each behavior. |
+| [ADR-013](docs/adr/ADR-013-checked-in-openapi-build-time-kiota.md) | Checked-in OpenAPI with build-time Kiota generation | Accepted | Commit the contract and generator version, not generated client source. |
+| [ADR-014](docs/adr/ADR-014-replicated-local-topology-stable-ingress.md) | Replicated local topology behind stable Aspire ingress | Accepted | Competing replicas remain accessible through stable logical endpoints. |
 
 ## Running the Demo
 
@@ -496,7 +505,7 @@ CoreBankDemo/
 │
 ├── CoreBankDemo.ServiceDefaults/      # Aspire shared config
 │   ├── Extensions.cs                  # Service defaults setup
-│   ├── DaprDistributedLockService.cs  # Distributed locking
+│   ├── RedisDistributedLockService.cs # Distributed locking (Redis, ADR-011)
 │   ├── Configuration/
 │   │   ├── InboxProcessingOptions.cs
 │   │   ├── OutboxProcessingOptions.cs
@@ -578,11 +587,15 @@ CoreBankDemo/
 
 ## Key Design Decisions
 
-### Why PostgreSQL instead of SQLite?
+### Why PostgreSQL everywhere?
 - Production-ready database
-- Better concurrency handling
+- Better concurrency handling (`SELECT ... FOR UPDATE` row locks)
 - Supports distributed locking
 - Easier to scale horizontally
+- One engine in production *and* in tests: persistence tests run against a pinned
+  `postgres:18.3` Testcontainer (ADR-016), so SQL translation, SQLSTATE handling,
+  transaction behavior, and data-type round trips are proved, not assumed. No second
+  relational engine exists in this repository.
 
 ### Why Generic Base Classes?
 - Eliminates code duplication
@@ -638,6 +651,10 @@ The `CoreBankDemo.LoadTests` project is a complete Aspire-orchestrated load test
    - Configurable VUs (default: 10) submit transactions concurrently
    - Configurable transaction count (default: 1000 unique transactions)
    - ~10% are deliberate retries with duplicate idempotency keys
+   - ~20% carry `scheme=instant` (deterministic by key index, stable across a
+     transaction's retry), exercising the opt-in instant payment rail
+     alongside the standard rail under real concurrent load; the remaining
+     ~80% omit `scheme` and use the standard rail exactly as before
    - Total iterations = unique count + retry count
 
 3. **Drain Phase**

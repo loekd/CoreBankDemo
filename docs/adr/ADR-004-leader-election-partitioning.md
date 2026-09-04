@@ -1,8 +1,9 @@
 # ADR-004: Leader election and partitioning for scalable message processing
 
-**Date:** 2026-05-23  
-**Status:** Accepted  
-**Deciders:** Architecture team  
+**Date:** 2026-05-23
+**Status:** Accepted
+**Deciders:** Architecture team
+**Superseded in part by:** ADR-011 replaces the Dapr lock adapter and fixed-expiry lifetime behavior; partitioning remains accepted
 
 ## Context
 

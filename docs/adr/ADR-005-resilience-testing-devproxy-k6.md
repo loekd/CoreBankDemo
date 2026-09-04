@@ -1,8 +1,9 @@
 # ADR-005: Resilience testing with DevProxy and K6
 
-**Date:** 2026-05-23  
-**Status:** Accepted  
-**Deciders:** Architecture team  
+**Date:** 2026-05-23
+**Status:** Accepted
+**Deciders:** Architecture team
+**Superseded in part by:** ADR-008 removes the Dapr routing switch; DevProxy and k6 remain accepted
 
 ## Context
 

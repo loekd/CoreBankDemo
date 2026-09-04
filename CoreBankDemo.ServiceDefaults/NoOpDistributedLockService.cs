@@ -1,7 +1,10 @@
 namespace CoreBankDemo.ServiceDefaults;
 
 /// <summary>
-/// No-op implementation used by services that don't participate in distributed locking (e.g. read-only support APIs).
+/// No-op <see cref="IDistributedLockService"/> for services that don't
+/// participate in distributed locking (e.g. LoadTestSupport's lock-free
+/// hosting). Always reports "lock not acquired" — no lock is taken and the
+/// workload never runs.
 /// </summary>
 internal sealed class NoOpDistributedLockService : IDistributedLockService
 {

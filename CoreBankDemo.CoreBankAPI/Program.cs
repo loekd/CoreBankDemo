@@ -1,115 +1,86 @@
+using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Outbox;
-using CoreBankDemo.Messaging.Inbox;
+using CoreBankDemo.Messaging;
+using Microsoft.AspNetCore.Mvc;
 
-namespace CoreBankDemo.CoreBankAPI;
+var builder = WebApplication.CreateBuilder(args);
 
-public static class Program
+// Dapr must be registered before AddServiceDefaults(): ServiceDefaults only
+// registers IEventPublisher when a DaprClient is already present in DI at
+// that point (epic 3's retrospective flagged the reverse order as a silent
+// registration failure). The messaging outbox delivery strategy registered
+// below consumes IEventPublisher through this ordering-sensitive registration.
+builder.Services.AddDaprClient();
+
+// Story 6.2 (ADR-011): register Aspire's Redis client for the shared "redis"
+// resource before AddServiceDefaults, so IDistributedLockService resolves to
+// RedisDistributedLockService rather than the no-op fallback.
+builder.AddRedisClient("redis");
+
+builder.AddServiceDefaults("CoreBank.CoreBankAPI");
+
+builder.Services.AddSingleton(TimeProvider.System);
+
+// Database for the ledger, inbox, and outbox tables (connection string name
+// matches the legacy service).
+builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
+
+builder.Services.AddScoped<DemoAccountSeeder>();
+
+// Transaction intake (story 4.4): controllers, the manual-ModelState fix
+// (see below), inbox partitioning options, and the intake port/handler pair.
+builder.Services.AddControllers();
+
+// [ApiController]'s default automatic-400 behavior would otherwise return a
+// framework ValidationProblemDetails shape and short-circuit before the
+// controller action ever runs, making its manual ModelState.IsValid check
+// unreachable dead code (legacy's brownfield defect — spec-4-4's fix).
+builder.Services.Configure<ApiBehaviorOptions>(options =>
 {
-    public static void Main(string[] args)
-    {
-        var builder = WebApplication.CreateBuilder(args);
+    options.SuppressModelStateInvalidFilter = true;
+});
 
-        // Add Aspire Service Defaults (includes OpenTelemetry, health checks, service discovery)
-        builder.AddServiceDefaults("CoreBank.CoreBankAPI", new[] { nameof(InboxProcessor), nameof(MessagingOutboxProcessor) });
+builder.AddInboxProcessingOptions();
+builder.AddMessagingOutboxProcessingOptions();
 
-        // DB health check so Aspire's WaitFor blocks until the schema is ready
-        builder.Services.AddHealthChecks()
-            .AddDbContextCheck<CoreBankDbContext>("corebank-db");
+// The ActivitySource is already registered as a singleton by
+// AddServiceDefaults("CoreBank.CoreBankAPI") above and wired into the OTel
+// trace provider under that same name — reuse it rather than registering a
+// second, differently-named ActivitySource, which would silently produce
+// spans OpenTelemetry never exports.
+builder.Services.AddScoped<InboxMessageRepository>();
+builder.Services.AddScoped<IInboxMessageRepository>(sp => sp.GetRequiredService<InboxMessageRepository>());
+builder.Services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());
+builder.Services.AddScoped<ITransactionIntakeHandler, TransactionIntakeHandler>();
+builder.Services.AddScoped<ITransactionExecutor, TransactionExecutor>();
+builder.Services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
+builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionExecutionHandler>();
+builder.Services.AddHostedService<InboxProcessor>();
+builder.Services.AddScoped<MessagingOutboxRepository>();
+builder.Services.AddScoped<IOutboxMessageStore<MessagingOutboxMessage>>(
+    sp => sp.GetRequiredService<MessagingOutboxRepository>());
+builder.Services.AddScoped<IOutboxDeliveryStrategy<MessagingOutboxMessage>, DaprOutboxDeliveryStrategy>();
+builder.Services.AddHostedService<MessagingOutboxProcessor>();
 
-        // Add configuration options with validation
-        builder.AddInboxProcessingOptions();
-        builder.AddMessagingOutboxProcessingOptions();
+// Account read surface (story 4.5): IAccountRepository was built in story 4.3
+// but never registered in DI until now (only this story's controller-facing
+// wiring was deferred, not the repository's own registration).
+builder.Services.AddScoped<IAccountRepository, AccountRepository>();
+builder.Services.AddScoped<IAccountQueryHandler, AccountQueryHandler>();
 
-        // Add Dapr
-        builder.Services.AddControllers().AddDapr();
-        builder.Services.AddDaprClient();
-        builder.Services.AddOpenApi();
-        builder.Services.AddEndpointsApiExplorer();
-        builder.Services.AddSwaggerGen();
+var app = builder.Build();
 
-        // Add TimeProvider
-        builder.Services.AddSingleton(TimeProvider.System);
-
-        // Database for Inbox pattern
-        builder.AddNpgsqlDbContext<CoreBankDbContext>("corebankdb");
-        
-        //Register all services
-        builder.Services.AddHostedService<InboxProcessor>();
-        builder.Services.AddHostedService<MessagingOutboxProcessor>();
-        
-        builder.Services.AddScoped<InboxMessageRepositoryBase<InboxMessage, CoreBankDbContext>, InboxMessageRepository>();
-        builder.Services.AddScoped<IInboxMessageRepository, InboxMessageRepository>();
-        builder.Services.AddScoped<IAccountRepository, AccountRepository>();
-        builder.Services.AddTransient<ITransactionExecutor, TransactionExecutor>();
-        builder.Services.AddTransient<IOutboxPublisher, OutboxPublisher>();
-        builder.Services.AddTransient<TransactionValidator>();
-
-        var app = builder.Build();
-        
-        // Ensure database is created and seeded
-        InitializeDatabaseWithSeedAccounts(app);
-
-        // Map default endpoints (health checks, etc.)
-        app.MapDefaultEndpoints();
-
-        if (app.Environment.IsDevelopment())
-        {
-            app.MapOpenApi();
-            app.UseSwagger();
-            app.UseSwaggerUI();
-        }
-
-        app.MapControllers();
-
-        app.Run();
-    }
-
-    private static void InitializeDatabaseWithSeedAccounts(WebApplication app)
-    {
-        using var scope = app.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
-        db.Database.EnsureCreated();
-
-        // Seed accounts if empty
-        if (db.Accounts.Any())
-            return;
-
-        var now = TimeProvider.System.GetUtcNow().UtcDateTime;
-
-        var accounts = new List<Account>
-        {
-            new Account
-            {
-                AccountNumber = "NL91ABNA0417164300",
-                AccountHolderName = "John Doe",
-                Balance = 5000.00m,
-                Currency = "EUR",
-                IsActive = true,
-                CreatedAt = now
-            },
-            new Account
-            {
-                AccountNumber = "NL20INGB0001234567",
-                AccountHolderName = "Jane Smith",
-                Balance = 10000.00m,
-                Currency = "EUR",
-                IsActive = true,
-                CreatedAt = now
-            },
-            new Account
-            {
-                AccountNumber = "NL39RABO0300065264",
-                AccountHolderName = "Bob Johnson",
-                Balance = 2500.00m,
-                Currency = "EUR",
-                IsActive = true,
-                CreatedAt = now
-            }
-        };
-
-
-        db.Accounts.AddRange(accounts);
-        db.SaveChanges();
-    }
+// Ensure schema exists and demo accounts are seeded (idempotent — safe on
+// every startup). No EF migrations, ever (this repo's convention).
+using (var scope = app.Services.CreateScope())
+{
+    var dbContext = scope.ServiceProvider.GetRequiredService<CoreBankDbContext>();
+    var seeder = scope.ServiceProvider.GetRequiredService<DemoAccountSeeder>();
+    await CoreBankDatabaseInitializer.InitializeAsync(dbContext, seeder);
 }
+
+app.MapDefaultEndpoints();
+app.MapControllers();
+
+app.Run();

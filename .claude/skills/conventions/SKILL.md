@@ -48,8 +48,8 @@ return BadRequest(new { Errors = errors });
 
 ## Feature flags
 
-- `Features:UseDapr` — switches PaymentsAPI between `DaprCoreBankApiClient` and `HttpCoreBankApiClient`
-- `Features:UseDevProxy` — AppHost conditionally starts Dev Proxy; forces `UseDapr=false` (Dapr bypasses the proxy)
+- `Features:UseDevProxy` — AppHost conditionally starts Dev Proxy, which proxies PaymentsAPI's outbound HTTP traffic for fault injection
+- There is no PaymentsAPI→CoreBankAPI transport selector: PaymentsAPI always calls CoreBankAPI over HTTP through the sole generated Kiota client (`ICoreBankApiClient`/`KiotaCoreBankApiClient`, ADR-008/ADR-013). Dapr is reserved for the CoreBank→Payments CloudEvent pub/sub hop.
 
 ## Logging
 
