@@ -183,12 +183,13 @@ public class AspireAdapterTests
     public async Task ProcessAdapter_StartAndStop_VerifiesExactPidAndArgv()
     {
         var project = "/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj";
+        var pid = DeadPid();
         var commands = new RecordingCommandRunner();
         commands.Queue(
             CommandOutput.Success("[]"),
-            CommandOutput.Success("""{"appHostPid":42}"""),
-            CommandOutput.Success(Ps(project, 42)),
-            CommandOutput.Success(Ps(project, 42)),
+            CommandOutput.Success($$"""{"appHostPid":{{pid}}}"""),
+            CommandOutput.Success(Ps(project, pid)),
+            CommandOutput.Success(Ps(project, pid)),
             CommandOutput.Success(),
             CommandOutput.Success("[]"));
         var adapter = new AspireProcessAdapter("/repo", commands);
@@ -196,7 +197,7 @@ public class AspireAdapterTests
         var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
         await adapter.StopOwnedAsync(handle, CancellationToken.None);
 
-        handle.ProcessId.Should().Be(42);
+        handle.ProcessId.Should().Be(pid);
         handle.ProjectPath.Should().Be(project);
         commands.Calls[1].Arguments.Should().Equal(
             "start", "--apphost", project, "--format", "Json", "--non-interactive", "--nologo");
@@ -212,7 +213,7 @@ public class AspireAdapterTests
         commands.Queue(
             CommandOutput.Success("[]"),
             CommandOutput.Success("{}"),
-            CommandOutput.Success(Ps(project, 42)),
+            CommandOutput.Success(Ps(project, DeadPid())),
             CommandOutput.Success());
         var adapter = new AspireProcessAdapter("/repo", commands);
 
@@ -226,11 +227,12 @@ public class AspireAdapterTests
     public async Task ProcessAdapter_StartTimeout_CleansNewExactPid()
     {
         var project = "/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj";
+        var pid = DeadPid();
         var commands = new RecordingCommandRunner();
         commands.Queue(
             CommandOutput.Success("[]"),
-            CommandOutput.Timeout("""{"appHostPid":42}"""),
-            CommandOutput.Success(Ps(project, 42)),
+            CommandOutput.Timeout($$"""{"appHostPid":{{pid}}}"""),
+            CommandOutput.Success(Ps(project, pid)),
             CommandOutput.Success());
         var adapter = new AspireProcessAdapter("/repo", commands);
 
@@ -281,14 +283,15 @@ public class AspireAdapterTests
     public async Task ProcessAdapter_StopTimeoutOrFailure_ForceTerminatesExactOwnedPid()
     {
         var project = "/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj";
+        var pid = DeadPid();
         foreach (var stopResult in new[] { CommandOutput.Timeout(), CommandOutput.Failure(2, "stop failed") })
         {
             var commands = new RecordingCommandRunner();
             commands.Queue(
                 CommandOutput.Success("[]"),
-                CommandOutput.Success("""{"appHostPid":42}"""),
-                CommandOutput.Success(Ps(project, 42)),
-                CommandOutput.Success(Ps(project, 42)),
+                CommandOutput.Success($$"""{"appHostPid":{{pid}}}"""),
+                CommandOutput.Success(Ps(project, pid)),
+                CommandOutput.Success(Ps(project, pid)),
                 stopResult,
                 CommandOutput.Success("[]"));
             var adapter = new AspireProcessAdapter("/repo", commands);
@@ -419,6 +422,20 @@ public class AspireAdapterTests
         var act = () => AspireProcessJsonParser.Parse(json);
 
         act.Should().Throw<InvalidOperationException>();
+    }
+
+    /// <summary>
+    /// A PID guaranteed not to belong to any running process. A hardcoded literal
+    /// (e.g. 42) works on a dev machine but on a fresh GitHub Actions runner may
+    /// coincide with a real system process; OwnedProcessTerminator then makes a
+    /// genuine Process.GetProcessById/Kill call against it and fails with
+    /// "Operation not permitted" instead of the intended no-op.
+    /// </summary>
+    private static int DeadPid()
+    {
+        using var process = Process.Start(new ProcessStartInfo("/bin/true") { UseShellExecute = false })!;
+        process.WaitForExit();
+        return process.Id;
     }
 
     private static string Ps(string project, int pid) =>

@@ -2,6 +2,7 @@ using AwesomeAssertions;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Xunit;
 
 namespace CoreBankDemo.Persistence.IntegrationTests.Messaging;
@@ -277,7 +278,14 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
         // before either writes, so the loser's SaveChangesAsync hits the
         // optimistic-concurrency check and ClaimBatchForPartitionAsync's
         // conflict-retry path (drop the losing entry, retry with what's left)
-        // runs for real rather than by scheduling luck.
+        // runs. "Odds" was still scheduling luck, though: on a CPU-constrained
+        // host (e.g. a 2-4 vCPU CI runner, versus a many-core dev machine) one
+        // caller's whole read-write-commit pipeline can complete before the
+        // other's read even starts, so the loser simply never selects an
+        // already-claimed row and the retry path goes uncovered. The barrier
+        // below forces both callers to have read the row and be about to
+        // write before either is allowed to proceed, so the real database-
+        // level conflict happens on every run regardless of core count.
         var ct = TestContext.Current.CancellationToken;
 
         Guid contestedId;
@@ -297,9 +305,14 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
             contestedId = seeded.Id;
         }
 
+        using var bothAboutToSave = new Barrier(2);
+
         async Task<List<TestInboxMessage>> ClaimAsync()
         {
-            await using var context = CreateContext();
+            var options = new DbContextOptionsBuilder<TestMessagingDbContext>(CreateOptions<TestMessagingDbContext>())
+                .AddInterceptors(new SynchronizedSaveInterceptor(bothAboutToSave))
+                .Options;
+            await using var context = new TestMessagingDbContext(options);
             var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
             var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 1, ct);
             return [.. claimed];
@@ -327,5 +340,27 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
         var act = async () => await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 0, ct);
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>().WithParameterName("batchSize");
+    }
+}
+
+/// <summary>
+/// Pauses each side of a two-way race at the instant it is about to issue its
+/// SaveChanges SQL, releasing both only once both have arrived there. Used to
+/// make a genuine database-level write conflict deterministic instead of
+/// depending on how the OS scheduler happens to interleave two tasks.
+/// </summary>
+internal sealed class SynchronizedSaveInterceptor(Barrier bothAboutToSave) : SaveChangesInterceptor
+{
+    public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
+    {
+        bothAboutToSave.SignalAndWait();
+        return result;
+    }
+
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+    {
+        bothAboutToSave.SignalAndWait(cancellationToken);
+        return ValueTask.FromResult(result);
     }
 }
