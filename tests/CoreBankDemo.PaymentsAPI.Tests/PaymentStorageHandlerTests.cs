@@ -62,6 +62,42 @@ public class PaymentStorageHandlerTests
     }
 
     [Theory]
+    [InlineData(PaymentSchemes.Instant, MessageConstants.Priority.Instant)]
+    [InlineData(PaymentSchemes.Standard, MessageConstants.Priority.Standard)]
+    public async Task Instant_rows_are_stored_at_instant_priority_and_standard_rows_at_standard(string scheme, int expectedPriority)
+    {
+        OutboxMessage? captured = null;
+        var repository = new Mock<IOutboxRepository>();
+        repository
+            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(true);
+        var handler = CreateHandler(repository.Object);
+
+        await handler.StoreAsync(Request with { Scheme = scheme }, "priority-key", TestContext.Current.CancellationToken);
+
+        captured!.Priority.Should().Be(expectedPriority);
+    }
+
+    [Fact]
+    public async Task Instant_rows_are_held_for_the_inline_budget_and_standard_rows_are_not()
+    {
+        var captured = new List<OutboxMessage>();
+        var repository = new Mock<IOutboxRepository>();
+        repository
+            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<OutboxMessage, CancellationToken>((message, _) => captured.Add(message))
+            .ReturnsAsync(true);
+        var handler = CreateHandler(repository.Object);
+
+        await handler.StoreAsync(Request with { Scheme = PaymentSchemes.Instant }, "held-key", TestContext.Current.CancellationToken);
+        await handler.StoreAsync(Request with { Scheme = PaymentSchemes.Standard }, "free-key", TestContext.Current.CancellationToken);
+
+        captured[0].HoldUntil.Should().Be(captured[0].CreatedAt.AddMilliseconds(new InstantRailOptions().BudgetMilliseconds));
+        captured[1].HoldUntil.Should().BeNull();
+    }
+
+    [Theory]
     [InlineData("1.005", "1.00")]
     [InlineData("1.015", "1.02")]
     public async Task Amount_is_rounded_once_to_scale_two_using_midpoint_to_even(
@@ -334,6 +370,7 @@ public class PaymentStorageHandlerTests
                 LockExpirySeconds = 30,
                 PollingIntervalMs = 200
             }),
+            Options.Create(new InstantRailOptions()),
             new FixedTimeProvider(Now),
             logger ?? NullLogger<PaymentStorageHandler>.Instance,
             businessMetrics ?? new BusinessMetrics());

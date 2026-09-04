@@ -38,4 +38,10 @@ public class MessagingOutboxMessage : IOutboxMessage
     public required string Currency { get; set; }
     public required string TransactionStatus { get; set; }
     public string? ErrorReason { get; set; }
+
+    /// <inheritdoc/>
+    public int Priority { get; set; } = MessageConstants.Priority.Standard;
+
+    /// <inheritdoc/>
+    public DateTime? HoldUntil { get; set; }
 }

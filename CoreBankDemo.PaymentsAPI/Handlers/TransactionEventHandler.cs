@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Inbox;
+using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 
 namespace CoreBankDemo.PaymentsAPI.Handlers;
@@ -24,7 +25,9 @@ namespace CoreBankDemo.PaymentsAPI.Handlers;
 /// retry/poison transition -- this handler itself decides nothing about
 /// <see cref="InboxMessage.Status"/>.
 /// </summary>
-internal sealed class TransactionEventHandler(ILogger<TransactionEventHandler> logger)
+internal sealed class TransactionEventHandler(
+    ILogger<TransactionEventHandler> logger,
+    IOutboxRepository outboxRepository)
     : IInboxMessageHandler<InboxMessage>
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web)
@@ -33,7 +36,7 @@ internal sealed class TransactionEventHandler(ILogger<TransactionEventHandler> l
         RespectNullableAnnotations = true
     };
 
-    public Task HandleAsync(InboxMessage message, CancellationToken cancellationToken = default)
+    public async Task HandleAsync(InboxMessage message, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var scope = logger.BeginScope(new Dictionary<string, object>
@@ -46,10 +49,10 @@ internal sealed class TransactionEventHandler(ILogger<TransactionEventHandler> l
         switch (message.EventType)
         {
             case Constants.TransactionCompleted:
-                HandleTransactionCompleted(message);
+                await RecordCommittedOutcomeAsync(HandleTransactionCompleted(message), cancellationToken).ConfigureAwait(false);
                 break;
             case Constants.TransactionFailed:
-                HandleTransactionFailed(message);
+                await RecordCommittedOutcomeAsync(HandleTransactionFailed(message), cancellationToken).ConfigureAwait(false);
                 break;
             case Constants.BalanceUpdated:
                 HandleBalanceUpdated(message);
@@ -65,11 +68,35 @@ internal sealed class TransactionEventHandler(ILogger<TransactionEventHandler> l
                 throw new InvalidOperationException(
                     $"Unsupported stored transaction-events type '{message.EventType}' for inbox message {message.Id}.");
         }
-
-        return Task.CompletedTask;
     }
 
-    private void HandleTransactionCompleted(InboxMessage message)
+    /// <summary>
+    /// The instant rail's inline attempt regularly ends with CoreBankAPI
+    /// answering <c>202 Pending</c> -- it accepted the command for its own
+    /// background execution instead of running it inline -- and that
+    /// non-committed answer is what gets cached on the payment row. CoreBank
+    /// settles the transaction moments later and says so through exactly
+    /// this event, so this is where the payment learns its real outcome;
+    /// without it every duplicate replay answered <c>Pending</c> forever for
+    /// a payment that had long since completed.
+    /// </summary>
+    private async Task RecordCommittedOutcomeAsync(
+        (string TransactionId, string Status, DateTimeOffset ProcessedAt) outcome,
+        CancellationToken cancellationToken)
+    {
+        var recorded = await outboxRepository
+            .RecordCommittedOutcomeAsync(outcome.TransactionId, outcome.Status, outcome.ProcessedAt, cancellationToken)
+            .ConfigureAwait(false);
+        if (recorded)
+        {
+            logger.LogInformation(
+                "Recorded committed outcome {Status} for payment {TransactionId} from its transaction event",
+                outcome.Status,
+                outcome.TransactionId);
+        }
+    }
+
+    private (string TransactionId, string Status, DateTimeOffset ProcessedAt) HandleTransactionCompleted(InboxMessage message)
     {
         var payload = Deserialize<TransactionCompletedEvent>(message);
 
@@ -83,9 +110,10 @@ internal sealed class TransactionEventHandler(ILogger<TransactionEventHandler> l
             payload.TransactionId,
             payload.Status,
             message.EventType);
+        return (payload.TransactionId, payload.Status, payload.ProcessedAt);
     }
 
-    private void HandleTransactionFailed(InboxMessage message)
+    private (string TransactionId, string Status, DateTimeOffset ProcessedAt) HandleTransactionFailed(InboxMessage message)
     {
         var payload = Deserialize<TransactionFailedEvent>(message);
 
@@ -103,6 +131,7 @@ internal sealed class TransactionEventHandler(ILogger<TransactionEventHandler> l
             payload.Status,
             payload.ErrorReason,
             message.EventType);
+        return (payload.TransactionId, payload.Status, payload.ProcessedAt);
     }
 
     private void HandleBalanceUpdated(InboxMessage message)

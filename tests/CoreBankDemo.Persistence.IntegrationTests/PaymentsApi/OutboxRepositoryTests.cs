@@ -1,4 +1,5 @@
 using AwesomeAssertions;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
 using CoreBankDemo.PaymentsAPI.Outbox;
@@ -26,6 +27,47 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
             TestContext.Current.CancellationToken);
         found.Should().NotBeNull();
         context.Entry(found!).State.Should().Be(Microsoft.EntityFrameworkCore.EntityState.Detached);
+    }
+
+    [Fact]
+    public async Task RecordCommittedOutcomeAsync_upgrades_a_non_committed_cached_outcome_only_once()
+    {
+        // The instant rail caches whatever CoreBank answered, and a deferred
+        // inline attempt answers Pending; the transaction event is the only
+        // place the payment can learn that it went on to settle.
+        await using var store = CreateStore();
+        await using var context = store.CreateContext();
+        var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
+        var message = PaymentsApiTestData.Outbox("deferred-key");
+        message.Status = MessageConstants.Status.Completed;
+        message.ResponsePayload = """{"TransactionId":"deferred-key","Status":"Pending","ProcessedAt":"2026-08-28T12:00:00+00:00"}""";
+        (await repository.StoreIfNewAsync(message, TestContext.Current.CancellationToken)).Should().BeTrue();
+        var settledAt = new DateTimeOffset(2026, 8, 28, 12, 0, 5, TimeSpan.Zero);
+
+        var first = await repository.RecordCommittedOutcomeAsync(
+            "deferred-key", MessageConstants.Status.Completed, settledAt, TestContext.Current.CancellationToken);
+        var second = await repository.RecordCommittedOutcomeAsync(
+            "deferred-key", MessageConstants.Status.Failed, settledAt, TestContext.Current.CancellationToken);
+
+        first.Should().BeTrue();
+        second.Should().BeFalse("a committed outcome is never overwritten");
+        await using var verification = store.CreateContext();
+        var row = verification.OutboxMessages.Single(row => row.TransactionId == "deferred-key");
+        row.Status.Should().Be(MessageConstants.Status.Completed, "transport state is never touched");
+        row.ResponsePayload.Should().Contain("\"Status\":\"Completed\"").And.Contain("2026-08-28T12:00:05");
+    }
+
+    [Fact]
+    public async Task RecordCommittedOutcomeAsync_ignores_unknown_transactions()
+    {
+        await using var store = CreateStore();
+        await using var context = store.CreateContext();
+        var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
+
+        var recorded = await repository.RecordCommittedOutcomeAsync(
+            "never-stored", MessageConstants.Status.Completed, DateTimeOffset.UtcNow, TestContext.Current.CancellationToken);
+
+        recorded.Should().BeFalse();
     }
 
     [Fact]

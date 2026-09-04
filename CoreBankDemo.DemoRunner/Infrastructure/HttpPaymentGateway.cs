@@ -9,6 +9,8 @@ namespace CoreBankDemo.DemoRunner.Infrastructure;
 
 public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
 {
+    private const int BodyExcerptLength = 200;
+
     public async Task<PaymentResult> SubmitAsync(
         TopologyProfile profile,
         PaymentSubmission submission,
@@ -39,33 +41,15 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             var body = await response.Content.ReadAsStringAsync(ct);
             stopwatch.Stop();
             var parsed = ParsePaymentResponse(body);
-            var outcome = response.StatusCode switch
-            {
-                HttpStatusCode.Accepted => PaymentOutcome.Pending,
-                HttpStatusCode.OK when string.Equals(parsed.Status, "Completed", StringComparison.OrdinalIgnoreCase) => PaymentOutcome.Completed,
-                HttpStatusCode.OK when string.Equals(parsed.Status, "Failed", StringComparison.OrdinalIgnoreCase) => PaymentOutcome.Failed,
-                _ when response.IsSuccessStatusCode => PaymentOutcome.TransportFailure,
-                _ => PaymentOutcome.TransportFailure,
-            };
-            if (response.IsSuccessStatusCode
-                && (parsed.IsMalformed
-                    || (response.StatusCode == HttpStatusCode.Accepted
-                        && !string.Equals(parsed.Status, "Pending", StringComparison.OrdinalIgnoreCase))
-                    || (!string.IsNullOrWhiteSpace(submission.IdempotencyKey)
-                        && !string.Equals(parsed.TransactionId, submission.IdempotencyKey, StringComparison.Ordinal))))
-            {
-                outcome = PaymentOutcome.TransportFailure;
-            }
+            var violation = DescribeViolation(response.StatusCode, parsed, submission.IdempotencyKey, body);
             return new PaymentResult(
-                outcome,
+                violation is null ? MapOutcome(parsed.Status) : PaymentOutcome.TransportFailure,
                 (int)response.StatusCode,
                 parsed.PaymentId,
                 parsed.TransactionId,
                 parsed.Status,
                 body,
-                outcome == PaymentOutcome.TransportFailure
-                    ? "PaymentsAPI returned a malformed or mismatched response."
-                    : response.IsSuccessStatusCode ? null : $"HTTP {(int)response.StatusCode}",
+                violation,
                 stopwatch.Elapsed);
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
@@ -160,6 +144,74 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             return new InspectionResult(false, 0, endpointId, null, ex.Message, stopwatch.Elapsed);
         }
     }
+
+    /// <summary>
+    /// Reports why a response cannot be read as a payment acknowledgement, or
+    /// <see langword="null"/> when it can. Every rejection names the offending
+    /// value: "the same error" on a second run is otherwise indistinguishable
+    /// from the first, which is exactly what made this hard to diagnose.
+    /// </summary>
+    private static string? DescribeViolation(
+        HttpStatusCode statusCode,
+        PaymentParseResult parsed,
+        string? idempotencyKey,
+        string body)
+    {
+        if (statusCode is < HttpStatusCode.OK or >= HttpStatusCode.MultipleChoices)
+        {
+            return $"PaymentsAPI returned HTTP {(int)statusCode}{Excerpt(body)}";
+        }
+
+        if (parsed.IsMalformed)
+        {
+            return $"PaymentsAPI returned HTTP {(int)statusCode} without a paymentId/transactionId/status acknowledgement{Excerpt(body)}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(idempotencyKey)
+            && !string.Equals(parsed.TransactionId, idempotencyKey, StringComparison.Ordinal))
+        {
+            return $"PaymentsAPI answered idempotency key '{idempotencyKey}' with transactionId '{parsed.TransactionId}'.";
+        }
+
+        return MapOutcome(parsed.Status) == PaymentOutcome.TransportFailure
+            ? $"PaymentsAPI returned HTTP {(int)statusCode} with the unrecognised, possibly malformed status '{parsed.Status}'."
+            : null;
+    }
+
+    private static string Excerpt(string body)
+    {
+        var collapsed = string.Join(' ', body.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (collapsed.Length == 0)
+        {
+            return " and an empty body.";
+        }
+
+        return collapsed.Length <= BodyExcerptLength
+            ? $": {collapsed}"
+            : $": {collapsed[..BodyExcerptLength]}…";
+    }
+
+    /// <summary>
+    /// Maps the acknowledged status word to a business outcome, deliberately
+    /// without consulting the HTTP status code. Pairing the two used to reject
+    /// legitimate answers as malformed: an instant duplicate whose row is
+    /// <c>Completed</c> replays <c>200</c> carrying the persisted delivery
+    /// status (<c>PaymentsController.ResolveDeliveredResponse</c>), and that
+    /// payload is whatever CoreBankAPI last returned — <c>Pending</c> when the
+    /// inline attempt was accepted for deferred execution, or <c>Processing</c>
+    /// for an in-flight duplicate. Which HTTP code each rail is allowed to use
+    /// is a rail rule, and is enforced where rail rules live
+    /// (<c>OperatorConsoleController.EnforceRailSemantics</c>), not here.
+    /// </summary>
+    private static PaymentOutcome MapOutcome(string? status) => Normalize(status) switch
+    {
+        "completed" => PaymentOutcome.Completed,
+        "failed" => PaymentOutcome.Failed,
+        "pending" or "processing" => PaymentOutcome.Pending,
+        _ => PaymentOutcome.TransportFailure,
+    };
+
+    private static string Normalize(string? status) => status?.Trim().ToLowerInvariant() ?? string.Empty;
 
     private static PaymentParseResult ParsePaymentResponse(string body)
     {

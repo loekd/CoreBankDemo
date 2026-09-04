@@ -65,7 +65,8 @@ public sealed record OrderingObservation(
     string IdempotencyKey,
     DateTime EnqueuedAt,
     DateTime? ProcessedAt,
-    Guid Id = default);
+    Guid Id = default,
+    int Priority = 0);
 
 public sealed record OrderingViolation(
     string Store,
@@ -281,7 +282,8 @@ public sealed class LoadTestAssertionService(
                 message.IdempotencyKey,
                 message.CreatedAt,
                 message.ProcessedAt,
-                message.Id))
+                message.Id,
+                message.Priority))
             .ToListAsync(ct));
         orderingObservations.AddRange(await coreBankDb.InboxMessages
             .Select(message => new OrderingObservation(
@@ -290,7 +292,8 @@ public sealed class LoadTestAssertionService(
                 message.IdempotencyKey,
                 message.ReceivedAt,
                 message.ProcessedAt,
-                message.Id))
+                message.Id,
+                message.Priority))
             .ToListAsync(ct));
         orderingObservations.AddRange(await coreBankDb.MessagingOutboxMessages
             .Select(message => new OrderingObservation(
@@ -299,7 +302,8 @@ public sealed class LoadTestAssertionService(
                 message.IdempotencyKey,
                 message.CreatedAt,
                 message.ProcessedAt,
-                message.Id))
+                message.Id,
+                message.Priority))
             .ToListAsync(ct));
         orderingObservations.AddRange(await paymentsDb.InboxMessages
             .Select(message => new OrderingObservation(
@@ -308,7 +312,8 @@ public sealed class LoadTestAssertionService(
                 message.IdempotencyKey,
                 message.ReceivedAt,
                 message.ProcessedAt,
-                message.Id))
+                message.Id,
+                message.Priority))
             .ToListAsync(ct));
 
         var request = new ComputeAssertionRequest(
@@ -453,7 +458,7 @@ public static class LoadTestAssertionCalculator
                 : missingProcessedAt > 0
                     ? $"{missingProcessedAt} ordering observation(s) have no ProcessedAt timestamp"
                 : orderingViolations.Count == 0
-                    ? $"Verified timestamp-distinct FIFO ordering across {orderingObservations.Select(item => (item.Store, item.PartitionId)).Distinct().Count()} store partitions"
+                    ? $"Verified timestamp-distinct FIFO ordering within each priority class across {orderingObservations.Select(item => (item.Store, item.PartitionId)).Distinct().Count()} store partitions"
                     : $"{orderingViolations.Count} ordering inversion(s); first: {orderingViolations[0].Store}/partition-{orderingViolations[0].PartitionId} {orderingViolations[0].EarlierKey} processed after {orderingViolations[0].LaterKey}");
         var inlineInstantSettlement = new AssertionCheck(
             request.InlineInstantSettlementCount > 0,
@@ -546,7 +551,11 @@ public static class LoadTestAssertionCalculator
         IReadOnlyList<OrderingObservation> observations)
     {
         var violations = new List<OrderingViolation>();
-        foreach (var partition in observations.GroupBy(item => (item.Store, item.PartitionId)))
+        // FIFO is a promise within a priority class, not across them: the
+        // instant rail is *meant* to overtake queued standard work in the
+        // same partition (an SCT Inst never waits behind batch SCT work), so
+        // rows are only ever compared against rows of their own priority.
+        foreach (var partition in observations.GroupBy(item => (item.Store, item.PartitionId, item.Priority)))
         {
             OrderingObservation? latestPrior = null;
             // Grouping by EnqueuedAt alone collapsed every row sharing an

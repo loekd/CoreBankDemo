@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
@@ -258,6 +259,34 @@ public class CoreBankApiClientTests
         var request = new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
 
         await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_carries_the_priority_header_only_for_a_non_standard_priority()
+    {
+        var seen = new List<string?>();
+        using var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            seen.Add(request.Headers.Contains("X-Payment-Priority")
+                ? request.Headers.GetValues("X-Payment-Priority").Single()
+                : null);
+            return JsonResponse(HttpStatusCode.Accepted, new
+            {
+                transactionId = "txn-1",
+                status = "Pending",
+                processedAt = DateTimeOffset.UtcNow
+            });
+        });
+        var client = CreateClient(handler);
+
+        await client.ProcessTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+        await client.ProcessTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1", MessageConstants.Priority.Instant),
+            TestContext.Current.CancellationToken);
+
+        seen.Should().Equal(null, "100");
     }
 
     [Fact]

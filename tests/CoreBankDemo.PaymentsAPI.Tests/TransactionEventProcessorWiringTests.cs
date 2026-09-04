@@ -47,6 +47,10 @@ public class TransactionEventProcessorWiringTests
         builder.Services.AddDbContext<PaymentsDbContext>(
             options => options.UseNpgsql(TestConnectionStrings.NeverConnected));
         builder.Services.AddTransactionEventIntake(builder.Configuration);
+        // TransactionEventHandler records committed outcomes on the payment
+        // row, so it needs the IOutboxRepository that AddPaymentStorage scopes.
+        builder.Configuration["OutboxProcessing:PartitionCount"] = "4";
+        builder.Services.AddPaymentStorage(builder.Configuration);
         builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionEventHandler>();
         builder.Services.AddHostedService<InboxProcessor>();
 

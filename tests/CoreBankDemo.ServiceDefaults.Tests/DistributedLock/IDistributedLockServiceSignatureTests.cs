@@ -17,8 +17,27 @@ namespace CoreBankDemo.ServiceDefaults.Tests.DistributedLock;
 /// </summary>
 public class IDistributedLockServiceSignatureTests
 {
+    // The non-blocking form Messaging's processors call. Resolved by parameter
+    // list because the port also has the bounded-acquire overload (ADR-018
+    // priority addendum), which the instant rail's inline paths use.
     private static readonly MethodInfo Method =
-        typeof(IDistributedLockService).GetMethod(nameof(IDistributedLockService.ExecuteWithLockAsync))!;
+        typeof(IDistributedLockService).GetMethod(
+            nameof(IDistributedLockService.ExecuteWithLockAsync),
+            [typeof(string), typeof(int), typeof(Func<CancellationToken, Task>), typeof(CancellationToken)])!;
+
+    private static readonly MethodInfo BoundedMethod =
+        typeof(IDistributedLockService).GetMethod(
+            nameof(IDistributedLockService.ExecuteWithLockAsync),
+            [typeof(string), typeof(int), typeof(TimeSpan), typeof(Func<CancellationToken, Task>), typeof(CancellationToken)])!;
+
+    [Fact]
+    public void Bounded_acquire_overload_has_a_default_implementation_so_existing_implementations_keep_working()
+    {
+        BoundedMethod.Should().NotBeNull();
+        BoundedMethod.ReturnType.Should().Be(typeof(Task<bool>));
+        BoundedMethod.GetParameters()[2].Name.Should().Be("acquireTimeout");
+        BoundedMethod.IsAbstract.Should().BeFalse("a default interface implementation delegates to the non-blocking form");
+    }
 
     [Fact]
     public void ExecuteWithLockAsync_exists_and_returns_TaskOfBool()

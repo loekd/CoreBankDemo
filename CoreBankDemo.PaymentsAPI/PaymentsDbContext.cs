@@ -18,7 +18,7 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
             MessageRepositoryBase<OutboxMessage, PaymentsDbContext>.ConfigureDedupeIndex(
                 entity, nameof(OutboxMessage.IdempotencyKey));
             MessageRepositoryBase<OutboxMessage, PaymentsDbContext>.ConfigureConcurrencyToken(entity);
-            entity.HasIndex(e => new { e.PartitionId, e.Status, e.CreatedAt });
+            entity.HasIndex(e => new { e.PartitionId, e.Status, e.Priority, e.CreatedAt });
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.CreatedAt);
             entity.Property(e => e.IdempotencyKey).IsRequired().HasMaxLength(100);
@@ -41,7 +41,7 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
                 nameof(InboxMessage.EventType),
                 nameof(InboxMessage.AccountNumber));
             MessageRepositoryBase<InboxMessage, PaymentsDbContext>.ConfigureConcurrencyToken(entity);
-            entity.HasIndex(e => new { e.PartitionId, e.Status, e.ReceivedAt });
+            entity.HasIndex(e => new { e.PartitionId, e.Status, e.Priority, e.ReceivedAt });
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.ReceivedAt);
             entity.Property(e => e.IdempotencyKey).IsRequired().HasMaxLength(100);

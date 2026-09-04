@@ -34,14 +34,16 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
     protected override BusinessMetrics.StoreKind StoreKind => BusinessMetrics.StoreKind.Inbox;
 
     /// <inheritdoc/>
-    protected override IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold) =>
+    protected override IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold, DateTime? holdCutoff) =>
         InboxMessages
             .Where(m =>
                 m.PartitionId == partitionId &&
                 m.RetryCount < MessageConstants.Defaults.MaxRetryCount &&
+                (holdCutoff == null || m.HoldUntil == null || m.HoldUntil <= holdCutoff) &&
                 (m.Status == MessageConstants.Status.Pending ||
                  (m.Status == MessageConstants.Status.Processing && m.ReceivedAt < staleThreshold)))
-            .OrderBy(m => m.ReceivedAt)
+            .OrderByDescending(m => m.Priority)
+            .ThenBy(m => m.ReceivedAt)
             .ThenBy(m => m.Id);
 
     /// <inheritdoc/>

@@ -19,4 +19,10 @@ public class InboxMessage : IInboxMessage
     public required string EventType { get; set; }
     public required string AccountNumber { get; set; }
     public required string Payload { get; set; }
+
+    /// <inheritdoc/>
+    public int Priority { get; set; } = MessageConstants.Priority.Standard;
+
+    /// <inheritdoc/>
+    public DateTime? HoldUntil { get; set; }
 }

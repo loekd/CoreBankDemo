@@ -4,6 +4,7 @@ using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
+using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
@@ -112,7 +113,12 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
             store,
             collection => collection.AddScoped<IInboxMessageHandler<InboxMessage>>(
                 _ => new TraceCapturingHandler(
-                    new TransactionEventHandler(NullLogger<TransactionEventHandler>.Instance),
+                    new TransactionEventHandler(
+                        NullLogger<TransactionEventHandler>.Instance,
+                        new OutboxRepository(
+                            _.GetRequiredService<PaymentsDbContext>(),
+                            System.TimeProvider.System,
+                            TestBusinessMetrics.Instance)),
                     observedActivity)));
         using var activitySource = new ActivitySource(nameof(InboxProcessorTests));
         using var listener = new ActivityListener
@@ -287,6 +293,9 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
         services.AddScoped<PaymentsDbContext>(_ => store.CreateContext());
         services.AddScoped<InboxMessageRepository>();
         services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());
+        // TransactionEventHandler records committed outcomes on the payment row.
+        services.AddScoped<OutboxRepository>();
+        services.AddScoped<IOutboxRepository>(sp => sp.GetRequiredService<OutboxRepository>());
         services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionEventHandler>();
         configure?.Invoke(services);
 

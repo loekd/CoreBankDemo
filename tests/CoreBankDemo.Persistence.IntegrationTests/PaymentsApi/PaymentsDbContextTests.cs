@@ -25,6 +25,7 @@ public class PaymentsDbContextTests(PostgresContainerFixture fixture) : Payments
             false,
             nameof(OutboxMessage.PartitionId),
             nameof(OutboxMessage.Status),
+            nameof(OutboxMessage.Priority),
             nameof(OutboxMessage.CreatedAt));
         AssertIndex(outbox.GetIndexes(), false, nameof(OutboxMessage.Status));
         AssertIndex(outbox.GetIndexes(), false, nameof(OutboxMessage.CreatedAt));
@@ -62,6 +63,7 @@ public class PaymentsDbContextTests(PostgresContainerFixture fixture) : Payments
             false,
             nameof(InboxMessage.PartitionId),
             nameof(InboxMessage.Status),
+            nameof(InboxMessage.Priority),
             nameof(InboxMessage.ReceivedAt));
         AssertIndex(inbox.GetIndexes(), false, nameof(InboxMessage.Status));
         AssertIndex(inbox.GetIndexes(), false, nameof(InboxMessage.ReceivedAt));

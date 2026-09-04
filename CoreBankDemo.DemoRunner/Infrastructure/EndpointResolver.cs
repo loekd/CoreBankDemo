@@ -12,14 +12,19 @@ public static class EndpointResolver
     private const string LoadPaymentsApiBaseUrl = "http://127.0.0.1:5295";
     private const string CoreBankApiBaseUrl = "http://127.0.0.1:5032";
     private const string LoadTestSupportBaseUrl = "http://localhost:5181";
-    private const string JaegerBaseUrl = "http://localhost:16686";
+
+    // Probing goes to the literal loopback address, like every other health probe here, so
+    // the result never depends on how the machine orders "localhost" across address
+    // families; the browser link keeps the friendlier hostname.
+    private const string JaegerProbeUrl = "http://127.0.0.1:16686/";
+    private const string JaegerLinkUrl = "http://localhost:16686/";
 
     public static string HealthUrlFor(string resourceName, TopologyProfile profile = TopologyProfile.Regular) => resourceName switch
     {
         KnownResources.PaymentsApi => $"{PaymentsBaseUrl(profile)}/health",
         KnownResources.CoreBankApi => $"{CoreBankApiBaseUrl}/health",
         KnownResources.LoadTestSupport => $"{LoadTestSupportBaseUrl}/health",
-        KnownResources.Jaeger => $"{JaegerBaseUrl}/",
+        KnownResources.Jaeger => JaegerProbeUrl,
         // Postgres, Redis, and Dapr are not directly HTTP-probed by the console
         // (ADR-015 forbids connecting to their sockets); their confidence status is
         // reported via the owning API's health check instead.
@@ -54,7 +59,7 @@ public static class EndpointResolver
 
     public static string LinkFor(string linkId) => linkId switch
     {
-        KnownLinks.Jaeger => $"{JaegerBaseUrl}/",
+        KnownLinks.Jaeger => JaegerLinkUrl,
         _ => throw new ArgumentOutOfRangeException(nameof(linkId), linkId, "Unknown link."),
     };
 

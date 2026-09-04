@@ -77,7 +77,10 @@ public interface ITransactionIntakeHandler
     /// add-instant-payment-rail) -- see <see cref="TransactionIntakeOutcome.InlineCompleted"/>.
     /// </summary>
     Task<TransactionIntakeResult> ProcessAsync(
-        TransactionRequest request, CancellationToken cancellationToken, bool executeInline = false);
+        TransactionRequest request,
+        CancellationToken cancellationToken,
+        bool executeInline = false,
+        int priority = MessageConstants.Priority.Standard);
 
     Task<TransactionStatusResult> GetStatusAsync(string transactionId, CancellationToken cancellationToken);
 }
@@ -93,7 +96,10 @@ internal sealed class TransactionIntakeHandler(
     BusinessMetrics businessMetrics) : ITransactionIntakeHandler
 {
     public async Task<TransactionIntakeResult> ProcessAsync(
-        TransactionRequest request, CancellationToken cancellationToken, bool executeInline = false)
+        TransactionRequest request,
+        CancellationToken cancellationToken,
+        bool executeInline = false,
+        int priority = MessageConstants.Priority.Standard)
     {
         EnrichActivityWithRequest(request);
 
@@ -121,6 +127,10 @@ internal sealed class TransactionIntakeHandler(
             Currency = request.Currency,
             PartitionId = partitionId,
             Status = MessageConstants.Status.Pending,
+            Priority = priority,
+            // Left to this request's inline execution for its wait window;
+            // the inbox processor takes over only once that has lapsed.
+            HoldUntil = executeInline ? now.UtcDateTime + InlineClaimWait : null,
             ReceivedAt = now.UtcDateTime,
             TraceParent = Activity.Current?.Id,
             TraceState = Activity.Current?.TraceStateString
@@ -281,15 +291,90 @@ internal sealed class TransactionIntakeHandler(
     private async Task<TransactionIntakeResult?> TryExecuteInlineAsync(
         InboxMessage message, CancellationToken cancellationToken)
     {
-        TransactionIntakeResult? result = null;
+        // Same reasoning as PaymentsAPI's InstantPaymentForwardingHandler:
+        // under load the partition lock is busy and the row is rarely first
+        // in dispatch order on the first look, so wait a bounded time for
+        // both rather than deferring at the first sign of contention. Only
+        // "not first yet" is retried; an execution failure is never retried
+        // inline (the inbox processor drains it, per the spec), and a row
+        // claimed by that processor meanwhile is left to it.
+        var lockName = $"corebank-inbox-partition-{message.PartitionId}";
+        var deadline = timeProvider.GetUtcNow() + InlineClaimWait;
+        while (true)
+        {
+            var remaining = deadline - timeProvider.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                logger.LogInformation(
+                    "Inline execution for transaction {TransactionId} timed out waiting for partition {PartitionId}; leaving it for the inbox processor",
+                    message.TransactionId,
+                    message.PartitionId);
+                return null;
+            }
+
+            var attempt = await TryExecuteInlineOnceAsync(message, lockName, remaining, cancellationToken).ConfigureAwait(false);
+            if (!attempt.NotFirstYet)
+            {
+                return attempt.Result;
+            }
+
+            string? currentStatus;
+            try
+            {
+                currentStatus = await inboxStore.GetStatusAsync(message.Id, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Inline execution: could not read transaction {TransactionId} while waiting for partition {PartitionId}; leaving it for the inbox processor",
+                    message.TransactionId,
+                    message.PartitionId);
+                return null;
+            }
+
+            if (currentStatus != MessageConstants.Status.Pending)
+            {
+                logger.LogInformation(
+                    "Inline execution for transaction {TransactionId} was overtaken by the inbox processor's own claim while waiting for partition {PartitionId}",
+                    message.TransactionId,
+                    message.PartitionId);
+                return null;
+            }
+
+            await Task.Delay(ClaimRetryDelay, timeProvider, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Bounded wait for the partition lock and for the row to become first
+    /// in dispatch order. Kept below PaymentsAPI's per-attempt timeout
+    /// (<c>Payments:InstantRail:AttemptTimeoutMilliseconds</c>, default
+    /// 2500 ms) so the caller still sees this attempt's answer.
+    /// </summary>
+    private static readonly TimeSpan InlineClaimWait = TimeSpan.FromMilliseconds(2000);
+
+    private static readonly TimeSpan ClaimRetryDelay = TimeSpan.FromMilliseconds(25);
+
+    private readonly record struct InlineAttempt(TransactionIntakeResult? Result, bool NotFirstYet);
+
+    private async Task<InlineAttempt> TryExecuteInlineOnceAsync(
+        InboxMessage message, string lockName, TimeSpan acquireTimeout, CancellationToken cancellationToken)
+    {
+        InlineAttempt? outcome = null;
         try
         {
             await lockService.ExecuteWithLockAsync(
-                $"corebank-inbox-partition-{message.PartitionId}",
+                lockName,
                 inboxOptions.Value.LockExpirySeconds,
+                acquireTimeout,
                 async lockToken =>
                 {
-                    result = await ExecuteOldestInlineAsync(message, lockToken).ConfigureAwait(false);
+                    outcome = await ExecuteOldestInlineAsync(message, lockToken).ConfigureAwait(false);
                 },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -304,21 +389,19 @@ internal sealed class TransactionIntakeHandler(
                 "Inline execution: lock backend failed for partition {PartitionId} while executing transaction {TransactionId}; deferred to background processing",
                 message.PartitionId,
                 message.TransactionId);
-            return null;
+            return new InlineAttempt(null, NotFirstYet: false);
         }
 
         // ExecuteWithLockAsync returns false both when the lock was never
-        // acquired (the callback above never ran, so result is still null)
-        // AND when the workload ran to completion but lock ownership was
-        // lost mid-flight (its own XML doc: "not reporting success for work
-        // that ran without a guaranteed-exclusive lock"). In the second case
-        // result is non-null -- execution genuinely committed -- and must be
-        // trusted and returned rather than discarded; only a null result
-        // (the callback never ran) means the lock was truly unavailable.
-        return result;
+        // acquired (the callback never ran, so outcome is still null) AND
+        // when the workload ran but lock ownership was lost mid-flight. In
+        // the second case outcome is set -- execution genuinely committed --
+        // and is trusted; a lock that was never acquired is treated exactly
+        // like "not first yet": worth waiting for.
+        return outcome ?? new InlineAttempt(null, NotFirstYet: true);
     }
 
-    private async Task<TransactionIntakeResult?> ExecuteOldestInlineAsync(
+    private async Task<InlineAttempt> ExecuteOldestInlineAsync(
         InboxMessage message,
         CancellationToken cancellationToken)
     {
@@ -328,11 +411,11 @@ internal sealed class TransactionIntakeHandler(
             cancellationToken).ConfigureAwait(false);
         if (claimed is null)
         {
-            logger.LogInformation(
-                "Inline execution for transaction {TransactionId} is not the oldest claimable row in partition {PartitionId}; leaving it for the inbox processor",
+            logger.LogDebug(
+                "Inline execution for transaction {TransactionId} is not yet first in dispatch order for partition {PartitionId}",
                 message.TransactionId,
                 message.PartitionId);
-            return null;
+            return new InlineAttempt(null, NotFirstYet: true);
         }
 
         try
@@ -369,13 +452,15 @@ internal sealed class TransactionIntakeHandler(
                     claimed.TransactionId);
                 Activity.Current?.SetTag("outcome", "transport_failed");
                 businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.TransportFailed);
-                return new TransactionIntakeResult(
-                    TransactionIntakeOutcome.TransportFailed,
-                    null,
-                    [claimed.LastError ?? ex.Message]);
+                return new InlineAttempt(
+                    new TransactionIntakeResult(
+                        TransactionIntakeOutcome.TransportFailed,
+                        null,
+                        [claimed.LastError ?? ex.Message]),
+                    NotFirstYet: false);
             }
 
-            return null;
+            return new InlineAttempt(null, NotFirstYet: false);
         }
 
         if (claimed.Status != MessageConstants.Status.Completed ||
@@ -388,11 +473,13 @@ internal sealed class TransactionIntakeHandler(
             logger.LogWarning(
                 "Inline execution for transaction {TransactionId} did not yield a deserializable committed response; leaving the row Pending",
                 claimed.TransactionId);
-            return null;
+            return new InlineAttempt(null, NotFirstYet: false);
         }
 
         Activity.Current?.SetTag("outcome", "inline_completed");
-        return new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null);
+        return new InlineAttempt(
+            new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null),
+            NotFirstYet: false);
     }
 
     private bool TryDeserializeResponse(string? responsePayload, out TransactionResponse? response)

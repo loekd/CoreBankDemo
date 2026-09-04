@@ -330,6 +330,46 @@ public class TransactionIntakeHandlerTests
     }
 
     [Fact]
+    public async Task ProcessAsync_holds_an_inline_row_for_its_wait_window_and_a_deferred_row_not_at_all()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        var stored = new List<InboxMessage>();
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored.Add(m))
+            .ReturnsAsync(true);
+        _inboxStore
+            .Setup(s => s.TryClaimByIdIfOldestAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _inboxStore
+            .Setup(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Processing);
+        var handler = CreateHandler();
+
+        await handler.ProcessAsync(ValidRequest("inline-txn"), TestContext.Current.CancellationToken, executeInline: true);
+        await handler.ProcessAsync(ValidRequest("deferred-txn"), TestContext.Current.CancellationToken, executeInline: false);
+
+        stored[0].HoldUntil.Should().Be(stored[0].ReceivedAt.AddSeconds(2));
+        stored[1].HoldUntil.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_stores_the_requested_priority_on_the_inbox_row()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        var handler = CreateHandler();
+
+        await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: false, priority: MessageConstants.Priority.Instant);
+
+        stored!.Priority.Should().Be(MessageConstants.Priority.Instant);
+    }
+
+    [Fact]
     public async Task ProcessAsync_executes_inline_and_returns_the_committed_response_when_it_commits()
     {
         _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
@@ -373,6 +413,10 @@ public class TransactionIntakeHandlerTests
         _inboxStore
             .Setup(s => s.TryClaimByIdIfOldestAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((InboxMessage?)null);
+        // The row is already Processing under the batch claim: stop waiting.
+        _inboxStore
+            .Setup(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Processing);
 
         var handler = CreateHandler();
 
@@ -380,6 +424,74 @@ public class TransactionIntakeHandlerTests
 
         result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
         result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
+        _executionHandler.VerifyNoOtherCalls();
+    }
+
+    // ---- ADR-018 priority addendum: wait within a bounded window instead of giving up ----
+
+    [Fact]
+    public async Task ProcessAsync_waits_for_its_turn_and_then_executes_inline()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        var looks = 0;
+        _inboxStore
+            .Setup(s => s.TryClaimByIdIfOldestAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                if (++looks == 1)
+                {
+                    return null;
+                }
+
+                stored!.Status = MessageConstants.Status.Processing;
+                return stored;
+            });
+        _inboxStore
+            .Setup(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => stored?.Status);
+        var committedResponse = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow());
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ResponsePayload = JsonSerializer.Serialize(committedResponse);
+            })
+            .Returns(Task.CompletedTask);
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InlineCompleted);
+        looks.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_stops_waiting_for_a_busy_lock_when_the_wait_window_closes()
+    {
+        _lock.Acquired = false;
+        // Every failed acquire "takes" three seconds: the window is 2 s.
+        _lock.OnCall = () => _timeProvider.Advance(TimeSpan.FromSeconds(3));
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        _inboxStore
+            .Setup(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => stored?.Status);
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        _lock.LockNames.Should().ContainSingle();
         _executionHandler.VerifyNoOtherCalls();
     }
 
@@ -666,6 +778,11 @@ public class TransactionIntakeHandlerTests
             .ReturnsAsync(true);
         var handler = CreateHandler();
 
+        // The lock holder (the batch processor) has claimed the row: nothing to wait for.
+        _inboxStore
+            .Setup(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Processing);
+
         var result = await handler.ProcessAsync(
             ValidRequest(),
             TestContext.Current.CancellationToken,
@@ -673,6 +790,7 @@ public class TransactionIntakeHandlerTests
 
         result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
         _lock.LockNames.Should().ContainSingle().Which.Should().StartWith("corebank-inbox-partition-");
+        _inboxStore.Verify(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Once);
         _inboxStore.VerifyNoOtherCalls();
         _executionHandler.VerifyNoOtherCalls();
     }
@@ -711,6 +829,9 @@ public class TransactionIntakeHandlerTests
         /// <summary>When set, the call throws instead of returning -- simulating a lock backend failure (e.g. Redis connection failure).</summary>
         public Exception? ThrowException { get; set; }
 
+        /// <summary>Runs at the start of every call -- lets a test move the fake clock per acquire attempt.</summary>
+        public Action? OnCall { get; set; }
+
         public List<string> LockNames { get; } = [];
 
         public async Task<bool> ExecuteWithLockAsync(
@@ -720,6 +841,7 @@ public class TransactionIntakeHandlerTests
             CancellationToken cancellationToken = default)
         {
             LockNames.Add(lockName);
+            OnCall?.Invoke();
             if (ThrowException is not null)
             {
                 throw ThrowException;

@@ -32,4 +32,10 @@ public class InboxMessage : IInboxMessage
     public required string Currency { get; set; }
     public required string TransactionId { get; set; }
     public string? ResponsePayload { get; set; }
+
+    /// <inheritdoc/>
+    public int Priority { get; set; } = MessageConstants.Priority.Standard;
+
+    /// <inheritdoc/>
+    public DateTime? HoldUntil { get; set; }
 }

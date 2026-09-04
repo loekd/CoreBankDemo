@@ -52,6 +52,13 @@ internal sealed class InstantPaymentForwardingHandler(
     ILogger<InstantPaymentForwardingHandler> logger,
     BusinessMetrics businessMetrics) : IInstantPaymentForwardingHandler
 {
+    /// <summary>
+    /// Pause between "not yet first in dispatch order" checks while waiting
+    /// within budget. Short, because the rows ahead are typically settled
+    /// inline by their own requests in tens of milliseconds.
+    /// </summary>
+    private static readonly TimeSpan ClaimRetryDelay = TimeSpan.FromMilliseconds(25);
+
     public async Task<InstantForwardResult> ForwardAsync(PaymentSnapshot payment, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(payment);
@@ -66,58 +73,112 @@ internal sealed class InstantPaymentForwardingHandler(
             return Deferred(startedAt);
         }
 
-        InstantForwardResult? result = null;
-        try
-        {
-            await lockService.ExecuteWithLockAsync(
-                $"payments-outbox-partition-{payment.PartitionId}",
-                outboxOptions.Value.LockExpirySeconds,
-                async lockToken =>
-                {
-                    result = await ForwardUnderPartitionLockAsync(
-                        payment,
-                        opts,
-                        startedAt,
-                        lockToken).ConfigureAwait(false);
-                },
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(
-                ex,
-                "Instant rail: lock backend failed for partition {PartitionId} while forwarding payment {IdempotencyKey}; deferred to background delivery",
-                payment.PartitionId,
-                payment.IdempotencyKey);
-            return Deferred(startedAt);
-        }
+        var deadline = startedAt + TimeSpan.FromMilliseconds(opts.BudgetMilliseconds);
+        var attemptTimeout = TimeSpan.FromMilliseconds(opts.AttemptTimeoutMilliseconds);
+        var lockName = $"payments-outbox-partition-{payment.PartitionId}";
 
-        // ExecuteWithLockAsync returns false both when the lock was never
-        // acquired (the callback above never ran, so result is still null)
-        // AND when the workload ran to completion but lock ownership was
-        // lost mid-flight (its own XML doc: "not reporting success for work
-        // that ran without a guaranteed-exclusive lock"). In the second case
-        // result is non-null -- the forward genuinely happened -- and must be
-        // trusted and returned rather than discarded; only a null result
-        // (the callback never ran) means the lock was truly unavailable and
-        // must fall back to Deferred.
-        if (result is null)
+        // Under load, a busy partition lock and "not first in dispatch order
+        // yet" are the normal case, not the exception: every concurrent
+        // instant request in the partition and the background processor's
+        // 200 ms poll all contend for the same lock. Giving up at the first
+        // sign of contention deferred almost every instant payment in a
+        // burst. The budget exists precisely so an SCT Inst can wait a
+        // bounded time instead, so this waits -- for the lock, and for its
+        // turn -- until the budget runs out. It stops early the moment
+        // another claimant owns the row: that row is being delivered by the
+        // background processor and its outcome will arrive via the event.
+        while (true)
         {
-            logger.LogInformation(
-                "Instant rail: partition {PartitionId} lock unavailable for payment {IdempotencyKey}; deferred without overtaking queued work",
-                payment.PartitionId,
-                payment.IdempotencyKey);
-            return Deferred(startedAt);
-        }
+            var remaining = deadline - timeProvider.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                logger.LogInformation(
+                    "Instant rail: budget exhausted waiting for partition {PartitionId} to reach payment {IdempotencyKey}; deferred to background delivery",
+                    payment.PartitionId,
+                    payment.IdempotencyKey);
+                return Deferred(startedAt);
+            }
 
-        return result;
+            InstantForwardResult? result = null;
+            try
+            {
+                await lockService.ExecuteWithLockAsync(
+                    lockName,
+                    outboxOptions.Value.LockExpirySeconds,
+                    remaining < attemptTimeout ? remaining : attemptTimeout,
+                    async lockToken =>
+                    {
+                        result = await ForwardUnderPartitionLockAsync(
+                            payment,
+                            opts,
+                            startedAt,
+                            lockToken).ConfigureAwait(false);
+                    },
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Instant rail: lock backend failed for partition {PartitionId} while forwarding payment {IdempotencyKey}; deferred to background delivery",
+                    payment.PartitionId,
+                    payment.IdempotencyKey);
+                return Deferred(startedAt);
+            }
+
+            // ExecuteWithLockAsync returns false both when the lock was never
+            // acquired (the callback never ran, so result is still null) AND
+            // when the workload ran but lock ownership was lost mid-flight.
+            // In the second case result is non-null -- the forward genuinely
+            // happened -- and is trusted and returned; only a null result
+            // (lock unavailable, or not yet first in dispatch order) waits.
+            if (result is not null)
+            {
+                return result;
+            }
+
+            string? currentStatus;
+            try
+            {
+                currentStatus = await store.GetStatusAsync(payment.Id, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Instant rail: could not read payment {IdempotencyKey} while waiting for partition {PartitionId}; deferred to background delivery",
+                    payment.IdempotencyKey,
+                    payment.PartitionId);
+                return Deferred(startedAt);
+            }
+
+            if (currentStatus != MessageConstants.Status.Pending)
+            {
+                logger.LogInformation(
+                    "Instant rail: payment {IdempotencyKey} was claimed by the background processor while waiting for partition {PartitionId}; deferred to that delivery",
+                    payment.IdempotencyKey,
+                    payment.PartitionId);
+                return Deferred(startedAt);
+            }
+
+            await Task.Delay(ClaimRetryDelay, timeProvider, cancellationToken).ConfigureAwait(false);
+        }
     }
 
-    private async Task<InstantForwardResult> ForwardUnderPartitionLockAsync(
+    /// <summary>
+    /// The one budgeted forward attempt under the partition lock. Returns
+    /// <see langword="null"/> -- rather than a deferral -- when the row is not
+    /// yet first in dispatch order, so the caller can wait and try again.
+    /// </summary>
+    private async Task<InstantForwardResult?> ForwardUnderPartitionLockAsync(
         PaymentSnapshot payment,
         InstantRailOptions opts,
         DateTimeOffset startedAt,
@@ -129,11 +190,11 @@ internal sealed class InstantPaymentForwardingHandler(
             cancellationToken).ConfigureAwait(false);
         if (claimed is null)
         {
-            logger.LogInformation(
-                "Instant rail: payment {IdempotencyKey} is not the oldest claimable row in partition {PartitionId}; deferred to preserve FIFO ordering",
+            logger.LogDebug(
+                "Instant rail: payment {IdempotencyKey} is not yet first in dispatch order for partition {PartitionId}",
                 payment.IdempotencyKey,
                 payment.PartitionId);
-            return Deferred(startedAt);
+            return null;
         }
 
         var budget = TimeSpan.FromMilliseconds(opts.BudgetMilliseconds);
@@ -194,11 +255,38 @@ internal sealed class InstantPaymentForwardingHandler(
                         payment.IdempotencyKey);
                 }
 
-                var settled = string.Equals(submission.Status, MessageConstants.Status.Completed, StringComparison.Ordinal);
-                var outcome = settled ? InstantDeliveryOutcome.Completed : InstantDeliveryOutcome.Rejected;
+                // Only a terminal CoreBank status is a committed business
+                // outcome. A 2xx carrying Pending/Processing means CoreBank
+                // accepted the command for its own deferred execution --
+                // TransactionIntakeHandler answers 202/Pending whenever
+                // inline execution could not run (the inbox row was not the
+                // first in dispatch order for its partition, the partition lock
+                // was unavailable, or execution threw but left the row
+                // retryable). Reading "not Completed" as Rejected reported
+                // that deferral to the operator as a business rejection --
+                // a 200/Failed for a payment nobody had rejected.
+                var outcome = submission.Status switch
+                {
+                    MessageConstants.Status.Completed => InstantDeliveryOutcome.Completed,
+                    MessageConstants.Status.Failed => InstantDeliveryOutcome.Rejected,
+                    _ => InstantDeliveryOutcome.Deferred,
+                };
+
+                if (outcome == InstantDeliveryOutcome.Deferred)
+                {
+                    logger.LogInformation(
+                        "Instant rail: CoreBank accepted payment {IdempotencyKey} with non-committed status {Status}; reporting no committed outcome yet",
+                        payment.IdempotencyKey,
+                        submission.Status);
+                }
 
                 businessMetrics.RecordInstantPaymentDuration(
-                    settled ? BusinessMetrics.InstantPaymentOutcome.Settled : BusinessMetrics.InstantPaymentOutcome.Rejected,
+                    outcome switch
+                    {
+                        InstantDeliveryOutcome.Completed => BusinessMetrics.InstantPaymentOutcome.Settled,
+                        InstantDeliveryOutcome.Rejected => BusinessMetrics.InstantPaymentOutcome.Rejected,
+                        _ => BusinessMetrics.InstantPaymentOutcome.Deferred,
+                    },
                     timeProvider.GetUtcNow() - startedAt);
 
                 return new InstantForwardResult(outcome, submission.ProcessedAt);

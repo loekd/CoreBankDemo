@@ -28,4 +28,27 @@ public interface IMessage
 
     /// <summary>W3C tracestate captured at enqueue (AD-8).</summary>
     string? TraceState { get; set; }
+
+    /// <summary>
+    /// Claim priority within a partition. Claims are ordered by this value
+    /// descending, then by arrival, so a higher-priority row is dispatched
+    /// before every lower-priority row still queued in its partition -- and
+    /// never before an earlier row of its own priority. The instant payment
+    /// rail uses <see cref="MessageConstants.Priority.Instant"/> so that an
+    /// SCT Inst never waits behind batch (SCT) work; everything else is
+    /// <see cref="MessageConstants.Priority.Standard"/>.
+    /// </summary>
+    int Priority { get; set; }
+
+    /// <summary>
+    /// While set and in the future, the background batch claim leaves this
+    /// row alone; the ordered inline claim ignores it. The instant rail sets
+    /// it to the row's creation time plus its budget, so a fresh SCT Inst is
+    /// settled by the request that stored it rather than being snatched by
+    /// the next 200 ms poll tick -- which, once priority made instant rows
+    /// first in line, the poller otherwise won almost every time. If the
+    /// inline attempt gives up or dies, the hold lapses and the batch rail
+    /// takes over exactly as before. <see langword="null"/> means no hold.
+    /// </summary>
+    DateTime? HoldUntil { get; set; }
 }

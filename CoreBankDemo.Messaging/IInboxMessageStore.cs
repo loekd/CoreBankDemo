@@ -17,8 +17,8 @@ public interface IInboxMessageStore<TMessage>
 {
     /// <summary>
     /// Claims up to <paramref name="batchSize"/> claimable rows in
-    /// <paramref name="partitionId"/>, oldest first, atomically transitioning
-    /// them to <c>Processing</c>. See
+    /// <paramref name="partitionId"/>, highest priority first and oldest first
+    /// within a priority, atomically transitioning them to <c>Processing</c>. See
     /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.ClaimBatchForPartitionAsync"/>.
     /// </summary>
     Task<IReadOnlyList<TMessage>> ClaimBatchForPartitionAsync(
@@ -60,8 +60,29 @@ public interface IInboxMessageStore<TMessage>
     /// </returns>
     Task<TMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Claims the identified row only when it is first in its partition's
+    /// dispatch order — <see cref="IMessage.Priority"/> descending, then
+    /// arrival — so inline execution never overtakes earlier work of its own
+    /// priority, while a higher-priority row may overtake queued
+    /// lower-priority rows. See
+    /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.TryClaimByIdIfOldestAsync"/>.
+    /// </summary>
     Task<TMessage?> TryClaimByIdIfOldestAsync(
         Guid id,
         int partitionId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the row's <em>current</em> <c>Status</c> straight from the store.
+    /// The inline paths use it between bounded claim attempts to tell "not
+    /// first in dispatch order yet" (keep waiting) apart from "another
+    /// claimant now owns the row" (stop waiting: it is being delivered
+    /// elsewhere). Deliberately a projection, never an entity: the caller's
+    /// scoped <c>DbContext</c> is the one that inserted the row moments ago,
+    /// and an entity query would hand back that tracked instance -- still
+    /// <c>Pending</c> whatever the database says -- so the wait would never
+    /// end.
+    /// </summary>
+    Task<string?> GetStatusAsync(Guid id, CancellationToken cancellationToken = default);
 }

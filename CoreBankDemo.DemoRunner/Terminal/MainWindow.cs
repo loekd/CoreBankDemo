@@ -3,6 +3,8 @@ using System.Drawing;
 using System.Globalization;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
+using CoreBankDemo.DemoRunner.Infrastructure;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -13,7 +15,21 @@ namespace CoreBankDemo.DemoRunner.Terminal;
 #pragma warning disable CS0618
 public sealed class MainWindow : Window
 {
-    private const int CompactWidthThreshold = 100;
+    private const int RailWidthPreferred = 22;
+    private const int RailWidthCompact = 5;
+    private const int ActionColumnWidth = 22;
+
+    // Operations workspace column grid, sized so both columns still fit the
+    // narrowest supported content area (80 columns minus the compact rail).
+    private const int LabelX = 1;
+    private const int LabelWidth = 13;
+    private const int WideFieldWidth = 28;
+    private const int SecondLabelX = 45;
+    private const int SecondLabelWidth = 11;
+    private const int NarrowFieldWidth = 10;
+
+    private static readonly string[] NavigationLabels = ["Operations", "Resources", "Evidence", "Load Test"];
+
     private readonly OperatorConsoleController _controller;
     private readonly Func<Task> _onExitRequested;
     private readonly IConfirmationService _confirmation;
@@ -23,64 +39,88 @@ public sealed class MainWindow : Window
     private readonly object _activeActionsLock = new();
     private readonly HashSet<Task> _activeActions = [];
 
-    private readonly Label _topologyBar = new() { X = 1, Y = 0, Height = 1 };
-    private readonly Button _aspireDashboardButton = new() { Text = "Aspire" };
-    private readonly Button _jaegerButton = new() { Text = "Jaeger" };
-    private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = 18, Height = Dim.Fill(3), Title = "WORKSPACES" };
-    private readonly FrameView _content = new() { X = 18, Y = 1, Width = Dim.Fill(), Height = Dim.Fill(3) };
-    private readonly Label _evidenceStrip = new() { X = 1, Y = Pos.AnchorEnd(2), Height = 1, Width = Dim.Fill(1) };
+    private readonly Label _topologyBar = new() { X = 1, Y = 0, Height = 1, Width = Dim.Fill(22) };
+    private readonly Button _aspireDashboardButton = NewButton("Aspire");
+    private readonly Button _jaegerButton = NewButton("Jaeger");
+    private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = RailWidthPreferred, Height = Dim.Fill(3), Title = "WORKSPACES" };
+    private readonly FrameView _content = new() { X = RailWidthPreferred, Y = 1, Width = Dim.Fill(), Height = Dim.Fill(3) };
+    private readonly Label _statusLine = new() { X = 1, Y = Pos.AnchorEnd(3), Height = 1, Width = Dim.Fill(1) };
+    private readonly Label _messageLine = new() { X = 1, Y = Pos.AnchorEnd(2), Height = 1, Width = Dim.Fill(1) };
 
     private readonly Button[] _navigationButtons;
     private readonly View _operationsView;
     private readonly View _resourcesView;
     private readonly View _evidenceView;
     private readonly View _loadView;
+    private readonly View[] _workspaces;
+    private View? _mountedWorkspace;
 
     private readonly TextField _fromAccount = new() { Text = "NL91ABNA0417164300" };
     private readonly TextField _toAccount = new() { Text = "NL20INGB0001234567" };
     private readonly TextField _amount = new() { Text = "1.00" };
     private readonly TextField _currency = new() { Text = "EUR" };
-    private readonly TextField _suppliedKey = new() { Text = "demo-key-001" };
+    // Unique per console session on purpose. An idempotency key is a permanent
+    // identity: a hard-coded default meant every "Supplied" submit in a new
+    // session silently replayed whatever row a previous session had created
+    // under that key, so the operator saw hours-old state and no fresh payment.
+    // Typing a fixed key to demonstrate a replay is still one keystroke away.
+    private readonly TextField _suppliedKey = new() { Text = NewSessionKey() };
     private readonly TextField _outcomeKey = new();
     private readonly TextField _burstCount = new() { Text = "20" };
     private readonly TextField _burstConcurrency = new() { Text = "4" };
-    private readonly Button _railButton = new() { Text = "Rail: standard" };
-    private readonly Button _idempotencyButton = new() { Text = "Idempotency: Generated" };
-    private readonly Button _submitButton = new() { Text = "Submit payment", IsDefault = true };
-    private readonly Button _resendButton = new() { Text = "Resend same key" };
-    private readonly Button _burstButton = new() { Text = "Run bounded burst" };
-    private readonly Button _cancelBurstButton = new() { Text = "Cancel active burst" };
-    private readonly Button _queryButton = new() { Text = "Query outcome" };
+    private readonly Button _railButton = NewButton("Rail: standard");
+    private readonly Button _idempotencyButton = NewButton("Idempotency: Generated");
+    private readonly Button _submitButton = NewButton("Submit payment", isDefault: true);
+    private readonly Button _resendButton = NewButton("Resend same key");
+    private readonly Button _burstButton = NewButton("Run bounded burst");
+    private readonly Button _cancelBurstButton = NewButton("Cancel active burst");
+    private readonly Button _queryButton = NewButton("Query outcome");
     private readonly Label _burstStatus = new();
+    private readonly Label _operationsHint = new();
+    private Label _omittedNote = null!;
+    private Label _burstCountLabel = null!;
+    private Label _concurrencyLabel = null!;
+    private Label _outcomeLabel = null!;
 
     private readonly ListView _resourceList = new();
-    private readonly Button _startRegularButton = new() { Text = "Start Regular" };
-    private readonly Button _attachRegularButton = new() { Text = "Attach Regular" };
-    private readonly Button _startLoadButton = new() { Text = "Start LoadTests" };
-    private readonly Button _attachLoadButton = new() { Text = "Attach LoadTests" };
-    private readonly Button _stopButton = new() { Text = "Stop AppHost" };
-    private readonly Button _switchButton = new() { Text = "Switch topology" };
-    private readonly Button _resourceActionButton = new() { Text = "Resource action" };
-    private readonly Button _restartResourceButton = new() { Text = "Restart selected" };
-    private readonly Button _refreshButton = new() { Text = "Refresh live state" };
+    private readonly Button _startRegularButton = NewButton("Start Regular");
+    private readonly Button _attachRegularButton = NewButton("Attach Regular");
+    private readonly Button _startLoadButton = NewButton("Start LoadTests");
+    private readonly Button _attachLoadButton = NewButton("Attach LoadTests");
+    private readonly Button _stopButton = NewButton("Stop AppHost");
+    private readonly Button _switchButton = NewButton("Switch topology");
+    private readonly Button _resourceActionButton = NewButton("Resource action");
+    private readonly Button _restartResourceButton = NewButton("Restart selected");
+    private readonly Button _refreshButton = NewButton("Refresh state");
+    private readonly Label _resourcesHint = new();
 
     private readonly ListView _evidenceList = new();
     private readonly TextView _evidenceDetail = new() { ReadOnly = true, WordWrap = false };
-    private readonly Button _detailsButton = new() { Text = "Details" };
-    private readonly Button _wrapButton = new() { Text = "Wrap: off" };
-    private readonly Button _exportButton = new() { Text = "Export session evidence" };
-    private readonly Button _inspectPaymentsOutbox = new() { Text = "Payments outbox" };
-    private readonly Button _inspectCoreBankInbox = new() { Text = "CoreBank inbox" };
+    private readonly Button _detailsButton = NewButton("Details");
+    private readonly Button _wrapButton = NewButton("Wrap: off");
+    private readonly Button _copyButton = NewButton("Copy detail");
+    private readonly Button _exportButton = NewButton("Export session evidence");
+    private readonly Button _inspectPaymentsOutbox = NewButton("Payments outbox");
+    private readonly Button _inspectCoreBankInbox = NewButton("CoreBank inbox");
 
-    private readonly Label _loadPhase = new();
+    private readonly Label _loadPhase = new() { Text = "Reset → Run → Wait → Assert → Investigate" };
+    private readonly Label _loadStatus = new();
     private readonly ListView _loadResults = new();
-    private readonly Button _runLoadButton = new() { Text = "Run accepted load workflow" };
+    private readonly Button _runLoadButton = NewButton("Run accepted load workflow");
     private readonly TextField _expectedUnique = new() { Text = "100" };
+    private readonly Label _loadHint = new();
+
+    private readonly ListBinding _resourceBinding;
+    private readonly ListBinding _evidenceBinding;
+    private readonly ListBinding _loadResultBinding;
 
     private PaymentRail _rail = PaymentRail.Standard;
     private IdempotencyMode _idempotencyMode = IdempotencyMode.Generated;
     private IReadOnlyList<ResourceRowViewModel> _resourceRows = [];
     private IReadOnlyList<EvidenceRowViewModel> _evidenceRows = [];
+    private bool _compactLayout;
+    private string _message = string.Empty;
+    private long _messageMark = -1;
 
     public MainWindow(OperatorConsoleController controller, Func<Task> onExitRequested)
         : this(controller, onExitRequested, null, true)
@@ -99,6 +139,9 @@ public sealed class MainWindow : Window
         _onExitRequested = onExitRequested;
         _confirmation = confirmation ?? new TerminalConfirmationService();
         _marshalUpdates = marshalUpdates;
+        _resourceBinding = new ListBinding(_resourceList);
+        _evidenceBinding = new ListBinding(_evidenceList);
+        _loadResultBinding = new ListBinding(_loadResults);
         Title = "CoreBankDemo — Operator Console";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
@@ -114,10 +157,10 @@ public sealed class MainWindow : Window
 
         _navigationButtons =
         [
-            CreateNavigationButton("1 Operations", WorkspaceKind.Operations, 0),
-            CreateNavigationButton("2 Resources", WorkspaceKind.Resources, 2),
-            CreateNavigationButton("3 Evidence", WorkspaceKind.Evidence, 4),
-            CreateNavigationButton("4 Load Test", WorkspaceKind.LoadTest, 6),
+            CreateNavigationButton(WorkspaceKind.Operations, 0),
+            CreateNavigationButton(WorkspaceKind.Resources, 2),
+            CreateNavigationButton(WorkspaceKind.Evidence, 4),
+            CreateNavigationButton(WorkspaceKind.LoadTest, 6),
         ];
         _navigation.Add(_navigationButtons);
 
@@ -125,7 +168,7 @@ public sealed class MainWindow : Window
         _resourcesView = BuildResourcesView();
         _evidenceView = BuildEvidenceView();
         _loadView = BuildLoadView();
-        _content.Add(_operationsView, _resourcesView, _evidenceView, _loadView);
+        _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView];
 
         var statusBar = new StatusBar(
         [
@@ -137,25 +180,26 @@ public sealed class MainWindow : Window
             new Shortcut("Q", "Quit", () => Dispatch(RequestExitAsync)),
         ]);
 
-        _topologyBar.Width = Dim.Fill(22);
-        _aspireDashboardButton.X = Pos.AnchorEnd(20);
+        _aspireDashboardButton.X = Pos.AnchorEnd(21);
         _aspireDashboardButton.Y = 0;
-        _jaegerButton.X = Pos.Right(_aspireDashboardButton) + 1;
+        _jaegerButton.X = Pos.AnchorEnd(10);
         _jaegerButton.Y = 0;
-        _aspireDashboardButton.Accepted += (_, e) =>
+        _aspireDashboardButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             Dispatch(() => _controller.OpenKnownLinkAsync(KnownLinks.AspireDashboard, _sessionCancellation.Token));
         };
-        _jaegerButton.Accepted += (_, e) =>
+        _jaegerButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             Dispatch(() => _controller.OpenKnownLinkAsync(KnownLinks.Jaeger, _sessionCancellation.Token));
         };
 
-        Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content, _evidenceStrip, statusBar);
+        Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content, _statusLine, _messageLine, statusBar);
+        UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
+        Render(PresentationModelBuilder.Build(_controller.State));
         if (startPolling)
         {
             _ = PollAsync(_pollCancellation.Token);
@@ -165,22 +209,23 @@ public sealed class MainWindow : Window
     private View BuildOperationsView()
     {
         var view = NewWorkspace("OPERATIONS");
-        AddField(view, "From", _fromAccount, 0);
-        AddField(view, "To", _toAccount, 1);
-        AddField(view, "Amount", _amount, 2, 16);
-        AddField(view, "Currency", _currency, 2, 45, 8);
+        AddField(view, "From", _fromAccount, LabelX, 0, LabelWidth, WideFieldWidth);
+        AddField(view, "To", _toAccount, LabelX, 1, LabelWidth, WideFieldWidth);
+        AddField(view, "Amount", _amount, LabelX, 2, LabelWidth, NarrowFieldWidth);
+        AddField(view, "Currency", _currency, SecondLabelX, 2, SecondLabelWidth, NarrowFieldWidth);
+        AddField(view, "Supplied key", _suppliedKey, LabelX, 3, LabelWidth, WideFieldWidth);
 
-        _railButton.X = 1;
-        _railButton.Y = 3;
+        _railButton.X = LabelX;
+        _railButton.Y = 4;
         _idempotencyButton.X = Pos.Right(_railButton) + 2;
-        _idempotencyButton.Y = 3;
-        _railButton.Accepted += (_, e) =>
+        _idempotencyButton.Y = 4;
+        _railButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             _rail = _rail == PaymentRail.Standard ? PaymentRail.Instant : PaymentRail.Standard;
             _railButton.Text = $"Rail: {_rail.ToString().ToLowerInvariant()}";
         };
-        _idempotencyButton.Accepted += (_, e) =>
+        _idempotencyButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             _idempotencyMode = _idempotencyMode switch
@@ -192,27 +237,28 @@ public sealed class MainWindow : Window
             _idempotencyButton.Text = $"Idempotency: {_idempotencyMode}";
         };
 
-        AddField(view, "Supplied key", _suppliedKey, 4);
-        view.Add(new Label { X = 1, Y = 5, Text = "Omitted mode: not retry-safe after an ambiguous outcome." });
+        _omittedNote = new Label { X = LabelX, Y = 5, Height = 1, Width = Dim.Fill(1), Text = "Omitted mode: not retry-safe after an ambiguous outcome." };
+        view.Add(_omittedNote);
 
-        _submitButton.X = 1;
+        _submitButton.X = LabelX;
         _submitButton.Y = 7;
         _resendButton.X = Pos.Right(_submitButton) + 2;
         _resendButton.Y = 7;
-        _submitButton.Accepted += (_, e) => { e.Handled = true; Dispatch(SubmitPaymentAsync); };
-        _resendButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token))); };
+        _submitButton.Accepting += (_, e) => { e.Handled = true; Dispatch(SubmitPaymentAsync); };
+        _resendButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token))); };
 
-        AddField(view, "Burst count", _burstCount, 9, 16);
-        AddField(view, "Concurrency", _burstConcurrency, 9, 45, 8);
-        _burstButton.X = 1;
+        _burstCountLabel = AddField(view, "Burst count", _burstCount, LabelX, 9, LabelWidth, NarrowFieldWidth);
+        _concurrencyLabel = AddField(view, "Concurrency", _burstConcurrency, SecondLabelX, 9, SecondLabelWidth, NarrowFieldWidth);
+        _burstButton.X = LabelX;
         _burstButton.Y = 10;
         _cancelBurstButton.X = Pos.Right(_burstButton) + 2;
         _cancelBurstButton.Y = 10;
-        _burstStatus.X = 1;
+        _burstStatus.X = LabelX;
         _burstStatus.Y = 11;
+        _burstStatus.Height = 1;
         _burstStatus.Width = Dim.Fill(1);
-        _burstButton.Accepted += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
-        _cancelBurstButton.Accepted += (_, e) =>
+        _burstButton.Accepting += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
+        _cancelBurstButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             if (!_controller.CancelActiveBurst())
@@ -221,15 +267,16 @@ public sealed class MainWindow : Window
             }
         };
 
-        AddField(view, "Outcome id/key", _outcomeKey, 13);
-        _queryButton.X = 1;
+        _outcomeLabel = AddField(view, "Outcome key", _outcomeKey, LabelX, 13, LabelWidth, WideFieldWidth);
+        _queryButton.X = LabelX;
         _queryButton.Y = 14;
-        _queryButton.Accepted += (_, e) =>
+        _queryButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(_outcomeKey.Text.ToString() ?? string.Empty, _sessionCancellation.Token)));
         };
-        view.Add(_railButton, _idempotencyButton, _submitButton, _resendButton, _burstButton, _cancelBurstButton, _burstStatus, _queryButton);
+        LayoutHint(_operationsHint);
+        view.Add(_railButton, _idempotencyButton, _submitButton, _resendButton, _burstButton, _cancelBurstButton, _burstStatus, _queryButton, _operationsHint);
         return view;
     }
 
@@ -238,34 +285,27 @@ public sealed class MainWindow : Window
         var view = NewWorkspace("RESOURCES");
         _resourceList.X = 1;
         _resourceList.Y = 1;
-        _resourceList.Width = Dim.Fill(1);
-        _resourceList.Height = Dim.Fill(7);
+        _resourceList.Width = Dim.Fill(ActionColumnWidth + 2);
+        _resourceList.Height = Dim.Fill(2);
 
-        _startRegularButton.X = 1;
-        _startRegularButton.Y = Pos.AnchorEnd(5);
-        _attachRegularButton.X = Pos.Right(_startRegularButton) + 1;
-        _attachRegularButton.Y = Pos.AnchorEnd(5);
-        _startLoadButton.X = Pos.Right(_attachRegularButton) + 1;
-        _startLoadButton.Y = Pos.AnchorEnd(5);
-        _attachLoadButton.X = Pos.Right(_startLoadButton) + 1;
-        _attachLoadButton.Y = Pos.AnchorEnd(5);
+        // A vertical action column keeps every control on screen at 80 columns;
+        // a horizontal button row pushed the right-most commands off the frame.
+        var actions = new View
+        {
+            X = Pos.AnchorEnd(ActionColumnWidth + 1),
+            Y = 1,
+            Width = ActionColumnWidth,
+            Height = Dim.Fill(2),
+            CanFocus = true,
+        };
+        StackButtons(actions, 0, _startRegularButton, _attachRegularButton, _startLoadButton, _attachLoadButton);
+        StackButtons(actions, 5, _stopButton, _switchButton, _resourceActionButton, _restartResourceButton, _refreshButton);
 
-        _stopButton.X = 1;
-        _stopButton.Y = Pos.AnchorEnd(3);
-        _switchButton.X = Pos.Right(_stopButton) + 1;
-        _switchButton.Y = Pos.AnchorEnd(3);
-        _resourceActionButton.X = Pos.Right(_switchButton) + 1;
-        _resourceActionButton.Y = Pos.AnchorEnd(3);
-        _restartResourceButton.X = Pos.Right(_resourceActionButton) + 1;
-        _restartResourceButton.Y = Pos.AnchorEnd(3);
-        _refreshButton.X = Pos.Right(_restartResourceButton) + 1;
-        _refreshButton.Y = Pos.AnchorEnd(3);
-
-        _startRegularButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
-        _attachRegularButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
-        _startLoadButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.LoadTests, _sessionCancellation.Token))); };
-        _attachLoadButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.LoadTests, _sessionCancellation.Token))); };
-        _stopButton.Accepted += (_, e) =>
+        _startRegularButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
+        _attachRegularButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
+        _startLoadButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.LoadTests, _sessionCancellation.Token))); };
+        _attachLoadButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.LoadTests, _sessionCancellation.Token))); };
+        _stopButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             IReadOnlyList<string> instance = _controller.OwnedProcessId is { } pid
@@ -278,7 +318,7 @@ public sealed class MainWindow : Window
                 Dispatch(() => SurfaceAsync(_controller.StopAsync(_sessionCancellation.Token)));
             }
         };
-        _switchButton.Accepted += (_, e) =>
+        _switchButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             var target = _controller.State.Profile == TopologyProfile.Regular ? TopologyProfile.LoadTests : TopologyProfile.Regular;
@@ -289,12 +329,12 @@ public sealed class MainWindow : Window
                 Dispatch(() => SurfaceAsync(_controller.SwitchAsync(target, _sessionCancellation.Token)));
             }
         };
-        _resourceActionButton.Accepted += (_, e) =>
+        _resourceActionButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             TriggerSelectedResourceAction();
         };
-        _restartResourceButton.Accepted += (_, e) =>
+        _restartResourceButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             if (_resourceRows.Count == 0)
@@ -318,19 +358,10 @@ public sealed class MainWindow : Window
                 Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, ResourceCommand.Restart, _sessionCancellation.Token)));
             }
         };
-        _refreshButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token)); };
+        _refreshButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token)); };
 
-        view.Add(
-            _resourceList,
-            _startRegularButton,
-            _attachRegularButton,
-            _startLoadButton,
-            _attachLoadButton,
-            _stopButton,
-            _switchButton,
-            _resourceActionButton,
-            _restartResourceButton,
-            _refreshButton);
+        LayoutHint(_resourcesHint);
+        view.Add(_resourceList, actions, _resourcesHint);
         return view;
     }
 
@@ -340,45 +371,49 @@ public sealed class MainWindow : Window
         _evidenceList.X = 1;
         _evidenceList.Y = 1;
         _evidenceList.Width = Dim.Percent(42);
-        _evidenceList.Height = Dim.Fill(5);
+        _evidenceList.Height = Dim.Fill(3);
         _evidenceDetail.X = Pos.Right(_evidenceList) + 1;
         _evidenceDetail.Y = 1;
         _evidenceDetail.Width = Dim.Fill(1);
-        _evidenceDetail.Height = Dim.Fill(5);
+        _evidenceDetail.Height = Dim.Fill(3);
 
         _detailsButton.X = 1;
-        _detailsButton.Y = Pos.AnchorEnd(3);
+        _detailsButton.Y = Pos.AnchorEnd(2);
         _wrapButton.X = Pos.Right(_detailsButton) + 1;
-        _wrapButton.Y = Pos.AnchorEnd(3);
-        _exportButton.X = Pos.Right(_wrapButton) + 1;
-        _exportButton.Y = Pos.AnchorEnd(3);
+        _wrapButton.Y = Pos.AnchorEnd(2);
+        _copyButton.X = Pos.Right(_wrapButton) + 1;
+        _copyButton.Y = Pos.AnchorEnd(2);
+        _exportButton.X = Pos.Right(_copyButton) + 1;
+        _exportButton.Y = Pos.AnchorEnd(2);
         _inspectPaymentsOutbox.X = 1;
         _inspectPaymentsOutbox.Y = Pos.AnchorEnd(1);
         _inspectCoreBankInbox.X = Pos.Right(_inspectPaymentsOutbox) + 1;
         _inspectCoreBankInbox.Y = Pos.AnchorEnd(1);
 
-        _detailsButton.Accepted += (_, e) =>
+        _detailsButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             if (_evidenceRows.Count == 0)
             {
+                ShowMessage("No action has been recorded this session yet.");
                 return;
             }
 
             var index = Math.Clamp(_evidenceList.SelectedItem ?? 0, 0, _evidenceRows.Count - 1);
             _controller.SelectEvidence(_evidenceRows[index].Sequence);
         };
-        _wrapButton.Accepted += (_, e) =>
+        _wrapButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             _evidenceDetail.WordWrap = !_evidenceDetail.WordWrap;
             _wrapButton.Text = _evidenceDetail.WordWrap ? "Wrap: on" : "Wrap: off";
         };
-        _exportButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token))); };
-        _inspectPaymentsOutbox.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.PaymentsOutbox, _sessionCancellation.Token))); };
-        _inspectCoreBankInbox.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.CoreBankInbox, _sessionCancellation.Token))); };
+        _copyButton.Accepting += (_, e) => { e.Handled = true; CopyDetailToTerminalClipboard(); };
+        _exportButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token))); };
+        _inspectPaymentsOutbox.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.PaymentsOutbox, _sessionCancellation.Token))); };
+        _inspectCoreBankInbox.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.CoreBankInbox, _sessionCancellation.Token))); };
 
-        view.Add(_evidenceList, _evidenceDetail, _detailsButton, _wrapButton, _exportButton, _inspectPaymentsOutbox, _inspectCoreBankInbox);
+        view.Add(_evidenceList, _evidenceDetail, _detailsButton, _wrapButton, _copyButton, _exportButton, _inspectPaymentsOutbox, _inspectCoreBankInbox);
         return view;
     }
 
@@ -387,32 +422,41 @@ public sealed class MainWindow : Window
         var view = NewWorkspace("LOAD TEST");
         _loadPhase.X = 1;
         _loadPhase.Y = 1;
+        _loadPhase.Height = 1;
         _loadPhase.Width = Dim.Fill(1);
+        _loadStatus.X = 1;
+        _loadStatus.Y = 2;
+        _loadStatus.Height = 1;
+        _loadStatus.Width = Dim.Fill(1);
         _loadResults.X = 1;
-        _loadResults.Y = 3;
+        _loadResults.Y = 4;
         _loadResults.Width = Dim.Fill(1);
-        _loadResults.Height = Dim.Fill(5);
-        AddField(view, "Expected unique", _expectedUnique, 11, 20);
+        _loadResults.Height = Dim.Fill(4);
+
+        // The expected-unique row sits below the results list: when it shared the
+        // list's rows the list painted over it and the field was unreachable.
+        AddField(view, "Expected unique", _expectedUnique, 1, Pos.AnchorEnd(3), 16, NarrowFieldWidth);
         _runLoadButton.X = 1;
         _runLoadButton.Y = Pos.AnchorEnd(2);
-        _runLoadButton.Accepted += (_, e) =>
+        _runLoadButton.Accepting += (_, e) =>
         {
             e.Handled = true;
+            if (!int.TryParse(_expectedUnique.Text.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var value)
+                || value <= 0)
+            {
+                ShowMessage("Expected unique count must be a positive integer; load run not started.");
+                return;
+            }
+
             if (ConfirmAndRestore(
                     new ConfirmationRequest("Run accepted load workflow", "Reset → Run → Wait → Assert → Investigate", [KnownResources.LoadTestSupport, KnownResources.K6]),
                     _runLoadButton))
             {
-                if (!int.TryParse(_expectedUnique.Text.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var value)
-                    || value <= 0)
-                {
-                    _evidenceStrip.Text = "Expected unique count must be a positive integer; load run not started.";
-                    return;
-                }
-                var expected = (int?)value;
-                Dispatch(() => SurfaceAsync(_controller.RunLoadTestAsync(expected, _sessionCancellation.Token)));
+                Dispatch(() => SurfaceAsync(_controller.RunLoadTestAsync(value, _sessionCancellation.Token)));
             }
         };
-        view.Add(_loadPhase, _loadResults, _runLoadButton);
+        LayoutHint(_loadHint);
+        view.Add(_loadPhase, _loadStatus, _loadResults, _runLoadButton, _loadHint);
         return view;
     }
 
@@ -456,10 +500,18 @@ public sealed class MainWindow : Window
         await SurfaceAsync(_controller.RunBurstAsync(request, count, concurrency, _sessionCancellation.Token));
     }
 
-    private Button CreateNavigationButton(string text, WorkspaceKind workspace, int y)
+    /// <summary>
+    /// Terminal.Gui raises <c>Accepting</c> for a mouse click on any button but raises
+    /// <c>Accepted</c> only for the default button, so every command here handles
+    /// <c>Accepting</c> and marks it handled to stop the command bubbling to the default.
+    /// </summary>
+    private Button CreateNavigationButton(WorkspaceKind workspace, int y)
     {
-        var button = new Button { Text = text, X = 1, Y = y, Width = Dim.Fill(1) };
-        button.Accepted += (_, e) =>
+        var button = NewButton(string.Empty);
+        button.X = 1;
+        button.Y = y;
+        button.Width = Dim.Fill(1);
+        button.Accepting += (_, e) =>
         {
             e.Handled = true;
             ActivateWorkspace(workspace);
@@ -467,29 +519,64 @@ public sealed class MainWindow : Window
         return button;
     }
 
+    /// <summary>
+    /// Creates a button without the default drop shadow. The shadow occupies the row
+    /// below and the column right of the button, which silently overwrote neighbouring
+    /// fields and pushed bottom-anchored controls outside their frame.
+    /// </summary>
+    private static string NewSessionKey() => $"demo-key-{Guid.NewGuid():N}"[..17];
+
+    private static Button NewButton(string text, bool isDefault = false) =>
+        new() { Text = text, IsDefault = isDefault, ShadowStyle = ShadowStyles.None };
+
     private static View NewWorkspace(string title) =>
         new FrameView { Title = title, X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill() };
 
-    private static void AddField(View parent, string label, TextField field, int y, int labelWidth = 16, int fieldWidth = 38)
+    private static void StackButtons(View parent, int startY, params Button[] buttons)
     {
-        parent.Add(new Label { X = 1, Y = y, Width = labelWidth, Text = label });
-        field.X = labelWidth + 2;
+        for (var index = 0; index < buttons.Length; index++)
+        {
+            buttons[index].X = 0;
+            buttons[index].Y = startY + index;
+            buttons[index].Width = Dim.Fill();
+            parent.Add(buttons[index]);
+        }
+    }
+
+    private static void LayoutHint(Label hint)
+    {
+        hint.X = 1;
+        hint.Y = Pos.AnchorEnd(1);
+        hint.Height = 1;
+        hint.Width = Dim.Fill(1);
+    }
+
+    private static Label AddField(View parent, string label, TextField field, int x, Pos y, int labelWidth, int fieldWidth)
+    {
+        var caption = new Label { X = x, Y = y, Height = 1, Width = labelWidth, Text = label };
+        parent.Add(caption);
+        field.X = x + labelWidth + 1;
         field.Y = y;
+        field.Height = 1;
         field.Width = fieldWidth;
         parent.Add(field);
+        return caption;
     }
 
     private void ActivateWorkspace(WorkspaceKind workspace) => _controller.SelectWorkspace(workspace);
 
-    private void OnStateChanged(OperatorConsoleState state)
+    private void OnStateChanged(OperatorConsoleState state) =>
+        RunOnUiThread(() => Render(PresentationModelBuilder.Build(state)));
+
+    private void RunOnUiThread(Action action)
     {
         if (_marshalUpdates)
         {
-            AppTerminal.Invoke(() => Render(PresentationModelBuilder.Build(state)));
+            AppTerminal.Invoke(action);
         }
         else
         {
-            Render(PresentationModelBuilder.Build(state));
+            action();
         }
     }
 
@@ -498,6 +585,12 @@ public sealed class MainWindow : Window
         await _controller.InitializeAsync(_sessionCancellation.Token);
         Render(PresentationModelBuilder.Build(_controller.State));
     }
+
+    /// <summary>
+    /// Starts the first preflight without blocking the first paint, so the operator sees
+    /// the console immediately instead of an empty terminal while discovery runs.
+    /// </summary>
+    internal void BeginInitialRefresh() => Dispatch(RefreshAsync);
 
     private async Task PollAsync(CancellationToken ct)
     {
@@ -514,7 +607,7 @@ public sealed class MainWindow : Window
             }
             catch (Exception ex)
             {
-                AppTerminal.Invoke(() => _evidenceStrip.Text = $"Unreachable — {ex.Message}");
+                ShowMessage($"Unreachable — {ex.Message}");
             }
         }
     }
@@ -522,26 +615,31 @@ public sealed class MainWindow : Window
     private void Render(OperatorPresentationModel model)
     {
         _topologyBar.Text = model.TopologyBar;
-        _operationsView.Visible = model.ActiveWorkspace == WorkspaceKind.Operations;
-        _resourcesView.Visible = model.ActiveWorkspace == WorkspaceKind.Resources;
-        _evidenceView.Visible = model.ActiveWorkspace == WorkspaceKind.Evidence;
-        _loadView.Visible = model.ActiveWorkspace == WorkspaceKind.LoadTest;
+        MountWorkspace(model.ActiveWorkspace);
+        UpdateNavigationText();
 
         _resourceRows = model.Resources;
-        _resourceList.SetSource(new ObservableCollection<string>(
-            model.Resources.Count == 0
-                ? ["○ No verified resources — refresh or attach a known topology"]
-                : model.Resources.Select(row => $"{row.Symbol} {row.Name,-20} {row.State,-11} {row.Detail} [{row.NextAction}]")));
+        _resourceBinding.Bind(model.Resources.Count == 0
+            ? ["○ No verified resources — refresh or attach a known topology"]
+            : [.. model.Resources.Select(row => $"{row.Symbol} {row.Name,-20} {row.State,-11} {row.Detail} [{row.NextAction}]")]);
         _evidenceRows = model.Evidence;
-        _evidenceList.SetSource(new ObservableCollection<string>(
-            model.Evidence.Count == 0
-                ? ["○ No actions yet this session"]
-                : model.Evidence.Select(row => $"{row.Summary} · {row.Provenance}")));
-        _evidenceDetail.Text = model.SelectedEvidenceDetail;
-        _evidenceStrip.Text = model.EvidenceStrip;
+        _evidenceBinding.Bind(model.Evidence.Count == 0
+            ? ["○ No actions yet this session"]
+            : [.. model.Evidence.Select(row => $"{row.Summary} · {row.Provenance}")]);
+        if (!string.Equals(_evidenceDetail.Text, model.SelectedEvidenceDetail, StringComparison.Ordinal))
+        {
+            _evidenceDetail.Text = model.SelectedEvidenceDetail;
+        }
+
+        _statusLine.Text = model.MutationStatus;
+        RenderMessageLine(model);
         _burstStatus.Text = model.BurstStatus;
-        _loadPhase.Text = $"Reset → Run → Wait → Assert → Investigate{Environment.NewLine}{model.LoadPhaseStatus}";
-        _loadResults.SetSource(new ObservableCollection<string>(model.LoadResults));
+        _loadStatus.Text = model.LoadPhaseStatus;
+        _loadResultBinding.Bind(model.LoadResults);
+
+        _operationsHint.Text = Hint(model.OperationsHint);
+        _resourcesHint.Text = Hint(model.ResourcesHint);
+        _loadHint.Text = Hint(model.LoadHint);
 
         _submitButton.Enabled = !model.IsBusy;
         _resendButton.Enabled = model.CanResend;
@@ -572,22 +670,109 @@ public sealed class MainWindow : Window
         _wrapButton.Enabled = true;
     }
 
+    /// <summary>
+    /// Keeps only the active workspace in the view tree. Terminal.Gui resolves a mouse click
+    /// to the last stacked sibling whose frame contains the point, so leaving all four
+    /// workspaces mounted on top of each other sent every content click to the Load Test
+    /// workspace and left the other workspaces' buttons unreachable by mouse.
+    /// </summary>
+    private void MountWorkspace(WorkspaceKind active)
+    {
+        var target = _workspaces[(int)active];
+        foreach (var workspace in _workspaces)
+        {
+            workspace.Visible = ReferenceEquals(workspace, target);
+        }
+
+        if (ReferenceEquals(_mountedWorkspace, target))
+        {
+            return;
+        }
+
+        if (_mountedWorkspace is not null)
+        {
+            _content.Remove(_mountedWorkspace);
+        }
+
+        _content.Add(target);
+        _mountedWorkspace = target;
+    }
+
+    private static string Hint(string hint) => hint.Length == 0 ? string.Empty : $"○ {hint}";
+
+    /// <summary>
+    /// Keeps the most recent operator-facing message on screen until the operator's next
+    /// action produces evidence. Without the mark the 1.5 second poll erased every failure
+    /// message before it could be read.
+    /// </summary>
+    private void RenderMessageLine(OperatorPresentationModel model)
+    {
+        var newestSequence = model.Evidence.Count == 0 ? -1 : model.Evidence[0].Sequence;
+        if (_message.Length > 0 && newestSequence <= _messageMark)
+        {
+            _messageLine.Text = $"✕ {_message}";
+            _messageLine.SchemeName = OperatorTheme.DestructiveScheme;
+            return;
+        }
+
+        _message = string.Empty;
+        _messageLine.Text = model.EvidenceStrip;
+        _messageLine.SchemeName = OperatorTheme.BaseScheme;
+    }
+
     private void ApplyResponsiveLayout()
     {
         var layout = InteractionPolicies.LayoutFor(Frame.Width, Frame.Height);
-        var compact = layout != TerminalLayoutMode.Preferred;
-        _navigation.Width = compact ? 5 : 18;
+        _compactLayout = layout != TerminalLayoutMode.Preferred;
+        _navigation.Width = _compactLayout ? RailWidthCompact : RailWidthPreferred;
+        _navigation.BorderStyle = _compactLayout ? LineStyle.None : LineStyle.Rounded;
         _content.X = Pos.Right(_navigation);
-        for (var index = 0; index < _navigationButtons.Length; index++)
+        foreach (var button in _navigationButtons)
         {
-            _navigationButtons[index].Text = compact
-                ? (index + 1).ToString(CultureInfo.InvariantCulture)
-                : $"{index + 1} {PresentationModelBuilder.Build(_controller.State).Navigation[index].Label}";
+            button.X = _compactLayout ? 0 : 1;
+            button.Width = _compactLayout ? Dim.Fill() : Dim.Fill(1);
         }
 
+        ApplyOperationsRows();
+        UpdateNavigationText();
         if (layout == TerminalLayoutMode.BelowMinimum)
         {
-            _evidenceStrip.Text = "Terminal below 80×24 — use keyboard shortcuts; session state is preserved.";
+            ShowMessage("Terminal below 80×24 — use keyboard shortcuts; session state is preserved.");
+        }
+    }
+
+    /// <summary>
+    /// Drops the blank spacer rows from the Operations form on short terminals so the
+    /// outcome lookup stays on screen at the supported 80x24 minimum.
+    /// </summary>
+    private void ApplyOperationsRows()
+    {
+        var submit = _compactLayout ? 6 : 7;
+        var burst = _compactLayout ? 7 : 9;
+        var outcome = _compactLayout ? 10 : 13;
+        _submitButton.Y = submit;
+        _resendButton.Y = submit;
+        _burstCountLabel.Y = burst;
+        _burstCount.Y = burst;
+        _concurrencyLabel.Y = burst;
+        _burstConcurrency.Y = burst;
+        _burstButton.Y = burst + 1;
+        _cancelBurstButton.Y = burst + 1;
+        _burstStatus.Y = burst + 2;
+        _outcomeLabel.Y = outcome;
+        _outcomeKey.Y = outcome;
+        _queryButton.Y = outcome + 1;
+    }
+
+    private void UpdateNavigationText()
+    {
+        var active = _controller.State.ActiveWorkspace;
+        for (var index = 0; index < _navigationButtons.Length; index++)
+        {
+            var marker = (WorkspaceKind)index == active ? "▸" : " ";
+            _navigationButtons[index].Text = _compactLayout
+                ? (index + 1).ToString(CultureInfo.InvariantCulture)
+                : $"{marker}{index + 1} {NavigationLabels[index]}";
         }
     }
 
@@ -651,7 +836,7 @@ public sealed class MainWindow : Window
 
                 if (task.Exception is not null)
                 {
-                    AppTerminal.Invoke(() => _evidenceStrip.Text = $"Operation failed — {task.Exception.GetBaseException().Message}");
+                    ShowMessage($"Operation failed — {task.Exception.GetBaseException().Message}");
                 }
             },
             TaskScheduler.Default);
@@ -702,10 +887,55 @@ public sealed class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Where OSC 52 is written. Defaults to the console's own output, which is
+    /// the terminal Terminal.Gui is drawing to; tests substitute a writer.
+    /// </summary>
+    internal TextWriter TerminalOut { get; set; } = Console.Out;
+
+    /// <summary>
+    /// Copies the evidence detail through the terminal rather than through an
+    /// OS clipboard helper -- see <see cref="TerminalClipboard"/> for why the
+    /// built-in copy silently did nothing. The outcome always reaches the
+    /// status bar: a copy that quietly fails is worse than one that reports it.
+    /// </summary>
+    private void CopyDetailToTerminalClipboard()
+    {
+        // Guard on the evidence list, not on the detail text: with nothing
+        // selected the pane still holds a placeholder, and copying that would
+        // report a cheerful success for a clipboard full of nothing.
+        if (_evidenceRows.Count == 0)
+        {
+            ShowMessage("No action has been recorded this session yet — there is nothing to copy.");
+            return;
+        }
+
+        var detail = _evidenceDetail.Text;
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            ShowMessage("Select an entry and press Details first — there is nothing to copy.");
+            return;
+        }
+
+        ShowMessage(TerminalClipboard.Copy(
+            detail,
+            TerminalOut,
+            Environment.GetEnvironmentVariable("TERM"),
+            Environment.GetEnvironmentVariable("TMUX")).Message);
+    }
+
     private void ShowMessage(string message)
     {
-        _evidenceStrip.Text = message;
         LastUiMessage = message;
+        _message = message;
+        _messageMark = _controller.State.Evidence.Count == 0
+            ? -1
+            : _controller.State.Evidence[^1].Sequence;
+        RunOnUiThread(() =>
+        {
+            _messageLine.Text = $"✕ {message}";
+            _messageLine.SchemeName = OperatorTheme.DestructiveScheme;
+        });
     }
 
     private static string ExactCommands(IReadOnlyList<string> instances, string command) =>
@@ -749,6 +979,10 @@ public sealed class MainWindow : Window
     internal Task? LastDispatchedTask { get; private set; }
     internal WorkspaceKind VisibleWorkspace => _controller.State.ActiveWorkspace;
     internal int NavigationFrameWidth => _navigation.Frame.Width;
+    internal string StatusLineText => _statusLine.Text;
+    internal string MessageLineText => _messageLine.Text;
+    internal string ResourcesHintText => _resourcesHint.Text;
+    internal string LoadHintText => _loadHint.Text;
     internal bool IsWorkspaceVisible(WorkspaceKind workspace) => workspace switch
     {
         WorkspaceKind.Operations => _operationsView.Visible,
@@ -764,7 +998,18 @@ public sealed class MainWindow : Window
     internal TextField CurrencyField => _currency;
     internal TextField BurstCountField => _burstCount;
     internal TextField BurstConcurrencyField => _burstConcurrency;
+    internal TextField ExpectedUniqueField => _expectedUnique;
     internal Button SubmitButton => _submitButton;
+    internal Button RailButton => _railButton;
+    internal Button IdempotencyButton => _idempotencyButton;
+    internal Button WrapButton => _wrapButton;
+    internal Button DetailsButton => _detailsButton;
+
+    internal Button CopyButton => _copyButton;
+
+    internal TextField SuppliedKeyField => _suppliedKey;
+    internal Button RefreshButton => _refreshButton;
+    internal int MountedWorkspaceCount => _content.SubViews.Count;
     internal Button BurstButton => _burstButton;
     internal Button StopButton => _stopButton;
     internal Button ResourceActionButton => _resourceActionButton;
@@ -814,9 +1059,44 @@ public sealed class MainWindow : Window
             _sessionCancellation.Cancel();
             _sessionCancellation.Dispose();
             _controller.StateChanged -= OnStateChanged;
+
+            // Remove() transfers lifecycle ownership, so unmounted workspaces are ours to dispose.
+            foreach (var workspace in _workspaces)
+            {
+                if (!ReferenceEquals(workspace, _mountedWorkspace))
+                {
+                    workspace.Dispose();
+                }
+            }
         }
 
         base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// Rebinds a <see cref="ListView"/> only when its rows actually change and restores the
+    /// operator's selection. Rebinding on every poll reset the selection to the first row,
+    /// so per-resource commands silently targeted the wrong resource.
+    /// </summary>
+    private sealed class ListBinding(ListView list)
+    {
+        private string[] _items = [];
+
+        internal void Bind(IReadOnlyList<string> items)
+        {
+            if (_items.Length == items.Count && _items.SequenceEqual(items, StringComparer.Ordinal))
+            {
+                return;
+            }
+
+            var selected = list.SelectedItem;
+            _items = [.. items];
+            list.SetSource(new ObservableCollection<string>(_items));
+            if (_items.Length > 0)
+            {
+                list.SelectedItem = Math.Clamp(selected ?? 0, 0, _items.Length - 1);
+            }
+        }
     }
 }
 #pragma warning restore CS0618

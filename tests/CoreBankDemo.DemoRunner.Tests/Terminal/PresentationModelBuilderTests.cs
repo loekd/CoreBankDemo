@@ -91,6 +91,34 @@ public class PresentationModelBuilderTests
     }
 
     [Fact]
+    public void Build_ColdState_ExplainsWhyEveryGatedControlIsUnavailable()
+    {
+        var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty);
+
+        model.OperationsHint.Should().Contain("No topology attached");
+        model.ResourcesHint.Should().Contain("Preflight");
+        model.LoadHint.Should().Contain("LoadTests topology");
+    }
+
+    [Fact]
+    public void Build_ReadyLoadTopology_LeavesEveryHintEmpty()
+    {
+        var state = OperatorConsoleState.Empty with
+        {
+            Profile = TopologyProfile.LoadTests,
+            Ownership = TopologyOwnership.Owned,
+            Topology = OperatorHarness.Snapshot(TopologyProfile.LoadTests),
+            ResourceAuthorityAvailable = true,
+        };
+
+        var model = PresentationModelBuilder.Build(state);
+
+        model.OperationsHint.Should().BeEmpty();
+        model.ResourcesHint.Should().BeEmpty();
+        model.LoadHint.Should().BeEmpty();
+    }
+
+    [Fact]
     public void Build_ActiveBurst_LeavesOnlyBurstCancelFlagEnabled()
     {
         var state = OperatorConsoleState.Empty with

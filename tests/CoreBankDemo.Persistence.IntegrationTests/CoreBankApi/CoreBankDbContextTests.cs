@@ -46,7 +46,7 @@ public class CoreBankDbContextTests(PostgresContainerFixture fixture) : CoreBank
             i.Properties.Select(p => p.Name).SequenceEqual(new[] { nameof(InboxMessage.IdempotencyKey) }) && i.IsUnique);
         indexes.Should().ContainSingle(i =>
             i.Properties.Select(p => p.Name).SequenceEqual(
-                new[] { nameof(InboxMessage.PartitionId), nameof(InboxMessage.Status), nameof(InboxMessage.ReceivedAt) })
+                new[] { nameof(InboxMessage.PartitionId), nameof(InboxMessage.Status), nameof(InboxMessage.Priority), nameof(InboxMessage.ReceivedAt) })
             && !i.IsUnique);
         indexes.Should().ContainSingle(i =>
             i.Properties.Select(p => p.Name).SequenceEqual(new[] { nameof(InboxMessage.Status) }) && !i.IsUnique);

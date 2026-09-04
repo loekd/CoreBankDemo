@@ -22,6 +22,8 @@ public class MessageContractsTests
         public string? TraceState { get; set; }
         public string IdempotencyKey { get; set; } = string.Empty;
         public DateTime ReceivedAt { get; set; }
+        public int Priority { get; set; }
+        public DateTime? HoldUntil { get; set; }
     }
 
     private sealed class TestOutboxMessage : IOutboxMessage
@@ -36,6 +38,8 @@ public class MessageContractsTests
         public string? TraceState { get; set; }
         public string IdempotencyKey { get; set; } = string.Empty;
         public DateTime CreatedAt { get; set; }
+        public int Priority { get; set; }
+        public DateTime? HoldUntil { get; set; }
     }
 
     [Fact]
@@ -51,7 +55,10 @@ public class MessageContractsTests
         var properties = typeof(IMessage).GetProperties()
             .ToDictionary(p => p.Name, p => p.PropertyType);
 
-        properties.Should().HaveCount(8);
+        // ADR-018 priority addendum added Priority to the epic-2 list.
+        properties.Should().HaveCount(10);
+        properties["Priority"].Should().Be(typeof(int));
+        properties["HoldUntil"].Should().Be(typeof(DateTime?));
         properties["Id"].Should().Be(typeof(Guid));
         properties["PartitionId"].Should().Be(typeof(int));
         properties["Status"].Should().Be(typeof(string));

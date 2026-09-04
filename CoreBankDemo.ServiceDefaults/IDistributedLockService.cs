@@ -45,4 +45,23 @@ public interface IDistributedLockService
         int lockExpirySeconds,
         Func<CancellationToken, Task> workload,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Like <see cref="ExecuteWithLockAsync(string,int,Func{CancellationToken,Task},CancellationToken)"/>
+    /// but waits up to <paramref name="acquireTimeout"/> for a busy lock
+    /// instead of skipping it immediately. The background processors keep the
+    /// non-blocking form (a busy partition is simply the next tick's work);
+    /// the instant rail's inline paths use this one, because under load a
+    /// busy partition lock is the *normal* case and an SCT Inst has a budget
+    /// precisely so that it can wait a bounded time rather than give up.
+    /// The default implementation ignores the timeout and behaves like the
+    /// non-blocking form, so existing implementations keep working unchanged.
+    /// </summary>
+    Task<bool> ExecuteWithLockAsync(
+        string lockName,
+        int lockExpirySeconds,
+        TimeSpan acquireTimeout,
+        Func<CancellationToken, Task> workload,
+        CancellationToken cancellationToken = default)
+        => ExecuteWithLockAsync(lockName, lockExpirySeconds, workload, cancellationToken);
 }

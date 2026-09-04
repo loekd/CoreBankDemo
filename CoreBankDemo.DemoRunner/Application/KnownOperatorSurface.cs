@@ -26,6 +26,17 @@ public static class KnownResources
     public const string K6 = "k6";
     public const string AspireDashboard = "aspire-dashboard";
 
+    /// <summary>
+    /// Resources the AppHosts declare with <c>ContainerLifetime.Persistent</c>. They keep
+    /// running — and keep their published host ports — after an AppHost stops, and Aspire
+    /// reuses the running container on the next start instead of binding the port itself.
+    /// Finding one of these ports occupied is therefore the normal steady state, not a
+    /// conflict.
+    /// </summary>
+    public static readonly IReadOnlySet<string> PersistentInfrastructure = new HashSet<string>(
+        [Jaeger, Postgres, Redis],
+        StringComparer.Ordinal);
+
     public static readonly IReadOnlySet<string> ResourceCommandAllowList = new HashSet<string>(
         [
             PaymentsApi,

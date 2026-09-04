@@ -42,6 +42,47 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
     }
 
     [Fact]
+    public async Task Claims_higher_priority_rows_before_older_standard_rows_then_oldest_first()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var t0 = TimeProvider.GetUtcNow().UtcDateTime;
+        context.OutboxEventMessages.AddRange(
+            new TestOutboxEventMessage { IdempotencyKey = "standard-1", EventType = "E", CreatedAt = t0 },
+            new TestOutboxEventMessage { IdempotencyKey = "standard-2", EventType = "E", CreatedAt = t0.AddSeconds(1) },
+            new TestOutboxEventMessage { IdempotencyKey = "instant-1", EventType = "E", CreatedAt = t0.AddSeconds(2), Priority = MessageConstants.Priority.Instant },
+            new TestOutboxEventMessage { IdempotencyKey = "instant-2", EventType = "E", CreatedAt = t0.AddSeconds(3), Priority = MessageConstants.Priority.Instant });
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
+
+        claimed.Select(m => m.IdempotencyKey).Should().ContainInOrder("instant-1", "instant-2", "standard-1", "standard-2");
+    }
+
+    [Fact]
+    public async Task Batch_claim_leaves_a_held_row_alone_until_its_hold_lapses()
+    {
+        // ADR-018 priority addendum: a fresh instant row is the inline
+        // request's to settle; the batch rail only picks it up once the hold
+        // has lapsed (the inline attempt gave up or died).
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var now = TimeProvider.GetUtcNow().UtcDateTime;
+        context.OutboxEventMessages.Add(new TestOutboxEventMessage
+        {
+            IdempotencyKey = "held", EventType = "E", CreatedAt = now, HoldUntil = now.AddSeconds(5),
+        });
+        await context.SaveChangesAsync(ct);
+
+        (await repository.ClaimBatchForPartitionAsync(0, 10, ct)).Should().BeEmpty();
+        TimeProvider.Advance(TimeSpan.FromSeconds(6));
+        (await repository.ClaimBatchForPartitionAsync(0, 10, ct)).Should().ContainSingle(m => m.IdempotencyKey == "held");
+    }
+
+
+    [Fact]
     public async Task Excludes_poisoned_and_other_partition_outbox_rows()
     {
         var ct = TestContext.Current.CancellationToken;

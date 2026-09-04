@@ -89,29 +89,80 @@ public class InstantPaymentForwardingHandlerTests
     }
 
     [Fact]
-    public async Task ForwardAsync_defers_without_claiming_when_partition_lock_is_unavailable()
+    public async Task ForwardAsync_defers_without_claiming_when_the_lock_is_busy_and_the_processor_has_taken_the_row()
     {
+        // The lock holder was the background processor, and it claimed this
+        // row: nothing left to wait for -- the row is being delivered there.
         _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Processing);
         var handler = CreateHandler();
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
         _lock.LockNames.Should().ContainSingle().Which.Should().Be("payments-outbox-partition-1");
+        _store.Verify(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()), Times.Once);
         _store.VerifyNoOtherCalls();
         _forwarder.VerifyNoOtherCalls();
     }
 
     [Fact]
-    public async Task ForwardAsync_defers_when_the_row_is_not_claimable()
+    public async Task ForwardAsync_defers_when_the_row_was_claimed_by_the_processor_before_its_turn()
     {
         _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>()))
             .ReturnsAsync((OutboxMessage?)null);
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Processing);
         var handler = CreateHandler();
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        _forwarder.VerifyNoOtherCalls();
+    }
+
+    // ---- ADR-018 priority addendum: wait within budget instead of giving up ----
+
+    [Fact]
+    public async Task ForwardAsync_waits_for_its_turn_and_then_settles_inline()
+    {
+        // First look: an earlier instant row in the partition is still ahead.
+        // Second look, 25 ms later: it has settled and this row is first.
+        var claimed = ClaimedMessage();
+        var looks = 0;
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => ++looks == 1 ? null : claimed);
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, DateTimeOffset.UtcNow));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Completed);
+        looks.Should().Be(2);
+        _lock.LockNames.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_keeps_waiting_for_a_busy_lock_until_the_budget_is_spent()
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        var handler = CreateHandler(new InstantRailOptions
+        {
+            BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1,
+        });
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        _lock.LockNames.Count.Should().BeGreaterThan(1, "the lock is retried until the budget runs out");
         _forwarder.VerifyNoOtherCalls();
     }
 
@@ -160,6 +211,35 @@ public class InstantPaymentForwardingHandlerTests
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("rejected");
+    }
+
+    [Theory]
+    [InlineData("Pending")]
+    [InlineData("Processing")]
+    public async Task ForwardAsync_defers_when_CoreBank_accepted_without_committing_an_outcome(string coreBankStatus)
+    {
+        // CoreBankAPI answers 2xx with a non-terminal status whenever its own
+        // inline execution could not run (the inbox row was not the oldest
+        // claimable one in its partition, the partition lock was unavailable,
+        // or execution threw but left the row retryable). That is an accepted
+        // command, not a rejected payment: mapping every non-Completed status
+        // to Rejected reported it to the operator as a business rejection.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, coreBankStatus, DateTimeOffset.UtcNow));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(businessMetrics: businessMetrics);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
+            .Which.Tags["outcome"].Should().Be("deferred");
     }
 
     [Fact]
@@ -269,7 +349,10 @@ public class InstantPaymentForwardingHandlerTests
         // Budget only covers a single attempt window: the clock jumps past
         // the deadline between the first failed attempt and the loop's next
         // remaining-budget check, so a second attempt must never start.
+        // Reads, in order: startedAt, the outer wait-loop's budget check, the
+        // first attempt's budget check, then the post-failure check.
         var timeProvider = new SequencedTimeProvider(
+            new DateTimeOffset(2026, 9, 2, 12, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 9, 2, 12, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 9, 2, 12, 0, 0, TimeSpan.Zero),
             new DateTimeOffset(2026, 9, 2, 12, 0, 10, TimeSpan.Zero));

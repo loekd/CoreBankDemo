@@ -4,8 +4,10 @@ using AwesomeAssertions;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Inbox;
+using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using Microsoft.Extensions.Logging;
+using Moq;
 using Xunit;
 
 namespace CoreBankDemo.PaymentsAPI.Tests;
@@ -32,7 +34,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionCompletedEvent("txn-1", "Completed", Now);
         var message = Inbox(Constants.TransactionCompleted, "txn-1", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger);
+        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -59,7 +61,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionFailedEvent("txn-2", "Failed", Now, "Insufficient funds");
         var message = Inbox(Constants.TransactionFailed, "txn-2", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger);
+        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -86,7 +88,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionFailedEvent("txn-3", "Failed", Now, null);
         var message = Inbox(Constants.TransactionFailed, "txn-3", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger);
+        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -109,7 +111,7 @@ public class TransactionEventHandlerTests
             accountNumber: "NL91ABNA0417164300",
             payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger);
+        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -137,7 +139,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionCompletedEvent("txn-5", "Completed", Now);
         var message = Inbox(Constants.TransactionCompleted, "txn-5", payload: Serialize(payload));
         message.Status = MessageConstants.Status.Processing;
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
@@ -151,7 +153,7 @@ public class TransactionEventHandlerTests
     public async Task Invalid_json_throws_JsonException_so_the_kernel_records_retry()
     {
         var message = Inbox(Constants.TransactionCompleted, "txn-6", payload: "{not-json");
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -162,7 +164,7 @@ public class TransactionEventHandlerTests
     public async Task Json_null_throws_InvalidOperationException_so_the_kernel_records_retry()
     {
         var message = Inbox(Constants.TransactionCompleted, "txn-6", payload: "null");
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -174,7 +176,7 @@ public class TransactionEventHandlerTests
     public async Task Missing_required_payload_fields_throw_JsonException_so_the_kernel_records_retry()
     {
         var message = Inbox(Constants.TransactionCompleted, "txn-6", payload: "{}");
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -188,7 +190,7 @@ public class TransactionEventHandlerTests
             Constants.TransactionCompleted,
             "txn-6",
             payload: """{"transactionId":null,"status":"Completed","processedAt":"2026-08-29T12:00:00Z"}""");
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -199,7 +201,7 @@ public class TransactionEventHandlerTests
     public async Task Unsupported_stored_event_type_throws_an_explicit_unsupported_type_error()
     {
         var message = Inbox("com.corebank.unknown.type", "txn-7", payload: "{}");
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -217,12 +219,73 @@ public class TransactionEventHandlerTests
             "txn-8",
             payload: Serialize(new TransactionCompletedEvent("txn-8", "Completed", Now)));
         message.Status = MessageConstants.Status.Processing;
-        var handler = new TransactionEventHandler(new CapturingLogger());
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
 
         var act = () => handler.HandleAsync(message, cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
         message.Status.Should().Be(MessageConstants.Status.Processing);
+    }
+
+    // ---- The instant rail's deferred-then-settled gap: CoreBank's inline
+    // attempt regularly answers 202/Pending, that non-committed answer gets
+    // cached on the payment row, and nothing ever refreshed it -- every
+    // duplicate replay said Pending forever for a payment that had settled.
+    // The transaction event is where the payment learns its real outcome. ----
+
+    [Theory]
+    [InlineData(Constants.TransactionCompleted, "Completed")]
+    [InlineData(Constants.TransactionFailed, "Failed")]
+    public async Task Committed_outcome_events_are_recorded_on_the_payment_row(string eventType, string status)
+    {
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        repository
+            .Setup(r => r.RecordCommittedOutcomeAsync("txn-9", status, Now, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var payload = eventType == Constants.TransactionCompleted
+            ? Serialize(new TransactionCompletedEvent("txn-9", status, Now))
+            : Serialize(new TransactionFailedEvent("txn-9", status, Now, "Insufficient funds"));
+        var message = Inbox(eventType, "txn-9", payload: payload);
+        var logger = new CapturingLogger();
+        var handler = new TransactionEventHandler(logger, repository.Object);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        repository.VerifyAll();
+        logger.Entries.Should().Contain(entry => entry.Message.Contains("Recorded committed outcome"));
+    }
+
+    [Fact]
+    public async Task Balance_events_never_touch_the_payment_row()
+    {
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        var payload = new BalanceUpdatedEvent("txn-10", "NL91ABNA0417164300", -25m, 975m, "EUR");
+        var message = Inbox(Constants.BalanceUpdated, "txn-10", "NL91ABNA0417164300", Serialize(payload));
+        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task A_failed_outcome_write_propagates_so_the_kernel_retries_the_event()
+    {
+        // Losing the concurrency race against the outbox processor must not
+        // silently acknowledge the event -- the outcome would be lost forever.
+        var repository = new Mock<IOutboxRepository>();
+        repository
+            .Setup(r => r.RecordCommittedOutcomeAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException("raced the outbox processor"));
+        var message = Inbox(
+            Constants.TransactionCompleted,
+            "txn-11",
+            payload: Serialize(new TransactionCompletedEvent("txn-11", "Completed", Now)));
+        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException>();
     }
 
     private static ObservedActivity StartListenedActivity()

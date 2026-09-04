@@ -78,7 +78,9 @@ public static class Program
         Console.CancelKeyPress += cancelHandler;
         try
         {
-            window.RefreshAsync().GetAwaiter().GetResult();
+            // Preflight probes ports and the Aspire CLI; running it before the first paint
+            // left the operator staring at an empty terminal for several seconds.
+            window.BeginInitialRefresh();
             AppTerminal.Run(window);
         }
         finally

@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging;
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Kiota.Abstractions;
@@ -135,6 +136,15 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
                             if (executeInline)
                             {
                                 configuration.Headers.Add("X-Execute-Mode", "inline");
+                            }
+
+                            // Only ever on the wire for a non-standard priority,
+                            // so the standard rail's request stays byte-identical.
+                            if (request.Priority != MessageConstants.Priority.Standard)
+                            {
+                                configuration.Headers.Add(
+                                    "X-Payment-Priority",
+                                    request.Priority.ToString(System.Globalization.CultureInfo.InvariantCulture));
                             }
                         },
                         ct)

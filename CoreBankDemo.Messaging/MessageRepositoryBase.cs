@@ -177,15 +177,23 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
     /// <summary>
     /// Query for this store's claimable rows in <paramref name="partitionId"/>,
-    /// ordered oldest-first by the store's ordering timestamp (<c>ReceivedAt</c>
-    /// for inbox, <c>CreatedAt</c> for outbox): rows that are <c>Pending</c>, or
+    /// ordered by <see cref="IMessage.Priority"/> descending and then oldest-first
+    /// by the store's ordering timestamp (<c>ReceivedAt</c> for inbox,
+    /// <c>CreatedAt</c> for outbox): rows that are <c>Pending</c>, or
     /// <c>Processing</c> rows whose ordering timestamp is older than
     /// <paramref name="staleThreshold"/> (stale-claim reclaim, AD-3), excluding
     /// poisoned rows (<c>RetryCount &gt;= MaxRetryCount</c>). Implemented by the
     /// inbox/outbox base — this base class does not know the concrete ordering
     /// timestamp property.
     /// </summary>
-    protected abstract IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold);
+    /// <param name="partitionId">The partition to query.</param>
+    /// <param name="staleThreshold">Processing rows older than this are reclaimable.</param>
+    /// <param name="holdCutoff">
+    /// When given, rows whose <see cref="IMessage.HoldUntil"/> is still after
+    /// it are excluded (the background batch claim); <see langword="null"/>
+    /// ignores holds (the ordered inline claim, which is what a hold is for).
+    /// </param>
+    protected abstract IQueryable<TMessage> GetClaimableMessagesQuery(int partitionId, DateTime staleThreshold, DateTime? holdCutoff);
 
     /// <summary>
     /// Sets <paramref name="message"/>'s ordering timestamp
@@ -214,7 +222,8 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// <summary>
     /// Claims up to <paramref name="batchSize"/> claimable rows (see
     /// <see cref="GetClaimableMessagesQuery"/>) in <paramref name="partitionId"/>,
-    /// oldest first, atomically transitioning them to <c>Processing</c> — no row
+    /// highest priority first and oldest first within a priority, atomically
+    /// transitioning them to <c>Processing</c> — no row
     /// can be claimed by two concurrent callers (see
     /// <see cref="ConfigureConcurrencyToken"/>). A caller that loses the race for
     /// some of its candidate rows simply keeps whatever it did win; losing a row
@@ -236,7 +245,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         var claimedAt = TimeProvider.GetUtcNow().UtcDateTime;
         var staleThreshold = claimedAt - MessageConstants.Defaults.ProcessingTimeout;
 
-        var claimed = await GetClaimableMessagesQuery(partitionId, staleThreshold)
+        var claimed = await GetClaimableMessagesQuery(partitionId, staleThreshold, holdCutoff: claimedAt)
             .Take(batchSize)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -503,6 +512,16 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         return await ApplyPendingClaimAsync(message, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Claims the row identified by <paramref name="id"/> only when it is the
+    /// <em>first</em> claimable row of its partition in dispatch order — the
+    /// same <see cref="IMessage.Priority"/>-descending, then arrival order
+    /// <see cref="ClaimBatchForPartitionAsync"/> uses. An inline caller can
+    /// therefore never overtake earlier work of its own priority, while a
+    /// higher-priority row (the instant rail) is first even when older
+    /// standard rows are still queued: that queued batch work is exactly what
+    /// an SCT Inst must not wait behind.
+    /// </summary>
     public virtual async Task<TMessage?> TryClaimByIdIfOldestAsync(
         Guid id,
         int partitionId,
@@ -514,7 +533,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         }
 
         var staleThreshold = TimeProvider.GetUtcNow().UtcDateTime - MessageConstants.Defaults.ProcessingTimeout;
-        var oldest = await GetClaimableMessagesQuery(partitionId, staleThreshold)
+        var oldest = await GetClaimableMessagesQuery(partitionId, staleThreshold, holdCutoff: null)
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
         if (oldest is null
@@ -557,6 +576,14 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// Looks up a single row by <paramref name="id"/>, or <see langword="null"/>
     /// if none exists.
     /// </summary>
+    /// <inheritdoc cref="IOutboxMessageStore{TMessage}.GetStatusAsync"/>
+    public virtual Task<string?> GetStatusAsync(Guid id, CancellationToken cancellationToken = default) =>
+        Messages
+            .AsNoTracking()
+            .Where(m => m.Id == id)
+            .Select(m => m.Status)
+            .FirstOrDefaultAsync(cancellationToken);
+
     public virtual Task<TMessage?> FindByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
         Messages.FirstOrDefaultAsync(m => m.Id == id, cancellationToken);
 

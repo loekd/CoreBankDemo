@@ -23,3 +23,6 @@ dotnet/runfile-discovery/CoreBankDemo-28ffb55a5460842cf50353e2d7ceb84e595d4bd536
 # output, rehearsal proof packs) — generated at runtime, never checked in.
 /.demo-runner-artifacts/
 /.demo-runner-exports/
+
+# Dev Proxy generates its root certificate on first start
+CoreBankDemo.AppHost/dev-proxy/

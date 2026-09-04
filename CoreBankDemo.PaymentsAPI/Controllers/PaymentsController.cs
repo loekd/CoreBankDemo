@@ -119,9 +119,22 @@ public class PaymentsController(
             return ToAcceptedResult(snapshot);
         }
 
+        // A Completed row means the command was *delivered*, which is not the
+        // same as CoreBank having *committed* an outcome: the cached payload
+        // carries whatever CoreBankAPI last answered, and a 202/Pending
+        // deferral is persisted just like a settlement. Replaying that as a
+        // committed 200 told the operator "here is your final answer" while
+        // the wire word was still Pending -- and, because nothing ever
+        // refreshes the cached payload, it did so on every resend forever.
+        // Only a terminal cached status is a committed outcome; anything
+        // else falls through to the not-yet-committed 202 below.
         if (snapshot.Status == MessageConstants.Status.Completed)
         {
-            return Ok(ToDeliveredResponse(snapshot));
+            var delivered = ToDeliveredResponse(snapshot);
+            if (delivered.Status is MessageConstants.Status.Completed or MessageConstants.Status.Failed)
+            {
+                return Ok(delivered);
+            }
         }
 
         var wireStatus = snapshot.Status == MessageConstants.Status.Failed

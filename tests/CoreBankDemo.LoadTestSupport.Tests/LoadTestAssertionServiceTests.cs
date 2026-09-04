@@ -372,6 +372,41 @@ public class LoadTestAssertionServiceTests
     }
 
     [Fact]
+    public void An_instant_row_overtaking_an_earlier_standard_row_is_not_an_inversion()
+    {
+        // ADR-018 priority addendum: FIFO is a promise within a priority
+        // class. The later instant row here is processed before the earlier
+        // standard row, exactly as intended, while two rows of the same class
+        // in the same partition are still held to arrival order.
+        var observations = new[]
+        {
+            new OrderingObservation("PaymentsOutbox", 2, "standard-earlier", new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 9)),
+            new OrderingObservation("PaymentsOutbox", 2, "instant-later", new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 2), Priority: 100),
+            new OrderingObservation("PaymentsOutbox", 2, "instant-latest", new DateTime(2026, 1, 1, 0, 0, 3), new DateTime(2026, 1, 1, 0, 0, 4), Priority: 100),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerKeyOrdering.Passed.Should().BeTrue();
+        result.Debug.OrderingViolations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void An_inversion_between_two_instant_rows_is_still_detected()
+    {
+        var observations = new[]
+        {
+            new OrderingObservation("PaymentsOutbox", 2, "instant-earlier", new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 5), Priority: 100),
+            new OrderingObservation("PaymentsOutbox", 2, "instant-later", new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 4), Priority: 100),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerKeyOrdering.Passed.Should().BeFalse();
+        result.Debug.OrderingViolations.Should().ContainSingle();
+    }
+
+    [Fact]
     public void Ordering_inversion_is_still_detected_when_both_rows_share_an_identical_enqueued_timestamp()
     {
         // Patch 5 regression test: timestamps come from TimeProvider.GetUtcNow()

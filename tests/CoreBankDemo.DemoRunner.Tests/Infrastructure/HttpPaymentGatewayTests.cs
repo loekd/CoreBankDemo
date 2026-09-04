@@ -105,8 +105,12 @@ public class HttpPaymentGatewayTests
     }
 
     [Fact]
-    public async Task Submit_202FailedBody_IsMalformedContractNotCommittedFailure()
+    public async Task Submit_202FailedBody_IsACommittedFailureNotAMalformedContract()
     {
+        // spec-add-instant-payment-rail.md:184 — an instant duplicate whose row has
+        // permanently failed deliberately replays 202/Failed rather than masking a
+        // given-up delivery as still in flight. Reading that as a contract violation
+        // reported "malformed or mismatched" for a truthful terminal answer.
         using var client = new HttpClient(new StubHttpHandler(_ => Task.FromResult(
             new HttpResponseMessage(HttpStatusCode.Accepted)
             {
@@ -121,8 +125,8 @@ public class HttpPaymentGatewayTests
         var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
 
         result.StatusCode.Should().Be(202);
-        result.Outcome.Should().Be(PaymentOutcome.TransportFailure);
-        result.ErrorSummary.Should().Contain("malformed");
+        result.Outcome.Should().Be(PaymentOutcome.Failed);
+        result.ErrorSummary.Should().BeNull();
     }
 
     [Fact]
@@ -191,6 +195,112 @@ public class HttpPaymentGatewayTests
 
         timeout.ErrorSummary.Should().Contain("timed out");
         connection.ErrorSummary.Should().Contain("connection");
+    }
+
+    [Theory]
+    // PaymentsController.ToDuplicateResult: an instant-rail duplicate replay of a terminally
+    // failed row answers 202 with the wire word "Failed"; ToAcceptedResult/ToResponse replays
+    // the raw kernel status on the standard rail, which can be Processing or Completed once
+    // the first submit has moved on. All of these are contractual, none is malformed.
+    [InlineData("Failed", PaymentOutcome.Failed)]
+    [InlineData("Processing", PaymentOutcome.Pending)]
+    [InlineData("Completed", PaymentOutcome.Completed)]
+    [InlineData("Pending", PaymentOutcome.Pending)]
+    public async Task Submit_DuplicateReplayOn202_IsNotTreatedAsMalformed(string wireStatus, PaymentOutcome expected)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent(
+                    $$"""{"paymentId":"demo-key-001","transactionId":"demo-key-001","status":"{{wireStatus}}"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "demo-key-001");
+
+        var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        result.Outcome.Should().Be(expected);
+        result.ErrorSummary.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Submit_UnrecognisedStatusOn202_IsStillTreatedAsMalformed()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("""{"paymentId":"k","transactionId":"k","status":"Teleported"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "k");
+
+        var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentOutcome.TransportFailure);
+        result.ErrorSummary.Should().Contain("malformed");
+    }
+
+    [Theory]
+    // The regression that made an instant demo payment report "malformed or mismatched":
+    // PaymentsController.ToDuplicateResult replays 200 for an already-Completed instant row,
+    // and ResolveDeliveredResponse takes the status straight from the persisted CoreBank
+    // delivery payload — which is "Pending" when the inline attempt was accepted for deferred
+    // execution and "Processing" for an in-flight duplicate. Pairing 200 with the status word
+    // rejected both as a contract violation.
+    [InlineData("Completed", PaymentOutcome.Completed)]
+    [InlineData("Failed", PaymentOutcome.Failed)]
+    [InlineData("Pending", PaymentOutcome.Pending)]
+    [InlineData("Processing", PaymentOutcome.Pending)]
+    public async Task Submit_InstantDuplicateReplayOn200_ReportsTheReplayedStatus(
+        string wireStatus, PaymentOutcome expected)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    $$"""{"paymentId":"demo-key-001","transactionId":"demo-key-001","status":"{{wireStatus}}"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "demo-key-001");
+
+        var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        result.Outcome.Should().Be(expected);
+        result.ErrorSummary.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Submit_ContractViolation_NamesTheOffendingValueNotJustTheVerdict()
+    {
+        var responses = new Queue<HttpResponseMessage>(
+        [
+            new(HttpStatusCode.OK) { Content = new StringContent("""{"paymentId":"k","transactionId":"someone-else","status":"Completed"}""") },
+            new(HttpStatusCode.OK) { Content = new StringContent("<html>gateway</html>") },
+            new(HttpStatusCode.BadRequest) { Content = new StringContent("""{"errors":["Amount must be positive."]}""") },
+        ]);
+        using var client = new HttpClient(new StubHttpHandler(_ => Task.FromResult(responses.Dequeue())));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "expected-key");
+
+        var mismatch = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+        var notJson = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+        var rejected = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        mismatch.ErrorSummary.Should().Contain("expected-key").And.Contain("someone-else");
+        notJson.ErrorSummary.Should().Contain("gateway");
+        rejected.ErrorSummary.Should().Contain("400").And.Contain("Amount must be positive.");
     }
 
     private sealed class StubHttpHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler

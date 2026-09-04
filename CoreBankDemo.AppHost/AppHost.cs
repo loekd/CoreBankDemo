@@ -141,10 +141,29 @@ paymentsApi.WithReference(coreBankApi);
 
 if (devProxy is not null)
 {
+    const string devProxyUrl = "http://127.0.0.1:8000";
+    // Exclude the Dapr sidecar's pub/sub gRPC port (localhost:50001) from
+    // proxying; the Kiota HTTP call to CoreBankAPI is unaffected and still
+    // proxied.
+    const string noProxy = "localhost";
+
+    // Both casings, deliberately. .NET's HttpEnvironmentProxy reads the
+    // lowercase names *first* and only falls back to the uppercase ones, so
+    // in any environment that already exports a lowercase http_proxy -- every
+    // dev container, sandbox, and corporate-proxy setup does -- the inherited
+    // value silently wins over the uppercase pair below. PaymentsAPI then
+    // bypasses Dev Proxy entirely and sends its CoreBankAPI calls to that
+    // outer proxy, which answers 403 for a loopback address it has no rule
+    // for; account validation fails, the outbox row exhausts its retries, and
+    // the payment never settles. Setting both casings makes the value chosen
+    // here the value that actually applies.
     paymentsApi
-        .WithEnvironment("HTTP_PROXY", "http://127.0.0.1:8000")
-        .WithEnvironment("HTTPS_PROXY", "http://127.0.0.1:8000")
-        .WithEnvironment("NO_PROXY", "localhost") // Exclude the Dapr sidecar's pub/sub gRPC port (localhost:50001) from proxying; the Kiota HTTP call to CoreBankAPI is unaffected and still proxied.
+        .WithEnvironment("HTTP_PROXY", devProxyUrl)
+        .WithEnvironment("HTTPS_PROXY", devProxyUrl)
+        .WithEnvironment("NO_PROXY", noProxy)
+        .WithEnvironment("http_proxy", devProxyUrl)
+        .WithEnvironment("https_proxy", devProxyUrl)
+        .WithEnvironment("no_proxy", noProxy)
         .WaitFor(devProxy);
 }
 

@@ -48,8 +48,11 @@ builder.Services.AddTransactionEventIntake(builder.Configuration);
 
 // Story 5.6: event handling processor. IInboxMessageStore<InboxMessage> is
 // already exposed by AddTransactionEventIntake above (the same
-// InboxMessageRepository instance); TransactionEventHandler is observational
-// only (no payment/account state mutation) and enriches the consumer span
+// InboxMessageRepository instance). TransactionEventHandler records the
+// committed outcome each transaction.completed/failed event carries onto the
+// payment's cached ResponsePayload (never its transport Status) -- the only
+// way a payment whose inline instant attempt was deferred by CoreBank ever
+// learns that it settled -- and enriches the consumer span
 // InboxProcessor's InboxProcessorBase<InboxMessage> restores from each
 // message's persisted TraceParent/TraceState onto the same
 // "CoreBank.PaymentsAPI" ActivitySource already registered by

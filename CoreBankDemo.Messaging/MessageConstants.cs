@@ -22,6 +22,19 @@ public static class MessageConstants
     }
 
     /// <summary>
+    /// Claim priorities (<see cref="IMessage.Priority"/>). Higher is claimed
+    /// first within a partition; ties fall back to arrival order.
+    /// </summary>
+    public static class Priority
+    {
+        /// <summary>The batch rail (SCT) and every event store: plain arrival order.</summary>
+        public const int Standard = 0;
+
+        /// <summary>The instant rail (SCT Inst): claimed ahead of any queued standard work.</summary>
+        public const int Instant = 100;
+    }
+
+    /// <summary>
     /// Default configuration values for message processing.
     /// </summary>
     public static class Defaults

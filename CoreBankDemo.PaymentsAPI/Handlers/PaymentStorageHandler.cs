@@ -47,6 +47,7 @@ public interface IPaymentStorageHandler
 internal sealed class PaymentStorageHandler(
     IOutboxRepository repository,
     IOptions<OutboxProcessingOptions> options,
+    IOptions<InstantRailOptions> instantRail,
     TimeProvider timeProvider,
     ILogger<PaymentStorageHandler> logger,
     BusinessMetrics businessMetrics) : IPaymentStorageHandler
@@ -72,6 +73,8 @@ internal sealed class PaymentStorageHandler(
         var key = idempotencyKey ?? Guid.NewGuid().ToString("D");
         var partitionId = PartitionHelper.GetPartitionId(key, options.Value.PartitionCount);
         var normalizedAmount = decimal.Round(request.Amount, 2, MidpointRounding.ToEven);
+        var now = timeProvider.GetUtcNow().UtcDateTime;
+        var isInstant = scheme == BusinessMetrics.PaymentScheme.Instant;
         var message = new OutboxMessage
         {
             Id = Guid.NewGuid(),
@@ -83,7 +86,14 @@ internal sealed class PaymentStorageHandler(
             Currency = request.Currency,
             PartitionId = partitionId,
             Status = MessageConstants.Status.Pending,
-            CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
+            // An SCT Inst is claimed ahead of any queued batch (SCT) work in
+            // its partition -- for the inline attempt and, if that is
+            // deferred, for the background processor alike.
+            Priority = isInstant ? MessageConstants.Priority.Instant : MessageConstants.Priority.Standard,
+            // Left to the inline request for the length of its budget; the
+            // batch rail takes over only once that has lapsed.
+            HoldUntil = isInstant ? now.AddMilliseconds(instantRail.Value.BudgetMilliseconds) : null,
+            CreatedAt = now,
             TraceParent = Activity.Current?.Id,
             TraceState = Activity.Current?.TraceStateString
         };

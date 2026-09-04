@@ -37,7 +37,10 @@ public sealed record OperatorPresentationModel(
     bool CanCancelBurst,
     bool CanStopOrSwitch,
     bool CanUseLoadTest,
-    bool CanResend);
+    bool CanResend,
+    string OperationsHint,
+    string ResourcesHint,
+    string LoadHint);
 
 public static class PresentationModelBuilder
 {
@@ -135,7 +138,97 @@ public static class PresentationModelBuilder
                 && state.ActiveMutation is null
                 && state.ResourceAuthorityAvailable
                 && state.Topology?.IsReady == true,
-            state.CanResendLastPayment && state.ActiveMutation is null);
+            state.CanResendLastPayment && state.ActiveMutation is null,
+            OperationsHint(state),
+            ResourcesHint(state),
+            LoadHint(state));
+    }
+
+    /// <summary>
+    /// Explains why the payment controls cannot act right now. Empty when they can.
+    /// </summary>
+    private static string OperationsHint(OperatorConsoleState state)
+    {
+        if (state.ActiveMutation is { } mutation)
+        {
+            return $"Busy — {mutation.Kind} on {mutation.Target} is in flight; controls unlock when it settles.";
+        }
+
+        return state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None
+            ? "No topology attached — go to Resources (2) and Start or Attach a known topology first."
+            : string.Empty;
+    }
+
+    /// <summary>
+    /// Explains why the topology and resource controls cannot act right now. Empty when they can.
+    /// </summary>
+    private static string ResourcesHint(OperatorConsoleState state)
+    {
+        if (state.ActiveMutation is { } mutation)
+        {
+            return $"Busy — {mutation.Kind} on {mutation.Target} is in flight; controls unlock when it settles.";
+        }
+
+        if (state.Ownership == TopologyOwnership.None)
+        {
+            if (state.Preflight is null)
+            {
+                return "Preflight has not completed yet — running discovery.";
+            }
+
+            var failed = state.Preflight.Checks.Where(check => !check.Passed).ToList();
+            if (!state.Preflight.EnvironmentReady || !state.Preflight.DiscoveryReachable)
+            {
+                return $"Start and Attach blocked — {string.Join(" | ", failed.Select(check => $"{check.Name}: {check.Remediation}"))}";
+            }
+
+            var blocked = KnownTopologyProfiles.All
+                .Where(profile => !state.Preflight.CanStart(profile)
+                    && !(state.Preflight.Profiles.TryGetValue(profile, out var candidate) && candidate.CanAttach))
+                .Select(profile => $"{KnownTopologyProfiles.DisplayName(profile)}: "
+                    + (state.Preflight.Profiles.TryGetValue(profile, out var candidate) ? candidate.Detail : "no preflight result"))
+                .ToList();
+            return blocked.Count == 0
+                ? "Start or Attach a topology to enable Stop, Switch and per-resource commands."
+                : string.Join(" | ", blocked);
+        }
+
+        if (!state.ResourceAuthorityAvailable)
+        {
+            return "Resource commands need a verified Aspire snapshot — use Refresh state.";
+        }
+
+        return state.Topology switch
+        {
+            null or { IsReachable: false } => "Aspire snapshot is unreachable — use Refresh state.",
+            { IsFingerprintMatch: false } => "The running graph no longer matches the known profile — Stop and Start it again.",
+            _ => string.Empty,
+        };
+    }
+
+    /// <summary>
+    /// Explains why the accepted load workflow cannot run right now. Empty when it can.
+    /// </summary>
+    private static string LoadHint(OperatorConsoleState state)
+    {
+        if (state.ActiveMutation is { } mutation)
+        {
+            return $"Busy — {mutation.Kind} on {mutation.Target} is in flight; the load workflow unlocks when it settles.";
+        }
+
+        if (state.Profile != TopologyProfile.LoadTests || state.Ownership == TopologyOwnership.None)
+        {
+            return "Load Test requires the LoadTests topology — go to Resources (2) and Start or Attach LoadTests.";
+        }
+
+        if (!state.ResourceAuthorityAvailable)
+        {
+            return "Load Test requires a verified Aspire snapshot — use Refresh state on the Resources workspace.";
+        }
+
+        return state.Topology?.IsReady == true
+            ? string.Empty
+            : "The LoadTests graph is not ready yet — waiting for every required resource to report healthy.";
     }
 
     private static bool CanMutateResource(OperatorConsoleState state, ResourceSnapshot resource) =>

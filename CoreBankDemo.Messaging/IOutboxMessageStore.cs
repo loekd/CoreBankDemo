@@ -15,7 +15,7 @@ public interface IOutboxMessageStore<TMessage>
 {
     /// <summary>
     /// Claims up to <paramref name="batchSize"/> claimable rows in
-    /// <paramref name="partitionId"/>, oldest first, atomically transitioning
+    /// <paramref name="partitionId"/>, highest priority first and oldest first within a priority, atomically transitioning
     /// them to <c>Processing</c>. See
     /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.ClaimBatchForPartitionAsync"/>.
     /// </summary>
@@ -63,9 +63,25 @@ public interface IOutboxMessageStore<TMessage>
     /// claimable row in its partition. Used by the instant inline path while
     /// holding the same distributed partition lock as the background
     /// processor, so inline settlement cannot overtake earlier durable work.
+    /// Dispatch order is <see cref="IMessage.Priority"/> descending, then arrival: a
+    /// higher-priority row may overtake earlier lower-priority rows, never an
+    /// earlier row of its own priority.
     /// </summary>
     Task<TMessage?> TryClaimByIdIfOldestAsync(
         Guid id,
         int partitionId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads the row's <em>current</em> <c>Status</c> straight from the store.
+    /// The inline paths use it between bounded claim attempts to tell "not
+    /// first in dispatch order yet" (keep waiting) apart from "another
+    /// claimant now owns the row" (stop waiting: it is being delivered
+    /// elsewhere). Deliberately a projection, never an entity: the caller's
+    /// scoped <c>DbContext</c> is the one that inserted the row moments ago,
+    /// and an entity query would hand back that tracked instance -- still
+    /// <c>Pending</c> whatever the database says -- so the wait would never
+    /// end.
+    /// </summary>
+    Task<string?> GetStatusAsync(Guid id, CancellationToken cancellationToken = default);
 }

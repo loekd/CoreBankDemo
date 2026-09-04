@@ -23,6 +23,9 @@ internal interface ICoreBankApiClient
     /// carries <c>X-Execute-Mode: inline</c> on the wire only when
     /// <see langword="true"/> (spec: add-instant-payment-rail) -- absent
     /// (the default) reproduces today's deferred-execution request exactly.
+    /// A non-standard <see cref="TransactionSubmissionRequest.Priority"/> is
+    /// carried as <c>X-Payment-Priority</c> so CoreBankAPI queues the command
+    /// at the same priority; the standard rail never sends that header.
     /// </summary>
     Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
         TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false);

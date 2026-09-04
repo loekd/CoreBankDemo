@@ -108,7 +108,8 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(ICoreBankApiClient clien
                     message.ToAccount,
                     message.Amount,
                     message.Currency,
-                    message.TransactionId),
+                    message.TransactionId,
+                    message.Priority),
                 cancellationToken,
                 executeInline)
             .ConfigureAwait(false);

@@ -1,3 +1,4 @@
+using CoreBankDemo.Messaging;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.ServiceDefaults;
@@ -23,6 +24,14 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
     private const string ExecuteModeHeader = "X-Execute-Mode";
     private const string ExecuteModeInline = "inline";
 
+    /// <summary>
+    /// Optional claim priority for the stored command (see
+    /// <see cref="MessageConstants.Priority"/>). PaymentsAPI sends it for the
+    /// instant rail only; absent, unparsable or non-positive means standard,
+    /// so a caller can never make a command wait *longer* by sending garbage.
+    /// </summary>
+    private const string PaymentPriorityHeader = "X-Payment-Priority";
+
     [HttpPost("process")]
     public async Task<IActionResult> ProcessTransaction(
         [FromBody] TransactionRequest request, CancellationToken cancellationToken)
@@ -35,11 +44,18 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
 
         var executeInline = string.Equals(
             Request.Headers[ExecuteModeHeader].FirstOrDefault(), ExecuteModeInline, StringComparison.OrdinalIgnoreCase);
+        var priority = int.TryParse(
+            Request.Headers[PaymentPriorityHeader].FirstOrDefault(),
+            System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsedPriority) && parsedPriority > MessageConstants.Priority.Standard
+            ? parsedPriority
+            : MessageConstants.Priority.Standard;
 
         TransactionIntakeResult result;
         try
         {
-            result = await handler.ProcessAsync(request, cancellationToken, executeInline);
+            result = await handler.ProcessAsync(request, cancellationToken, executeInline, priority);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

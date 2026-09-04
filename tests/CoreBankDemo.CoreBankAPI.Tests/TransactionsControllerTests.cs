@@ -214,6 +214,27 @@ public class TransactionsControllerTests
         _handler.Verify(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), true), Times.Once);
     }
 
+    [Theory]
+    [InlineData("100", 100)]
+    [InlineData(null, 0)]
+    [InlineData("garbage", 0)]
+    [InlineData("-5", 0)]
+    public async Task ProcessTransaction_passes_the_payment_priority_header_and_never_lets_garbage_lower_it(string? headerValue, int expectedPriority)
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Pending, DateTimeOffset.UtcNow);
+        _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), false, expectedPriority))
+            .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.Accepted, response, null));
+        var controller = CreateController();
+        if (headerValue is not null)
+        {
+            controller.Request.Headers["X-Payment-Priority"] = headerValue;
+        }
+
+        await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        _handler.Verify(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), false, expectedPriority), Times.Once);
+    }
+
     [Fact]
     public async Task ProcessTransaction_treats_an_unrecognized_execute_mode_value_as_deferred()
     {

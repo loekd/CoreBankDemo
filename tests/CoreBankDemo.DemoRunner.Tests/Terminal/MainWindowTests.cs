@@ -261,6 +261,126 @@ public class MainWindowTests
         upper.DefaultAcceptView.Should().BeSameAs(upper.CancelButton);
     }
 
+    [Fact]
+    public void AcceptCommand_ReachesNonDefaultButtons()
+    {
+        // Terminal.Gui raises Accepted only for the default button; a click on any other
+        // button raises Accepting. Handlers wired to Accepted leave every non-default
+        // control inert, which is what this asserts against.
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+
+        window.RailButton.InvokeCommand(Command.Accept);
+        window.IdempotencyButton.InvokeCommand(Command.Accept);
+        window.WrapButton.InvokeCommand(Command.Accept);
+        window.DetailsButton.InvokeCommand(Command.Accept);
+
+        window.RailButton.Text.Should().Be("Rail: instant");
+        window.IdempotencyButton.Text.Should().Be("Idempotency: Supplied");
+        window.WrapButton.Text.Should().Be("Wrap: on");
+        window.LastUiMessage.Should().Contain("No action has been recorded");
+    }
+
+    [Fact]
+    public void SuppliedKeyDefault_IsUniquePerSessionSoItNeverReplaysAnOldRow()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var first = CreateWindow(controller);
+        using var second = CreateWindow(controller);
+
+        first.SuppliedKeyField.Text.ToString().Should().StartWith("demo-key-").And.NotBe("demo-key-001");
+        second.SuppliedKeyField.Text.ToString().Should().NotBe(first.SuppliedKeyField.Text.ToString());
+    }
+
+    [Fact]
+    public async Task CopyDetail_WritesTheDetailToTheTerminalClipboardAndSaysSo()
+    {
+        // Terminal.Gui's built-in copy shells out to an OS clipboard helper and
+        // silently does nothing when none can reach a display server -- the
+        // sandbox and every SSH session. OSC 52 goes to the terminal instead.
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
+        await window.RefreshAsync();
+        window.DetailsButton.InvokeCommand(Command.Accept);
+        window.RenderForTest();
+
+        window.CopyButton.InvokeCommand(Command.Accept);
+
+        terminal.ToString().Should().StartWith("\u001b]52;c;").And.EndWith("\u0007");
+        window.LastUiMessage.Should().Contain("terminal clipboard");
+    }
+
+    [Fact]
+    public void CopyDetail_WithNothingSelected_SaysSoInsteadOfCopyingNothing()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
+        window.RenderForTest();
+
+        window.CopyButton.InvokeCommand(Command.Accept);
+
+        terminal.ToString().Should().BeEmpty();
+        window.LastUiMessage.Should().Contain("nothing to copy");
+    }
+
+    [Fact]
+    public async Task FailureMessage_SurvivesTheNextPollRender()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        await window.TriggerResendForTestAsync();
+        window.RenderForTest();
+        window.RenderForTest();
+
+        window.MessageLineText.Should().Contain("No retry-safe");
+        window.StatusLineText.Should().Be(controller.State.StatusLine);
+    }
+
+    [Fact]
+    public async Task ResourceSelection_SurvivesRepeatedRenders()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        controller.SelectWorkspace(WorkspaceKind.Resources);
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+        var selected = window.ResourceList.SelectedItem;
+
+        window.RenderForTest();
+        window.RenderForTest();
+
+        selected.Should().NotBe(0);
+        window.ResourceList.SelectedItem.Should().Be(selected);
+    }
+
+    [Fact]
+    public void OnlyTheActiveWorkspaceIsMounted()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        foreach (var workspace in Enum.GetValues<WorkspaceKind>())
+        {
+            controller.SelectWorkspace(workspace);
+            window.RenderForTest();
+
+            window.MountedWorkspaceCount.Should().Be(1);
+            window.IsWorkspaceVisible(workspace).Should().BeTrue();
+        }
+    }
+
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
         IConfirmationService? confirmation = null) =>

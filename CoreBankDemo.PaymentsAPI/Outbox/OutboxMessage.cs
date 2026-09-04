@@ -32,4 +32,10 @@ public class OutboxMessage : IOutboxMessage
     /// what lets a duplicate replay recover that distinction.
     /// </summary>
     public string? ResponsePayload { get; set; }
+
+    /// <inheritdoc/>
+    public int Priority { get; set; } = MessageConstants.Priority.Standard;
+
+    /// <inheritdoc/>
+    public DateTime? HoldUntil { get; set; }
 }

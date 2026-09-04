@@ -18,6 +18,8 @@ public sealed class TestInboxMessage : IInboxMessage
     public string? TraceState { get; set; }
     public string IdempotencyKey { get; set; } = string.Empty;
     public DateTime ReceivedAt { get; set; }
+    public int Priority { get; set; }
+    public DateTime? HoldUntil { get; set; }
 }
 
 /// <inheritdoc cref="TestInboxMessage"/>
@@ -34,6 +36,8 @@ public sealed class TestOutboxEventMessage : IOutboxMessage
     public string IdempotencyKey { get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
     public string EventType { get; set; } = string.Empty;
+    public int Priority { get; set; }
+    public DateTime? HoldUntil { get; set; }
 }
 
 /// <summary>Minimal deterministic <see cref="TimeProvider"/> for tests that need one.</summary>

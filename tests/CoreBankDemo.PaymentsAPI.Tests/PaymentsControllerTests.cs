@@ -374,6 +374,55 @@ public class PaymentsControllerTests
         _instantHandler.VerifyNoOtherCalls();
     }
 
+    [Theory]
+    [InlineData("Pending")]
+    [InlineData("Processing")]
+    public async Task ProcessPayment_does_not_replay_a_non_committed_cached_payload_as_200(string cachedStatus)
+    {
+        // A Completed row means the command was delivered, not that CoreBank
+        // committed an outcome: TransactionIntakeHandler answers 202/Pending
+        // whenever inline execution could not run, and
+        // HttpForwardOutboxDeliveryStrategy caches that answer verbatim.
+        // Replaying it as 200 announced a final answer whose own wire word
+        // was still Pending -- and since nothing ever refreshes the cached
+        // payload, it did so on every resend, forever.
+        var winner = Snapshot(
+            status: "Completed",
+            responsePayload: $$"""{"TransactionId":"{{TransactionId}}","Status":"{{cachedStatus}}","ProcessedAt":"2026-08-28T12:00:05+00:00"}""");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        var response = accepted.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Pending");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Theory]
+    [InlineData("Completed")]
+    [InlineData("Failed")]
+    public async Task ProcessPayment_still_replays_a_committed_cached_payload_as_200(string cachedStatus)
+    {
+        var winner = Snapshot(
+            status: "Completed",
+            responsePayload: $$"""{"TransactionId":"{{TransactionId}}","Status":"{{cachedStatus}}","ProcessedAt":"2026-08-28T12:00:05+00:00"}""");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var ok = result.Should().BeOfType<OkObjectResult>().Subject;
+        ok.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be(cachedStatus);
+    }
+
     [Fact]
     public async Task ProcessPayment_replays_a_pending_instant_duplicate_as_202_without_a_forward_attempt()
     {

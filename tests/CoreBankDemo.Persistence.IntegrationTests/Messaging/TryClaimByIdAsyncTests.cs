@@ -187,6 +187,76 @@ public class TryClaimByIdAsyncTests(PostgresContainerFixture fixture) : Messagin
     }
 
     [Fact]
+    public async Task Ordered_claim_lets_a_higher_priority_row_overtake_an_earlier_standard_row()
+    {
+        // ADR-018 priority addendum: an SCT Inst never waits behind queued
+        // batch (SCT) work in its partition.
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var earlierStandard = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "earlier-standard", EventType = "Debited", PartitionId = 2,
+            Priority = MessageConstants.Priority.Standard, CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        var laterInstant = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "later-instant", EventType = "Debited", PartitionId = 2,
+            Priority = MessageConstants.Priority.Instant, CreatedAt = TimeProvider.GetUtcNow().UtcDateTime.AddSeconds(1),
+        };
+        context.AddRange(earlierStandard, laterInstant);
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.TryClaimByIdIfOldestAsync(laterInstant.Id, 2, ct);
+
+        claimed.Should().NotBeNull();
+        claimed!.Status.Should().Be(MessageConstants.Status.Processing);
+        (await repository.FindByIdAsync(earlierStandard.Id, ct))!.Status.Should().Be(MessageConstants.Status.Pending);
+    }
+
+    [Fact]
+    public async Task Ordered_claim_still_refuses_to_overtake_an_earlier_row_of_the_same_priority()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var earlierInstant = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "earlier-instant", EventType = "Debited", PartitionId = 2,
+            Priority = MessageConstants.Priority.Instant, CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        var laterInstant = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "later-instant", EventType = "Debited", PartitionId = 2,
+            Priority = MessageConstants.Priority.Instant, CreatedAt = TimeProvider.GetUtcNow().UtcDateTime.AddSeconds(1),
+        };
+        context.AddRange(earlierInstant, laterInstant);
+        await context.SaveChangesAsync(ct);
+
+        (await repository.TryClaimByIdIfOldestAsync(laterInstant.Id, 2, ct)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Ordered_claim_ignores_the_hold_it_exists_for()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var now = TimeProvider.GetUtcNow().UtcDateTime;
+        var held = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "held", EventType = "E", PartitionId = 3, CreatedAt = now, HoldUntil = now.AddSeconds(9),
+        };
+        context.Add(held);
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.TryClaimByIdIfOldestAsync(held.Id, 3, ct);
+
+        claimed.Should().NotBeNull();
+        claimed!.Status.Should().Be(MessageConstants.Status.Processing);
+    }
+
+    [Fact]
     public async Task Ordered_claim_rejects_empty_id()
     {
         await using var context = CreateContext();

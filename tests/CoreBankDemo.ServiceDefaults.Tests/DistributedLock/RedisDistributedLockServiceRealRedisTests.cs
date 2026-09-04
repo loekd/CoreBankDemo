@@ -26,6 +26,54 @@ public class RedisDistributedLockServiceRealRedisTests
     private const int LockExpirySeconds = 2;
 
     [Fact]
+    public async Task Bounded_acquire_waits_for_a_busy_lock_while_the_non_blocking_form_skips_it()
+    {
+        // ADR-018 priority addendum: the instant rail's inline paths queue for
+        // a busy partition lock for a bounded time; the background processors
+        // keep the skip-immediately behaviour.
+        var connectionString = Environment.GetEnvironmentVariable("COREBANKDEMO_TEST_REDIS_CONNECTION")
+            ?? "localhost:6379,connectTimeout=1000,abortConnect=false";
+        ConnectionMultiplexer? multiplexer = null;
+        try
+        {
+            multiplexer = await ConnectionMultiplexer.ConnectAsync(connectionString);
+        }
+        catch
+        {
+            // Not reachable: skipped below.
+        }
+
+        Xunit.Assert.SkipUnless(
+            multiplexer is { IsConnected: true },
+            $"requires a reachable real Redis instance (tried '{connectionString}')");
+
+        await using var connection = multiplexer;
+        var lockName = $"bounded-acquire-{Guid.NewGuid():N}";
+        var factory = new RedisDistributedLockFactory(connection!);
+        var holder = new RedisDistributedLockService(factory, NullLogger<RedisDistributedLockService>.Instance);
+        var contender = new RedisDistributedLockService(factory, NullLogger<RedisDistributedLockService>.Instance);
+        var holderStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var holderTask = holder.ExecuteWithLockAsync(lockName, LockExpirySeconds, async _ =>
+        {
+            holderStarted.SetResult();
+            await release.Task;
+        });
+        await holderStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var skipped = await contender.ExecuteWithLockAsync(lockName, LockExpirySeconds, _ => Task.CompletedTask);
+        var waited = contender.ExecuteWithLockAsync(lockName, LockExpirySeconds, TimeSpan.FromSeconds(3), _ => Task.CompletedTask);
+        await Task.Delay(300, TestContext.Current.CancellationToken);
+        waited.IsCompleted.Should().BeFalse("the bounded form queues behind the holder");
+        release.SetResult();
+
+        (await holderTask).Should().BeTrue();
+        skipped.Should().BeFalse("the non-blocking form never queues");
+        (await waited.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)).Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Lease_survives_past_its_initial_expiry_and_a_second_contender_only_acquires_after_release()
     {
         var connectionString = Environment.GetEnvironmentVariable("COREBANKDEMO_TEST_REDIS_CONNECTION")

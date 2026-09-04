@@ -12,9 +12,11 @@ namespace CoreBankDemo.ServiceDefaults;
 /// Reaches Redis only through <see cref="IRedisDistributedLockFactory"/> (AD-6).
 /// </summary>
 /// <remarks>
-/// Acquisition is non-blocking (<see cref="IDistributedLock.TryAcquireAsync"/>
+/// Acquisition is non-blocking by default (<see cref="IDistributedLock.TryAcquireAsync"/>
 /// with a zero timeout): a busy partition is skipped immediately rather than
-/// queued. While the returned handle is healthy, the library automatically
+/// queued. The bounded overload passes its timeout straight through, so an
+/// inline instant-rail attempt can queue for a busy partition for at most
+/// that long. While the returned handle is healthy, the library automatically
 /// extends the Redis lease — there is no 5/6-of-expiry cooperative cutoff
 /// (that mechanism belonged only to the superseded Dapr adapter, story 3.2).
 /// The workload instead receives a token linked to both the caller's ambient
@@ -41,16 +43,24 @@ internal sealed class RedisDistributedLockService(
     /// </summary>
     internal const string LockKeyPrefix = "corebankdemo:lock:";
 
+    public Task<bool> ExecuteWithLockAsync(
+        string lockName,
+        int lockExpirySeconds,
+        Func<CancellationToken, Task> workload,
+        CancellationToken cancellationToken = default)
+        => ExecuteWithLockAsync(lockName, lockExpirySeconds, TimeSpan.Zero, workload, cancellationToken);
+
     public async Task<bool> ExecuteWithLockAsync(
         string lockName,
         int lockExpirySeconds,
+        TimeSpan acquireTimeout,
         Func<CancellationToken, Task> workload,
         CancellationToken cancellationToken = default)
     {
         try
         {
             var redisLock = lockFactory.CreateLock(LockKeyPrefix + lockName, TimeSpan.FromSeconds(lockExpirySeconds));
-            var handle = await redisLock.TryAcquireAsync(TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+            var handle = await redisLock.TryAcquireAsync(acquireTimeout, cancellationToken).ConfigureAwait(false);
 
             if (handle is null)
             {

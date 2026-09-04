@@ -54,6 +54,7 @@ public class PaymentStorageHandlerConcurrencyTests(PostgresContainerFixture fixt
                 LockExpirySeconds = 30,
                 PollingIntervalMs = 200
             }),
+            Options.Create(new InstantRailOptions()),
             new FixedTimeProvider(),
             NullLogger<PaymentStorageHandler>.Instance,
             TestBusinessMetrics.Instance);

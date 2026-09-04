@@ -35,7 +35,7 @@ internal sealed class DestructiveConfirmationDialog : Dialog<bool>
         OperatorTheme.Apply(this, OperatorTheme.OverlayScheme);
 
         CancelButton = new Button { Text = "Cancel", IsDefault = true };
-        CancelButton.Accepted += (_, e) =>
+        CancelButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             Cancel();

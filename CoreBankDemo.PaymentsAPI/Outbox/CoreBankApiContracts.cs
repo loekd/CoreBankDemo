@@ -1,3 +1,5 @@
+using CoreBankDemo.Messaging;
+
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
 /// <summary>
@@ -123,7 +125,8 @@ internal sealed record TransactionSubmissionRequest(
     string ToAccount,
     decimal Amount,
     string Currency,
-    string TransactionId);
+    string TransactionId,
+    int Priority = MessageConstants.Priority.Standard);
 
 /// <summary>
 /// Application-owned mirror of CoreBankAPI's <c>TransactionResponse</c>

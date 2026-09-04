@@ -140,6 +140,9 @@ public class OutboxProcessorBaseTests
         public Task<TestOutboxEventMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.FromResult<TestOutboxEventMessage?>(null);
 
+        public Task<string?> GetStatusAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException("Not exercised by the outbox processor.");
+
         public Task<TestOutboxEventMessage?> TryClaimByIdIfOldestAsync(
             Guid id,
             int partitionId,
