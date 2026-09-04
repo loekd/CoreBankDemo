@@ -1,6 +1,7 @@
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Doctor;
 using CoreBankDemo.DemoRunner.Application.Ports;
+using CoreBankDemo.DemoRunner.Infrastructure;
 
 namespace CoreBankDemo.DemoRunner.Tests.Fakes;
 
@@ -388,11 +389,21 @@ public sealed class FakeBrowserLauncher : IBrowserLauncher
 {
     public List<string> Opened { get; } = [];
     public List<string?> VerifiedUrls { get; } = [];
+    public bool NextSucceeds { get; set; } = true;
 
-    public Task<bool> OpenAsync(string linkId, string? verifiedUrl, CancellationToken ct)
+    public Task<LinkOpenResult> OpenAsync(string linkId, string? verifiedUrl, CancellationToken ct)
     {
         Opened.Add(linkId);
         VerifiedUrls.Add(verifiedUrl);
-        return Task.FromResult(true);
+
+        // Mirrors the one business rule the real BrowserLauncher enforces before
+        // ever attempting an OS-level open: Aspire's dashboard link needs an
+        // already-verified URL, since a live topology may not have one yet.
+        if (linkId == KnownLinks.AspireDashboard && verifiedUrl is null)
+        {
+            return Task.FromResult(new LinkOpenResult(false, null));
+        }
+
+        return Task.FromResult(new LinkOpenResult(NextSucceeds, verifiedUrl ?? EndpointResolver.LinkFor(linkId)));
     }
 }

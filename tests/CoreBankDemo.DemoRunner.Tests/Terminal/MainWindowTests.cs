@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
+using CoreBankDemo.DemoRunner.Infrastructure;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
@@ -294,6 +295,50 @@ public class MainWindowTests
     }
 
     [Fact]
+    public async Task OpenJaegerLink_WhenTheOsCannotLaunchABrowser_ShowsTheFallbackWithTheResolvedUrl()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        harness.Browser.NextSucceeds = false;
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        var fallback = new FakeLinkFallbackPresenter();
+        using var window = CreateWindow(controller, linkFallback: fallback);
+
+        await window.TriggerOpenKnownLinkForTestAsync("Jaeger", KnownLinks.Jaeger);
+
+        fallback.Shown.Should().ContainSingle().Which.Title.Should().Be("Jaeger");
+        fallback.Shown[0].Url.Should().Be(EndpointResolver.LinkFor(KnownLinks.Jaeger));
+    }
+
+    [Fact]
+    public async Task OpenAspireLink_WhenNoDashboardUrlIsVerifiedYet_SaysSoInsteadOfShowingTheFallback()
+    {
+        var fallback = new FakeLinkFallbackPresenter();
+        using var window = CreateWindow(new OperatorHarness().CreateController(), linkFallback: fallback);
+
+        await window.TriggerOpenKnownLinkForTestAsync("Aspire dashboard", KnownLinks.AspireDashboard);
+
+        fallback.Shown.Should().BeEmpty();
+        window.LastUiMessage.Should().Contain("not available yet");
+    }
+
+    [Fact]
+    public async Task OpenJaegerLink_WhenTheOsBrowserOpensSuccessfully_NeverShowsTheFallback()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        var fallback = new FakeLinkFallbackPresenter();
+        using var window = CreateWindow(controller, linkFallback: fallback);
+
+        await window.TriggerOpenKnownLinkForTestAsync("Jaeger", KnownLinks.Jaeger);
+
+        fallback.Shown.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task CopyDetail_WritesTheDetailToTheTerminalClipboardAndSaysSo()
     {
         // Terminal.Gui's built-in copy shells out to an OS clipboard helper and
@@ -383,8 +428,16 @@ public class MainWindowTests
 
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
-        IConfirmationService? confirmation = null) =>
-        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+        IConfirmationService? confirmation = null,
+        ILinkFallbackPresenter? linkFallback = null) =>
+        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false, linkFallback);
+
+    private sealed class FakeLinkFallbackPresenter : ILinkFallbackPresenter
+    {
+        public List<(string Title, string Url)> Shown { get; } = [];
+
+        public void Show(string title, string url) => Shown.Add((title, url));
+    }
 
     private sealed class FakeConfirmationService : IConfirmationService
     {

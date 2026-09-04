@@ -33,6 +33,7 @@ public sealed class MainWindow : Window
     private readonly OperatorConsoleController _controller;
     private readonly Func<Task> _onExitRequested;
     private readonly IConfirmationService _confirmation;
+    private readonly ILinkFallbackPresenter _linkFallback;
     private readonly bool _marshalUpdates;
     private readonly CancellationTokenSource _pollCancellation = new();
     private readonly CancellationTokenSource _sessionCancellation = new();
@@ -132,12 +133,17 @@ public sealed class MainWindow : Window
         Func<Task> onExitRequested,
         IConfirmationService? confirmation,
         bool startPolling,
-        bool marshalUpdates = true)
+        bool marshalUpdates = true,
+        ILinkFallbackPresenter? linkFallback = null)
     {
         OperatorTheme.Register();
         _controller = controller;
         _onExitRequested = onExitRequested;
         _confirmation = confirmation ?? new TerminalConfirmationService();
+        _linkFallback = linkFallback ?? new TerminalLinkFallbackPresenter(
+            TerminalOut,
+            Environment.GetEnvironmentVariable("TERM"),
+            Environment.GetEnvironmentVariable("TMUX"));
         _marshalUpdates = marshalUpdates;
         _resourceBinding = new ListBinding(_resourceList);
         _evidenceBinding = new ListBinding(_evidenceList);
@@ -187,12 +193,12 @@ public sealed class MainWindow : Window
         _aspireDashboardButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => _controller.OpenKnownLinkAsync(KnownLinks.AspireDashboard, _sessionCancellation.Token));
+            OpenKnownLink("Aspire dashboard", KnownLinks.AspireDashboard);
         };
         _jaegerButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => _controller.OpenKnownLinkAsync(KnownLinks.Jaeger, _sessionCancellation.Token));
+            OpenKnownLink("Jaeger", KnownLinks.Jaeger);
         };
 
         Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content, _statusLine, _messageLine, statusBar);
@@ -817,6 +823,35 @@ public sealed class MainWindow : Window
         await _onExitRequested();
     }
 
+    /// <summary>
+    /// Tries the OS default browser first (works wherever one is actually
+    /// reachable); when that fails, falls back to a dialog showing the URL for
+    /// terminal-native clicking/selection plus an explicit Copy link action --
+    /// the OS browser almost never exists in this sandbox, and the previous
+    /// silent no-op left the operator with no way to reach the link at all.
+    /// </summary>
+    private void OpenKnownLink(string title, string linkId) =>
+        Dispatch(() => OpenKnownLinkAsync(title, linkId));
+
+    private async Task OpenKnownLinkAsync(string title, string linkId)
+    {
+        var result = await _controller.OpenKnownLinkAsync(linkId, _sessionCancellation.Token);
+        if (result.Succeeded)
+        {
+            return;
+        }
+
+        if (result.Url is null)
+        {
+            ShowMessage($"{title} is not available yet — attach or start a topology first.");
+            return;
+        }
+
+        RunOnUiThread(() => _linkFallback.Show(title, result.Url));
+    }
+
+    internal Task TriggerOpenKnownLinkForTestAsync(string title, string linkId) => OpenKnownLinkAsync(title, linkId);
+
     private void Dispatch(Func<Task> action)
     {
         var task = action();
@@ -1012,6 +1047,8 @@ public sealed class MainWindow : Window
     internal Button DetailsButton => _detailsButton;
 
     internal Button CopyButton => _copyButton;
+    internal Button JaegerButton => _jaegerButton;
+    internal Button AspireDashboardButton => _aspireDashboardButton;
 
     internal TextField SuppliedKeyField => _suppliedKey;
     internal Button RefreshButton => _refreshButton;

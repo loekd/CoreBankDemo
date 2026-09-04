@@ -922,11 +922,11 @@ public sealed class OperatorConsoleController
         return result;
     }
 
-    public Task<bool> OpenKnownLinkAsync(string linkId, CancellationToken ct)
+    public Task<LinkOpenResult> OpenKnownLinkAsync(string linkId, CancellationToken ct)
     {
         if (!KnownLinks.All.Contains(linkId))
         {
-            return Task.FromResult(false);
+            return Task.FromResult(new LinkOpenResult(false, null));
         }
 
         var resolvedUrl = linkId == KnownLinks.AspireDashboard
