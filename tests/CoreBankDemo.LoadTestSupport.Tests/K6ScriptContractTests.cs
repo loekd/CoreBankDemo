@@ -22,9 +22,22 @@ public sealed class K6ScriptContractTests
     [InlineData("all checks passed")]
     [InlineData("stage cardinality N/N/3N/3N")]
     [InlineData("canonical account set exact")]
+    [InlineData("per-key ordering")]
+    [InlineData("inline instant settlement")]
+    [InlineData("inline settlement evidence recorded")]
     public void Critical_state_gate_is_named_and_therefore_thresholded(string checkName)
     {
         Script.Should().Contain($"'{checkName}'");
+    }
+
+    [Fact]
+    public void Inline_settlement_counter_and_authority_record_only_completed_fresh_instant_requests()
+    {
+        Script.Should().Contain("res.status === 200 && parsedStatus === 'Completed'");
+        Script.Should().Contain("/run-evidence/inline-settlement");
+        Script.Should().Contain("instantSettledInlineCounter.add(1)");
+        Script.Should().Contain("setup instant probe settled inline");
+        Script.Should().Contain("!isRetry && keyIndex === 0");
     }
 
     [Fact]

@@ -105,6 +105,27 @@ public class HttpPaymentGatewayTests
     }
 
     [Fact]
+    public async Task Submit_202FailedBody_IsMalformedContractNotCommittedFailure()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("""{"paymentId":"p","transactionId":"expected","status":"Failed"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "expected");
+
+        var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        result.StatusCode.Should().Be(202);
+        result.Outcome.Should().Be(PaymentOutcome.TransportFailure);
+        result.ErrorSummary.Should().Contain("malformed");
+    }
+
+    [Fact]
     public async Task Submit_ConnectionFailureWithOmittedKey_IsAmbiguous()
     {
         using var client = new HttpClient(new StubHttpHandler(_ => throw new HttpRequestException("reset")));
@@ -137,6 +158,39 @@ public class HttpPaymentGatewayTests
         requests[0].AbsoluteUri.Should().Contain("key%2Fwith%20slash");
         requests[1].AbsoluteUri.Should().Be("http://localhost:5181/corebank/inbox");
         rejected.Succeeded.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError, false)]
+    [InlineData(HttpStatusCode.OK, true)]
+    public async Task Inspect_MapsHttpStatus(HttpStatusCode status, bool succeeded)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ => Task.FromResult(
+            new HttpResponseMessage(status) { Content = new StringContent("{}") })));
+
+        var result = await new HttpPaymentGateway(client)
+            .InspectAsync(TopologyProfile.LoadTests, KnownEndpoints.PaymentsOutbox, CancellationToken.None);
+
+        result.Succeeded.Should().Be(succeeded);
+        result.StatusCode.Should().Be((int)status);
+    }
+
+    [Fact]
+    public async Task Inspect_TimeoutAndTransportFailure_AreDistinctDetails()
+    {
+        var responses = new Queue<Func<Task<HttpResponseMessage>>>(
+        [
+            () => throw new TaskCanceledException("timeout"),
+            () => throw new HttpRequestException("connection"),
+        ]);
+        using var client = new HttpClient(new StubHttpHandler(_ => responses.Dequeue()()));
+        var gateway = new HttpPaymentGateway(client);
+
+        var timeout = await gateway.InspectAsync(TopologyProfile.LoadTests, KnownEndpoints.PaymentsOutbox, CancellationToken.None);
+        var connection = await gateway.InspectAsync(TopologyProfile.LoadTests, KnownEndpoints.PaymentsOutbox, CancellationToken.None);
+
+        timeout.ErrorSummary.Should().Contain("timed out");
+        connection.ErrorSummary.Should().Contain("connection");
     }
 
     private sealed class StubHttpHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler

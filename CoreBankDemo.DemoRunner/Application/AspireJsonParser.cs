@@ -30,10 +30,22 @@ public static class AspireJsonParser
                     && resource.ReplicaCount != KnownResources.ExpectedReplicaCount(resource.Name))
                 .Select(resource => $"{resource.Name} expected {KnownResources.ExpectedReplicaCount(resource.Name)}, found {resource.ReplicaCount}")
                 .ToList();
-            var fingerprintMatch = missing.Count == 0 && replicaMismatches.Count == 0;
+            var endpointMismatches = KnownResources.ExpectedEndpointPorts(profile)
+                .Where(expected =>
+                {
+                    var resource = resources.FirstOrDefault(item => item.Name == expected.Key);
+                    return resource is null || !resource.Endpoints.Any(endpoint =>
+                        Uri.TryCreate(endpoint, UriKind.Absolute, out var uri) && uri.Port == expected.Value);
+                })
+                .Select(expected => $"{expected.Key} expected port {expected.Value}")
+                .ToList();
+            var fingerprintMatch = missing.Count == 0
+                && replicaMismatches.Count == 0
+                && endpointMismatches.Count == 0;
             var fingerprint = string.Join(
                 ",",
-                resources.Select(resource => $"{resource.Name}:{resource.ReplicaCount}"));
+                resources.Select(resource =>
+                    $"{resource.Name}:{resource.ReplicaCount}:{string.Join("|", resource.Endpoints.Order(StringComparer.Ordinal))}"));
 
             return new TopologySnapshot(
                 profile,
@@ -44,7 +56,7 @@ public static class AspireJsonParser
                 resources,
                 fingerprintMatch
                     ? null
-                    : $"Fingerprint mismatch; missing: {string.Join(", ", missing)}; replicas: {string.Join(", ", replicaMismatches)}.",
+                    : $"Fingerprint mismatch; missing: {string.Join(", ", missing)}; replicas: {string.Join(", ", replicaMismatches)}; endpoints: {string.Join(", ", endpointMismatches)}.",
                 dashboardUrl);
         }
         catch (JsonException ex)
@@ -99,6 +111,11 @@ public static class AspireJsonParser
 
     private static bool MatchesKnownName(ResourceCandidate candidate, string knownName)
     {
+        if (candidate.ResourceType.Contains("Parameter", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var nameMatches = string.Equals(candidate.DisplayName, knownName, StringComparison.OrdinalIgnoreCase)
             || string.Equals(candidate.InstanceName, knownName, StringComparison.OrdinalIgnoreCase)
             || candidate.InstanceName.StartsWith(knownName + "-", StringComparison.OrdinalIgnoreCase)

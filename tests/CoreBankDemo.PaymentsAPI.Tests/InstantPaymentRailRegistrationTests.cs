@@ -4,6 +4,7 @@ using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults;
+using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
@@ -154,6 +155,8 @@ public class InstantPaymentRailRegistrationTests
         services.AddLogging();
         services.AddSingleton<BusinessMetrics>();
         services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<IDistributedLockService, NoOpDistributedLockService>();
+        services.AddOptions<OutboxProcessingOptions>();
         services.AddInstantPaymentRail(Configuration(values));
         services.AddScoped(_ => new Mock<IOutboxMessageStore<OutboxMessage>>().Object);
         services.AddScoped(_ => new Mock<ICoreBankTransactionForwarder>().Object);

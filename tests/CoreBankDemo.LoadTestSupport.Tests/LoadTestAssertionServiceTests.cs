@@ -36,9 +36,20 @@ public class LoadTestAssertionServiceTests
         int outboxCompleted = 0,
         int outboxPending = 0,
         int outboxUniqueKeys = 0,
-        IReadOnlyList<LoadTestAccountBalance>? loadTestAccounts = null)
+        IReadOnlyList<LoadTestAccountBalance>? loadTestAccounts = null,
+        IReadOnlyList<OrderingObservation>? orderingObservations = null,
+        int inlineSettlementCount = 1)
     {
         var downstreamCount = (expectedUnique ?? 0) * 3;
+        var transactions = completedTransactions ?? [];
+        var ordering = orderingObservations ?? transactions
+            .Select((transaction, index) => new OrderingObservation(
+                "CoreBankInbox",
+                0,
+                transaction.IdempotencyKey,
+                new DateTime(2026, 1, 1).AddSeconds(index),
+                new DateTime(2026, 1, 1).AddSeconds(index + 1)))
+            .ToList();
         return
         LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
             ExpectedUnique: expectedUnique,
@@ -46,18 +57,20 @@ public class LoadTestAssertionServiceTests
             CoreBankInbox: new MessageStoreSummary(completedCount + failedCount + pendingCount, completedCount, failedCount, pendingCount),
             CoreBankOutbox: new MessageStoreSummary(downstreamCount, downstreamCount, 0, 0),
             PaymentsInbox: new MessageStoreSummary(downstreamCount, downstreamCount, 0, 0),
-            CompletedTransactions: completedTransactions ?? [],
+            CompletedTransactions: transactions,
             DuplicateKeys: duplicateKeys ?? [],
             OutboxUniqueKeys: outboxUniqueKeys,
-            LoadTestAccounts: loadTestAccounts ?? UntouchedAccounts()));
+            LoadTestAccounts: loadTestAccounts ?? UntouchedAccounts(),
+            OrderingObservations: ordering,
+            InlineInstantSettlementCount: inlineSettlementCount));
     }
 
     [Fact]
-    public void Untouched_accounts_pass_every_check_with_zero_activity()
+    public void Untouched_accounts_do_not_claim_ordering_proof_with_zero_activity()
     {
         var result = Compute(expectedUnique: 0, totalOutbox: 0, loadTestAccounts: UntouchedAccounts());
 
-        result.AllPassed.Should().BeTrue();
+        result.AllPassed.Should().BeFalse();
         result.Checks.NoFailedMessages.Passed.Should().BeTrue();
         result.Checks.NoPendingMessages.Passed.Should().BeTrue();
         result.Checks.NoDuplicateProcessing.Passed.Should().BeTrue();
@@ -65,6 +78,7 @@ public class LoadTestAssertionServiceTests
         result.Checks.AllSubmittedProcessed.Passed.Should().BeTrue();
         result.Checks.BalanceConservation.Passed.Should().BeTrue();
         result.Checks.BalancesCorrect.Passed.Should().BeTrue();
+        result.Checks.PerKeyOrdering.Passed.Should().BeFalse();
         result.Summary.TotalBalance.Should().Be(AccountCount * InitialBalance);
     }
 
@@ -328,11 +342,69 @@ public class LoadTestAssertionServiceTests
             ],
             DuplicateKeys: [],
             OutboxUniqueKeys: 2,
-            LoadTestAccounts: UntouchedAccounts()));
+            LoadTestAccounts: UntouchedAccounts(),
+            OrderingObservations:
+            [
+                new OrderingObservation("CoreBankInbox", 0, "key-1", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
+                new OrderingObservation("CoreBankInbox", 0, "key-2", new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
+            ],
+            InlineInstantSettlementCount: 1));
 
         result.Checks.StageCardinality.Passed.Should().BeTrue();
         result.Checks.CanonicalAccountSet.Passed.Should().BeTrue();
         result.AllPassed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Ordering_inversion_fails_with_exact_partition_evidence()
+    {
+        var observations = new[]
+        {
+            new OrderingObservation("PaymentsOutbox", 2, "earlier", new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 5)),
+            new OrderingObservation("PaymentsOutbox", 2, "later", new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 4)),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerKeyOrdering.Passed.Should().BeFalse();
+        result.Checks.PerKeyOrdering.Detail.Should().Contain("PaymentsOutbox").And.Contain("partition-2");
+        result.Debug.OrderingViolations.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void Ordering_inversion_is_still_detected_when_both_rows_share_an_identical_enqueued_timestamp()
+    {
+        // Patch 5 regression test: timestamps come from TimeProvider.GetUtcNow()
+        // per-request, so two rows in the same partition can genuinely land on
+        // the exact same tick under real concurrent load. Grouping solely by
+        // EnqueuedAt used to collapse them into one incomparable group; the Id
+        // tiebreaker (the same column GetClaimableMessagesQuery already uses)
+        // must keep them distinguishable so a real violation is still caught.
+        var sameInstant = new DateTime(2026, 1, 1, 0, 0, 0);
+        var earlierId = new Guid("00000000-0000-0000-0000-000000000001");
+        var laterId = new Guid("00000000-0000-0000-0000-000000000002");
+        var observations = new[]
+        {
+            new OrderingObservation(
+                "PaymentsOutbox", 2, "earlier", sameInstant, new DateTime(2026, 1, 1, 0, 0, 5), earlierId),
+            new OrderingObservation(
+                "PaymentsOutbox", 2, "later", sameInstant, new DateTime(2026, 1, 1, 0, 0, 4), laterId),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerKeyOrdering.Passed.Should().BeFalse();
+        result.Checks.PerKeyOrdering.Detail.Should().Contain("PaymentsOutbox").And.Contain("partition-2");
+        result.Debug.OrderingViolations.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void Inline_settlement_requires_authoritative_positive_count()
+    {
+        var result = Compute(expectedUnique: 0, inlineSettlementCount: 0);
+
+        result.Checks.InlineInstantSettlement.Passed.Should().BeFalse();
+        result.Summary.InlineInstantSettlementCount.Should().Be(0);
     }
 
     [Fact]

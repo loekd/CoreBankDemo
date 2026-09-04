@@ -74,6 +74,8 @@ public class PresentationModelBuilderTests
             Profile = TopologyProfile.LoadTests,
             Ownership = TopologyOwnership.Owned,
             RunGeneration = 4,
+            Topology = OperatorHarness.Snapshot(TopologyProfile.LoadTests),
+            ResourceAuthorityAvailable = true,
             Evidence = [evidence],
             SelectedEvidence = evidence,
             LastLoadResult = result,

@@ -1,3 +1,5 @@
+using CoreBankDemo.DemoRunner.Application.Doctor;
+
 namespace CoreBankDemo.DemoRunner.Application;
 
 public enum WorkspaceKind
@@ -157,7 +159,8 @@ public sealed record TopologyHandle(
     TopologyProfile Profile,
     bool IsOwned,
     int? ProcessId,
-    string Fingerprint);
+    string Fingerprint,
+    string ProjectPath);
 
 public sealed record ActiveMutation(MutationKind Kind, string Target, DateTimeOffset StartedAt);
 
@@ -221,7 +224,11 @@ public sealed record BurstProgress(
 
 public sealed record InvariantResult(string Name, bool Passed, string Detail);
 
-public sealed record InlineSettlementResult(bool Observed, string Detail);
+public sealed record InlineSettlementResult(
+    bool Observed,
+    string Detail,
+    int Count = 0,
+    bool ThresholdPassed = false);
 
 public sealed record LoadWorkflowProgress(LoadWorkflowPhase Phase, TimeSpan Elapsed, string Detail);
 
@@ -251,13 +258,14 @@ public sealed record LoadWorkflowResult(
         LoadWorkflowPhase phase,
         string error,
         IReadOnlyList<InvariantResult>? invariants = null,
-        string investigationDetail = "") =>
+        string investigationDetail = "",
+        InlineSettlementResult? inlineSettlement = null) =>
         new(
             false,
             false,
             phase,
             invariants ?? [],
-            new InlineSettlementResult(false, "Not proven by a successful k6 run."),
+            inlineSettlement ?? new InlineSettlementResult(false, "Not reported by the accepted harness."),
             investigationDetail,
             error);
 }
@@ -268,6 +276,7 @@ public sealed record OperatorConsoleState(
     TopologyOwnership Ownership,
     int RunGeneration,
     TopologySnapshot? Topology,
+    DoctorReport? Preflight,
     bool ResourceAuthorityAvailable,
     ActiveMutation? ActiveMutation,
     IReadOnlyList<EvidenceRecord> Evidence,
@@ -284,6 +293,7 @@ public sealed record OperatorConsoleState(
         TopologyProfile.None,
         TopologyOwnership.None,
         0,
+        null,
         null,
         false,
         null,

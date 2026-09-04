@@ -16,4 +16,8 @@
     <PackageReference Include="Terminal.Gui" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CoreBankDemo.DemoRunner.Tests" />
+  </ItemGroup>
+
 </Project>

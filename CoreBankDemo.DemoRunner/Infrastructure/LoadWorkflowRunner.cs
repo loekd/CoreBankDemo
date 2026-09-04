@@ -28,30 +28,54 @@ public sealed class LoadWorkflowRunner(
         CancellationToken ct)
     {
         var startedAt = time.GetUtcNow();
+
+        async Task<LoadWorkflowResult> FailAsync(
+            LoadWorkflowPhase phase,
+            string error,
+            string? assertionBody = null,
+            IReadOnlyList<InvariantResult>? invariants = null,
+            InlineSettlementResult? inline = null)
+        {
+            progress.Report(new LoadWorkflowProgress(
+                LoadWorkflowPhase.Investigate,
+                time.GetUtcNow() - startedAt,
+                $"Investigating failure from {phase}."));
+            var investigation = await BuildInvestigationAsync(assertionBody, ct);
+            progress.Report(new LoadWorkflowProgress(
+                LoadWorkflowPhase.Failed,
+                time.GetUtcNow() - startedAt,
+                error));
+            return LoadWorkflowResult.Failure(phase, error, invariants, investigation, inline);
+        }
+
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Reset, TimeSpan.Zero, "Resetting disposable LoadTests state."));
         var reset = await SendAsync(KnownEndpoints.LoadReset, HttpMethod.Post, null, ct);
         if (!reset.Succeeded)
         {
-            return LoadWorkflowResult.Failure(LoadWorkflowPhase.Reset, reset.ErrorSummary ?? "Reset failed.");
+            return await FailAsync(LoadWorkflowPhase.Reset, reset.ErrorSummary ?? "Reset failed.");
         }
 
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Run, time.GetUtcNow() - startedAt, "Starting the accepted k6 resource."));
         var beforeRun = await aspire.GetSnapshotAsync(TopologyProfile.LoadTests, ct);
-        var priorExecutionIdentity = beforeRun.FindResource(KnownResources.K6)?.ExecutionIdentity;
+        var k6BeforeRun = beforeRun.FindResource(KnownResources.K6);
+        var priorExecutionIdentity = k6BeforeRun?.ExecutionIdentity;
+        var runCommand = k6BeforeRun?.Supports(ResourceCommand.Start) == true
+            ? ResourceCommand.Start
+            : ResourceCommand.Restart;
         var dispatch = await aspire.ExecuteResourceCommandAsync(
             TopologyProfile.LoadTests,
             KnownResources.K6,
-            ResourceCommand.Restart,
+            runCommand,
             ct);
         if (!dispatch.Dispatched)
         {
-            return LoadWorkflowResult.Failure(LoadWorkflowPhase.Run, dispatch.Detail);
+            return await FailAsync(LoadWorkflowPhase.Run, dispatch.Detail);
         }
 
         var k6 = await WaitForK6Async(startedAt, priorExecutionIdentity, progress, ct);
         if (!k6.Succeeded)
         {
-            return LoadWorkflowResult.Failure(LoadWorkflowPhase.Run, k6.ErrorSummary ?? "k6 did not finish successfully.");
+            return await FailAsync(LoadWorkflowPhase.Run, k6.ErrorSummary ?? "k6 did not finish successfully.");
         }
 
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Wait, time.GetUtcNow() - startedAt, "Waiting for all four stores to drain."));
@@ -61,7 +85,7 @@ public sealed class LoadWorkflowRunner(
             var drain = await SendAsync(KnownEndpoints.LoadDrain, HttpMethod.Get, null, ct);
             if (!drain.Succeeded)
             {
-                return LoadWorkflowResult.Failure(LoadWorkflowPhase.Wait, drain.ErrorSummary ?? "Drain probe failed.");
+                return await FailAsync(LoadWorkflowPhase.Wait, drain.ErrorSummary ?? "Drain probe failed.");
             }
 
             if (ReadBoolean(drain.Body, "isDrained") == true)
@@ -75,7 +99,7 @@ public sealed class LoadWorkflowRunner(
 
         if (time.GetUtcNow() > drainDeadline)
         {
-            return LoadWorkflowResult.Failure(LoadWorkflowPhase.Wait, "Timed out waiting for all four message stores to drain.");
+            return await FailAsync(LoadWorkflowPhase.Wait, "Timed out waiting for all four message stores to drain.");
         }
 
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Assert, time.GetUtcNow() - startedAt, "Reading LoadTestSupport assertion authority."));
@@ -85,26 +109,31 @@ public sealed class LoadWorkflowRunner(
         var assertion = await SendAsync(KnownEndpoints.LoadAssert, HttpMethod.Get, query, ct);
         if (!assertion.Succeeded)
         {
-            return LoadWorkflowResult.Failure(LoadWorkflowPhase.Assert, assertion.ErrorSummary ?? "Assertion request failed.");
-        }
-
-        if (ReadBoolean(assertion.Body, "allPassed") != true)
-        {
-            return LoadWorkflowResult.Failure(
-                LoadWorkflowPhase.Assert,
-                "LoadTestSupport reported allPassed=false.",
-                investigationDetail: assertion.Body ?? string.Empty);
+            return await FailAsync(LoadWorkflowPhase.Assert, assertion.ErrorSummary ?? "Assertion request failed.", assertion.Body);
         }
 
         var invariants = CanonicalInvariants
             .Select(definition => ReadInvariant(assertion.Body, definition.Name, definition.Keys))
             .ToList();
+        var inline = ReadInlineSettlement(assertion.Body);
+        var authoritativePass = ReadBoolean(assertion.Body, "allPassed") == true;
 
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Investigate, time.GetUtcNow() - startedAt, "Capturing the accepted harness source detail."));
         var investigation = await BuildInvestigationAsync(assertion.Body, ct);
-        var inline = new InlineSettlementResult(
-            true,
-            "Passed: successful k6 completion includes its instant_settled_inline count>0 threshold.");
+        if (!authoritativePass)
+        {
+            progress.Report(new LoadWorkflowProgress(
+                LoadWorkflowPhase.Failed,
+                time.GetUtcNow() - startedAt,
+                "LoadTestSupport reported allPassed=false."));
+            return LoadWorkflowResult.Failure(
+                LoadWorkflowPhase.Assert,
+                "LoadTestSupport reported allPassed=false.",
+                invariants,
+                investigation,
+                inline);
+        }
+
         var result = LoadWorkflowResult.Success(invariants, inline, investigation);
         progress.Report(new LoadWorkflowProgress(
             result.AllPassed ? LoadWorkflowPhase.Completed : LoadWorkflowPhase.Failed,
@@ -120,6 +149,7 @@ public sealed class LoadWorkflowRunner(
         CancellationToken ct)
     {
         var deadline = time.GetUtcNow() + K6Timeout;
+        var sawNewExecutionState = false;
         while (time.GetUtcNow() <= deadline)
         {
             var snapshot = await aspire.GetSnapshotAsync(TopologyProfile.LoadTests, ct);
@@ -134,8 +164,15 @@ public sealed class LoadWorkflowRunner(
                 return new InspectionResult(false, 0, KnownResources.K6, null, resource.Detail ?? "k6 failed.", time.GetUtcNow() - startedAt);
             }
 
+            if (resource?.Condition is ResourceCondition.Starting or ResourceCondition.Running)
+            {
+                sawNewExecutionState = true;
+            }
+
+            var identityChanged = !string.IsNullOrWhiteSpace(resource?.ExecutionIdentity)
+                && !string.Equals(resource.ExecutionIdentity, priorExecutionIdentity, StringComparison.Ordinal);
             if (resource?.Condition == ResourceCondition.Completed
-                && !string.Equals(resource.ExecutionIdentity, priorExecutionIdentity, StringComparison.Ordinal))
+                && (identityChanged || sawNewExecutionState))
             {
                 return new InspectionResult(true, 0, KnownResources.K6, resource.Detail, null, time.GetUtcNow() - startedAt);
             }
@@ -144,12 +181,17 @@ public sealed class LoadWorkflowRunner(
             await Task.Delay(PollInterval, time, ct);
         }
 
-        return new InspectionResult(false, 0, KnownResources.K6, null, "Timed out waiting for k6 completion.", time.GetUtcNow() - startedAt);
+        return new InspectionResult(false, 0, KnownResources.K6, null, "Timed out waiting for a distinguishable k6 execution to complete.", time.GetUtcNow() - startedAt);
     }
 
     private async Task<string> BuildInvestigationAsync(string? assertionBody, CancellationToken ct)
     {
-        var sections = new List<string> { $"ASSERT RESULTS{Environment.NewLine}{assertionBody}" };
+        var sections = new List<string>();
+        if (!string.IsNullOrWhiteSpace(assertionBody))
+        {
+            sections.Add($"ASSERT RESULTS{Environment.NewLine}{assertionBody}");
+        }
+
         foreach (var endpoint in new[]
                  {
                      KnownEndpoints.PaymentsOutbox,
@@ -224,6 +266,15 @@ public sealed class LoadWorkflowRunner(
         return new InvariantResult(name, false, "Not reported by LoadTestSupport.");
     }
 
+    private static InlineSettlementResult ReadInlineSettlement(string? json)
+    {
+        var passed = ReadBoolean(json, "checks", "inlineInstantSettlement", "passed") == true;
+        var detail = ReadString(json, "checks", "inlineInstantSettlement", "detail")
+            ?? "Not reported by LoadTestSupport.";
+        var count = ReadInt32(json, "summary", "inlineInstantSettlementCount") ?? 0;
+        return new InlineSettlementResult(passed && count > 0, detail, count, passed);
+    }
+
     private static InvariantResult CombineChecks(string? json, string name, IReadOnlyList<string> keys)
     {
         var checks = keys.Select(key => new
@@ -251,6 +302,14 @@ public sealed class LoadWorkflowRunner(
             : null;
     }
 
+    private static int? ReadInt32(string? json, params string[] path)
+    {
+        var value = Navigate(json, path);
+        return value is { ValueKind: JsonValueKind.Number } && value.Value.TryGetInt32(out var result)
+            ? result
+            : null;
+    }
+
     private static string? ReadString(string? json, params string[] path)
     {
         var value = Navigate(json, path);
@@ -270,6 +329,11 @@ public sealed class LoadWorkflowRunner(
             var current = document.RootElement;
             foreach (var segment in path)
             {
+                if (current.ValueKind != JsonValueKind.Object)
+                {
+                    return null;
+                }
+
                 var found = false;
                 foreach (var property in current.EnumerateObject())
                 {

@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
+using System.Drawing;
 using System.Globalization;
 using CoreBankDemo.DemoRunner.Application;
+using CoreBankDemo.DemoRunner.Application.Ports;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
@@ -14,6 +16,8 @@ public sealed class MainWindow : Window
     private const int CompactWidthThreshold = 100;
     private readonly OperatorConsoleController _controller;
     private readonly Func<Task> _onExitRequested;
+    private readonly IConfirmationService _confirmation;
+    private readonly bool _marshalUpdates;
     private readonly CancellationTokenSource _pollCancellation = new();
     private readonly CancellationTokenSource _sessionCancellation = new();
     private readonly object _activeActionsLock = new();
@@ -57,6 +61,7 @@ public sealed class MainWindow : Window
     private readonly Button _stopButton = new() { Text = "Stop AppHost" };
     private readonly Button _switchButton = new() { Text = "Switch topology" };
     private readonly Button _resourceActionButton = new() { Text = "Resource action" };
+    private readonly Button _restartResourceButton = new() { Text = "Restart selected" };
     private readonly Button _refreshButton = new() { Text = "Refresh live state" };
 
     private readonly ListView _evidenceList = new();
@@ -78,10 +83,22 @@ public sealed class MainWindow : Window
     private IReadOnlyList<EvidenceRowViewModel> _evidenceRows = [];
 
     public MainWindow(OperatorConsoleController controller, Func<Task> onExitRequested)
+        : this(controller, onExitRequested, null, true)
+    {
+    }
+
+    internal MainWindow(
+        OperatorConsoleController controller,
+        Func<Task> onExitRequested,
+        IConfirmationService? confirmation,
+        bool startPolling,
+        bool marshalUpdates = true)
     {
         OperatorTheme.Register();
         _controller = controller;
         _onExitRequested = onExitRequested;
+        _confirmation = confirmation ?? new TerminalConfirmationService();
+        _marshalUpdates = marshalUpdates;
         Title = "CoreBankDemo — Operator Console";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
@@ -90,6 +107,7 @@ public sealed class MainWindow : Window
         OperatorTheme.Apply(_burstButton, OperatorTheme.ActionScheme);
         OperatorTheme.Apply(_queryButton, OperatorTheme.ActionScheme);
         OperatorTheme.Apply(_resourceActionButton, OperatorTheme.DestructiveScheme);
+        OperatorTheme.Apply(_restartResourceButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_stopButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_switchButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_runLoadButton, OperatorTheme.DestructiveScheme);
@@ -138,7 +156,10 @@ public sealed class MainWindow : Window
         Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content, _evidenceStrip, statusBar);
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
-        _ = PollAsync(_pollCancellation.Token);
+        if (startPolling)
+        {
+            _ = PollAsync(_pollCancellation.Token);
+        }
     }
 
     private View BuildOperationsView()
@@ -179,7 +200,7 @@ public sealed class MainWindow : Window
         _resendButton.X = Pos.Right(_submitButton) + 2;
         _resendButton.Y = 7;
         _submitButton.Accepted += (_, e) => { e.Handled = true; Dispatch(SubmitPaymentAsync); };
-        _resendButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.ResendLastPaymentAsync(_sessionCancellation.Token)); };
+        _resendButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token))); };
 
         AddField(view, "Burst count", _burstCount, 9, 16);
         AddField(view, "Concurrency", _burstConcurrency, 9, 45, 8);
@@ -191,7 +212,14 @@ public sealed class MainWindow : Window
         _burstStatus.Y = 11;
         _burstStatus.Width = Dim.Fill(1);
         _burstButton.Accepted += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
-        _cancelBurstButton.Accepted += (_, e) => { e.Handled = true; _controller.CancelActiveBurst(); };
+        _cancelBurstButton.Accepted += (_, e) =>
+        {
+            e.Handled = true;
+            if (!_controller.CancelActiveBurst())
+            {
+                ShowMessage("No active burst is available to cancel.");
+            }
+        };
 
         AddField(view, "Outcome id/key", _outcomeKey, 13);
         _queryButton.X = 1;
@@ -199,7 +227,7 @@ public sealed class MainWindow : Window
         _queryButton.Accepted += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => _controller.QueryOutcomeAsync(_outcomeKey.Text.ToString() ?? string.Empty, _sessionCancellation.Token));
+            Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(_outcomeKey.Text.ToString() ?? string.Empty, _sessionCancellation.Token)));
         };
         view.Add(_railButton, _idempotencyButton, _submitButton, _resendButton, _burstButton, _cancelBurstButton, _burstStatus, _queryButton);
         return view;
@@ -228,49 +256,66 @@ public sealed class MainWindow : Window
         _switchButton.Y = Pos.AnchorEnd(3);
         _resourceActionButton.X = Pos.Right(_switchButton) + 1;
         _resourceActionButton.Y = Pos.AnchorEnd(3);
-        _refreshButton.X = Pos.Right(_resourceActionButton) + 1;
+        _restartResourceButton.X = Pos.Right(_resourceActionButton) + 1;
+        _restartResourceButton.Y = Pos.AnchorEnd(3);
+        _refreshButton.X = Pos.Right(_restartResourceButton) + 1;
         _refreshButton.Y = Pos.AnchorEnd(3);
 
-        _startRegularButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.StartAsync(TopologyProfile.Regular, _sessionCancellation.Token)); };
-        _attachRegularButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.AttachAsync(TopologyProfile.Regular, _sessionCancellation.Token)); };
-        _startLoadButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.StartAsync(TopologyProfile.LoadTests, _sessionCancellation.Token)); };
-        _attachLoadButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.AttachAsync(TopologyProfile.LoadTests, _sessionCancellation.Token)); };
+        _startRegularButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
+        _attachRegularButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
+        _startLoadButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.LoadTests, _sessionCancellation.Token))); };
+        _attachLoadButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.LoadTests, _sessionCancellation.Token))); };
         _stopButton.Accepted += (_, e) =>
         {
             e.Handled = true;
-            if (ConfirmDestructive("Stop owned AppHost", "Stop the exact AppHost child owned by this session?"))
+            IReadOnlyList<string> instance = _controller.OwnedProcessId is { } pid
+                ? [$"{_controller.State.Profile} AppHost PID {pid}"]
+                : [];
+            if (ConfirmAndRestore(
+                    new ConfirmationRequest("Stop owned AppHost", "aspire stop --apphost <exact known project>", instance),
+                    _stopButton))
             {
-                Dispatch(() => _controller.StopAsync(_sessionCancellation.Token));
+                Dispatch(() => SurfaceAsync(_controller.StopAsync(_sessionCancellation.Token)));
             }
         };
         _switchButton.Accepted += (_, e) =>
         {
             e.Handled = true;
             var target = _controller.State.Profile == TopologyProfile.Regular ? TopologyProfile.LoadTests : TopologyProfile.Regular;
-            if (ConfirmDestructive($"Switch to {target}", $"Stop the owned AppHost and start {target}?"))
+            if (ConfirmAndRestore(
+                    new ConfirmationRequest($"Switch to {target}", $"aspire stop current && aspire start {target}", [$"{_controller.State.Profile} AppHost", $"{target} AppHost"]),
+                    _switchButton))
             {
-                Dispatch(() => _controller.SwitchAsync(target, _sessionCancellation.Token));
+                Dispatch(() => SurfaceAsync(_controller.SwitchAsync(target, _sessionCancellation.Token)));
             }
         };
         _resourceActionButton.Accepted += (_, e) =>
         {
             e.Handled = true;
+            TriggerSelectedResourceAction();
+        };
+        _restartResourceButton.Accepted += (_, e) =>
+        {
+            e.Handled = true;
             if (_resourceRows.Count == 0)
             {
+                ShowMessage("Select a verified resource before restarting.");
                 return;
             }
 
             var index = Math.Clamp(_resourceList.SelectedItem ?? 0, 0, _resourceRows.Count - 1);
             var row = _resourceRows[index];
-            if (!Enum.TryParse<ResourceCommand>(row.NextAction, out var command))
+            if (!row.CanRestart)
             {
+                ShowMessage($"{row.Name} cannot be restarted from the current fresh Aspire state.");
                 return;
             }
 
-            var exactCommand = $"aspire resource {row.Name} {row.NextAction.ToLowerInvariant()}";
-            if (ConfirmDestructive($"{row.NextAction} {row.Name}", exactCommand))
+            if (ConfirmAndRestore(
+                    new ConfirmationRequest($"Restart {row.Name}", ExactCommands(row.Instances, "Restart"), row.Instances),
+                    _restartResourceButton))
             {
-                Dispatch(() => _controller.ExecuteResourceCommandAsync(row.Name, command, _sessionCancellation.Token));
+                Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, ResourceCommand.Restart, _sessionCancellation.Token)));
             }
         };
         _refreshButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token)); };
@@ -284,6 +329,7 @@ public sealed class MainWindow : Window
             _stopButton,
             _switchButton,
             _resourceActionButton,
+            _restartResourceButton,
             _refreshButton);
         return view;
     }
@@ -328,9 +374,9 @@ public sealed class MainWindow : Window
             _evidenceDetail.WordWrap = !_evidenceDetail.WordWrap;
             _wrapButton.Text = _evidenceDetail.WordWrap ? "Wrap: on" : "Wrap: off";
         };
-        _exportButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.ExportEvidenceAsync(_sessionCancellation.Token)); };
-        _inspectPaymentsOutbox.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.InspectAsync(KnownEndpoints.PaymentsOutbox, _sessionCancellation.Token)); };
-        _inspectCoreBankInbox.Accepted += (_, e) => { e.Handled = true; Dispatch(() => _controller.InspectAsync(KnownEndpoints.CoreBankInbox, _sessionCancellation.Token)); };
+        _exportButton.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token))); };
+        _inspectPaymentsOutbox.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.PaymentsOutbox, _sessionCancellation.Token))); };
+        _inspectCoreBankInbox.Accepted += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.CoreBankInbox, _sessionCancellation.Token))); };
 
         view.Add(_evidenceList, _evidenceDetail, _detailsButton, _wrapButton, _exportButton, _inspectPaymentsOutbox, _inspectCoreBankInbox);
         return view;
@@ -352,7 +398,9 @@ public sealed class MainWindow : Window
         _runLoadButton.Accepted += (_, e) =>
         {
             e.Handled = true;
-            if (ConfirmDestructive("Run accepted load workflow", "Reset disposable LoadTests state, run k6, wait, assert, and investigate?"))
+            if (ConfirmAndRestore(
+                    new ConfirmationRequest("Run accepted load workflow", "Reset → Run → Wait → Assert → Investigate", [KnownResources.LoadTestSupport, KnownResources.K6]),
+                    _runLoadButton))
             {
                 if (!int.TryParse(_expectedUnique.Text.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var value)
                     || value <= 0)
@@ -361,7 +409,7 @@ public sealed class MainWindow : Window
                     return;
                 }
                 var expected = (int?)value;
-                Dispatch(() => _controller.RunLoadTestAsync(expected, _sessionCancellation.Token));
+                Dispatch(() => SurfaceAsync(_controller.RunLoadTestAsync(expected, _sessionCancellation.Token)));
             }
         };
         view.Add(_loadPhase, _loadResults, _runLoadButton);
@@ -372,6 +420,7 @@ public sealed class MainWindow : Window
     {
         if (!decimal.TryParse(_amount.Text.ToString(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var amount))
         {
+            ShowMessage("Amount must be a decimal using '.' as the separator.");
             return;
         }
 
@@ -381,11 +430,11 @@ public sealed class MainWindow : Window
             amount,
             _currency.Text.ToString() ?? string.Empty,
             _rail);
-        await _controller.SubmitPaymentAsync(
+        await SurfaceAsync(_controller.SubmitPaymentAsync(
             request,
             _idempotencyMode,
             _idempotencyMode == IdempotencyMode.Supplied ? _suppliedKey.Text.ToString() : null,
-            _sessionCancellation.Token);
+            _sessionCancellation.Token));
     }
 
     private async Task RunBurstAsync()
@@ -394,6 +443,7 @@ public sealed class MainWindow : Window
             || !int.TryParse(_burstCount.Text.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var count)
             || !int.TryParse(_burstConcurrency.Text.ToString(), NumberStyles.None, CultureInfo.InvariantCulture, out var concurrency))
         {
+            ShowMessage("Burst requires a valid decimal amount, positive count, and positive concurrency.");
             return;
         }
 
@@ -403,7 +453,7 @@ public sealed class MainWindow : Window
             amount,
             _currency.Text.ToString() ?? string.Empty,
             _rail);
-        await _controller.RunBurstAsync(request, count, concurrency, _sessionCancellation.Token);
+        await SurfaceAsync(_controller.RunBurstAsync(request, count, concurrency, _sessionCancellation.Token));
     }
 
     private Button CreateNavigationButton(string text, WorkspaceKind workspace, int y)
@@ -431,8 +481,17 @@ public sealed class MainWindow : Window
 
     private void ActivateWorkspace(WorkspaceKind workspace) => _controller.SelectWorkspace(workspace);
 
-    private void OnStateChanged(OperatorConsoleState state) =>
-        AppTerminal.Invoke(() => Render(PresentationModelBuilder.Build(state)));
+    private void OnStateChanged(OperatorConsoleState state)
+    {
+        if (_marshalUpdates)
+        {
+            AppTerminal.Invoke(() => Render(PresentationModelBuilder.Build(state)));
+        }
+        else
+        {
+            Render(PresentationModelBuilder.Build(state));
+        }
+    }
 
     public async Task RefreshAsync()
     {
@@ -488,14 +547,24 @@ public sealed class MainWindow : Window
         _resendButton.Enabled = model.CanResend;
         _burstButton.Enabled = !model.IsBusy;
         _cancelBurstButton.Enabled = model.CanCancelBurst;
-        _startRegularButton.Enabled = !model.IsBusy && _controller.State.Profile == TopologyProfile.None;
-        _attachRegularButton.Enabled = !model.IsBusy && _controller.State.Ownership == TopologyOwnership.None;
-        _startLoadButton.Enabled = !model.IsBusy && _controller.State.Profile == TopologyProfile.None;
-        _attachLoadButton.Enabled = !model.IsBusy && _controller.State.Ownership == TopologyOwnership.None;
+        var state = _controller.State;
+        _startRegularButton.Enabled = !model.IsBusy && state.Preflight?.CanStart(TopologyProfile.Regular) == true;
+        _attachRegularButton.Enabled = !model.IsBusy
+            && state.Ownership == TopologyOwnership.None
+            && state.Preflight is not null
+            && state.Preflight.Profiles.TryGetValue(TopologyProfile.Regular, out var regularProfile)
+            && regularProfile.CanAttach;
+        _startLoadButton.Enabled = !model.IsBusy && state.Preflight?.CanStart(TopologyProfile.LoadTests) == true;
+        _attachLoadButton.Enabled = !model.IsBusy
+            && state.Ownership == TopologyOwnership.None
+            && state.Preflight is not null
+            && state.Preflight.Profiles.TryGetValue(TopologyProfile.LoadTests, out var loadProfile)
+            && loadProfile.CanAttach;
         _stopButton.Enabled = model.CanStopOrSwitch;
         _switchButton.Enabled = model.CanStopOrSwitch;
         _resourceActionButton.Enabled = !model.IsBusy && model.Resources.Any(row => row.CanMutate);
-        _runLoadButton.Enabled = model.CanUseLoadTest;
+        _restartResourceButton.Enabled = !model.IsBusy && model.Resources.Any(row => row.CanRestart);
+        _runLoadButton.Enabled = model.CanUseLoadTest && _controller.CanRunLoadTest;
         _queryButton.Enabled = true;
         _aspireDashboardButton.Enabled = _controller.State.Topology?.DashboardUrl is not null;
         _jaegerButton.Enabled = _controller.State.Profile != TopologyProfile.None;
@@ -522,41 +591,27 @@ public sealed class MainWindow : Window
         }
     }
 
-    private static bool ConfirmDestructive(string title, string command)
+    protected override bool OnKeyDown(Key key)
     {
-        var dialog = new Dialog<bool> { Title = title, Width = 66, Height = 8 };
-        OperatorTheme.Apply(dialog, OperatorTheme.OverlayScheme);
-        var cancel = new Button { Text = "Cancel", IsDefault = true };
-        cancel.Accepted += (_, e) =>
+        var workspace = key switch
         {
-            e.Handled = true;
-            dialog.Result = false;
-            dialog.RequestStop();
+            var value when value == Key.D1 => WorkspaceKind.Operations,
+            var value when value == Key.D2 => WorkspaceKind.Resources,
+            var value when value == Key.D3 => WorkspaceKind.Evidence,
+            var value when value == Key.D4 => WorkspaceKind.LoadTest,
+            _ => (WorkspaceKind?)null,
         };
-        dialog.Add(new Label
+        if (workspace is not null)
         {
-            X = 1,
-            Y = 1,
-            Width = Dim.Fill(1),
-            Height = 2,
-            Text = $"{command}{Environment.NewLine}Press Y to confirm. Escape cancels.",
-        });
-        dialog.AddButton(cancel);
-        dialog.KeyDown += (_, key) =>
-        {
-            if (InteractionPolicies.ConfirmsDestructiveAction((char)(uint)key))
-            {
-                key.Handled = true;
-                dialog.Result = true;
-                dialog.RequestStop();
-            }
-        };
-        cancel.SetFocus();
-        AppTerminal.Run(dialog);
-        return dialog.Result == true;
+            key.Handled = true;
+            ActivateWorkspace(workspace.Value);
+            return true;
+        }
+
+        return base.OnKeyDown(key);
     }
 
-    private async Task RequestExitAsync()
+    internal async Task RequestExitAsync()
     {
         _sessionCancellation.Cancel();
         Task[] active;
@@ -569,8 +624,9 @@ public sealed class MainWindow : Window
         {
             await Task.WhenAll(active);
         }
-        catch (Exception ex) when (ex is OperationCanceledException or InvalidOperationException or HttpRequestException)
+        catch (Exception ex)
         {
+            ShowMessage($"Operation ended during shutdown: {ex.GetBaseException().Message}");
         }
 
         await _onExitRequested();
@@ -579,6 +635,7 @@ public sealed class MainWindow : Window
     private void Dispatch(Func<Task> action)
     {
         var task = action();
+        LastDispatchedTask = task;
         lock (_activeActionsLock)
         {
             _activeActions.Add(task);
@@ -598,6 +655,154 @@ public sealed class MainWindow : Window
                 }
             },
             TaskScheduler.Default);
+    }
+
+    private async Task SurfaceAsync(Task<CommandResult> task)
+    {
+        var result = await task;
+        if (!result.Succeeded)
+        {
+            ShowMessage(result.Message);
+        }
+    }
+
+    private async Task SurfaceAsync(Task<PaymentResult> task)
+    {
+        var result = await task;
+        if (result.Outcome is PaymentOutcome.Rejected or PaymentOutcome.TransportFailure or PaymentOutcome.Ambiguous)
+        {
+            ShowMessage(result.ErrorSummary ?? result.Outcome.ToString());
+        }
+    }
+
+    private async Task SurfaceAsync(Task<InspectionResult> task)
+    {
+        var result = await task;
+        if (!result.Succeeded)
+        {
+            ShowMessage(result.ErrorSummary ?? $"Inspection failed: {result.Target}");
+        }
+    }
+
+    private async Task SurfaceAsync(Task<LoadWorkflowResult> task)
+    {
+        var result = await task;
+        if (!result.AllPassed)
+        {
+            ShowMessage(result.ErrorSummary ?? $"Load workflow failed at {result.FinalPhase}.");
+        }
+    }
+
+    private async Task SurfaceAsync(Task<EvidenceExportResult> task)
+    {
+        var result = await task;
+        if (!result.Succeeded)
+        {
+            ShowMessage(result.ErrorSummary ?? "Evidence export failed.");
+        }
+    }
+
+    private void ShowMessage(string message)
+    {
+        _evidenceStrip.Text = message;
+        LastUiMessage = message;
+    }
+
+    private static string ExactCommands(IReadOnlyList<string> instances, string command) =>
+        string.Join(
+            " && ",
+            instances.Select(instance => $"aspire resource {instance} {command.ToLowerInvariant()}"));
+
+    private bool ConfirmAndRestore(ConfirmationRequest request, View trigger)
+    {
+        var confirmed = _confirmation.Confirm(request);
+        trigger.SetFocus();
+        return confirmed;
+    }
+
+    private void TriggerSelectedResourceAction()
+    {
+        if (_resourceRows.Count == 0)
+        {
+            ShowMessage("Select a verified resource before running a resource action.");
+            return;
+        }
+
+        var index = Math.Clamp(_resourceList.SelectedItem ?? 0, 0, _resourceRows.Count - 1);
+        var row = _resourceRows[index];
+        if (!Enum.TryParse<ResourceCommand>(row.NextAction, out var command))
+        {
+            ShowMessage($"{row.Name} has no legal next action in the fresh Aspire state.");
+            return;
+        }
+
+        var exactCommands = ExactCommands(row.Instances, row.NextAction);
+        if (ConfirmAndRestore(
+                new ConfirmationRequest($"{row.NextAction} {row.Name}", exactCommands, row.Instances),
+                _resourceActionButton))
+        {
+            Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, command, _sessionCancellation.Token)));
+        }
+    }
+
+    internal string LastUiMessage { get; private set; } = string.Empty;
+    internal Task? LastDispatchedTask { get; private set; }
+    internal WorkspaceKind VisibleWorkspace => _controller.State.ActiveWorkspace;
+    internal int NavigationFrameWidth => _navigation.Frame.Width;
+    internal bool IsWorkspaceVisible(WorkspaceKind workspace) => workspace switch
+    {
+        WorkspaceKind.Operations => _operationsView.Visible,
+        WorkspaceKind.Resources => _resourcesView.Visible,
+        WorkspaceKind.Evidence => _evidenceView.Visible,
+        WorkspaceKind.LoadTest => _loadView.Visible,
+        _ => false,
+    };
+    internal bool LoadRunEnabled => _runLoadButton.Enabled;
+    internal TextField AmountField => _amount;
+    internal TextField FromAccountField => _fromAccount;
+    internal TextField ToAccountField => _toAccount;
+    internal TextField CurrencyField => _currency;
+    internal TextField BurstCountField => _burstCount;
+    internal TextField BurstConcurrencyField => _burstConcurrency;
+    internal Button SubmitButton => _submitButton;
+    internal Button BurstButton => _burstButton;
+    internal Button StopButton => _stopButton;
+    internal Button ResourceActionButton => _resourceActionButton;
+    internal Button RestartResourceButton => _restartResourceButton;
+    internal Button RunLoadButton => _runLoadButton;
+    internal bool StartRegularEnabled => _startRegularButton.Enabled;
+    internal bool StartLoadTestsEnabled => _startLoadButton.Enabled;
+    internal ListView ResourceList => _resourceList;
+    internal void SelectResourceForTest(string resourceName)
+    {
+        var index = _resourceRows.ToList().FindIndex(row => row.Name == resourceName);
+        _resourceList.SelectedItem = Math.Max(0, index);
+    }
+    internal Task TriggerSubmitForTestAsync() => SubmitPaymentAsync();
+    internal Task TriggerBurstForTestAsync() => RunBurstAsync();
+    internal Task TriggerResendForTestAsync() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token));
+    internal Task TriggerQueryForTestAsync() => SurfaceAsync(
+        _controller.QueryOutcomeAsync(_outcomeKey.Text.ToString() ?? string.Empty, _sessionCancellation.Token));
+    internal Task TriggerLoadForTestAsync(int expectedUnique) => SurfaceAsync(
+        _controller.RunLoadTestAsync(expectedUnique, _sessionCancellation.Token));
+    internal Task TriggerExportForTestAsync() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token));
+    internal Task TriggerInspectForTestAsync(string endpoint) => SurfaceAsync(
+        _controller.InspectAsync(endpoint, _sessionCancellation.Token));
+    internal void TriggerResourceActionForTest() => TriggerSelectedResourceAction();
+    internal void RenderForTest() => Render(PresentationModelBuilder.Build(_controller.State));
+    internal bool HandleKeyForTest(Key key) => OnKeyDown(key);
+    internal void SetIdempotencyModeForTest(IdempotencyMode mode)
+    {
+        _idempotencyMode = mode;
+        _idempotencyButton.Text = $"Idempotency: {_idempotencyMode}";
+    }
+
+    internal void ResizeForTest(int width, int height)
+    {
+        Width = width;
+        Height = height;
+        SetRelativeLayout(new Size(width, height));
+        ApplyResponsiveLayout();
     }
 
     protected override void Dispose(bool disposing)

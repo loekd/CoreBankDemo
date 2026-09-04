@@ -86,6 +86,7 @@ internal sealed class TransactionIntakeHandler(
     IInboxMessageRepository repository,
     IInboxMessageStore<InboxMessage> inboxStore,
     IInboxMessageHandler<InboxMessage> executionHandler,
+    IDistributedLockService lockService,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
     ILogger<TransactionIntakeHandler> logger,
@@ -263,22 +264,74 @@ internal sealed class TransactionIntakeHandler(
     /// </summary>
     /// <returns>
     /// The <see cref="TransactionIntakeOutcome.InlineCompleted"/> result when
-    /// execution committed; <see langword="null"/> when the claim could not be
-    /// won (a concurrent background batch claim already owns the row),
-    /// execution threw (the transaction rolled back, the row is left exactly
-    /// as storage left it -- <c>Pending</c> -- for the background processor to
-    /// drain), or, defensively, when it returned without a deserializable
-    /// cached response.
+    /// execution committed; a <see cref="TransactionIntakeOutcome.TransportFailed"/>
+    /// result when execution threw and that failure drove the row to a
+    /// terminal <c>Failed</c> state (retries exhausted); <see langword="null"/>
+    /// when the claim could not be won (a concurrent background batch claim
+    /// already owns the row), execution threw but the row was left retryable
+    /// (not yet terminal), or, defensively, when it returned without a
+    /// deserializable cached response. Note that a non-null result is
+    /// returned even when the partition lock's ownership was lost mid-flight
+    /// (<see cref="IDistributedLockService.ExecuteWithLockAsync"/> reports
+    /// <see langword="false"/> for that case too) -- as long as the callback
+    /// ran and set a result, the work genuinely happened and is trusted;
+    /// only a lock that was never acquired (callback never ran) falls back to
+    /// <see langword="null"/>.
     /// </returns>
     private async Task<TransactionIntakeResult?> TryExecuteInlineAsync(
         InboxMessage message, CancellationToken cancellationToken)
     {
-        var claimed = await inboxStore.TryClaimByIdAsync(message.Id, cancellationToken).ConfigureAwait(false);
+        TransactionIntakeResult? result = null;
+        try
+        {
+            await lockService.ExecuteWithLockAsync(
+                $"corebank-inbox-partition-{message.PartitionId}",
+                inboxOptions.Value.LockExpirySeconds,
+                async lockToken =>
+                {
+                    result = await ExecuteOldestInlineAsync(message, lockToken).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Inline execution: lock backend failed for partition {PartitionId} while executing transaction {TransactionId}; deferred to background processing",
+                message.PartitionId,
+                message.TransactionId);
+            return null;
+        }
+
+        // ExecuteWithLockAsync returns false both when the lock was never
+        // acquired (the callback above never ran, so result is still null)
+        // AND when the workload ran to completion but lock ownership was
+        // lost mid-flight (its own XML doc: "not reporting success for work
+        // that ran without a guaranteed-exclusive lock"). In the second case
+        // result is non-null -- execution genuinely committed -- and must be
+        // trusted and returned rather than discarded; only a null result
+        // (the callback never ran) means the lock was truly unavailable.
+        return result;
+    }
+
+    private async Task<TransactionIntakeResult?> ExecuteOldestInlineAsync(
+        InboxMessage message,
+        CancellationToken cancellationToken)
+    {
+        var claimed = await inboxStore.TryClaimByIdIfOldestAsync(
+            message.Id,
+            message.PartitionId,
+            cancellationToken).ConfigureAwait(false);
         if (claimed is null)
         {
             logger.LogInformation(
-                "Inline execution for transaction {TransactionId} could not claim its row (already claimed); leaving it for the inbox processor",
-                message.TransactionId);
+                "Inline execution for transaction {TransactionId} is not the oldest claimable row in partition {PartitionId}; leaving it for the inbox processor",
+                message.TransactionId,
+                message.PartitionId);
             return null;
         }
 
@@ -294,8 +347,34 @@ internal sealed class TransactionIntakeHandler(
         {
             logger.LogWarning(
                 ex,
-                "Inline execution failed for transaction {TransactionId}; leaving the row Pending for the inbox processor",
+                "Inline execution failed for transaction {TransactionId}; releasing the claim for the inbox processor",
                 claimed.TransactionId);
+            await inboxStore.MarkAsFailedWithRetryAsync(
+                claimed,
+                ex.Message,
+                cancellationToken).ConfigureAwait(false);
+
+            // MarkAsFailedWithRetryAsync mutates claimed.Status in place
+            // (MessageRepositoryBase.ApplyFailureTransition) before returning
+            // normally, so its post-call value is authoritative: Failed means
+            // this call was the one that hit MaxRetryCount -- the row is now
+            // terminal and the caller must be told so (matching
+            // BuildIntakeResultForExisting's Failed branch) instead of
+            // ProcessAsync falling through to the generic Accepted/Pending
+            // response for a row that will never be retried again.
+            if (claimed.Status == MessageConstants.Status.Failed)
+            {
+                logger.LogInformation(
+                    "Transaction {TransactionId} exhausted retries during inline execution and is now terminally failed",
+                    claimed.TransactionId);
+                Activity.Current?.SetTag("outcome", "transport_failed");
+                businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.TransportFailed);
+                return new TransactionIntakeResult(
+                    TransactionIntakeOutcome.TransportFailed,
+                    null,
+                    [claimed.LastError ?? ex.Message]);
+            }
+
             return null;
         }
 

@@ -26,6 +26,23 @@ public class OperatorConsoleControllerTests
         controller.State.Evidence.Should().BeEmpty();
         controller.State.StatusLine.Should().Contain("No topology active");
         harness.Processes.StartCount.Should().Be(0);
+        controller.State.Preflight.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Initialize_DiscoveryUnreachable_IsStoredAndBlocksStart()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Discovery = TopologyDiscoveryResult.Unreachable("aspire missing");
+        var controller = harness.CreateController();
+
+        await controller.InitializeAsync(CancellationToken.None);
+        var start = await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        controller.State.Preflight!.DiscoveryReachable.Should().BeFalse();
+        controller.State.StatusLine.Should().Contain("Unreachable");
+        start.Succeeded.Should().BeFalse();
+        harness.Processes.StartCount.Should().Be(0);
     }
 
     [Fact]
@@ -95,6 +112,7 @@ public class OperatorConsoleControllerTests
         controller.State.Ownership.Should().Be(TopologyOwnership.Owned);
         controller.State.RunGeneration.Should().Be(1);
         controller.State.Evidence.Single().Summary.Should().Contain("Started");
+        controller.State.Evidence.Single().Method.Should().StartWith("aspire start --apphost");
         harness.Processes.StartCount.Should().Be(1);
     }
 
@@ -125,6 +143,22 @@ public class OperatorConsoleControllerTests
         result.Succeeded.Should().BeFalse();
         controller.State.Evidence.Single().Succeeded.Should().BeFalse();
         controller.State.Evidence.Single().Detail.Length.Should().BeLessThanOrEqualTo(JournalRedaction.MaxLength + 1);
+        harness.Processes.StopCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Start_ProcessOwnershipFailure_IsSurfacedWithoutClaimingOwnedState()
+    {
+        var harness = new OperatorHarness();
+        harness.Processes.StartException = new InvalidOperationException("missing verified PID");
+        var controller = harness.CreateController();
+
+        var result = await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Message.Should().Contain("verified PID");
+        controller.State.Ownership.Should().Be(TopologyOwnership.None);
+        controller.OwnedProcessId.Should().BeNull();
     }
 
     [Fact]
@@ -175,6 +209,27 @@ public class OperatorConsoleControllerTests
     }
 
     [Fact]
+    public async Task OwnedTopology_Stop_ReturnsRejectedWhenStopOwnedAsyncThrows()
+    {
+        // Patch 7a regression test: StopOwnedAsync can throw (e.g. an
+        // ownership/PID verification failure, an "aspire ps" timeout) --
+        // StopAsync must surface that as a Rejected result the UI can
+        // display, releasing the mutation lock, rather than propagating.
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Processes.StopException = new InvalidOperationException("ownership verification failed");
+
+        var result = await controller.StopAsync(CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Message.Should().Contain("ownership verification failed");
+        controller.State.ActiveMutation.Should().BeNull("the mutation lock must be released on failure");
+        controller.State.Ownership.Should().Be(TopologyOwnership.Owned, "a failed stop must not silently clear ownership");
+    }
+
+    [Fact]
     public async Task Switch_OwnedTopology_StopsStartsAndIncrementsGeneration()
     {
         var harness = new OperatorHarness();
@@ -191,6 +246,43 @@ public class OperatorConsoleControllerTests
         harness.Processes.StartCount.Should().Be(2);
         controller.State.Profile.Should().Be(TopologyProfile.LoadTests);
         controller.State.RunGeneration.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Switch_RechecksTargetBeforeStoppingOwnedSource()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Preflight.Report = FakePreflightRunner.ReadyReport(
+            loadTests: OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+
+        var result = await controller.SwitchAsync(TopologyProfile.LoadTests, CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Message.Should().Contain("before stopping");
+        harness.Processes.StopCount.Should().Be(0);
+        controller.State.Profile.Should().Be(TopologyProfile.Regular);
+    }
+
+    [Fact]
+    public async Task Switch_TargetHealthTimeout_CleansTargetOwnedProcess()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Aspire.DefaultSnapshot = TopologySnapshot.Unreachable(
+            TopologyProfile.LoadTests,
+            harness.Time.GetUtcNow(),
+            "not ready");
+
+        var result = await controller.SwitchAsync(TopologyProfile.LoadTests, CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        harness.Processes.StopCount.Should().Be(2);
+        controller.OwnedProcessId.Should().BeNull();
     }
 
     [Fact]
@@ -242,7 +334,7 @@ public class OperatorConsoleControllerTests
     public async Task ResourceCommand_DispatchFailure_DoesNotClaimSuccess()
     {
         var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
-        harness.Aspire.CommandResult = new ResourceCommandResult(false, "command rejected");
+        harness.Aspire.CommandResult = ResourceCommandResult.Rejected("command rejected");
 
         var result = await controller.ExecuteResourceCommandAsync(
             KnownResources.CoreBankApi,
@@ -251,6 +343,90 @@ public class OperatorConsoleControllerTests
 
         result.Succeeded.Should().BeFalse();
         controller.State.Evidence.Last().Succeeded.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task ResourceCommand_PartialReplicaFailure_ReconcilesAndRequiresManualRefresh()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Aspire.CommandResult = new ResourceCommandResult(
+            ResourceDispatchStatus.Partial,
+            "second replica failed",
+            ["corebank-api-1"],
+            ["corebank-api-2"]);
+        harness.Aspire.Queue(OperatorHarness.Snapshot(
+            TopologyProfile.Regular,
+            resources:
+            [
+                new ResourceSnapshot(
+                    KnownResources.CoreBankApi,
+                    ResourceCondition.Degraded,
+                    "Degraded",
+                    ["http://127.0.0.1:5032"],
+                    2,
+                    "one running, one failed",
+                    ["corebank-api-1", "corebank-api-2"]),
+                .. OperatorHarness.DefaultResources(TopologyProfile.Regular).Where(item => item.Name != KnownResources.CoreBankApi),
+            ]));
+
+        var result = await controller.ExecuteResourceCommandAsync(
+            KnownResources.CoreBankApi,
+            ResourceCommand.Restart,
+            CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Message.Should().Contain("Partial mutation");
+        controller.State.Topology!.FindResource(KnownResources.CoreBankApi)!.Condition.Should().Be(ResourceCondition.Degraded);
+        controller.State.ResourceAuthorityAvailable.Should().BeFalse();
+        controller.State.Evidence.Last().Detail.Should().Contain("second replica failed");
+    }
+
+    [Fact]
+    public async Task ResourceCommand_AmbiguousDispatch_RequiresRefreshBeforeAnotherMutation()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Aspire.CommandResult = new ResourceCommandResult(
+            ResourceDispatchStatus.Ambiguous,
+            "timed out after dispatch",
+            [],
+            ["corebank-api-1"]);
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+
+        var first = await controller.ExecuteResourceCommandAsync(
+            KnownResources.CoreBankApi,
+            ResourceCommand.Restart,
+            CancellationToken.None);
+        var second = await controller.ExecuteResourceCommandAsync(
+            KnownResources.CoreBankApi,
+            ResourceCommand.Restart,
+            CancellationToken.None);
+
+        first.Message.Should().Contain("Ambiguous");
+        second.Message.Should().Contain("fresh");
+        harness.Aspire.Commands.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task ResourceCommand_ConfirmationTimeoutAfterSuccessfulDispatch_IsAmbiguous()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Aspire.CommandResult = new ResourceCommandResult(
+            ResourceDispatchStatus.Dispatched,
+            "both dispatched",
+            ["corebank-api-1", "corebank-api-2"],
+            []);
+        harness.Aspire.DefaultSnapshot = OperatorHarness.Snapshot(TopologyProfile.Regular);
+
+        var result = await controller.ExecuteResourceCommandAsync(
+            KnownResources.CoreBankApi,
+            ResourceCommand.Stop,
+            CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Message.Should().Contain("Ambiguous after dispatch");
+        controller.State.ResourceAuthorityAvailable.Should().BeFalse();
+        controller.State.Evidence.Last().Method.Should().Contain("corebank-api-1 stop")
+            .And.Contain("corebank-api-2 stop");
     }
 
     [Fact]
@@ -296,6 +472,23 @@ public class OperatorConsoleControllerTests
     }
 
     [Fact]
+    public async Task Refresh_DiscoveryTransportFailure_PreservesValidAttachmentAndBlocksDuplicateStart()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Aspire.Queue(TopologySnapshot.Unreachable(TopologyProfile.Regular, harness.Time.GetUtcNow(), "describe timeout"));
+        harness.Aspire.Discovery = TopologyDiscoveryResult.Unreachable("ps timeout");
+
+        await controller.RefreshAsync(CancellationToken.None);
+        var start = await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        controller.State.Profile.Should().Be(TopologyProfile.Regular);
+        controller.State.Ownership.Should().Be(TopologyOwnership.Attached);
+        controller.State.Topology!.IsReachable.Should().BeFalse();
+        start.Succeeded.Should().BeFalse();
+        harness.Processes.StartCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task Refresh_AttachedTopologyConfirmedGone_ClearsAttachment()
     {
         var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
@@ -307,6 +500,47 @@ public class OperatorConsoleControllerTests
         controller.State.Profile.Should().Be(TopologyProfile.None);
         controller.State.Ownership.Should().Be(TopologyOwnership.None);
         controller.State.StatusLine.Should().Contain("no longer running");
+    }
+
+    [Fact]
+    public async Task Refresh_OwnedTopologyConfirmedGone_ClearsOwnershipTruthfully()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Aspire.Queue(TopologySnapshot.Unreachable(TopologyProfile.Regular, harness.Time.GetUtcNow(), "gone"));
+        harness.Aspire.Discovery = TopologyDiscoveryResult.Success([]);
+
+        await controller.RefreshAsync(CancellationToken.None);
+
+        controller.State.Profile.Should().Be(TopologyProfile.None);
+        controller.OwnedProcessId.Should().BeNull();
+        harness.Processes.ForgetCount.Should().Be(1);
+        controller.State.Evidence.Last().Summary.Should().Contain("Owned AppHost disappeared");
+        controller.State.Evidence.Last().RunGeneration.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Refresh_OwnedTopologyConfirmedGone_SelfHealsOwnershipEvenWhenForgetExitedOwnedAsyncThrows()
+    {
+        // Patch 7b regression test: ForgetExitedOwnedAsync can throw (e.g. an
+        // ownership-verification failure or an "aspire ps" timeout) -- the
+        // refresh must not abort before clearing stale ownership, or the
+        // console would keep showing an Owned AppHost that no longer exists.
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Aspire.Queue(TopologySnapshot.Unreachable(TopologyProfile.Regular, harness.Time.GetUtcNow(), "gone"));
+        harness.Aspire.Discovery = TopologyDiscoveryResult.Success([]);
+        harness.Processes.ForgetException = new InvalidOperationException("aspire ps timed out while verifying AppHost ownership");
+
+        await controller.RefreshAsync(CancellationToken.None);
+
+        controller.State.Profile.Should().Be(TopologyProfile.None);
+        controller.State.Ownership.Should().Be(TopologyOwnership.None, "the console must self-heal rather than get stuck showing a dead Owned AppHost");
+        controller.OwnedProcessId.Should().BeNull();
     }
 
     [Fact]
@@ -504,6 +738,107 @@ public class OperatorConsoleControllerTests
     }
 
     [Fact]
+    public async Task AsyncQuery_CapturesProvenanceBeforeConcurrentSwitch()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(
+            OperatorHarness.Snapshot(TopologyProfile.Regular),
+            OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.QueryStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseQuery = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var query = controller.QueryOutcomeAsync("old-key", CancellationToken.None);
+        await harness.Payments.QueryStarted.Task;
+        await controller.SwitchAsync(TopologyProfile.LoadTests, CancellationToken.None);
+        harness.Payments.ReleaseQuery.SetResult();
+        await query;
+
+        harness.Payments.QueryProfiles.Should().ContainSingle().Which.Should().Be(TopologyProfile.Regular);
+        controller.State.Evidence.Last(record => record.Kind == EvidenceKind.OutcomeQuery).Profile.Should().Be(TopologyProfile.Regular);
+        controller.State.Evidence.Last(record => record.Kind == EvidenceKind.OutcomeQuery).RunGeneration.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task AsyncPayment_CapturesOldProvenanceWhenOwnedTopologyDisappears()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var payment = controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        await harness.Payments.SubmissionStarted.Task;
+        harness.Aspire.Queue(TopologySnapshot.Unreachable(TopologyProfile.Regular, harness.Time.GetUtcNow(), "gone"));
+        harness.Aspire.Discovery = TopologyDiscoveryResult.Success([]);
+        await controller.RefreshAsync(CancellationToken.None);
+        harness.Payments.ReleaseSubmission.SetResult();
+        await payment;
+
+        var evidence = controller.State.Evidence.Last(record => record.Kind == EvidenceKind.Payment);
+        evidence.Profile.Should().Be(TopologyProfile.Regular);
+        evidence.RunGeneration.Should().Be(1);
+        controller.State.LastPayment.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task AsyncLoad_CapturesOldProvenanceAndDoesNotRestoreOldProofAfterDisappearance()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.LoadTests, CancellationToken.None);
+        harness.Load.RunStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Load.ReleaseRun = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var load = controller.RunLoadTestAsync(100, CancellationToken.None);
+        await harness.Load.RunStarted.Task;
+        harness.Aspire.Queue(TopologySnapshot.Unreachable(TopologyProfile.LoadTests, harness.Time.GetUtcNow(), "gone"));
+        harness.Aspire.Discovery = TopologyDiscoveryResult.Success([]);
+        await controller.RefreshAsync(CancellationToken.None);
+        harness.Load.ReleaseRun.SetResult();
+        await load;
+
+        var evidence = controller.State.Evidence.Last(record => record.Kind == EvidenceKind.LoadTest);
+        evidence.Profile.Should().Be(TopologyProfile.LoadTests);
+        evidence.RunGeneration.Should().Be(1);
+        controller.State.LastLoadResult.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task StaleRefreshResultAfterSwitch_IsDiscarded()
+    {
+        var harness = new OperatorHarness();
+        var delayed = new DelayedFirstSnapshotAspireAdapter(
+            OperatorHarness.Snapshot(TopologyProfile.Regular),
+            OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+        harness.Preflight.Report = FakePreflightRunner.ReadyReport();
+        var controller = new OperatorConsoleController(
+            delayed,
+            harness.Processes,
+            harness.Payments,
+            harness.Load,
+            harness.Exporter,
+            harness.Browser,
+            harness.Preflight,
+            harness.Time,
+            new OperatorConsoleOptions { PollInterval = TimeSpan.Zero, TransitionTimeout = TimeSpan.FromSeconds(1) });
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        var refresh = controller.RefreshAsync(CancellationToken.None);
+        await delayed.DelayedCallStarted.Task;
+        await controller.SwitchAsync(TopologyProfile.LoadTests, CancellationToken.None);
+        delayed.ReleaseDelayedCall.SetResult();
+        await refresh;
+
+        controller.State.Profile.Should().Be(TopologyProfile.LoadTests);
+        controller.State.Topology!.Profile.Should().Be(TopologyProfile.LoadTests);
+    }
+
+    [Fact]
     public async Task NewController_DoesNotRestorePriorEvidence()
     {
         var firstHarness = new OperatorHarness();
@@ -626,6 +961,51 @@ public class OperatorConsoleControllerTests
     }
 
     [Fact]
+    public async Task Shutdown_WaitsForActiveOperationBeforeStoppingOwnedInfrastructure()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var operationCts = new CancellationTokenSource();
+
+        var payment = controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, operationCts.Token);
+        await harness.Payments.SubmissionStarted.Task;
+        var shutdown = controller.ShutdownAsync(CancellationToken.None);
+        shutdown.IsCompleted.Should().BeFalse();
+        harness.Processes.StopCount.Should().Be(0);
+
+        operationCts.Cancel();
+        await payment.Invoking(task => task).Should().ThrowAsync<OperationCanceledException>();
+        await shutdown;
+
+        harness.Processes.StopCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Shutdown_CancelsActiveBurstBeforeStoppingOwnedInfrastructure()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var burst = controller.RunBurstAsync(StandardPayment, 5, 1, CancellationToken.None);
+        await harness.Payments.SubmissionStarted.Task;
+        var shutdown = controller.ShutdownAsync(CancellationToken.None);
+
+        await burst;
+        await shutdown;
+
+        controller.State.Burst.Cancelled.Should().BeTrue();
+        harness.Processes.StopCount.Should().Be(1);
+    }
+
+    [Fact]
     public async Task WorkspaceSelection_RaisesStateChange()
     {
         var controller = new OperatorHarness().CreateController();
@@ -663,4 +1043,36 @@ public class OperatorConsoleControllerTests
             "{}",
             error,
             TimeSpan.FromMilliseconds(5));
+
+    private sealed class DelayedFirstSnapshotAspireAdapter(
+        TopologySnapshot regular,
+        TopologySnapshot load) : IAspireAdapter
+    {
+        private int _calls;
+        public TaskCompletionSource DelayedCallStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource ReleaseDelayedCall { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<TopologyDiscoveryResult> DiscoverAsync(CancellationToken ct) =>
+            Task.FromResult(TopologyDiscoveryResult.Success([]));
+
+        public async Task<TopologySnapshot> GetSnapshotAsync(TopologyProfile profile, CancellationToken ct)
+        {
+            var call = Interlocked.Increment(ref _calls);
+            if (call == 2)
+            {
+                DelayedCallStarted.SetResult();
+                await ReleaseDelayedCall.Task.WaitAsync(ct);
+                return regular;
+            }
+
+            return profile == TopologyProfile.Regular ? regular : load;
+        }
+
+        public Task<ResourceCommandResult> ExecuteResourceCommandAsync(
+            TopologyProfile profile,
+            string resourceName,
+            ResourceCommand command,
+            CancellationToken ct) =>
+            Task.FromResult(ResourceCommandResult.Rejected("not used"));
+    }
 }

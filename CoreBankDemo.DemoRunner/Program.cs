@@ -31,16 +31,15 @@ public static class Program
         var repositoryRoot = FindRepositoryRoot();
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
         var aspire = new AspireCliAdapter(repositoryRoot, TimeProvider.System);
+        var doctor = new DoctorRunner(
+            new EnvironmentProbe(),
+            new HealthMonitor(httpClient, TimeProvider.System),
+            aspire,
+            BuildPortRequirements());
 
         if (options.Doctor)
         {
-            var doctor = new DoctorRunner(
-                new EnvironmentProbe(),
-                new HealthMonitor(httpClient, TimeProvider.System),
-                aspire);
-            var report = await doctor.RunAsync(
-                BuildPortRequirements(),
-                CancellationToken.None);
+            var report = await doctor.RunAsync(CancellationToken.None);
             foreach (var check in report.Checks)
             {
                 Console.WriteLine($"[{(check.Passed ? "OK  " : "FAIL")}] {check.Name}{(string.IsNullOrEmpty(check.Remediation) ? string.Empty : $" — {check.Remediation}")}");
@@ -56,6 +55,7 @@ public static class Program
             new LoadWorkflowRunner(httpClient, aspire, TimeProvider.System),
             new SessionEvidenceExporter(repositoryRoot, TimeProvider.System),
             new BrowserLauncher(),
+            doctor,
             TimeProvider.System);
 
         return RunConsole(controller);
@@ -65,20 +65,19 @@ public static class Program
     private static int RunConsole(OperatorConsoleController controller)
     {
         AppTerminal.Init();
+        var window = new MainWindow(controller, async () =>
+        {
+            await controller.ShutdownAsync(CancellationToken.None);
+            AppTerminal.RequestStop();
+        });
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
-            controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
-            AppTerminal.RequestStop();
+            window.RequestExitAsync().GetAwaiter().GetResult();
         };
         Console.CancelKeyPress += cancelHandler;
         try
         {
-            var window = new MainWindow(controller, async () =>
-            {
-                await controller.ShutdownAsync(CancellationToken.None);
-                AppTerminal.RequestStop();
-            });
             window.RefreshAsync().GetAwaiter().GetResult();
             AppTerminal.Run(window);
         }

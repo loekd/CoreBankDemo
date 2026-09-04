@@ -2,6 +2,7 @@ using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults;
+using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -44,7 +45,9 @@ public interface IInstantPaymentForwardingHandler
 internal sealed class InstantPaymentForwardingHandler(
     IOutboxMessageStore<OutboxMessage> store,
     ICoreBankTransactionForwarder forwarder,
+    IDistributedLockService lockService,
     IOptions<InstantRailOptions> options,
+    IOptions<OutboxProcessingOptions> outboxOptions,
     TimeProvider timeProvider,
     ILogger<InstantPaymentForwardingHandler> logger,
     BusinessMetrics businessMetrics) : IInstantPaymentForwardingHandler
@@ -63,12 +66,73 @@ internal sealed class InstantPaymentForwardingHandler(
             return Deferred(startedAt);
         }
 
-        var claimed = await store.TryClaimByIdAsync(payment.Id, cancellationToken).ConfigureAwait(false);
+        InstantForwardResult? result = null;
+        try
+        {
+            await lockService.ExecuteWithLockAsync(
+                $"payments-outbox-partition-{payment.PartitionId}",
+                outboxOptions.Value.LockExpirySeconds,
+                async lockToken =>
+                {
+                    result = await ForwardUnderPartitionLockAsync(
+                        payment,
+                        opts,
+                        startedAt,
+                        lockToken).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(
+                ex,
+                "Instant rail: lock backend failed for partition {PartitionId} while forwarding payment {IdempotencyKey}; deferred to background delivery",
+                payment.PartitionId,
+                payment.IdempotencyKey);
+            return Deferred(startedAt);
+        }
+
+        // ExecuteWithLockAsync returns false both when the lock was never
+        // acquired (the callback above never ran, so result is still null)
+        // AND when the workload ran to completion but lock ownership was
+        // lost mid-flight (its own XML doc: "not reporting success for work
+        // that ran without a guaranteed-exclusive lock"). In the second case
+        // result is non-null -- the forward genuinely happened -- and must be
+        // trusted and returned rather than discarded; only a null result
+        // (the callback never ran) means the lock was truly unavailable and
+        // must fall back to Deferred.
+        if (result is null)
+        {
+            logger.LogInformation(
+                "Instant rail: partition {PartitionId} lock unavailable for payment {IdempotencyKey}; deferred without overtaking queued work",
+                payment.PartitionId,
+                payment.IdempotencyKey);
+            return Deferred(startedAt);
+        }
+
+        return result;
+    }
+
+    private async Task<InstantForwardResult> ForwardUnderPartitionLockAsync(
+        PaymentSnapshot payment,
+        InstantRailOptions opts,
+        DateTimeOffset startedAt,
+        CancellationToken cancellationToken)
+    {
+        var claimed = await store.TryClaimByIdIfOldestAsync(
+            payment.Id,
+            payment.PartitionId,
+            cancellationToken).ConfigureAwait(false);
         if (claimed is null)
         {
             logger.LogInformation(
-                "Instant rail: payment {IdempotencyKey} row was not claimable (already claimed or not pending); deferred to background delivery",
-                payment.IdempotencyKey);
+                "Instant rail: payment {IdempotencyKey} is not the oldest claimable row in partition {PartitionId}; deferred to preserve FIFO ordering",
+                payment.IdempotencyKey,
+                payment.PartitionId);
             return Deferred(startedAt);
         }
 

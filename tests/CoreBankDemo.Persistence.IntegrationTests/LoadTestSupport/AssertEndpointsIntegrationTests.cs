@@ -284,22 +284,40 @@ public sealed class AssertEndpointsIntegrationTests(PostgresContainerFixture fix
         await using var payments = CreatePaymentsContext();
         SeedLoadAccounts(coreBank, Enumerable.Range(1, LoadTestConstants.AccountCount).ToArray());
         coreBank.InboxMessages.Add(CompletedTransfer("key-1", 1, 2, 0m));
-        payments.OutboxMessages.Add(CompletedOutbox("key-1"));
+        var completedOutbox = CompletedOutbox("key-1");
+        completedOutbox.ProcessedAt = new DateTime(2026, 8, 30, 0, 1, 0, DateTimeKind.Utc);
+        payments.OutboxMessages.Add(completedOutbox);
         for (var index = 0; index < 3; index++)
         {
-            coreBank.MessagingOutboxMessages.Add(CoreBankOutbox($"event-{index}", MessageConstants.Status.Completed));
+            var coreOutbox = CoreBankOutbox($"event-{index}", MessageConstants.Status.Completed);
+            // Distinct per-row CreatedAt (Patch 5): FindOrderingViolations now
+            // compares same-timestamp rows via their Id tiebreaker, so three
+            // rows sharing one literal CreatedAt would be compared in random
+            // Guid order against their genuinely-staggered ProcessedAt values
+            // below and spuriously flag a violation. Stagger CreatedAt by
+            // index too, matching the real enqueue order this fixture intends.
+            coreOutbox.CreatedAt = new DateTime(2026, 8, 30, 0, 0, index, DateTimeKind.Utc);
+            coreOutbox.ProcessedAt = new DateTime(2026, 8, 30, 0, 1, index, DateTimeKind.Utc);
+            coreBank.MessagingOutboxMessages.Add(coreOutbox);
             var paymentsInbox = PaymentsApiTestData.Inbox($"event-{index}", "BalanceUpdated", $"account-{index}");
             paymentsInbox.Status = MessageConstants.Status.Completed;
+            paymentsInbox.ReceivedAt = new DateTime(2026, 8, 30, 0, 0, index, DateTimeKind.Utc);
+            paymentsInbox.ProcessedAt = new DateTime(2026, 8, 30, 0, 2, index, DateTimeKind.Utc);
             payments.InboxMessages.Add(paymentsInbox);
         }
 
         await coreBank.SaveChangesAsync(cancellationToken);
         await payments.SaveChangesAsync(cancellationToken);
 
-        var result = await new LoadTestAssertionService(coreBank, payments).GetResultsAsync(1, cancellationToken);
+        var runEvidence = new LoadRunEvidenceState();
+        runEvidence.RecordInlineSettlement("load-test-key-1");
+        var result = await new LoadTestAssertionService(coreBank, payments, runEvidence)
+            .GetResultsAsync(1, cancellationToken);
 
         result.Checks.StageCardinality.Passed.Should().BeTrue();
         result.Checks.CanonicalAccountSet.Passed.Should().BeTrue();
+        result.Checks.PerKeyOrdering.Passed.Should().BeTrue();
+        result.Checks.InlineInstantSettlement.Passed.Should().BeTrue();
         result.Summary.PaymentsOutbox.Should().Be(new MessageStoreSummary(1, 1, 0, 0));
         result.Summary.CoreBankInbox.Should().Be(new MessageStoreSummary(1, 1, 0, 0));
         result.Summary.CoreBankOutbox.Should().Be(new MessageStoreSummary(3, 3, 0, 0));

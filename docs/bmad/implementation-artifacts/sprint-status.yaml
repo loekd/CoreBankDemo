@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 08-21-2026 16:00
-last_updated: 09-03-2026 16:30
+last_updated: 09-04-2026 05:10
 project: CoreBankDemo
 project_key: NOKEY
 tracking_system: file-system
@@ -86,11 +86,11 @@ development_status:
   6-7-eliminate-dapr-service-invocation: done
   epic-6-retrospective: optional
 
-  epic-7: in-progress
+  epic-7: done
   7-1-assertion-api-realignment: done
   7-2-mcp-server-tools: done
   7-3-k6-run-and-first-full-acceptance-gate: done
-  7-4-reusable-terminal-demo-operator-console: review
+  7-4-reusable-terminal-demo-operator-console: done
   epic-7-retrospective: optional
 
   epic-8: backlog

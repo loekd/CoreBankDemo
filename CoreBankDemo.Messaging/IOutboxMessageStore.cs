@@ -57,4 +57,15 @@ public interface IOutboxMessageStore<TMessage>
     /// caller won the claim race for it.
     /// </returns>
     Task<TMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Claims the identified row only when it is the oldest currently
+    /// claimable row in its partition. Used by the instant inline path while
+    /// holding the same distributed partition lock as the background
+    /// processor, so inline settlement cannot overtake earlier durable work.
+    /// </summary>
+    Task<TMessage?> TryClaimByIdIfOldestAsync(
+        Guid id,
+        int partitionId,
+        CancellationToken cancellationToken = default);
 }

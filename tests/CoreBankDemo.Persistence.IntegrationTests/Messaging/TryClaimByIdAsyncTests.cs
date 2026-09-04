@@ -134,4 +134,106 @@ public class TryClaimByIdAsyncTests(PostgresContainerFixture fixture) : Messagin
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
+
+    [Fact]
+    public async Task Ordered_claim_refuses_to_overtake_an_earlier_pending_row()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var earlier = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "earlier",
+            EventType = "Debited",
+            PartitionId = 2,
+            CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        var later = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "later",
+            EventType = "Debited",
+            PartitionId = 2,
+            CreatedAt = TimeProvider.GetUtcNow().UtcDateTime.AddSeconds(1),
+        };
+        context.AddRange(earlier, later);
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.TryClaimByIdIfOldestAsync(later.Id, 2, ct);
+
+        claimed.Should().BeNull();
+        (await repository.FindByIdAsync(later.Id, ct))!.Status.Should().Be(MessageConstants.Status.Pending);
+    }
+
+    [Fact]
+    public async Task Ordered_claim_claims_the_oldest_pending_row()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var message = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "oldest",
+            EventType = "Debited",
+            PartitionId = 3,
+            CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        context.Add(message);
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.TryClaimByIdIfOldestAsync(message.Id, 3, ct);
+
+        claimed.Should().NotBeNull();
+        claimed!.Status.Should().Be(MessageConstants.Status.Processing);
+    }
+
+    [Fact]
+    public async Task Ordered_claim_rejects_empty_id()
+    {
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+
+        var act = () => repository.TryClaimByIdIfOldestAsync(
+            Guid.Empty,
+            0,
+            TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task Ordered_claim_returns_null_when_partition_has_no_claimable_rows()
+    {
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+
+        var claimed = await repository.TryClaimByIdIfOldestAsync(
+            Guid.NewGuid(),
+            0,
+            TestContext.Current.CancellationToken);
+
+        claimed.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Ordered_claim_does_not_take_a_stale_processing_row_inline()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var message = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "stale-processing",
+            EventType = "Debited",
+            PartitionId = 1,
+            Status = MessageConstants.Status.Processing,
+            CreatedAt = TimeProvider.GetUtcNow().UtcDateTime - MessageConstants.Defaults.ProcessingTimeout - TimeSpan.FromSeconds(1),
+        };
+        context.Add(message);
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.TryClaimByIdIfOldestAsync(message.Id, 1, ct);
+
+        claimed.Should().BeNull();
+        (await repository.FindByIdAsync(message.Id, ct))!.Status.Should().Be(MessageConstants.Status.Processing);
+    }
 }

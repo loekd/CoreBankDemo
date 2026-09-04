@@ -50,6 +50,34 @@ public sealed record CompletedTransaction(
 public sealed record LoadTestAccountBalance(string AccountNumber, decimal Balance);
 
 /// <summary>
+/// <paramref name="Id"/> is the row's database identity (the same
+/// <c>Id</c> column <c>GetClaimableMessagesQuery</c>'s
+/// <c>.OrderBy(m => m.ReceivedAt/CreatedAt).ThenBy(m => m.Id)</c> already
+/// uses as the stable tiebreaker for "oldest" selection) -- defaulted so
+/// existing 5-arg call sites/tests keep compiling, but required for two
+/// same-<paramref name="EnqueuedAt"/> rows in the same partition to be
+/// distinguishable and still compared for FIFO violations
+/// (<see cref="LoadTestAssertionCalculator.FindOrderingViolations"/>).
+/// </summary>
+public sealed record OrderingObservation(
+    string Store,
+    int PartitionId,
+    string IdempotencyKey,
+    DateTime EnqueuedAt,
+    DateTime? ProcessedAt,
+    Guid Id = default);
+
+public sealed record OrderingViolation(
+    string Store,
+    int PartitionId,
+    string EarlierKey,
+    string LaterKey,
+    DateTime EarlierEnqueuedAt,
+    DateTime LaterEnqueuedAt,
+    DateTime EarlierProcessedAt,
+    DateTime LaterProcessedAt);
+
+/// <summary>
 /// The <c>NoDuplicateProcessing</c> check plus the actual duplicate rows
 /// found. <see cref="Duplicates"/> is nested inside this check object (not a
 /// top-level sibling in <see cref="AssertionChecks"/>) to preserve the
@@ -102,6 +130,8 @@ public sealed record AssertionChecks(
     AssertionCheck AllSubmittedProcessed,
     AssertionCheck BalanceConservation,
     BalancesCorrectCheck BalancesCorrect,
+    AssertionCheck PerKeyOrdering,
+    AssertionCheck InlineInstantSettlement,
     StageCardinalityCheck StageCardinality,
     CanonicalAccountSetCheck CanonicalAccountSet);
 
@@ -118,13 +148,16 @@ public sealed record AssertionSummary(
     decimal TotalBalance,
     decimal ExpectedTotalBalance,
     int AccountCount,
+    int InlineInstantSettlementCount,
     MessageStoreSummary PaymentsOutbox,
     MessageStoreSummary CoreBankInbox,
     MessageStoreSummary CoreBankOutbox,
     MessageStoreSummary PaymentsInbox);
 
 /// <summary>Raw completed-transaction data behind the balance replay, for troubleshooting a failed assertion run.</summary>
-public sealed record AssertionDebugInfo(IReadOnlyList<CompletedTransaction> CompletedTransactions);
+public sealed record AssertionDebugInfo(
+    IReadOnlyList<CompletedTransaction> CompletedTransactions,
+    IReadOnlyList<OrderingViolation> OrderingViolations);
 
 /// <summary>Full result of the assertion suite: overall pass/fail, the individual checks, aggregate summary, and replay debug data.</summary>
 public sealed record AssertionResult(
@@ -149,7 +182,10 @@ public sealed record AssertionResult(
 /// can actually exercise it, mirroring the existing
 /// <c>DatabaseResetCoordinator</c>/<c>LoadTestDatabaseResetter</c> split.
 /// </summary>
-public sealed class LoadTestAssertionService(CoreBankDbContext coreBankDb, PaymentsDbContext paymentsDb)
+public sealed class LoadTestAssertionService(
+    CoreBankDbContext coreBankDb,
+    PaymentsDbContext paymentsDb,
+    LoadRunEvidenceState? runEvidence = null)
 {
     /// <summary>
     /// Polls all four message stores — <c>paymentsDb.OutboxMessages</c>,
@@ -237,6 +273,44 @@ public sealed class LoadTestAssertionService(CoreBankDbContext coreBankDb, Payme
             .Select(a => new LoadTestAccountBalance(a.AccountNumber, a.Balance))
             .ToListAsync(ct);
 
+        var orderingObservations = new List<OrderingObservation>();
+        orderingObservations.AddRange(await paymentsDb.OutboxMessages
+            .Select(message => new OrderingObservation(
+                "PaymentsOutbox",
+                message.PartitionId,
+                message.IdempotencyKey,
+                message.CreatedAt,
+                message.ProcessedAt,
+                message.Id))
+            .ToListAsync(ct));
+        orderingObservations.AddRange(await coreBankDb.InboxMessages
+            .Select(message => new OrderingObservation(
+                "CoreBankInbox",
+                message.PartitionId,
+                message.IdempotencyKey,
+                message.ReceivedAt,
+                message.ProcessedAt,
+                message.Id))
+            .ToListAsync(ct));
+        orderingObservations.AddRange(await coreBankDb.MessagingOutboxMessages
+            .Select(message => new OrderingObservation(
+                "CoreBankOutbox",
+                message.PartitionId,
+                message.IdempotencyKey,
+                message.CreatedAt,
+                message.ProcessedAt,
+                message.Id))
+            .ToListAsync(ct));
+        orderingObservations.AddRange(await paymentsDb.InboxMessages
+            .Select(message => new OrderingObservation(
+                "PaymentsInbox",
+                message.PartitionId,
+                message.IdempotencyKey,
+                message.ReceivedAt,
+                message.ProcessedAt,
+                message.Id))
+            .ToListAsync(ct));
+
         var request = new ComputeAssertionRequest(
             ExpectedUnique: expectedUnique,
             PaymentsOutbox: paymentsOutboxSummary,
@@ -246,7 +320,9 @@ public sealed class LoadTestAssertionService(CoreBankDbContext coreBankDb, Payme
             CompletedTransactions: completedInbox,
             DuplicateKeys: duplicateKeys,
             OutboxUniqueKeys: outboxUniqueKeys,
-            LoadTestAccounts: loadTestAccounts);
+            LoadTestAccounts: loadTestAccounts,
+            OrderingObservations: orderingObservations,
+            InlineInstantSettlementCount: runEvidence?.InlineSettlementCount ?? 0);
 
         return LoadTestAssertionCalculator.ComputeAssertionResult(request);
     }
@@ -275,7 +351,9 @@ internal sealed record ComputeAssertionRequest(
     IReadOnlyList<CompletedTransaction> CompletedTransactions,
     IReadOnlyList<DuplicateKeyInfo> DuplicateKeys,
     int OutboxUniqueKeys,
-    IReadOnlyList<LoadTestAccountBalance> LoadTestAccounts);
+    IReadOnlyList<LoadTestAccountBalance> LoadTestAccounts,
+    IReadOnlyList<OrderingObservation>? OrderingObservations = null,
+    int InlineInstantSettlementCount = 0);
 
 /// <summary>
 /// The pure half of story 7.1's extraction: five-invariant/balance-replay
@@ -296,8 +374,16 @@ public static class LoadTestAssertionCalculator
     /// </summary>
     internal static AssertionResult ComputeAssertionResult(ComputeAssertionRequest request)
     {
-        var (expectedUnique, paymentsOutbox, coreBankInbox, coreBankOutbox, paymentsInbox,
-            completedTransactions, duplicateKeys, outboxUniqueKeys, loadTestAccounts) = request;
+        var expectedUnique = request.ExpectedUnique;
+        var paymentsOutbox = request.PaymentsOutbox;
+        var coreBankInbox = request.CoreBankInbox;
+        var coreBankOutbox = request.CoreBankOutbox;
+        var paymentsInbox = request.PaymentsInbox;
+        var completedTransactions = request.CompletedTransactions;
+        var duplicateKeys = request.DuplicateKeys;
+        var outboxUniqueKeys = request.OutboxUniqueKeys;
+        var loadTestAccounts = request.LoadTestAccounts;
+        var orderingObservations = request.OrderingObservations ?? [];
 
         var completedUniqueKeys = completedTransactions
             .Select(t => t.IdempotencyKey)
@@ -358,6 +444,20 @@ public static class LoadTestAssertionCalculator
                 ? "All balances match expected values"
                 : $"{balanceDiscrepancies.Count} account(s) have incorrect balances",
             balanceDiscrepancies);
+        var orderingViolations = FindOrderingViolations(orderingObservations);
+        var missingProcessedAt = orderingObservations.Count(item => !item.ProcessedAt.HasValue);
+        var perKeyOrdering = new AssertionCheck(
+            orderingObservations.Count > 0 && missingProcessedAt == 0 && orderingViolations.Count == 0,
+            orderingObservations.Count == 0
+                ? "No durable ordering observations were available"
+                : missingProcessedAt > 0
+                    ? $"{missingProcessedAt} ordering observation(s) have no ProcessedAt timestamp"
+                : orderingViolations.Count == 0
+                    ? $"Verified timestamp-distinct FIFO ordering across {orderingObservations.Select(item => (item.Store, item.PartitionId)).Distinct().Count()} store partitions"
+                    : $"{orderingViolations.Count} ordering inversion(s); first: {orderingViolations[0].Store}/partition-{orderingViolations[0].PartitionId} {orderingViolations[0].EarlierKey} processed after {orderingViolations[0].LaterKey}");
+        var inlineInstantSettlement = new AssertionCheck(
+            request.InlineInstantSettlementCount > 0,
+            $"Fresh instant payments completed inline: {request.InlineInstantSettlementCount}");
 
         var cardinalityPassed = !expectedUnique.HasValue ||
             (paymentsOutbox.Total == expectedUnique.Value
@@ -399,6 +499,8 @@ public static class LoadTestAssertionCalculator
             allSubmittedProcessed,
             balanceConservation,
             balancesCorrectCheck,
+            perKeyOrdering,
+            inlineInstantSettlement,
             stageCardinality,
             canonicalAccountSet);
 
@@ -410,6 +512,8 @@ public static class LoadTestAssertionCalculator
             allSubmittedProcessed.Passed &&
             balanceConservation.Passed &&
             balancesCorrectCheck.Passed &&
+            perKeyOrdering.Passed &&
+            inlineInstantSettlement.Passed &&
             stageCardinality.Passed &&
             canonicalAccountSet.Passed;
 
@@ -425,12 +529,72 @@ public static class LoadTestAssertionCalculator
             totalBalance,
             expectedTotalBalance,
             loadTestAccounts.Count,
+            request.InlineInstantSettlementCount,
             paymentsOutbox,
             coreBankInbox,
             coreBankOutbox,
             paymentsInbox);
 
-        return new AssertionResult(allPassed, checks, summary, new AssertionDebugInfo(completedTransactions));
+        return new AssertionResult(
+            allPassed,
+            checks,
+            summary,
+            new AssertionDebugInfo(completedTransactions, orderingViolations));
+    }
+
+    internal static IReadOnlyList<OrderingViolation> FindOrderingViolations(
+        IReadOnlyList<OrderingObservation> observations)
+    {
+        var violations = new List<OrderingViolation>();
+        foreach (var partition in observations.GroupBy(item => (item.Store, item.PartitionId)))
+        {
+            OrderingObservation? latestPrior = null;
+            // Grouping by EnqueuedAt alone collapsed every row sharing an
+            // exact timestamp (realistic under real concurrent load, since
+            // timestamps come from TimeProvider.GetUtcNow() per-request
+            // rather than a monotonic sequence) into one group that was
+            // never compared against itself -- silently reducing detection
+            // power exactly during the highest-throughput phase this check
+            // exists to police. Id is the same stable secondary tiebreaker
+            // GetClaimableMessagesQuery already uses
+            // (.OrderBy(EnqueuedAt).ThenBy(Id)) to give same-timestamp rows a
+            // deterministic order, so grouping by (EnqueuedAt, Id) instead
+            // makes every row its own step again and restores comparability.
+            foreach (var enqueueGroup in partition
+                         .OrderBy(item => item.EnqueuedAt)
+                         .ThenBy(item => item.Id)
+                         .GroupBy(item => (item.EnqueuedAt, item.Id)))
+            {
+                var current = enqueueGroup
+                    .Where(item => item.ProcessedAt.HasValue)
+                    .OrderBy(item => item.ProcessedAt)
+                    .ToList();
+                if (latestPrior?.ProcessedAt is { } priorProcessed
+                    && current.FirstOrDefault()?.ProcessedAt is { } currentProcessed
+                    && currentProcessed < priorProcessed)
+                {
+                    var later = current[0];
+                    violations.Add(new OrderingViolation(
+                        partition.Key.Store,
+                        partition.Key.PartitionId,
+                        latestPrior.IdempotencyKey,
+                        later.IdempotencyKey,
+                        latestPrior.EnqueuedAt,
+                        later.EnqueuedAt,
+                        priorProcessed,
+                        currentProcessed));
+                }
+
+                var latestCurrent = current.LastOrDefault();
+                if (latestCurrent?.ProcessedAt is not null
+                    && (latestPrior?.ProcessedAt is null || latestCurrent.ProcessedAt > latestPrior.ProcessedAt))
+                {
+                    latestPrior = latestCurrent;
+                }
+            }
+        }
+
+        return violations;
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using CoreBankDemo.DemoRunner.Application.Doctor;
 using CoreBankDemo.DemoRunner.Application.Ports;
 
 namespace CoreBankDemo.DemoRunner.Application;
@@ -9,6 +10,9 @@ public sealed record CommandResult(bool Succeeded, string Message)
     public static CommandResult Rejected(string message) => new(false, message);
 }
 
+internal sealed record EvidenceProvenance(TopologyProfile Profile, int RunGeneration);
+internal sealed record OperationContext(TopologyProfile Profile, int RunGeneration, string Fingerprint);
+
 public sealed class OperatorConsoleController
 {
     private readonly IAspireAdapter _aspire;
@@ -17,6 +21,7 @@ public sealed class OperatorConsoleController
     private readonly ILoadWorkflowRunner _loadWorkflow;
     private readonly IEvidenceExporter _exporter;
     private readonly IBrowserLauncher _browser;
+    private readonly IPreflightRunner _preflight;
     private readonly TimeProvider _time;
     private readonly OperatorConsoleOptions _options;
     private readonly Func<string> _keyFactory;
@@ -27,6 +32,8 @@ public sealed class OperatorConsoleController
     private OperatorConsoleState _state = OperatorConsoleState.Empty;
     private TopologyHandle? _ownedHandle;
     private CancellationTokenSource? _burstCancellation;
+    private TaskCompletionSource? _activeMutationCompletion;
+    private bool _shutdownRequested;
     private long _evidenceSequence;
     private int _burstSequence;
 
@@ -37,6 +44,7 @@ public sealed class OperatorConsoleController
         ILoadWorkflowRunner loadWorkflow,
         IEvidenceExporter exporter,
         IBrowserLauncher browser,
+        IPreflightRunner preflight,
         TimeProvider time,
         OperatorConsoleOptions? options = null,
         Func<string>? keyFactory = null)
@@ -47,6 +55,7 @@ public sealed class OperatorConsoleController
         _loadWorkflow = loadWorkflow;
         _exporter = exporter;
         _browser = browser;
+        _preflight = preflight;
         _time = time;
         _options = options ?? new OperatorConsoleOptions();
         _keyFactory = keyFactory ?? (() => Guid.NewGuid().ToString("D"));
@@ -65,15 +74,53 @@ public sealed class OperatorConsoleController
         }
     }
 
+    public int? OwnedProcessId
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _ownedHandle?.ProcessId;
+            }
+        }
+    }
+
+    public bool CanRunLoadTest
+    {
+        get
+        {
+            var state = State;
+            return state.Profile == TopologyProfile.LoadTests
+                && state.Topology?.IsReady == true
+                && HasFreshResourceAuthority(state)
+                && state.ActiveMutation is null;
+        }
+    }
+
     public async Task InitializeAsync(CancellationToken ct)
     {
-        var discovered = await _aspire.DiscoverAsync(ct);
+        var preflight = await _preflight.RunAsync(ct);
+        var discovered = preflight.Profiles.Values
+            .Select(profile => profile.Snapshot)
+            .Where(snapshot => snapshot is not null)
+            .Cast<TopologySnapshot>()
+            .ToList();
         var matches = discovered.Where(snapshot => snapshot.IsReady).ToList();
 
-        if (discovered.Count > 1)
+        if (!preflight.DiscoveryReachable)
         {
             Update(state => state with
             {
+                Preflight = preflight,
+                ResourceAuthorityAvailable = false,
+                StatusLine = $"Aspire discovery Unreachable — {preflight.Checks.First(check => check.Name == "Aspire discovery").Remediation}",
+            });
+        }
+        else if (discovered.Count > 1)
+        {
+            Update(state => state with
+            {
+                Preflight = preflight,
                 Profile = TopologyProfile.None,
                 Ownership = TopologyOwnership.None,
                 Topology = null,
@@ -86,6 +133,7 @@ public sealed class OperatorConsoleController
             var snapshot = matches[0];
             Update(state => state with
             {
+                Preflight = preflight,
                 Profile = snapshot.Profile,
                 Ownership = TopologyOwnership.None,
                 Topology = snapshot,
@@ -98,6 +146,7 @@ public sealed class OperatorConsoleController
             var snapshot = discovered[0];
             Update(state => state with
             {
+                Preflight = preflight,
                 Profile = snapshot.Profile,
                 Ownership = TopologyOwnership.None,
                 Topology = snapshot,
@@ -109,7 +158,10 @@ public sealed class OperatorConsoleController
         {
             Update(state => state with
             {
-                StatusLine = "No topology active. Preflight is ready; Start or Attach is explicit.",
+                Preflight = preflight,
+                StatusLine = preflight.AllPassed
+                    ? "No topology active. Preflight is ready; Start or Attach is explicit."
+                    : $"Preflight failed — {string.Join(" | ", preflight.Checks.Where(check => !check.Passed).Select(check => check.Remediation))}",
             });
         }
     }
@@ -134,24 +186,91 @@ public sealed class OperatorConsoleController
             return;
         }
 
-        var observed = await _aspire.GetSnapshotAsync(state.Profile, ct);
-        if (state.Ownership == TopologyOwnership.Attached && !observed.IsReachable)
+        if (state.ActiveMutation?.Kind is MutationKind.StartTopology
+            or MutationKind.StopTopology
+            or MutationKind.SwitchTopology
+            or MutationKind.ResourceCommand)
+        {
+            return;
+        }
+
+        var refreshContext = CaptureContext(state);
+        var observed = await _aspire.GetSnapshotAsync(refreshContext.Profile, ct);
+        if (!IsCurrent(refreshContext))
+        {
+            return;
+        }
+
+        if (!observed.IsReachable)
         {
             var discovered = await _aspire.DiscoverAsync(ct);
-            if (discovered.All(snapshot => snapshot.Profile != state.Profile))
+            if (!IsCurrent(refreshContext))
             {
+                return;
+            }
+
+            if (discovered.IsReachable
+                && discovered.Snapshots.All(snapshot => snapshot.Profile != refreshContext.Profile))
+            {
+                if (state.Ownership == TopologyOwnership.Owned && _ownedHandle is not null)
+                {
+                    try
+                    {
+                        await _processes.ForgetExitedOwnedAsync(_ownedHandle, ct);
+                    }
+                    catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
+                    {
+                        // ForgetExitedOwnedAsync can throw (e.g. an ownership
+                        // verification failure or an "aspire ps" timeout).
+                        // The refresh must not abort before clearing stale
+                        // ownership below -- doing so would leave the console
+                        // showing an Owned AppHost that no longer exists.
+                        // Self-heal by still clearing local ownership state,
+                        // recording the failure as evidence instead of losing it.
+                        AddEvidence(
+                            new EvidenceProvenance(refreshContext.Profile, refreshContext.RunGeneration),
+                            EvidenceKind.Topology,
+                            $"Failed to clear stale {state.Ownership} ownership for {refreshContext.Profile}",
+                            "aspire ps --format Json",
+                            refreshContext.Profile.ToString(),
+                            null,
+                            TimeSpan.Zero,
+                            ex.Message,
+                            false);
+                    }
+
+                    _ownedHandle = null;
+                }
+
+                var preflight = await _preflight.RunAsync(ct);
+                if (!IsCurrent(refreshContext))
+                {
+                    return;
+                }
+
                 _debouncer.Reset();
+                AddEvidence(
+                    new EvidenceProvenance(refreshContext.Profile, refreshContext.RunGeneration),
+                    EvidenceKind.Topology,
+                    $"{state.Ownership} AppHost disappeared",
+                    "aspire ps --format Json",
+                    refreshContext.Profile.ToString(),
+                    null,
+                    TimeSpan.Zero,
+                    "Aspire discovery confirmed the previously active AppHost is no longer running.",
+                    false);
                 Update(current => current with
                 {
                     Profile = TopologyProfile.None,
                     Ownership = TopologyOwnership.None,
                     Topology = null,
+                    Preflight = preflight,
                     ResourceAuthorityAvailable = false,
                     LastPayment = null,
                     CanResendLastPayment = false,
                     LastLoadResult = null,
                     LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run this session."),
-                    StatusLine = "The attached AppHost is no longer running. Start or attach a known topology.",
+                    StatusLine = $"The {state.Ownership} AppHost is no longer running. Start or attach a known topology.",
                 });
                 return;
             }
@@ -187,32 +306,57 @@ public sealed class OperatorConsoleController
             return CommandResult.Rejected("A topology is already detected or active. Attach it or stop it before starting another.");
         }
 
+        var preflight = await _preflight.RunAsync(ct);
+        Update(state => state with { Preflight = preflight });
+        if (!preflight.CanStart(profile))
+        {
+            return CommandResult.Rejected(
+                $"Start blocked by preflight: {string.Join(" | ", preflight.Checks.Where(check => !check.Passed).Select(check => check.Remediation))}");
+        }
+
         if (!TryBeginMutation(MutationKind.StartTopology, KnownTopologyProfiles.DisplayName(profile), out var mutation))
         {
             return BusyResult();
         }
 
+        TopologyHandle? handle = null;
         try
         {
-            var handle = await _processes.StartOwnedAsync(profile, ct);
+            handle = await _processes.StartOwnedAsync(profile, ct);
             _ownedHandle = handle;
             SetTopologyTransition(profile, TopologyOwnership.Owned, "Starting AppHost");
             var snapshot = await WaitForTopologyAsync(profile, expectPresent: true, ct);
             if (snapshot is null)
             {
                 var detail = JournalRedaction.Apply(_processes.GetRecentOutput(handle));
-                AddEvidence(EvidenceKind.Topology, $"Start {profile} timed out", "aspire run", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), detail, false);
+                await _processes.StopOwnedAsync(handle, CancellationToken.None);
+                _ownedHandle = null;
+                AddEvidence(EvidenceKind.Topology, $"Start {profile} timed out", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), detail, false);
                 return CommandResult.Rejected($"Timed out waiting for {profile}. {detail}");
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
-            AddEvidence(EvidenceKind.Topology, $"Started {profile} as Owned", "aspire run", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
+            AddEvidence(EvidenceKind.Topology, $"Started {profile} as Owned", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} started and verified.");
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
         {
-            AddEvidence(EvidenceKind.Topology, $"Start {profile} failed", "aspire run", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), ex.Message, false);
-            return CommandResult.Rejected(ex.Message);
+            var error = ex.Message;
+            if (handle is not null && _ownedHandle is not null)
+            {
+                try
+                {
+                    await _processes.StopOwnedAsync(handle, CancellationToken.None);
+                    _ownedHandle = null;
+                }
+                catch (Exception cleanupError)
+                {
+                    error = $"{error} Cleanup failed: {cleanupError.Message}";
+                }
+            }
+
+            AddEvidence(EvidenceKind.Topology, $"Start {profile} failed", handle is null ? "aspire start" : $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), error, false);
+            return CommandResult.Rejected(error);
         }
         finally
         {
@@ -259,7 +403,8 @@ public sealed class OperatorConsoleController
     public async Task<CommandResult> StopAsync(CancellationToken ct)
     {
         var state = State;
-        if (state.Ownership != TopologyOwnership.Owned || _ownedHandle is null)
+        var ownedHandle = _ownedHandle;
+        if (state.Ownership != TopologyOwnership.Owned || ownedHandle is null)
         {
             return CommandResult.Rejected("Whole-AppHost Stop is available only for an AppHost owned by this session.");
         }
@@ -271,9 +416,23 @@ public sealed class OperatorConsoleController
 
         try
         {
-            await _processes.StopOwnedAsync(_ownedHandle, ct);
+            OwnedStopResult stop;
+            try
+            {
+                stop = await _processes.StopOwnedAsync(ownedHandle, ct);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
+            {
+                // StopOwnedAsync can throw on an ownership/PID verification
+                // failure or an "aspire ps" timeout -- this must surface as a
+                // Rejected result the UI can display, like every other
+                // failure path in this controller, not propagate uncaught.
+                AddEvidence(EvidenceKind.Topology, $"Stop {state.Profile} failed", $"aspire stop --apphost {ownedHandle.ProjectPath}", state.Profile.ToString(), null, TimeSpanSince(mutation.StartedAt), ex.Message, false);
+                return CommandResult.Rejected(ex.Message);
+            }
+
             var stoppedProfile = state.Profile;
-            AddEvidence(EvidenceKind.Topology, $"Stopped {stoppedProfile}", "owned child stop", stoppedProfile.ToString(), null, TimeSpanSince(mutation.StartedAt), "Owned process stopped gracefully.", true);
+            AddEvidence(EvidenceKind.Topology, $"Stopped {stoppedProfile}", $"aspire stop --apphost {ownedHandle.ProjectPath}", stoppedProfile.ToString(), null, TimeSpanSince(mutation.StartedAt), stop.Detail, true);
             _ownedHandle = null;
             _debouncer.Reset();
             Update(current => current with
@@ -305,11 +464,25 @@ public sealed class OperatorConsoleController
             return CommandResult.Rejected("Choose the other known topology.");
         }
 
+        var preflight = await _preflight.RunAsync(ct);
+        Update(current => current with { Preflight = preflight });
+        if (!preflight.DiscoveryReachable)
+        {
+            return CommandResult.Rejected("Switch blocked because Aspire discovery is Unreachable.");
+        }
+
+        var targetState = preflight.Profiles[target];
+        if (targetState.Snapshot is not null || !targetState.PortsFree)
+        {
+            return CommandResult.Rejected($"Switch blocked before stopping the owned AppHost: {targetState.Detail}.");
+        }
+
         if (!TryBeginMutation(MutationKind.SwitchTopology, target.ToString(), out var mutation))
         {
             return BusyResult();
         }
 
+        TopologyHandle? targetHandle = null;
         try
         {
             if (_ownedHandle is not null)
@@ -329,19 +502,40 @@ public sealed class OperatorConsoleController
                 });
             }
 
-            var handle = await _processes.StartOwnedAsync(target, ct);
-            _ownedHandle = handle;
+            targetHandle = await _processes.StartOwnedAsync(target, ct);
+            _ownedHandle = targetHandle;
             SetTopologyTransition(target, TopologyOwnership.Owned, "Switching AppHost");
             var snapshot = await WaitForTopologyAsync(target, expectPresent: true, ct);
             if (snapshot is null)
             {
-                AddEvidence(EvidenceKind.Topology, $"Switch to {target} timed out", "aspire run", target.ToString(), null, TimeSpanSince(mutation.StartedAt), JournalRedaction.Apply(_processes.GetRecentOutput(handle)), false);
+                await _processes.StopOwnedAsync(targetHandle, CancellationToken.None);
+                _ownedHandle = null;
+                AddEvidence(EvidenceKind.Topology, $"Switch to {target} timed out", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), JournalRedaction.Apply(_processes.GetRecentOutput(targetHandle)), false);
                 return CommandResult.Rejected($"Timed out switching to {target}.");
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
-            AddEvidence(EvidenceKind.Topology, $"Switched to {target}", "owned stop + aspire run", target.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
+            AddEvidence(EvidenceKind.Topology, $"Switched to {target}", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"Switched to {target}.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
+        {
+            var error = ex.Message;
+            if (targetHandle is not null && _ownedHandle is not null)
+            {
+                try
+                {
+                    await _processes.StopOwnedAsync(targetHandle, CancellationToken.None);
+                    _ownedHandle = null;
+                }
+                catch (Exception cleanupError)
+                {
+                    error = $"{error} Cleanup failed: {cleanupError.Message}";
+                }
+            }
+
+            AddEvidence(EvidenceKind.Topology, $"Switch to {target} failed", "aspire stop + aspire start", target.ToString(), null, TimeSpanSince(mutation.StartedAt), error, false);
+            return CommandResult.Rejected(error);
         }
         finally
         {
@@ -374,21 +568,60 @@ public sealed class OperatorConsoleController
         {
             MarkResourceTransition(resourceName, command);
             var dispatch = await _aspire.ExecuteResourceCommandAsync(state.Profile, resourceName, command, ct);
-            if (!dispatch.Dispatched)
+            if (dispatch.Status == ResourceDispatchStatus.Rejected)
             {
                 AddEvidence(EvidenceKind.Resource, $"{command} {resourceName} rejected", $"aspire resource {resourceName} {command.ToString().ToLowerInvariant()}", resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, false);
                 return CommandResult.Rejected(dispatch.Detail);
             }
 
-            var snapshot = await WaitForResourceAsync(state.Profile, resourceName, command, ct);
-            if (snapshot is null)
+            if (dispatch.Status is ResourceDispatchStatus.Ambiguous or ResourceDispatchStatus.Partial)
             {
-                AddEvidence(EvidenceKind.Resource, $"{command} {resourceName} timed out", $"aspire resource {resourceName} {command.ToString().ToLowerInvariant()}", resourceName, null, TimeSpanSince(mutation.StartedAt), "Aspire did not confirm the requested terminal state.", false);
-                return CommandResult.Rejected("Timed out waiting for a fresh Aspire snapshot to confirm the resource transition.");
+                var reconciled = await _aspire.GetSnapshotAsync(state.Profile, CancellationToken.None);
+                Update(current => current with
+                {
+                    Topology = reconciled,
+                    ResourceAuthorityAvailable = false,
+                    StatusLine = dispatch.Status == ResourceDispatchStatus.Partial
+                        ? $"Partial mutation — refresh required. {dispatch.Detail}"
+                        : $"Ambiguous mutation — refresh required. {dispatch.Detail}",
+                });
+                AddEvidence(
+                    EvidenceKind.Resource,
+                    dispatch.Status == ResourceDispatchStatus.Partial
+                        ? $"{command} {resourceName} partially applied"
+                        : $"{command} {resourceName} ambiguous",
+                    ExactResourceCommands(command, dispatch.AffectedInstances, dispatch.FailedInstances),
+                    resourceName,
+                    null,
+                    TimeSpanSince(mutation.StartedAt),
+                    dispatch.Detail,
+                    false);
+                return CommandResult.Rejected(
+                    dispatch.Status == ResourceDispatchStatus.Partial
+                        ? $"Partial mutation; real topology was reconciled and refresh is required. {dispatch.Detail}"
+                        : $"Ambiguous after dispatch; refresh is required before further mutation. {dispatch.Detail}");
             }
 
-            Update(current => current with { Topology = snapshot });
-            AddEvidence(EvidenceKind.Resource, $"{command} {resourceName} confirmed", $"aspire resource {resourceName} {command.ToString().ToLowerInvariant()}", resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, true);
+            var wait = await WaitForResourceAsync(state.Profile, resourceName, command, ct);
+            if (!wait.Confirmed)
+            {
+                if (wait.Snapshot is not null)
+                {
+                    Update(current => current with { Topology = wait.Snapshot });
+                }
+                Update(current => current with { ResourceAuthorityAvailable = false });
+                var summary = wait.Partial
+                    ? $"{command} {resourceName} partially resolved"
+                    : $"{command} {resourceName} ambiguous";
+                AddEvidence(EvidenceKind.Resource, summary, ExactResourceCommands(command, dispatch.AffectedInstances, []), resourceName, null, TimeSpanSince(mutation.StartedAt), wait.Detail, false);
+                return CommandResult.Rejected(
+                    wait.Partial
+                        ? $"Partial mutation: {wait.Detail} Refresh is required before further mutation."
+                        : $"Ambiguous after dispatch: {wait.Detail} Refresh is required before further mutation.");
+            }
+
+            Update(current => current with { Topology = wait.Snapshot });
+            AddEvidence(EvidenceKind.Resource, $"{command} {resourceName} confirmed", ExactResourceCommands(command, dispatch.AffectedInstances, []), resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, true);
             return CommandResult.Ok($"{resourceName}: {command} confirmed by Aspire.");
         }
         finally
@@ -427,7 +660,8 @@ public sealed class OperatorConsoleController
 
     public async Task<InspectionResult> QueryOutcomeAsync(string transactionIdOrKey, CancellationToken ct)
     {
-        if (State.Profile == TopologyProfile.None || State.Ownership == TopologyOwnership.None)
+        var state = State;
+        if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
         {
             return new InspectionResult(false, 0, "outcome", null, "Start or attach a topology before querying an outcome.", TimeSpan.Zero);
         }
@@ -438,8 +672,11 @@ public sealed class OperatorConsoleController
         }
 
         var startedAt = _time.GetUtcNow();
-        var result = await _payments.QueryOutcomeAsync(State.Profile, transactionIdOrKey.Trim(), ct);
+        var context = CaptureContext(state);
+        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
+        var result = await _payments.QueryOutcomeAsync(context.Profile, transactionIdOrKey.Trim(), ct);
         AddEvidence(
+            provenance,
             EvidenceKind.OutcomeQuery,
             result.Succeeded ? $"Outcome query returned HTTP {result.StatusCode}" : "Outcome query failed",
             "GET",
@@ -453,13 +690,16 @@ public sealed class OperatorConsoleController
 
     public async Task<InspectionResult> InspectAsync(string endpointId, CancellationToken ct)
     {
-        if (State.Profile == TopologyProfile.None || State.Ownership == TopologyOwnership.None)
+        var state = State;
+        if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
         {
             return new InspectionResult(false, 0, endpointId, null, "Start or attach a topology before inspecting evidence.", TimeSpan.Zero);
         }
 
-        var result = await _payments.InspectAsync(State.Profile, endpointId, ct);
+        var context = CaptureContext(state);
+        var result = await _payments.InspectAsync(context.Profile, endpointId, ct);
         AddEvidence(
+            new EvidenceProvenance(context.Profile, context.RunGeneration),
             EvidenceKind.Inspection,
             result.Succeeded ? $"Inspected {endpointId}" : $"Inspection failed: {endpointId}",
             "GET",
@@ -504,6 +744,8 @@ public sealed class OperatorConsoleController
         }
 
         using var burstCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var context = CaptureContext(State);
+        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
         _burstCancellation = burstCts;
         var burstNumber = Interlocked.Increment(ref _burstSequence);
         Update(state => state with { Burst = new BurstProgress(count, 0, 0, 0, 0, false) });
@@ -521,14 +763,14 @@ public sealed class OperatorConsoleController
                 new ParallelOptions { MaxDegreeOfParallelism = concurrency, CancellationToken = burstCts.Token },
                 async (index, token) =>
                 {
-                    var key = $"demo-burst-{_sessionId}-g{State.RunGeneration:D3}-r{burstNumber:D3}-{index:D6}";
+                    var key = $"demo-burst-{_sessionId}-g{context.RunGeneration:D3}-r{burstNumber:D3}-{index:D6}";
                     PaymentResult result;
                     try
                     {
                         result = EnforceRailSemantics(
                             template.Rail,
                             await _payments.SubmitAsync(
-                                State.Profile,
+                                context.Profile,
                                 new PaymentSubmission(template, IdempotencyMode.Generated, key),
                                 token));
                     }
@@ -552,10 +794,9 @@ public sealed class OperatorConsoleController
                             break;
                     }
 
-                    Update(state => state with
-                    {
-                        Burst = new BurstProgress(count, sent, accepted, completed, failed, false),
-                    });
+                    Update(state => IsCurrent(context)
+                        ? state with { Burst = new BurstProgress(count, sent, accepted, completed, failed, false) }
+                        : state);
                 });
         }
         catch (OperationCanceledException) when (burstCts.IsCancellationRequested)
@@ -572,7 +813,7 @@ public sealed class OperatorConsoleController
             var summary = final.Cancelled
                 ? $"Burst cancelled after {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}."
                 : $"Burst finished {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}.";
-            AddEvidence(EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), string.Join(Environment.NewLine, failures), !final.Cancelled && final.Failed == 0);
+            AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), string.Join(Environment.NewLine, failures), !final.Cancelled && final.Failed == 0);
             EndMutation();
         }
 
@@ -631,18 +872,23 @@ public sealed class OperatorConsoleController
             return LoadWorkflowResult.Failure(LoadWorkflowPhase.NotStarted, BusyResult().Message);
         }
 
+        var context = CaptureContext(State);
+        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
         try
         {
             var progress = new InlineProgress<LoadWorkflowProgress>(value =>
-                Update(current => current with
-                {
-                    LoadProgress = value,
-                    StatusLine = $"Load Test · {value.Phase} — {value.Detail}",
-                }));
+                Update(current => IsCurrent(context)
+                    ? current with
+                    {
+                        LoadProgress = value,
+                        StatusLine = $"Load Test · {value.Phase} — {value.Detail}",
+                    }
+                    : current));
 
             var result = await _loadWorkflow.RunAsync(expectedUniqueCount, progress, ct);
-            Update(current => current with { LastLoadResult = result });
+            Update(current => IsCurrent(context) ? current with { LastLoadResult = result } : current);
             AddEvidence(
+                provenance,
                 EvidenceKind.LoadTest,
                 result.AllPassed ? "Load workflow passed" : $"Load workflow did not pass at {result.FinalPhase}",
                 "accepted load workflow",
@@ -661,8 +907,10 @@ public sealed class OperatorConsoleController
 
     public async Task<EvidenceExportResult> ExportEvidenceAsync(CancellationToken ct)
     {
-        var result = await _exporter.ExportAsync(State.Evidence, ct);
+        var state = State;
+        var result = await _exporter.ExportAsync(state.Evidence, ct);
         AddEvidence(
+            new EvidenceProvenance(state.Profile, state.RunGeneration),
             EvidenceKind.Export,
             result.Succeeded ? "Session evidence exported" : "Evidence export failed",
             "WRITE",
@@ -689,7 +937,19 @@ public sealed class OperatorConsoleController
 
     public async Task ShutdownAsync(CancellationToken ct)
     {
+        Task? activeMutation;
+        lock (_sync)
+        {
+            _shutdownRequested = true;
+            activeMutation = _activeMutationCompletion?.Task;
+        }
+
         CancelActiveBurst();
+        if (activeMutation is not null)
+        {
+            await activeMutation.WaitAsync(ct);
+        }
+
         if (_ownedHandle is not null)
         {
             await _processes.StopOwnedAsync(_ownedHandle, ct);
@@ -708,7 +968,8 @@ public sealed class OperatorConsoleController
             return RejectedPayment(string.Join(" ", validation));
         }
 
-        if (State.Profile == TopologyProfile.None || State.Ownership == TopologyOwnership.None)
+        var state = State;
+        if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
         {
             return RejectedPayment("Start or attach a topology before submitting a payment.");
         }
@@ -718,9 +979,11 @@ public sealed class OperatorConsoleController
             return RejectedPayment(BusyResult().Message);
         }
 
+        var context = CaptureContext(State);
+        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
         try
         {
-            var result = await _payments.SubmitAsync(State.Profile, submission, ct);
+            var result = await _payments.SubmitAsync(context.Profile, submission, ct);
             var safeResult = EnforceRailSemantics(submission.Request.Rail, result);
             var canResend = submission.IdempotencyMode != IdempotencyMode.Omitted;
             if (submission.IdempotencyMode == IdempotencyMode.Omitted && safeResult.IsAmbiguous)
@@ -728,11 +991,11 @@ public sealed class OperatorConsoleController
                 canResend = false;
             }
 
-            Update(state => state with
+            Update(state => IsCurrent(context) ? state with
             {
                 LastPayment = submission,
                 CanResendLastPayment = canResend,
-            });
+            } : state);
 
             var summary = safeResult.Outcome switch
             {
@@ -743,6 +1006,7 @@ public sealed class OperatorConsoleController
                 _ => safeResult.ErrorSummary ?? safeResult.Outcome.ToString(),
             };
             AddEvidence(
+                provenance,
                 EvidenceKind.Payment,
                 isResend ? $"Resend same key · {summary}" : summary,
                 "POST",
@@ -828,7 +1092,7 @@ public sealed class OperatorConsoleController
         return null;
     }
 
-    private async Task<TopologySnapshot?> WaitForResourceAsync(
+    private async Task<ResourceWaitResult> WaitForResourceAsync(
         TopologyProfile profile,
         string resourceName,
         ResourceCommand command,
@@ -836,13 +1100,24 @@ public sealed class OperatorConsoleController
     {
         var startedAt = _time.GetUtcNow();
         var deadline = _time.GetUtcNow() + _options.TransitionTimeout;
+        TopologySnapshot? lastSnapshot = null;
         for (var attempt = 0; attempt < 240 && _time.GetUtcNow() <= deadline; attempt++)
         {
             var snapshot = await _aspire.GetSnapshotAsync(profile, ct);
+            lastSnapshot = snapshot;
             var resource = snapshot.FindResource(resourceName);
             if (snapshot.IsReachable && snapshot.IsFingerprintMatch && ResourceReachedTarget(resource, command))
             {
-                return snapshot;
+                return new ResourceWaitResult(true, false, snapshot, "Aspire confirmed the requested state.");
+            }
+
+            if (resource?.Condition is ResourceCondition.Degraded or ResourceCondition.Failed)
+            {
+                return new ResourceWaitResult(
+                    false,
+                    true,
+                    snapshot,
+                    $"Aspire reports {resource.Condition} after dispatch: {resource.Detail}");
             }
 
             var elapsed = _time.GetUtcNow() - startedAt;
@@ -866,7 +1141,11 @@ public sealed class OperatorConsoleController
             await DelayAsync(ct);
         }
 
-        return null;
+        return new ResourceWaitResult(
+            false,
+            false,
+            lastSnapshot,
+            "Aspire did not confirm the requested terminal state before timeout.");
     }
 
     private static bool ResourceReachedTarget(ResourceSnapshot? resource, ResourceCommand command) =>
@@ -945,13 +1224,14 @@ public sealed class OperatorConsoleController
     {
         lock (_sync)
         {
-            if (_state.ActiveMutation is not null)
+            if (_shutdownRequested || _state.ActiveMutation is not null)
             {
-                mutation = _state.ActiveMutation;
+                mutation = _state.ActiveMutation ?? new ActiveMutation(kind, target, _time.GetUtcNow());
                 return false;
             }
 
             mutation = new ActiveMutation(kind, target, _time.GetUtcNow());
+            _activeMutationCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             _state = _state with
             {
                 ActiveMutation = mutation,
@@ -965,11 +1245,19 @@ public sealed class OperatorConsoleController
 
     private void EndMutation()
     {
+        TaskCompletionSource? completion;
+        lock (_sync)
+        {
+            completion = _activeMutationCompletion;
+            _activeMutationCompletion = null;
+        }
+
         Update(state => state with
         {
             ActiveMutation = null,
             StatusLine = state.Evidence.LastOrDefault()?.Summary ?? state.StatusLine,
         });
+        completion?.TrySetResult();
     }
 
     private static CommandResult BusyResult() =>
@@ -988,14 +1276,38 @@ public sealed class OperatorConsoleController
         string detail,
         bool succeeded)
     {
+        var state = State;
+        AddEvidence(
+            new EvidenceProvenance(state.Profile, state.RunGeneration),
+            kind,
+            summary,
+            method,
+            target,
+            statusCode,
+            duration,
+            detail,
+            succeeded);
+    }
+
+    private void AddEvidence(
+        EvidenceProvenance provenance,
+        EvidenceKind kind,
+        string summary,
+        string method,
+        string target,
+        int? statusCode,
+        TimeSpan duration,
+        string detail,
+        bool succeeded)
+    {
         Update(state =>
         {
             var records = state.Evidence.ToList();
             var record = new EvidenceRecord(
                 Interlocked.Increment(ref _evidenceSequence),
                 _time.GetUtcNow(),
-                state.Profile,
-                state.RunGeneration,
+                provenance.Profile,
+                provenance.RunGeneration,
                 kind,
                 JournalRedaction.Apply(summary),
                 method,
@@ -1021,6 +1333,30 @@ public sealed class OperatorConsoleController
 
     private TimeSpan TimeSpanSince(DateTimeOffset startedAt) => _time.GetUtcNow() - startedAt;
 
+    private OperationContext CaptureContext(OperatorConsoleState state) =>
+        new(state.Profile, state.RunGeneration, state.Topology?.Fingerprint ?? string.Empty);
+
+    private bool IsCurrent(OperationContext context)
+    {
+        var state = State;
+        return state.Profile == context.Profile
+            && state.RunGeneration == context.RunGeneration
+            && string.Equals(state.Topology?.Fingerprint ?? string.Empty, context.Fingerprint, StringComparison.Ordinal);
+    }
+
+    private static string ExactResourceCommands(
+        ResourceCommand command,
+        IReadOnlyList<string> affectedInstances,
+        IReadOnlyList<string> failedInstances)
+    {
+        var instances = affectedInstances.Concat(failedInstances).Distinct(StringComparer.Ordinal).ToList();
+        return instances.Count == 0
+            ? $"aspire resource <unconfirmed> {command.ToString().ToLowerInvariant()}"
+            : string.Join(
+                " && ",
+                instances.Select(instance => $"aspire resource {instance} {command.ToString().ToLowerInvariant()}"));
+    }
+
     private void Update(Func<OperatorConsoleState, OperatorConsoleState> update)
     {
         lock (_sync)
@@ -1037,4 +1373,10 @@ public sealed class OperatorConsoleController
     {
         public void Report(T value) => report(value);
     }
+
+    private sealed record ResourceWaitResult(
+        bool Confirmed,
+        bool Partial,
+        TopologySnapshot? Snapshot,
+        string Detail);
 }

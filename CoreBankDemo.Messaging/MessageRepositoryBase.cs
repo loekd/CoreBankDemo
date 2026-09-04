@@ -500,8 +500,38 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             return null;
         }
 
-        message.Status = MessageConstants.Status.Processing;
+        return await ApplyPendingClaimAsync(message, cancellationToken).ConfigureAwait(false);
+    }
 
+    public virtual async Task<TMessage?> TryClaimByIdIfOldestAsync(
+        Guid id,
+        int partitionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentOutOfRangeException(nameof(id), id, "id must not be Guid.Empty.");
+        }
+
+        var staleThreshold = TimeProvider.GetUtcNow().UtcDateTime - MessageConstants.Defaults.ProcessingTimeout;
+        var oldest = await GetClaimableMessagesQuery(partitionId, staleThreshold)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (oldest is null
+            || oldest.Id != id
+            || oldest.Status != MessageConstants.Status.Pending)
+        {
+            return null;
+        }
+
+        return await ApplyPendingClaimAsync(oldest, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<TMessage?> ApplyPendingClaimAsync(
+        TMessage message,
+        CancellationToken cancellationToken)
+    {
+        message.Status = MessageConstants.Status.Processing;
         try
         {
             await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -509,10 +539,6 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         }
         catch (DbUpdateConcurrencyException ex)
         {
-            // Lost the claim race to a concurrent claimer (e.g. the
-            // background processor's own batch claim reached this row
-            // first). Detach so the tracker doesn't try to resend a stale
-            // update -- not this call's row to deliver.
             foreach (var entry in ex.Entries)
             {
                 entry.State = EntityState.Detached;

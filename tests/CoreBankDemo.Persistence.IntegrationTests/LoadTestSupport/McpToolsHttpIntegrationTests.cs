@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Net.Http.Json;
 using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.CoreBankAPI.Inbox;
@@ -6,6 +7,7 @@ using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.LoadTestSupport;
 using CoreBankDemo.LoadTestSupport.Endpoints;
 using CoreBankDemo.LoadTestSupport.McpTools;
+using CoreBankDemo.LoadTestSupport.Services;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
@@ -71,6 +73,7 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
                     services.AddDbContext<PaymentsDbContext>(o => o.UseNpgsql(_paymentsConnectionString));
                     services.AddScoped<ILoadTestDatabaseResetter, LoadTestDatabaseResetter>();
                     services.AddSingleton<DatabaseResetState>();
+                    services.AddSingleton<LoadRunEvidenceState>();
                     services.AddSingleton(_publisher.Object);
                     services.AddScoped<DatabaseResetCoordinator>();
                     services.AddRouting();
@@ -83,6 +86,7 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
                         endpoints.MapResetEndpoints();
                         endpoints.MapInboxEndpoints();
                         endpoints.MapOutboxEndpoints();
+                        endpoints.MapRunEvidenceEndpoints();
                     });
                 });
             });
@@ -250,6 +254,50 @@ public sealed class McpToolsHttpIntegrationTests(PostgresContainerFixture fixtur
 
         JsonNode.Parse(json)!.AsObject().ContainsKey("error").Should().BeFalse($"reset should have succeeded: {json}");
         _publisher.Verify(p => p.ReleaseAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Inline_settlement_evidence_is_deduplicated_and_reset_with_the_run()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var client = _host!.GetTestClient();
+        using var first = await client.PostAsJsonAsync(
+            "/run-evidence/inline-settlement",
+            new InlineSettlementEvidence("load-test-0000000000"),
+            cancellationToken);
+        using var duplicate = await client.PostAsJsonAsync(
+            "/run-evidence/inline-settlement",
+            new InlineSettlementEvidence("load-test-0000000000"),
+            cancellationToken);
+
+        first.EnsureSuccessStatusCode();
+        duplicate.EnsureSuccessStatusCode();
+        using (var scope = _host!.Services.CreateScope())
+        {
+            scope.ServiceProvider.GetRequiredService<LoadRunEvidenceState>()
+                .InlineSettlementCount.Should().Be(1);
+        }
+
+        using var reset = await client.PostAsync("/reset", null, cancellationToken);
+        reset.EnsureSuccessStatusCode();
+        using var afterScope = _host.Services.CreateScope();
+        afterScope.ServiceProvider.GetRequiredService<LoadRunEvidenceState>()
+            .InlineSettlementCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Inline_settlement_evidence_returns_bad_request_for_a_null_body_instead_of_500()
+    {
+        // Patch 6 regression test: a literal JSON "null" body binds `evidence`
+        // to null; the handler must return a clean 400 rather than dereference
+        // it and surface an unhandled 500.
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var client = _host!.GetTestClient();
+        using var nullBody = new System.Net.Http.StringContent("null", System.Text.Encoding.UTF8, "application/json");
+
+        using var response = await client.PostAsync("/run-evidence/inline-settlement", nullBody, cancellationToken);
+
+        response.StatusCode.Should().Be(System.Net.HttpStatusCode.BadRequest);
     }
 
     [Fact]

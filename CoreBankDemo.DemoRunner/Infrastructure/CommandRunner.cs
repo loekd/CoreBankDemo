@@ -1,16 +1,11 @@
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Text;
 
 namespace CoreBankDemo.DemoRunner.Infrastructure;
 
-internal sealed record CommandOutput(int ExitCode, string StandardOutput, string StandardError)
+public sealed class CommandRunner : ICommandRunner
 {
-    public bool Succeeded => ExitCode == 0;
-}
-
-internal static class CommandRunner
-{
-    public static async Task<CommandOutput> RunAsync(
+    public async Task<CommandOutput> RunAsync(
         string fileName,
         IReadOnlyList<string> arguments,
         string workingDirectory,
@@ -33,7 +28,15 @@ internal static class CommandRunner
             process.StartInfo.ArgumentList.Add(argument);
         }
 
-        process.Start();
+        try
+        {
+            process.Start();
+        }
+        catch (Win32Exception ex)
+        {
+            return CommandOutput.Missing(ex.Message);
+        }
+
         var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
         var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -42,20 +45,33 @@ internal static class CommandRunner
         {
             await process.WaitForExitAsync(timeoutCts.Token);
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            await TerminateAsync(process);
+            return CommandOutput.Timeout(Bound(await stdoutTask), Bound(await stderrTask));
+        }
         catch (OperationCanceledException)
         {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-                await process.WaitForExitAsync(CancellationToken.None);
-            }
-
+            await TerminateAsync(process);
             throw;
         }
+
         return new CommandOutput(
             process.ExitCode,
             Bound(await stdoutTask),
-            Bound(await stderrTask));
+            Bound(await stderrTask),
+            true,
+            false,
+            false);
+    }
+
+    private static async Task TerminateAsync(Process process)
+    {
+        if (!process.HasExited)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(CancellationToken.None);
+        }
     }
 
     private static string Bound(string value)

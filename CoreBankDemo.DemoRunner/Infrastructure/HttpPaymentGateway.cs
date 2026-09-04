@@ -41,7 +41,6 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             var parsed = ParsePaymentResponse(body);
             var outcome = response.StatusCode switch
             {
-                HttpStatusCode.Accepted when string.Equals(parsed.Status, "Failed", StringComparison.OrdinalIgnoreCase) => PaymentOutcome.Failed,
                 HttpStatusCode.Accepted => PaymentOutcome.Pending,
                 HttpStatusCode.OK when string.Equals(parsed.Status, "Completed", StringComparison.OrdinalIgnoreCase) => PaymentOutcome.Completed,
                 HttpStatusCode.OK when string.Equals(parsed.Status, "Failed", StringComparison.OrdinalIgnoreCase) => PaymentOutcome.Failed,
@@ -50,6 +49,8 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             };
             if (response.IsSuccessStatusCode
                 && (parsed.IsMalformed
+                    || (response.StatusCode == HttpStatusCode.Accepted
+                        && !string.Equals(parsed.Status, "Pending", StringComparison.OrdinalIgnoreCase))
                     || (!string.IsNullOrWhiteSpace(submission.IdempotencyKey)
                         && !string.Equals(parsed.TransactionId, submission.IdempotencyKey, StringComparison.Ordinal))))
             {

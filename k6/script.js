@@ -115,6 +115,53 @@ export function setup() {
         throw new Error(`Payments API is not reachable at ${PAYMENTS_URL}/health - check that the service is running on the correct port`);
     }
 
+    // Deterministic inline proof before concurrent traffic starts. This is
+    // unique transaction index 0 from the normal workload; the default
+    // function skips its fresh submission and still performs its deliberate
+    // retry later. Running it here against the freshly reset empty stores
+    // guarantees the inline rail is exercised without weakening FIFO
+    // partition ordering under the concurrent phase.
+    const probeKey = 'load-test-0000000000';
+    const probeRes = http.post(
+        `${PAYMENTS_URL}/api/payments`,
+        JSON.stringify({
+            fromAccount: ACCOUNTS[0],
+            toAccount: ACCOUNTS[1],
+            amount: 1.00,
+            currency: 'EUR',
+            scheme: 'instant',
+        }),
+        {
+            headers: {
+                'Content-Type': 'application/json',
+                'Idempotency-Key': probeKey,
+            },
+            tags: { type: 'payment' },
+        }
+    );
+    let probeStatus = null;
+    try {
+        probeStatus = JSON.parse(probeRes.body).status;
+    } catch (_) {
+        // The named check below fails closed.
+    }
+    const probeCompleted = check(probeRes, {
+        'setup instant probe settled inline': (r) => r.status === 200 && probeStatus === 'Completed',
+    });
+    if (!probeCompleted) {
+        throw new Error(`Setup instant probe did not settle inline: status=${probeRes.status}, body=${probeRes.body}`);
+    }
+
+    instantSettledInlineCounter.add(1);
+    const evidenceRes = http.post(
+        `${SUPPORT_URL}/run-evidence/inline-settlement`,
+        JSON.stringify({ idempotencyKey: probeKey }),
+        { headers: { 'Content-Type': 'application/json' }, tags: { type: 'run-evidence' } }
+    );
+    if (!check(evidenceRes, { 'setup inline settlement evidence recorded': (r) => r.status === 200 })) {
+        throw new Error(`Setup inline evidence was not recorded: status=${evidenceRes.status}, body=${evidenceRes.body}`);
+    }
+
     return { startTime: Date.now() };
 }
 
@@ -129,6 +176,12 @@ export default function () {
         : iterationIndex;
     const messageId = `load-test-${keyIndex.toString().padStart(10, '0')}`;
     const isInstant = isInstantKey(keyIndex); // stable across a transaction's retry
+
+    if (!isRetry && keyIndex === 0) {
+        // Submitted once in setup to deterministically prove inline settlement.
+        sleep(0.1);
+        return;
+    }
 
     // Keep account selection tied to key index so retries replay the same shape.
     const fromIdx = keyIndex % ACCOUNTS.length;
@@ -181,17 +234,32 @@ export default function () {
         }
     } else {
         if (isInstant) {
+            let parsedStatus = null;
+            try {
+                parsedStatus = JSON.parse(res.body).status;
+            } catch (_) {
+                // The named response checks below report malformed success bodies.
+            }
             check(res, {
                 'payment (instant): 200 (completed/failed) or 202 (deferred)': (r) => r.status === 200 || r.status === 202,
+                'payment (instant): 200 has committed status': (r) => r.status !== 200 || parsedStatus === 'Completed' || parsedStatus === 'Failed',
                 'payment (instant): not 400 (valid request)': (r) => r.status !== 400,
                 'payment (instant): not 404 (endpoint exists)': (r) => r.status !== 404,
                 'payment (instant): not 500 (no server error)': (r) => r.status !== 500,
                 'payment (instant): not 503 (service available)': (r) => r.status !== 503,
             }) || console.error(`Instant payment failed: status=${res.status}, body=${res.body.substring(0, 200)}, messageId=${messageId}, from=${ACCOUNTS[fromIdx]}, to=${ACCOUNTS[toIdx]}`);
-            if (res.status === 200) {
+            if (res.status === 200 && parsedStatus === 'Completed') {
                 // Real inline settlement observed (not just an accepted 202) --
                 // feeds the 'instant_settled_inline' threshold above.
                 instantSettledInlineCounter.add(1);
+                const evidenceRes = http.post(
+                    `${SUPPORT_URL}/run-evidence/inline-settlement`,
+                    JSON.stringify({ idempotencyKey: messageId }),
+                    { headers: { 'Content-Type': 'application/json' }, tags: { type: 'run-evidence' } }
+                );
+                check(evidenceRes, {
+                    'inline settlement evidence recorded': (r) => r.status === 200,
+                });
             }
         } else {
             check(res, {
@@ -390,6 +458,8 @@ export function teardown(data) {
         'all submitted transactions processed': (r) => r.checks.allSubmittedProcessed.passed === true,
         'balance conservation':           (r) => r.checks.balanceConservation.passed === true,
         'balances correct':               (r) => r.checks.balancesCorrect.passed === true,
+        'per-key ordering':                (r) => r.checks.perKeyOrdering.passed === true,
+        'inline instant settlement':       (r) => r.checks.inlineInstantSettlement.passed === true,
         'stage cardinality N/N/3N/3N':     (r) => r.checks.stageCardinality.passed === true,
         'canonical account set exact':     (r) => r.checks.canonicalAccountSet.passed === true,
     });

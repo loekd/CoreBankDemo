@@ -28,6 +28,7 @@ public class Program
         builder.Services.AddSingleton<DatabaseResetState>();
         builder.Services.AddScoped<DatabaseResetCoordinator>();
         builder.Services.AddScoped<LoadTestAssertionService>();
+        builder.Services.AddSingleton<LoadRunEvidenceState>();
 
 // MCP server — exposes load test tools to AI agents via Streamable HTTP
         builder.Services.AddMcpServer()
@@ -47,6 +48,7 @@ public class Program
         app.MapAssertEndpoints();
         app.MapInboxEndpoints();
         app.MapOutboxEndpoints();
+        app.MapRunEvidenceEndpoints();
 
         app.Run();
 

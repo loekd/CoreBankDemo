@@ -140,6 +140,12 @@ public class OutboxProcessorBaseTests
         public Task<TestOutboxEventMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.FromResult<TestOutboxEventMessage?>(null);
 
+        public Task<TestOutboxEventMessage?> TryClaimByIdIfOldestAsync(
+            Guid id,
+            int partitionId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<TestOutboxEventMessage?>(null);
+
         public ValueTask DisposeAsync()
         {
             IsDisposed = true;

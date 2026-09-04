@@ -59,4 +59,9 @@ public interface IInboxMessageStore<TMessage>
     /// caller won the claim race for it.
     /// </returns>
     Task<TMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task<TMessage?> TryClaimByIdIfOldestAsync(
+        Guid id,
+        int partitionId,
+        CancellationToken cancellationToken = default);
 }

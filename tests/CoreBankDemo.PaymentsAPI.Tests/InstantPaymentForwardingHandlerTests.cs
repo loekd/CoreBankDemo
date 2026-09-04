@@ -4,6 +4,7 @@ using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults;
+using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -36,6 +37,7 @@ public class InstantPaymentForwardingHandlerTests
 
     private readonly Mock<IOutboxMessageStore<OutboxMessage>> _store = new(MockBehavior.Strict);
     private readonly Mock<ICoreBankTransactionForwarder> _forwarder = new(MockBehavior.Strict);
+    private readonly TestLockService _lock = new();
     private readonly BusinessMetrics _businessMetrics = new();
 
     private static OutboxMessage ClaimedMessage() => new()
@@ -57,7 +59,9 @@ public class InstantPaymentForwardingHandlerTests
         new(
             _store.Object,
             _forwarder.Object,
+            _lock,
             Options.Create(options ?? new InstantRailOptions()),
+            Options.Create(new OutboxProcessingOptions()),
             TimeProvider.System,
             NullLogger<InstantPaymentForwardingHandler>.Instance,
             businessMetrics ?? _businessMetrics);
@@ -85,9 +89,23 @@ public class InstantPaymentForwardingHandlerTests
     }
 
     [Fact]
+    public async Task ForwardAsync_defers_without_claiming_when_partition_lock_is_unavailable()
+    {
+        _lock.Acquired = false;
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        _lock.LockNames.Should().ContainSingle().Which.Should().Be("payments-outbox-partition-1");
+        _store.VerifyNoOtherCalls();
+        _forwarder.VerifyNoOtherCalls();
+    }
+
+    [Fact]
     public async Task ForwardAsync_defers_when_the_row_is_not_claimable()
     {
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>()))
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>()))
             .ReturnsAsync((OutboxMessage?)null);
         var handler = CreateHandler();
 
@@ -101,7 +119,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_completes_on_a_committed_business_success()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         var processedAt = new DateTimeOffset(2026, 9, 2, 12, 0, 3, TimeSpan.Zero);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, processedAt));
@@ -125,7 +143,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_reports_a_committed_business_rejection_but_still_completes_the_row()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         var processedAt = DateTimeOffset.UtcNow;
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Failed, processedAt));
@@ -148,7 +166,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_retries_a_transport_failure_within_budget_and_then_succeeds()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         var callCount = 0;
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .Returns(() =>
@@ -188,7 +206,7 @@ public class InstantPaymentForwardingHandlerTests
         // payment that actually succeeded). The caller still receives the
         // truthful committed outcome.
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         var processedAt = new DateTimeOffset(2026, 9, 3, 9, 0, 0, TimeSpan.Zero);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, processedAt));
@@ -217,7 +235,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_releases_the_claim_when_every_attempt_fails()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("transport failure"));
         _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -243,7 +261,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_stops_immediately_once_the_budget_is_exhausted_mid_retry()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("transport failure"));
         _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -258,7 +276,9 @@ public class InstantPaymentForwardingHandlerTests
         var handler = new InstantPaymentForwardingHandler(
             _store.Object,
             _forwarder.Object,
+            _lock,
             Options.Create(new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 5 }),
+            Options.Create(new OutboxProcessingOptions()),
             timeProvider,
             NullLogger<InstantPaymentForwardingHandler>.Instance,
             _businessMetrics);
@@ -274,7 +294,7 @@ public class InstantPaymentForwardingHandlerTests
     {
         using var cancellation = new CancellationTokenSource();
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .Returns(async () =>
             {
@@ -295,7 +315,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_retries_within_budget_after_a_per_attempt_timeout()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         var callCount = 0;
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .Returns<OutboxMessage, bool, CancellationToken>(async (_, _, ct) =>
@@ -329,7 +349,7 @@ public class InstantPaymentForwardingHandlerTests
     public async Task ForwardAsync_defers_when_releasing_the_claim_itself_fails()
     {
         var claimed = ClaimedMessage();
-        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("transport failure"));
         _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -341,6 +361,48 @@ public class InstantPaymentForwardingHandlerTests
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
     }
 
+    [Fact]
+    public async Task ForwardAsync_returns_the_true_result_when_lock_ownership_is_lost_after_the_workload_completes()
+    {
+        // Patch 1 regression test: ExecuteWithLockAsync returns false both
+        // when the lock was never acquired (callback never ran) AND when the
+        // callback ran to completion but ownership was lost mid-flight. The
+        // second case must still return the real, committed result -- not
+        // silently downgrade a completed forward to Deferred.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        var processedAt = new DateTimeOffset(2026, 9, 4, 9, 0, 0, TimeSpan.Zero);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, processedAt));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        _lock.LoseOwnershipAfterWorkload = true;
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Completed,
+            "the forward genuinely completed even though lock ownership was reported lost afterward");
+        result.ProcessedAt.Should().Be(processedAt);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_defers_gracefully_when_the_lock_backend_throws()
+    {
+        // Patch 2 regression test: an exception from ExecuteWithLockAsync
+        // itself (e.g. a Redis connection failure) must degrade gracefully
+        // to Deferred, matching every other transport hiccup in this method,
+        // rather than propagating out of ForwardAsync.
+        _lock.ThrowException = new InvalidOperationException("redis connection failure");
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        _store.VerifyNoOtherCalls();
+        _forwarder.VerifyNoOtherCalls();
+    }
+
     private sealed class SequencedTimeProvider(params DateTimeOffset[] values) : TimeProvider
     {
         private int _index;
@@ -350,6 +412,47 @@ public class InstantPaymentForwardingHandlerTests
             var value = values[Math.Min(_index, values.Length - 1)];
             _index++;
             return value;
+        }
+    }
+
+    private sealed class TestLockService : IDistributedLockService
+    {
+        public bool Acquired { get; set; } = true;
+
+        /// <summary>
+        /// When set, the workload still runs to completion but this reports
+        /// <see langword="false"/> anyway -- reproducing
+        /// <see cref="RedisDistributedLockService"/>'s documented "lock
+        /// ownership was lost during the workload; not reporting success"
+        /// case (as distinct from <see cref="Acquired"/> = <see langword="false"/>,
+        /// where the workload never runs at all).
+        /// </summary>
+        public bool LoseOwnershipAfterWorkload { get; set; }
+
+        /// <summary>When set, the call throws instead of returning -- simulating a lock backend failure (e.g. Redis connection failure).</summary>
+        public Exception? ThrowException { get; set; }
+
+        public List<string> LockNames { get; } = [];
+
+        public async Task<bool> ExecuteWithLockAsync(
+            string lockName,
+            int lockExpirySeconds,
+            Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default)
+        {
+            LockNames.Add(lockName);
+            if (ThrowException is not null)
+            {
+                throw ThrowException;
+            }
+
+            if (!Acquired)
+            {
+                return false;
+            }
+
+            await workload(cancellationToken);
+            return !LoseOwnershipAfterWorkload;
         }
     }
 }

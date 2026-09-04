@@ -27,12 +27,14 @@ public class TransactionIntakeHandlerTests
     private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
     private readonly Mock<IInboxMessageStore<InboxMessage>> _inboxStore = new(MockBehavior.Strict);
     private readonly Mock<IInboxMessageHandler<InboxMessage>> _executionHandler = new(MockBehavior.Strict);
+    private readonly TestLockService _lock = new();
     private readonly BusinessMetrics _businessMetrics = new();
 
     private TransactionIntakeHandler CreateHandler(int partitionCount = 4) =>
         new(_repository.Object,
             _inboxStore.Object,
             _executionHandler.Object,
+            _lock,
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
             NullLogger<TransactionIntakeHandler>.Instance,
@@ -41,7 +43,7 @@ public class TransactionIntakeHandlerTests
     /// <summary>Sets up a successful inline claim of whatever row <see cref="_repository"/>'s <c>StoreIfNewAsync</c> stores.</summary>
     private void SetUpSuccessfulClaimOf(Func<InboxMessage?> stored) =>
         _inboxStore
-            .Setup(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .Setup(s => s.TryClaimByIdIfOldestAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(stored);
 
     private static TransactionRequest ValidRequest(string transactionId = TransactionId) =>
@@ -354,7 +356,7 @@ public class TransactionIntakeHandlerTests
         result.Outcome.Should().Be(TransactionIntakeOutcome.InlineCompleted);
         result.Response.Should().Be(committedResponse);
         result.Errors.Should().BeNull();
-        _inboxStore.Verify(s => s.TryClaimByIdAsync(stored!.Id, It.IsAny<CancellationToken>()), Times.Once);
+        _inboxStore.Verify(s => s.TryClaimByIdIfOldestAsync(stored!.Id, stored.PartitionId, It.IsAny<CancellationToken>()), Times.Once);
         _executionHandler.Verify(h => h.HandleAsync(stored!, It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -369,7 +371,7 @@ public class TransactionIntakeHandlerTests
         _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
         _inboxStore
-            .Setup(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .Setup(s => s.TryClaimByIdIfOldestAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((InboxMessage?)null);
 
         var handler = CreateHandler();
@@ -394,6 +396,12 @@ public class TransactionIntakeHandlerTests
         _executionHandler
             .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("ledger transaction rolled back"));
+        _inboxStore.Setup(s => s.MarkAsFailedWithRetryAsync(
+                It.IsAny<InboxMessage>(),
+                "ledger transaction rolled back",
+                It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, string, CancellationToken>((message, _, _) => message.Status = MessageConstants.Status.Pending)
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
 
         var handler = CreateHandler();
 
@@ -401,6 +409,103 @@ public class TransactionIntakeHandlerTests
 
         result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
         result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
+        stored!.Status.Should().Be(MessageConstants.Status.Pending);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_reports_transport_failed_when_inline_execution_throws_and_retries_are_exhausted()
+    {
+        // Patch 3 regression test: when MarkAsFailedWithRetryAsync drives the
+        // claimed row to terminal Failed (retries exhausted), ProcessAsync
+        // must reflect that -- not the generic Accepted/Pending response it
+        // would otherwise return whenever TryExecuteInlineAsync returns null.
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("ledger transaction rolled back"));
+        _inboxStore.Setup(s => s.MarkAsFailedWithRetryAsync(
+                It.IsAny<InboxMessage>(),
+                "ledger transaction rolled back",
+                It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, string, CancellationToken>((message, error, _) =>
+            {
+                message.Status = MessageConstants.Status.Failed;
+                message.LastError = error;
+            })
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.TransportFailed);
+        result.Response.Should().BeNull();
+        result.Errors.Should().Equal("ledger transaction rolled back");
+        stored!.Status.Should().Be(MessageConstants.Status.Failed);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_returns_the_inline_completed_result_when_lock_ownership_is_lost_after_execution_commits()
+    {
+        // Patch 1 regression test: ExecuteWithLockAsync returns false both
+        // when the lock was never acquired (callback never ran) AND when the
+        // callback ran to completion but ownership was lost mid-flight. The
+        // second case must still return the real, committed result -- not
+        // silently downgrade a completed inline execution to Pending.
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        var committedResponse = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow());
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ResponsePayload = JsonSerializer.Serialize(committedResponse);
+            })
+            .Returns(Task.CompletedTask);
+        _lock.LoseOwnershipAfterWorkload = true;
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InlineCompleted,
+            "execution genuinely committed even though lock ownership was reported lost afterward");
+        result.Response.Should().Be(committedResponse);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_falls_back_to_pending_gracefully_when_the_lock_backend_throws()
+    {
+        // Patch 2 regression test: an exception from ExecuteWithLockAsync
+        // itself (e.g. a Redis connection failure) must degrade gracefully
+        // to the standard Accepted/Pending response, matching every other
+        // transport hiccup in this method, rather than propagating.
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        _lock.ThrowException = new InvalidOperationException("redis connection failure");
+
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
+        _inboxStore.VerifyNoOtherCalls();
+        _executionHandler.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -551,6 +656,27 @@ public class TransactionIntakeHandlerTests
         result.StatusResponse.Should().Be(new TransactionStatusResponse(TransactionId, MessageConstants.Status.Completed, existing.ReceivedAt, existing.ProcessedAt));
     }
 
+    [Fact]
+    public async Task ProcessAsync_defers_without_claiming_when_partition_lock_is_unavailable()
+    {
+        _lock.Acquired = false;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(
+            ValidRequest(),
+            TestContext.Current.CancellationToken,
+            executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
+        _lock.LockNames.Should().ContainSingle().Which.Should().StartWith("corebank-inbox-partition-");
+        _inboxStore.VerifyNoOtherCalls();
+        _executionHandler.VerifyNoOtherCalls();
+    }
+
     private InboxMessage ExistingMessage(string status, string? responsePayload = null, string? lastError = null) => new()
     {
         Id = Guid.NewGuid(),
@@ -567,4 +693,45 @@ public class TransactionIntakeHandlerTests
         ResponsePayload = responsePayload,
         LastError = lastError
     };
+
+    private sealed class TestLockService : IDistributedLockService
+    {
+        public bool Acquired { get; set; } = true;
+
+        /// <summary>
+        /// When set, the workload still runs to completion but this reports
+        /// <see langword="false"/> anyway -- reproducing
+        /// <see cref="RedisDistributedLockService"/>'s documented "lock
+        /// ownership was lost during the workload; not reporting success"
+        /// case (as distinct from <see cref="Acquired"/> = <see langword="false"/>,
+        /// where the workload never runs at all).
+        /// </summary>
+        public bool LoseOwnershipAfterWorkload { get; set; }
+
+        /// <summary>When set, the call throws instead of returning -- simulating a lock backend failure (e.g. Redis connection failure).</summary>
+        public Exception? ThrowException { get; set; }
+
+        public List<string> LockNames { get; } = [];
+
+        public async Task<bool> ExecuteWithLockAsync(
+            string lockName,
+            int lockExpirySeconds,
+            Func<CancellationToken, Task> workload,
+            CancellationToken cancellationToken = default)
+        {
+            LockNames.Add(lockName);
+            if (ThrowException is not null)
+            {
+                throw ThrowException;
+            }
+
+            if (!Acquired)
+            {
+                return false;
+            }
+
+            await workload(cancellationToken);
+            return !LoseOwnershipAfterWorkload;
+        }
+    }
 }

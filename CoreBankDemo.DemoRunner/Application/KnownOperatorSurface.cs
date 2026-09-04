@@ -52,6 +52,24 @@ public static class KnownResources
 
     public static int ExpectedReplicaCount(string resourceName) =>
         resourceName is PaymentsApi or CoreBankApi ? 2 : 1;
+
+    public static IReadOnlyDictionary<string, int> ExpectedEndpointPorts(TopologyProfile profile) => profile switch
+    {
+        TopologyProfile.Regular => new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            [PaymentsApi] = 5294,
+            [CoreBankApi] = 5032,
+            [Jaeger] = 16686,
+        },
+        TopologyProfile.LoadTests => new Dictionary<string, int>(StringComparer.Ordinal)
+        {
+            [PaymentsApi] = 5295,
+            [CoreBankApi] = 5032,
+            [Jaeger] = 16686,
+            [LoadTestSupport] = 5181,
+        },
+        _ => new Dictionary<string, int>(StringComparer.Ordinal),
+    };
 }
 
 public static class KnownEndpoints

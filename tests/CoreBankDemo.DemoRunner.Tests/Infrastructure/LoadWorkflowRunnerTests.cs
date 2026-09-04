@@ -28,8 +28,10 @@ public class LoadWorkflowRunnerTests
                     "balancesCorrect": {"passed":true,"detail":"replay matched"},
                     "noFailedMessages": {"passed":true,"detail":"none"},
                     "noPendingMessages": {"passed":true,"detail":"drained"},
-                    "perKeyOrdering": {"passed":true,"detail":"ordered"}
-                  }
+                    "perKeyOrdering": {"passed":true,"detail":"ordered"},
+                    "inlineInstantSettlement": {"passed":true,"detail":"count=20"}
+                  },
+                  "summary": {"inlineInstantSettlementCount":20}
                 }
                 """),
             Json(HttpStatusCode.OK, "[]"),
@@ -53,7 +55,7 @@ public class LoadWorkflowRunnerTests
         result.InlineSettlement.Observed.Should().BeTrue();
         result.InvestigationDetail.Should().Contain("ASSERT RESULTS").And.Contain(KnownEndpoints.PaymentsOutbox);
         aspire.Commands.Should().ContainSingle(command =>
-            command.Resource == KnownResources.K6 && command.Command == ResourceCommand.Restart);
+            command.Resource == KnownResources.K6 && command.Command == ResourceCommand.Start);
         progress.Select(item => item.Phase).Should().Contain(
             [LoadWorkflowPhase.Reset, LoadWorkflowPhase.Run, LoadWorkflowPhase.Wait, LoadWorkflowPhase.Assert, LoadWorkflowPhase.Investigate, LoadWorkflowPhase.Completed]);
     }
@@ -62,7 +64,11 @@ public class LoadWorkflowRunnerTests
     public async Task RunAsync_ResetFailure_StopsBeforeK6()
     {
         using var client = new HttpClient(new QueueHttpHandler(
-            new Queue<HttpResponseMessage>([Json(HttpStatusCode.ServiceUnavailable, "down")])));
+            new Queue<HttpResponseMessage>(
+            [
+                Json(HttpStatusCode.ServiceUnavailable, "down"),
+                .. InvestigationResponses(),
+            ])));
         var aspire = new FakeAspireAdapter();
         var runner = new LoadWorkflowRunner(client, aspire, TimeProvider.System);
 
@@ -70,6 +76,7 @@ public class LoadWorkflowRunnerTests
 
         result.Completed.Should().BeFalse();
         result.FinalPhase.Should().Be(LoadWorkflowPhase.Reset);
+        result.InvestigationDetail.Should().Contain(KnownEndpoints.PaymentsOutbox);
         aspire.Commands.Should().BeEmpty();
     }
 
@@ -77,7 +84,11 @@ public class LoadWorkflowRunnerTests
     public async Task RunAsync_K6Failure_IsNotReportedAsPassed()
     {
         using var client = new HttpClient(new QueueHttpHandler(
-            new Queue<HttpResponseMessage>([Json(HttpStatusCode.OK, "{}")])));
+            new Queue<HttpResponseMessage>(
+            [
+                Json(HttpStatusCode.OK, "{}"),
+                .. InvestigationResponses(),
+            ])));
         var aspire = new FakeAspireAdapter();
         aspire.Queue(
             K6Snapshot(ResourceCondition.Completed, "old-run"),
@@ -98,7 +109,24 @@ public class LoadWorkflowRunnerTests
         [
             Json(HttpStatusCode.OK, "{}"),
             Json(HttpStatusCode.OK, """{"isDrained":true}"""),
-            Json(HttpStatusCode.OK, """{"allPassed":false,"checks":{}}"""),
+            Json(HttpStatusCode.OK,
+                """
+                {
+                  "allPassed":false,
+                  "checks":{
+                    "noDuplicateProcessing":{"passed":true,"detail":"unique"},
+                    "allSubmittedProcessed":{"passed":false,"detail":"missing 1"},
+                    "balanceConservation":{"passed":true,"detail":"balanced"},
+                    "balancesCorrect":{"passed":true,"detail":"replay"},
+                    "noFailedMessages":{"passed":true,"detail":"none"},
+                    "noPendingMessages":{"passed":false,"detail":"pending 1"},
+                    "perKeyOrdering":{"passed":false,"detail":"partition 2 inverted"},
+                    "inlineInstantSettlement":{"passed":true,"detail":"count=3"}
+                  },
+                  "summary":{"inlineInstantSettlementCount":3}
+                }
+                """),
+            .. InvestigationResponses(),
         ]);
         using var client = new HttpClient(new QueueHttpHandler(responses));
         var aspire = new FakeAspireAdapter();
@@ -111,6 +139,11 @@ public class LoadWorkflowRunnerTests
 
         result.AllPassed.Should().BeFalse();
         result.ErrorSummary.Should().Contain("allPassed=false");
+        result.Invariants.Should().HaveCount(5);
+        result.Invariants.Single(item => item.Name == "Zero message loss").Detail.Should().Be("missing 1");
+        result.Invariants.Single(item => item.Name == "Per-key ordering").Detail.Should().Contain("inverted");
+        result.InlineSettlement.Count.Should().Be(3);
+        result.InvestigationDetail.Should().Contain(KnownEndpoints.CoreBankInbox);
     }
 
     [Fact]
@@ -154,6 +187,48 @@ public class LoadWorkflowRunnerTests
             .Should().Contain("Not reported");
     }
 
+    [Fact]
+    public async Task RunAsync_K6WithoutExecutionIdentity_RequiresObservedRunningTransition()
+    {
+        var responses = SuccessfulResponses();
+        using var client = new HttpClient(new QueueHttpHandler(responses));
+        var aspire = new FakeAspireAdapter();
+        aspire.Queue(
+            K6Snapshot(ResourceCondition.Completed, ""),
+            K6Snapshot(ResourceCondition.Running, ""),
+            K6Snapshot(ResourceCondition.Completed, ""));
+        var runner = new LoadWorkflowRunner(client, aspire, TimeProvider.System);
+
+        var result = await runner.RunAsync(100, new InlineProgress<LoadWorkflowProgress>(_ => { }), CancellationToken.None);
+
+        result.AllPassed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task RunAsync_NonObjectAssertionPaths_FailClosedWithoutThrowing()
+    {
+        var responses = new Queue<HttpResponseMessage>(
+        [
+            Json(HttpStatusCode.OK, "{}"),
+            Json(HttpStatusCode.OK, """{"isDrained":true}"""),
+            Json(HttpStatusCode.OK, """{"allPassed":false,"checks":"invalid","summary":[]}"""),
+            .. InvestigationResponses(),
+        ]);
+        using var client = new HttpClient(new QueueHttpHandler(responses));
+        var aspire = new FakeAspireAdapter();
+        aspire.Queue(
+            K6Snapshot(ResourceCondition.Completed, "old"),
+            K6Snapshot(ResourceCondition.Completed, "new"));
+
+        var result = await new LoadWorkflowRunner(client, aspire, TimeProvider.System)
+            .RunAsync(100, new InlineProgress<LoadWorkflowProgress>(_ => { }), CancellationToken.None);
+
+        result.AllPassed.Should().BeFalse();
+        result.Invariants.Should().HaveCount(5);
+        result.Invariants.Should().OnlyContain(item => !item.Passed);
+        result.InlineSettlement.Observed.Should().BeFalse();
+    }
+
     private static TopologySnapshot K6Snapshot(
         ResourceCondition condition,
         string executionIdentity,
@@ -168,6 +243,39 @@ public class LoadWorkflowRunnerTests
 
     private static HttpResponseMessage Json(HttpStatusCode status, string json) =>
         new(status) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+
+    private static IEnumerable<HttpResponseMessage> InvestigationResponses() =>
+    [
+        Json(HttpStatusCode.OK, "[]"),
+        Json(HttpStatusCode.OK, "[]"),
+        Json(HttpStatusCode.OK, "[]"),
+        Json(HttpStatusCode.OK, "[]"),
+    ];
+
+    private static Queue<HttpResponseMessage> SuccessfulResponses() =>
+        new(
+        [
+            Json(HttpStatusCode.OK, "{}"),
+            Json(HttpStatusCode.OK, """{"isDrained":true}"""),
+            Json(HttpStatusCode.OK,
+                """
+                {
+                  "allPassed":true,
+                  "checks":{
+                    "noDuplicateProcessing":{"passed":true,"detail":"unique"},
+                    "allSubmittedProcessed":{"passed":true,"detail":"all"},
+                    "balanceConservation":{"passed":true,"detail":"balanced"},
+                    "balancesCorrect":{"passed":true,"detail":"replay"},
+                    "noFailedMessages":{"passed":true,"detail":"none"},
+                    "noPendingMessages":{"passed":true,"detail":"drained"},
+                    "perKeyOrdering":{"passed":true,"detail":"ordered"},
+                    "inlineInstantSettlement":{"passed":true,"detail":"count=1"}
+                  },
+                  "summary":{"inlineInstantSettlementCount":1}
+                }
+                """),
+            .. InvestigationResponses(),
+        ]);
 
     private sealed class QueueHttpHandler(Queue<HttpResponseMessage> responses) : HttpMessageHandler
     {

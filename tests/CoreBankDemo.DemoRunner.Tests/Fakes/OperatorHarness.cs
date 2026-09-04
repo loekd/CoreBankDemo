@@ -1,16 +1,23 @@
 using CoreBankDemo.DemoRunner.Application;
+using CoreBankDemo.DemoRunner.Application.Doctor;
 using CoreBankDemo.DemoRunner.Application.Ports;
 
 namespace CoreBankDemo.DemoRunner.Tests.Fakes;
 
 public sealed class OperatorHarness
 {
+    public OperatorHarness()
+    {
+        Preflight.DiscoveryProvider = () => Aspire.Discovery;
+    }
+
     public FakeAspireAdapter Aspire { get; } = new();
     public FakeProcessAdapter Processes { get; } = new();
     public FakePaymentGateway Payments { get; } = new();
     public FakeLoadWorkflowRunner Load { get; } = new();
     public FakeEvidenceExporter Exporter { get; } = new();
     public FakeBrowserLauncher Browser { get; } = new();
+    public FakePreflightRunner Preflight { get; } = new();
     public FakeTimeProvider Time { get; } = new();
 
     public OperatorConsoleController CreateController(
@@ -23,6 +30,7 @@ public sealed class OperatorHarness
             Load,
             Exporter,
             Browser,
+            Preflight,
             Time,
             options ?? new OperatorConsoleOptions
             {
@@ -45,17 +53,25 @@ public sealed class OperatorHarness
             fingerprint,
             fingerprint ? $"{profile}-fingerprint" : string.Empty,
             resources.Length == 0 ? DefaultResources(profile) : resources,
-            reachable && fingerprint ? null : "not verified");
+            reachable && fingerprint ? null : "not verified",
+            "https://localhost:17253");
 
     public static IReadOnlyList<ResourceSnapshot> DefaultResources(TopologyProfile profile)
     {
         var names = KnownResources.RequiredFor(profile);
-        return names.Select(name => new ResourceSnapshot(
-            name,
-            ResourceCondition.Healthy,
-            "Healthy",
-            [],
-            KnownResources.ExpectedReplicaCount(name))).ToList();
+        var endpoints = KnownResources.ExpectedEndpointPorts(profile);
+        return names.Select(name =>
+        {
+            var replicas = KnownResources.ExpectedReplicaCount(name);
+            return new ResourceSnapshot(
+                name,
+                ResourceCondition.Healthy,
+                "Healthy",
+                endpoints.TryGetValue(name, out var port) ? [$"http://127.0.0.1:{port}"] : [],
+                replicas,
+                InstanceNames: Enumerable.Range(1, replicas).Select(index => $"{name}-{index}").ToList(),
+                AllowedCommands: Enum.GetValues<ResourceCommand>().ToHashSet());
+        }).ToList();
     }
 }
 
@@ -63,10 +79,21 @@ public sealed class FakeAspireAdapter : IAspireAdapter
 {
     private readonly Queue<TopologySnapshot> _snapshots = new();
 
-    public IReadOnlyList<TopologySnapshot> Discovered { get; set; } = [];
+    public TopologyDiscoveryResult Discovery { get; set; } = TopologyDiscoveryResult.Success([]);
+    public IReadOnlyList<TopologySnapshot> Discovered
+    {
+        get => Discovery.Snapshots;
+        set => Discovery = TopologyDiscoveryResult.Success(value);
+    }
     public List<(TopologyProfile Profile, string Resource, ResourceCommand Command)> Commands { get; } = [];
-    public ResourceCommandResult CommandResult { get; set; } = new(true, "dispatched");
+    public ResourceCommandResult CommandResult { get; set; } = new(
+        ResourceDispatchStatus.Dispatched,
+        "dispatched",
+        ["resource-1"],
+        []);
     public TopologySnapshot? DefaultSnapshot { get; set; }
+    public TaskCompletionSource? SnapshotStarted { get; set; }
+    public TaskCompletionSource? ReleaseSnapshot { get; set; }
 
     public void Queue(params TopologySnapshot[] snapshots)
     {
@@ -76,17 +103,23 @@ public sealed class FakeAspireAdapter : IAspireAdapter
         }
     }
 
-    public Task<IReadOnlyList<TopologySnapshot>> DiscoverAsync(CancellationToken ct) =>
-        Task.FromResult(Discovered);
+    public Task<TopologyDiscoveryResult> DiscoverAsync(CancellationToken ct) =>
+        Task.FromResult(Discovery);
 
-    public Task<TopologySnapshot> GetSnapshotAsync(TopologyProfile profile, CancellationToken ct)
+    public async Task<TopologySnapshot> GetSnapshotAsync(TopologyProfile profile, CancellationToken ct)
     {
-        if (_snapshots.Count > 0)
+        SnapshotStarted?.TrySetResult();
+        if (ReleaseSnapshot is not null)
         {
-            return Task.FromResult(_snapshots.Dequeue());
+            await ReleaseSnapshot.Task.WaitAsync(ct);
         }
 
-        return Task.FromResult(DefaultSnapshot ?? OperatorHarness.Snapshot(profile));
+        if (_snapshots.Count > 0)
+        {
+            return _snapshots.Dequeue();
+        }
+
+        return DefaultSnapshot ?? OperatorHarness.Snapshot(profile);
     }
 
     public Task<ResourceCommandResult> ExecuteResourceCommandAsync(
@@ -104,21 +137,53 @@ public sealed class FakeProcessAdapter : IProcessAdapter
 {
     public int StartCount { get; private set; }
     public int StopCount { get; private set; }
+    public int ForgetCount { get; private set; }
     public string Output { get; set; } = "bounded output";
+    public TaskCompletionSource? StopStarted { get; set; }
+    public TaskCompletionSource? ReleaseStop { get; set; }
+    public Exception? StartException { get; set; }
+    public Exception? StopException { get; set; }
+    public Exception? ForgetException { get; set; }
 
     public Task<TopologyHandle> StartOwnedAsync(TopologyProfile profile, CancellationToken ct)
     {
         StartCount++;
-        return Task.FromResult(new TopologyHandle(profile, true, 42, "owned:42"));
+        if (StartException is not null)
+        {
+            throw StartException;
+        }
+        return Task.FromResult(new TopologyHandle(profile, true, 42, "owned:42", $"/repo/{profile}.csproj"));
     }
 
     public string GetRecentOutput(TopologyHandle handle) => Output;
 
-    public Task StopOwnedAsync(TopologyHandle handle, CancellationToken ct)
+    public async Task<OwnedStopResult> StopOwnedAsync(TopologyHandle handle, CancellationToken ct)
     {
         if (handle.IsOwned)
         {
             StopCount++;
+        }
+
+        StopStarted?.TrySetResult();
+        if (ReleaseStop is not null)
+        {
+            await ReleaseStop.Task.WaitAsync(ct);
+        }
+
+        if (StopException is not null)
+        {
+            throw StopException;
+        }
+
+        return new OwnedStopResult(false, "stopped");
+    }
+
+    public Task ForgetExitedOwnedAsync(TopologyHandle handle, CancellationToken ct)
+    {
+        ForgetCount++;
+        if (ForgetException is not null)
+        {
+            throw ForgetException;
         }
 
         return Task.CompletedTask;
@@ -131,8 +196,12 @@ public sealed class FakePaymentGateway : IPaymentGateway
     private readonly Queue<InspectionResult> _inspections = new();
 
     public List<PaymentSubmission> Submissions { get; } = [];
+    public List<TopologyProfile> SubmissionProfiles { get; } = [];
+    public List<TopologyProfile> QueryProfiles { get; } = [];
     public TaskCompletionSource? SubmissionStarted { get; set; }
     public TaskCompletionSource? ReleaseSubmission { get; set; }
+    public TaskCompletionSource? QueryStarted { get; set; }
+    public TaskCompletionSource? ReleaseQuery { get; set; }
 
     public void Queue(params PaymentResult[] results)
     {
@@ -156,6 +225,7 @@ public sealed class FakePaymentGateway : IPaymentGateway
         CancellationToken ct)
     {
         Submissions.Add(submission);
+        SubmissionProfiles.Add(profile);
         SubmissionStarted?.TrySetResult();
         if (ReleaseSubmission is not null)
         {
@@ -178,11 +248,20 @@ public sealed class FakePaymentGateway : IPaymentGateway
             TimeSpan.FromMilliseconds(5));
     }
 
-    public Task<InspectionResult> QueryOutcomeAsync(
+    public async Task<InspectionResult> QueryOutcomeAsync(
         TopologyProfile profile,
         string transactionIdOrKey,
-        CancellationToken ct) =>
-        Task.FromResult(NextInspection("outcome"));
+        CancellationToken ct)
+    {
+        QueryProfiles.Add(profile);
+        QueryStarted?.TrySetResult();
+        if (ReleaseQuery is not null)
+        {
+            await ReleaseQuery.Task.WaitAsync(ct);
+        }
+
+        return NextInspection("outcome");
+    }
 
     public Task<InspectionResult> InspectAsync(
         TopologyProfile profile,
@@ -196,8 +275,76 @@ public sealed class FakePaymentGateway : IPaymentGateway
             : new InspectionResult(true, 200, target, "{}", null, TimeSpan.FromMilliseconds(3));
 }
 
+public sealed class FakePreflightRunner : IPreflightRunner
+{
+    private DoctorReport? _report;
+    public Func<TopologyDiscoveryResult>? DiscoveryProvider { get; set; }
+    public DoctorReport Report
+    {
+        get => _report ?? BuildFromDiscovery();
+        set => _report = value;
+    }
+    public int Calls { get; private set; }
+
+    public Task<DoctorReport> RunAsync(CancellationToken ct)
+    {
+        Calls++;
+        return Task.FromResult(Report);
+    }
+
+    public static DoctorReport ReadyReport(
+        TopologySnapshot? regular = null,
+        TopologySnapshot? loadTests = null,
+        bool discoveryReachable = true)
+    {
+        var checks = new List<DoctorCheckResult>
+        {
+            DoctorCheckResult.Ok(".NET SDK available"),
+            DoctorCheckResult.Ok("Aspire CLI available"),
+            DoctorCheckResult.Ok("Container runtime available"),
+        };
+        if (!discoveryReachable)
+        {
+            checks.Add(DoctorCheckResult.Fail("Aspire discovery", "unreachable"));
+        }
+
+        return new DoctorReport(checks)
+        {
+            EnvironmentReady = true,
+            DiscoveryReachable = discoveryReachable,
+            Profiles = new Dictionary<TopologyProfile, ProfilePreflightResult>
+            {
+                [TopologyProfile.Regular] = Profile(TopologyProfile.Regular, regular, discoveryReachable),
+                [TopologyProfile.LoadTests] = Profile(TopologyProfile.LoadTests, loadTests, discoveryReachable),
+            },
+        };
+    }
+
+    private static ProfilePreflightResult Profile(
+        TopologyProfile profile,
+        TopologySnapshot? snapshot,
+        bool discoveryReachable) =>
+        new(
+            profile,
+            PortsFree: snapshot is null,
+            snapshot,
+            CanStart: discoveryReachable && snapshot is null,
+            CanAttach: discoveryReachable && snapshot?.IsReady == true,
+            Detail: snapshot is null ? "not running" : "running");
+
+    private DoctorReport BuildFromDiscovery()
+    {
+        var discovery = DiscoveryProvider?.Invoke() ?? TopologyDiscoveryResult.Success([]);
+        var regular = discovery.Snapshots.FirstOrDefault(item => item.Profile == TopologyProfile.Regular);
+        var load = discovery.Snapshots.FirstOrDefault(item => item.Profile == TopologyProfile.LoadTests);
+        return ReadyReport(regular, load, discovery.IsReachable);
+    }
+}
+
 public sealed class FakeLoadWorkflowRunner : ILoadWorkflowRunner
 {
+    public TaskCompletionSource? RunStarted { get; set; }
+    public TaskCompletionSource? ReleaseRun { get; set; }
     public LoadWorkflowResult Result { get; set; } = LoadWorkflowResult.Success(
         [
             new InvariantResult("Exactly-once processing", true, "passed"),
@@ -209,14 +356,19 @@ public sealed class FakeLoadWorkflowRunner : ILoadWorkflowRunner
         new InlineSettlementResult(true, "observed"),
         "details");
 
-    public Task<LoadWorkflowResult> RunAsync(
+    public async Task<LoadWorkflowResult> RunAsync(
         int? expectedUniqueCount,
         IProgress<LoadWorkflowProgress> progress,
         CancellationToken ct)
     {
+        RunStarted?.TrySetResult();
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Reset, TimeSpan.Zero, "reset"));
+        if (ReleaseRun is not null)
+        {
+            await ReleaseRun.Task.WaitAsync(ct);
+        }
         progress.Report(new LoadWorkflowProgress(LoadWorkflowPhase.Completed, TimeSpan.FromSeconds(1), "done"));
-        return Task.FromResult(Result);
+        return Result;
     }
 }
 

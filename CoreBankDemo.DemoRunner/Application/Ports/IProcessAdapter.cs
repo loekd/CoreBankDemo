@@ -8,5 +8,9 @@ public interface IProcessAdapter
 
     string GetRecentOutput(TopologyHandle handle);
 
-    Task StopOwnedAsync(TopologyHandle handle, CancellationToken ct);
+    Task<OwnedStopResult> StopOwnedAsync(TopologyHandle handle, CancellationToken ct);
+
+    Task ForgetExitedOwnedAsync(TopologyHandle handle, CancellationToken ct);
 }
+
+public sealed record OwnedStopResult(bool Forced, string Detail);

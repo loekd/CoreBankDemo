@@ -37,4 +37,47 @@ public class EndpointResolverTests
         Action arbitrary = () => EndpointResolver.LinkFor("https://example.com");
         arbitrary.Should().Throw<ArgumentOutOfRangeException>();
     }
+
+    [Theory]
+    [InlineData(KnownEndpoints.TransactionOutcome, "key", "5032")]
+    [InlineData(KnownEndpoints.LoadReset, null, "5181/reset")]
+    [InlineData(KnownEndpoints.LoadDrain, null, "5181/assert/drain")]
+    [InlineData(KnownEndpoints.LoadAssert, null, "5181/assert/results")]
+    [InlineData(KnownEndpoints.PaymentsOutbox, null, "5181/payments/outbox")]
+    [InlineData(KnownEndpoints.PaymentsInbox, null, "5181/payments/inbox")]
+    [InlineData(KnownEndpoints.CoreBankInbox, null, "5181/corebank/inbox")]
+    [InlineData(KnownEndpoints.CoreBankOutbox, null, "5181/corebank/outbox")]
+    public void EndpointFor_AllCompiledEndpointsResolve(
+        string endpoint,
+        string? path,
+        string expected)
+    {
+        EndpointResolver.EndpointFor(TopologyProfile.LoadTests, endpoint, path).Url.Should().Contain(expected);
+    }
+
+    [Theory]
+    [InlineData(KnownResources.PaymentsApi, TopologyProfile.Regular, "5294")]
+    [InlineData(KnownResources.PaymentsApi, TopologyProfile.LoadTests, "5295")]
+    [InlineData(KnownResources.CoreBankApi, TopologyProfile.Regular, "5032")]
+    [InlineData(KnownResources.LoadTestSupport, TopologyProfile.LoadTests, "5181")]
+    [InlineData(KnownResources.Jaeger, TopologyProfile.Regular, "16686")]
+    [InlineData(KnownResources.Postgres, TopologyProfile.Regular, "5032")]
+    [InlineData(KnownResources.Redis, TopologyProfile.Regular, "5032")]
+    public void HealthUrlFor_AllKnownHttpProbesResolve(
+        string resource,
+        TopologyProfile profile,
+        string expectedPort)
+    {
+        EndpointResolver.HealthUrlFor(resource, profile).Should().Contain(expectedPort);
+    }
+
+    [Fact]
+    public void ProfileRegistry_ResolvesBothExactKnownProjects()
+    {
+        ProfileRegistry.RelativeProjectPath(TopologyProfile.Regular).Should().Be("CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj");
+        ProfileRegistry.RelativeProjectPath(TopologyProfile.LoadTests).Should().Be("CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj");
+        ProfileRegistry.ProjectPath("/repo", TopologyProfile.Regular).Should().Be("/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj");
+        Action invalid = () => ProfileRegistry.RelativeProjectPath(TopologyProfile.None);
+        invalid.Should().Throw<ArgumentOutOfRangeException>();
+    }
 }

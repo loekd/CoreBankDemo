@@ -6,11 +6,13 @@ public sealed record NavigationItemViewModel(WorkspaceKind Workspace, string Sho
 
 public sealed record ResourceRowViewModel(
     string Name,
+    IReadOnlyList<string> Instances,
     string Symbol,
     string State,
     string Detail,
     string NextAction,
-    bool CanMutate);
+    bool CanMutate,
+    bool CanRestart);
 
 public sealed record EvidenceRowViewModel(
     long Sequence,
@@ -48,11 +50,15 @@ public static class PresentationModelBuilder
                 var supported = Enum.TryParse<ResourceCommand>(nextAction, out var command) && resource.Supports(command);
                 return new ResourceRowViewModel(
                     resource.Name,
+                    resource.InstanceNames ?? [resource.Name],
                     SymbolFor(resource.Condition),
                     LabelFor(resource.Condition),
                     BuildResourceDetail(resource),
                     supported ? nextAction : "Unavailable",
-                    supported && CanMutateResource(state, resource));
+                    supported && CanMutateResource(state, resource),
+                    resource.Condition is ResourceCondition.Healthy or ResourceCondition.Running
+                    && resource.Supports(ResourceCommand.Restart)
+                    && CanMutateResource(state, resource));
             })
             .ToList();
 
@@ -124,7 +130,11 @@ public static class PresentationModelBuilder
             state.ActiveMutation is not null,
             state.ActiveMutation?.Kind == MutationKind.PaymentBurst,
             state.Ownership == TopologyOwnership.Owned && state.ActiveMutation is null,
-            state.Profile == TopologyProfile.LoadTests && state.Ownership != TopologyOwnership.None && state.ActiveMutation is null,
+            state.Profile == TopologyProfile.LoadTests
+                && state.Ownership != TopologyOwnership.None
+                && state.ActiveMutation is null
+                && state.ResourceAuthorityAvailable
+                && state.Topology?.IsReady == true,
             state.CanResendLastPayment && state.ActiveMutation is null);
     }
 
