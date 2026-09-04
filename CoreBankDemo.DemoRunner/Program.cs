@@ -65,11 +65,25 @@ public static class Program
     private static int RunConsole(OperatorConsoleController controller)
     {
         AppTerminal.Init();
+
+        // Terminal.Gui's own clipboard shells out to xclip, which exists in the sandbox
+        // but has no display to hand the text to, so Ctrl+C silently copied nothing.
+        // OSC 52 asks the terminal emulator itself instead; see Osc52Clipboard.
+        var clipboard = new Osc52Clipboard(
+            Console.Out,
+            Environment.GetEnvironmentVariable("TERM"),
+            Environment.GetEnvironmentVariable("TMUX"));
+        if (AppTerminal.Driver is { } driver)
+        {
+            driver.Clipboard = clipboard;
+        }
+
         var window = new MainWindow(controller, async () =>
         {
             await controller.ShutdownAsync(CancellationToken.None);
             AppTerminal.RequestStop();
         });
+        clipboard.Copied += window.ShowClipboardResult;
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
             eventArgs.Cancel = true;

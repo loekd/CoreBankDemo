@@ -924,6 +924,12 @@ public sealed class MainWindow : Window
             Environment.GetEnvironmentVariable("TMUX")).Message);
     }
 
+    /// <summary>
+    /// Surfaces the outcome of a Ctrl+C copy made through the Terminal.Gui
+    /// clipboard (<see cref="Osc52Clipboard"/>), which is otherwise silent.
+    /// </summary>
+    internal void ShowClipboardResult(ClipboardCopyResult result) => ShowMessage(result.Message);
+
     private void ShowMessage(string message)
     {
         LastUiMessage = message;
