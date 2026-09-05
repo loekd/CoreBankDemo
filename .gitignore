@@ -31,3 +31,9 @@ CoreBankDemo.AppHost/dev-proxy/
 # per-session Dev Proxy config beside each AppHost's checked-in profile (which stays a
 # read-only preset source). Generated per session, never checked in.
 */devproxy/config/generated/
+
+# `aspire start --apphost <path>` rewrites this file on every run, so tracking it
+# means every DemoRunner start leaves the working tree dirty and flips the default
+# AppHost under whoever pulls next. It is per-developer CLI state, not project
+# configuration — both AppHosts are selected explicitly by path.
+/aspire.config.json
