@@ -422,6 +422,155 @@ public class MainWindowTests
         }
     }
 
+
+    [Fact]
+    public async Task ArrivingOutcome_ResolvesThePaymentRowInPlaceWithoutMovingTheList()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        window.RenderForTest();
+        var selectedBefore = window.PaymentList.SelectedItem;
+
+        harness.Feed.PushCompleted("tx-8821", new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
+        harness.Feed.PushBalance("tx-8821", "1001", -250m, 4750m);
+        window.RenderForTest();
+
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Settled);
+        window.PaymentList.SelectedItem.Should().Be(selectedBefore, "an arriving event never moves the operator's selection");
+        window.PaymentRowTexts.Should().Contain(line => line.Contains("Settled — tx-8821"));
+        window.PaymentRowTexts.Should().Contain(line => line.Contains("−250.00 → 4,750.00 EUR"));
+        window.FeedStatusText.Should().Contain("Listening since");
+        window.BurstProvenStatusText.Should().StartWith("Proven leg");
+    }
+
+    [Fact]
+    public async Task OutcomeQuery_FallsBackToTheSelectedPaymentRowsTransactionId()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        window.RenderForTest();
+
+        window.OutcomeQueryTarget().Should().BeEmpty(
+            "no typed key and no deliberate selection must never quietly query the oldest payment");
+
+        window.SelectPaymentRowForTest(0);
+
+        window.OutcomeQueryTarget().Should().Be("tx-8821");
+    }
+
+
+    [Fact]
+    public async Task ArrivingEvent_LeavesTheListScrolledExactlyWhereTheOperatorLeftIt()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        for (var index = 0; index < 12; index++)
+        {
+            harness.Payments.Queue(new PaymentResult(
+                PaymentOutcome.Pending, 202, "payment-id", $"tx-{index}", "Pending", "{}", null, TimeSpan.Zero));
+            await controller.SubmitPaymentAsync(
+                new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+                IdempotencyMode.Generated,
+                null,
+                CancellationToken.None);
+        }
+
+        window.RenderForTest();
+        // The operator scrolled down to watch a specific row.
+        window.ScrollPaymentListForTest(6);
+        var offsetBefore = window.PaymentList.Viewport.Location.Y;
+        offsetBefore.Should().BeGreaterThan(0, "the list must actually be scrolled for this to prove anything");
+
+        harness.Feed.PushCompleted("tx-0", new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
+        window.RenderForTest();
+
+        window.PaymentList.Viewport.Location.Y.Should().Be(
+            offsetBefore,
+            "a list that scrolled itself under a live demonstration is a stage failure");
+    }
+
+    [Fact]
+    public async Task SelectingAnEvidenceRow_MovesTheDetailPaneToThatRecord()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending",
+            "{\"transactionId\":\"tx-8821\"}", null, TimeSpan.FromMilliseconds(5)));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+        window.EvidenceRowCount.Should().BeGreaterThan(1, "the attach and the payment are both recorded");
+
+        // Move off the newest row, which is what auto-selection already had.
+        window.EvidenceList.SelectedItem = window.EvidenceRowCount - 1;
+        window.RenderForTest();
+
+        var oldest = controller.State.Evidence.OrderBy(record => record.Sequence).First();
+        controller.State.SelectedEvidence!.Sequence.Should().Be(
+            oldest.Sequence,
+            "moving through the list is how the journal is read; the pane follows the selection");
+        window.EvidenceDetailText.Should().Contain(oldest.Summary);
+    }
+
+    [Fact]
+    public async Task RenderingAfterAnArrivingEvent_DoesNotPullTheDetailPaneOffTheOperatorsChoice()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+        window.EvidenceList.SelectedItem = window.EvidenceRowCount - 1;
+        window.RenderForTest();
+        var chosen = controller.State.SelectedEvidence!.Sequence;
+
+        // A rebind restores the selection; reacting to that would call back into the controller
+        // and drag the pane onto whatever the rebind happened to land on.
+        harness.Feed.PushCompleted("tx-8821", new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
+        window.RenderForTest();
+
+        controller.State.SelectedEvidence!.Sequence.Should().Be(chosen);
+    }
+
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
         IConfirmationService? confirmation = null) =>

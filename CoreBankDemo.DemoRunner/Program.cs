@@ -51,6 +51,11 @@ public static class Program
             return report.AllPassed ? 0 : 1;
         }
 
+        // The console's own transaction-events listener. It spawns and owns a daprd sidecar
+        // of its own, so its app-id -- and therefore its Redis consumer group -- is distinct
+        // from every banking service's and PaymentsAPI keeps receiving every event.
+        await using var outcomeFeed = new DaprOutcomeFeed(repositoryRoot, new EnvironmentProbe(), TimeProvider.System);
+
         var controller = new OperatorConsoleController(
             aspire,
             new AspireProcessAdapter(repositoryRoot),
@@ -60,6 +65,7 @@ public static class Program
             new DevProxySessionConfigWriter(repositoryRoot),
             new BrowserLauncher(),
             doctor,
+            outcomeFeed,
             TimeProvider.System);
 
         return RunConsole(controller);

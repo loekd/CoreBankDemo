@@ -111,8 +111,9 @@ public class OperatorConsoleControllerTests
         result.Succeeded.Should().BeTrue();
         controller.State.Ownership.Should().Be(TopologyOwnership.Owned);
         controller.State.RunGeneration.Should().Be(1);
-        controller.State.Evidence.Single().Summary.Should().Contain("Started");
-        controller.State.Evidence.Single().Method.Should().StartWith("aspire start --apphost");
+        var topologyRecord = controller.State.Evidence.Single(record => record.Kind == EvidenceKind.Topology);
+        topologyRecord.Summary.Should().Contain("Started");
+        topologyRecord.Method.Should().StartWith("aspire start --apphost");
         harness.Processes.StartCount.Should().Be(1);
     }
 
@@ -825,6 +826,7 @@ public class OperatorConsoleControllerTests
             harness.Faults,
             harness.Browser,
             harness.Preflight,
+            harness.Feed,
             harness.Time,
             new OperatorConsoleOptions { PollInterval = TimeSpan.Zero, TransitionTimeout = TimeSpan.FromSeconds(1) });
         await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
@@ -1018,6 +1020,670 @@ public class OperatorConsoleControllerTests
 
         controller.State.ActiveWorkspace.Should().Be(WorkspaceKind.LoadTest);
         observed.Should().Be(controller.State);
+    }
+
+
+    // --- Outcome feedback loop -----------------------------------------------------------
+    //
+    // These are the honesty rules and they are the point of the feature: silence is never an
+    // outcome, a contradiction is shown rather than resolved, and the console never claims to
+    // be waiting for an answer nobody is listening for.
+
+    private static readonly DateTimeOffset ProcessedAt = new(2026, 8, 29, 12, 4, 31, 882, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Settlement_CompletedAndBothLegs_ResolvesTheRowWithTwoClocksAndAlignedLegs()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Time.Advance(TimeSpan.FromMilliseconds(222));
+
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        harness.Feed.PushBalance("transaction-id", "1001", -250m, 4750m);
+        harness.Feed.PushBalance("transaction-id", "2002", 250m, 1180m);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Settled);
+        row.ProcessedAt.Should().Be(ProcessedAt);
+        row.ObservedAt.Should().Be(harness.Time.GetUtcNow(), "the console's own clock is a separate figure from the event's");
+        row.ObservedLegs.Should().HaveCount(2);
+        row.ObservedLegs.Select(leg => leg.AccountNumber).Should().Equal("1001", "2002");
+    }
+
+    [Fact]
+    public async Task Rejection_FailedEvent_CarriesTheFullErrorReasonAndNoLegs()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushFailed("transaction-id", ProcessedAt, "insufficient funds");
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Rejected);
+        row.ErrorReason.Should().Be("insufficient funds");
+        row.ObservedLegs.Should().BeEmpty();
+        controller.State.Evidence.Should().Contain(record =>
+            record.Kind == EvidenceKind.OutcomeEvent && record.Summary.Contains("insufficient funds"));
+    }
+
+    [Fact]
+    public async Task OneLegOnly_IsNeverInferredAsComplete()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        harness.Feed.PushBalance("transaction-id", "1001", -250m, 4750m);
+
+        controller.State.TrackedPayments.Single().ObservedLegs.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task RedeliveredEvents_AreIdempotent()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        harness.Feed.PushBalance("transaction-id", "1001", -250m, 4750m);
+        harness.Feed.PushBalance("transaction-id", "1001", -250m, 4750m);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Settled);
+        row.ObservedLegs.Should().HaveCount(1, "at-least-once delivery means a second copy of a leg is not a second leg");
+    }
+
+    [Fact]
+    public async Task UnattributedEvent_IsRecordedLabelledAndTouchesNoPaymentRow()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCompleted("tx-9004", ProcessedAt);
+
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Awaiting);
+        controller.State.Burst.Settled.Should().Be(0, "an unattributed event never counts toward the burst's proven leg");
+        controller.State.Evidence.Should().Contain(record =>
+            record.Kind == EvidenceKind.OutcomeEvent
+            && record.Summary.Contains("Unattributed")
+            && record.Summary.Contains("tx-9004"));
+    }
+
+    [Fact]
+    public async Task Contradiction_KeepsBothRecordsAndPicksNoWinner()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Completed, 200, "Completed"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushFailed("transaction-id", ProcessedAt, "insufficient funds");
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Contradiction);
+        row.HttpOutcome.Should().Be(PaymentOutcome.Completed, "the HTTP record is never overwritten");
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Failed);
+        row.Note.Should().Contain("HTTP proved Completed, broadcast says Failed");
+    }
+
+    [Fact]
+    public async Task FeedLost_WithdrawsEveryAwaitingClaimAndAnnouncesOnce()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-1" },
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-2" });
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        var lostAt = harness.Time.GetUtcNow();
+
+        harness.Feed.Fault(lostAt);
+
+        controller.State.TrackedPayments.Should().OnlyContain(payment =>
+            payment.State == PaymentTrackingState.OutcomeUnknown);
+        controller.State.TrackedPayments.Should().NotContain(payment =>
+            payment.State == PaymentTrackingState.Awaiting);
+        controller.State.Evidence.Count(record => record.Summary.StartsWith("Feed lost")).Should().Be(1);
+        controller.State.Evidence.Should().Contain(record =>
+            record.Summary.Contains("Feed lost") && record.Summary.Contains("2 payments"));
+    }
+
+    [Fact]
+    public async Task FeedResumed_StampsTheGapAndNeverBackFillsAnUnknownRow()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+        harness.Time.Advance(TimeSpan.FromSeconds(17));
+
+        harness.Feed.Resume(harness.Time.GetUtcNow());
+
+        controller.State.Feed.State.Should().Be(OutcomeFeedState.Listening);
+        controller.State.Feed.GapStart.Should().NotBeNull();
+        controller.State.TrackedPayments.Single().State.Should().Be(
+            PaymentTrackingState.OutcomeUnknown,
+            "a resumed subscription is not retroactive evidence");
+        controller.State.Evidence.Should().Contain(record => record.Summary.Contains("Listening again"));
+    }
+
+    [Fact]
+    public async Task SidecarUnavailable_StillStartsTheTopologyAndNamesTheRemedy()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        harness.Feed.QueueUnavailable("daprd is not on PATH");
+        var controller = harness.CreateController();
+
+        var start = await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        start.Succeeded.Should().BeTrue("a missing feed must never block a topology or a payment");
+        controller.State.Feed.State.Should().Be(OutcomeFeedState.Unavailable);
+        controller.State.Feed.Detail.Should().Contain("daprd is not on PATH");
+        controller.State.Evidence.Should().Contain(record =>
+            record.Kind == EvidenceKind.OutcomeEvent && record.Summary.Contains("Query outcome"));
+    }
+
+    [Fact]
+    public async Task NeverListeningSubmit_StartsAtOutcomeNotObservedRatherThanAwaiting()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        harness.Feed.QueueUnavailable("daprd is not on PATH");
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.NotObserved);
+        row.Note.Should().Contain("daprd is not on PATH");
+    }
+
+    [Fact]
+    public async Task AwaitingPayment_IsNeverConvertedToAFailureByElapsedTime()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Time.Advance(TimeSpan.FromHours(1));
+        await controller.RefreshAsync(CancellationToken.None);
+
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Awaiting);
+    }
+
+    [Fact]
+    public async Task ArrivingEvent_ResolvesInPlaceWithoutReorderingTheList()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-1" },
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-2" },
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-3" });
+        for (var index = 0; index < 3; index++)
+        {
+            await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        }
+
+        harness.Feed.PushCompleted("tx-1", ProcessedAt);
+
+        // An arriving outcome never re-sorts the list.
+        controller.State.TrackedPayments.Select(payment => payment.TransactionId)
+            .Should().Equal("tx-1", "tx-2", "tx-3");
+        controller.State.TrackedPayments[0].State.Should().Be(PaymentTrackingState.Settled);
+        controller.State.SelectedEvidence!.Kind.Should().NotBe(
+            EvidenceKind.OutcomeEvent,
+            "a pushed outcome never steals the Details pane");
+    }
+
+    [Fact]
+    public async Task Burst_ProvenLegMovesOnlyOnReceivedEventsAndAwaitingDrainsToZero()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+
+        await controller.RunBurstAsync(StandardPayment, 2, 1, CancellationToken.None);
+
+        controller.State.Burst.Accepted.Should().Be(2);
+        controller.State.Burst.Settled.Should().Be(0);
+        controller.State.Burst.Awaiting.Should().Be(2, "awaiting goes up as submissions are accepted");
+
+        var burstTransactions = harness.Payments.Submissions
+            .Select(submission => submission.IdempotencyKey!)
+            .ToList();
+        harness.Feed.PushCompleted(burstTransactions[0], ProcessedAt);
+        harness.Feed.PushFailed(burstTransactions[1], ProcessedAt, "insufficient funds");
+
+        controller.State.Burst.Settled.Should().Be(1);
+        controller.State.Burst.Rejected.Should().Be(1);
+        controller.State.Burst.Awaiting.Should().Be(0, "awaiting only ever drains from received events");
+        controller.State.TrackedPayments.Should().BeEmpty("a burst's outcomes are counted, never followed row by row");
+    }
+
+    [Fact]
+    public async Task Burst_RedeliveredTerminalEvent_DoesNotDoubleCountTheProvenLeg()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        await controller.RunBurstAsync(StandardPayment, 1, 1, CancellationToken.None);
+        var transactionId = harness.Payments.Submissions[0].IdempotencyKey!;
+
+        harness.Feed.PushCompleted(transactionId, ProcessedAt);
+        harness.Feed.PushCompleted(transactionId, ProcessedAt);
+
+        controller.State.Burst.Settled.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task LateEvent_AfterTheTopologyStops_IsDiscarded()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        await controller.StopAsync(CancellationToken.None);
+        var evidenceBefore = controller.State.Evidence.Count;
+
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+
+        controller.State.Evidence.Should().HaveCount(evidenceBefore);
+        controller.State.TrackedPayments.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Feed_IsTornDownWithTheTopologyOnStopSwitchShutdownAndDisappearance()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(
+            OperatorHarness.Snapshot(TopologyProfile.Regular),
+            OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+        var controller = harness.CreateController();
+
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Feed.Starts.Should().Equal(TopologyProfile.Regular);
+
+        await controller.SwitchAsync(TopologyProfile.LoadTests, CancellationToken.None);
+        harness.Feed.StopCount.Should().Be(1, "the outgoing half of a switch owns the outgoing sidecar");
+        harness.Feed.Starts.Should().Equal(TopologyProfile.Regular, TopologyProfile.LoadTests);
+
+        await controller.ShutdownAsync(CancellationToken.None);
+        harness.Feed.StopCount.Should().Be(2, "no orphan daprd may outlive the console");
+    }
+
+    [Fact]
+    public async Task Feed_IsTornDownWhenTheOwnedAppHostDisappears()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Aspire.DefaultSnapshot = TopologySnapshot.Unreachable(
+            TopologyProfile.Regular,
+            harness.Time.GetUtcNow(),
+            "gone");
+        harness.Aspire.Discovered = [];
+
+        await controller.RefreshAsync(CancellationToken.None);
+
+        controller.State.Profile.Should().Be(TopologyProfile.None);
+        harness.Feed.StopCount.Should().Be(1);
+        controller.State.Feed.State.Should().Be(OutcomeFeedState.NotStarted);
+    }
+
+    [Fact]
+    public async Task BufferedEventsOverflow_KeepsTheNewestAndDropsTheOldest()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+
+        // One past the cap. The buffer exists so an event that beat its own HTTP response still
+        // lands, so the entry worth keeping under pressure is the newest — it is the one most
+        // likely to still have a submission on the way.
+        var overflow = OperatorConsoleController.MaximumUnmatchedTerminalEvents + 1;
+        for (var index = 0; index < overflow; index++)
+        {
+            harness.Feed.PushCompleted($"tx-buffer-{index}", ProcessedAt);
+        }
+
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Completed, 200, "Completed") with { TransactionId = "tx-buffer-0" },
+            Payment(PaymentOutcome.Completed, 200, "Completed") with { TransactionId = $"tx-buffer-{overflow - 1}" });
+
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        var rows = controller.State.TrackedPayments;
+        rows.Single(row => row.TransactionId == "tx-buffer-0").State
+            .Should().NotBe(PaymentTrackingState.Settled, "the oldest buffered event is the one evicted");
+        rows.Single(row => row.TransactionId == $"tx-buffer-{overflow - 1}").State
+            .Should().Be(PaymentTrackingState.Settled, "the newest buffered event survives the overflow");
+    }
+
+    [Fact]
+    public async Task EventArrivingBeforeItsOwnSubmissionResponse_StillResolvesTheRow()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        // The instant rail commits before its own 200 returns, so the broadcast can genuinely
+        // beat the HTTP response. Correlating it is within-session, not replay.
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Settled);
+        controller.State.Evidence.Should().Contain(record => record.Summary.Contains("attributed"));
+    }
+
+    [Fact]
+    public async Task PaymentEvidence_CarriesTheTransactionIdItCorrelatesBy()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+
+        controller.State.Evidence.Where(record => record.TransactionId == "transaction-id")
+            .Should().HaveCount(2, "the submission and its broadcast outcome share the one correlation id");
+    }
+
+
+    [Fact]
+    public async Task DroppedFeed_IsReestablishedOnRefreshAndStampsTheGapWithoutBackFilling()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+        harness.Time.Advance(TimeSpan.FromSeconds(17));
+        harness.Feed.Queue(new OutcomeFeedStatus(
+            OutcomeFeedState.Listening,
+            ListeningSince: harness.Time.GetUtcNow(),
+            GapStart: harness.Time.GetUtcNow().AddSeconds(-17),
+            GapEnd: harness.Time.GetUtcNow()));
+
+        await controller.RefreshAsync(CancellationToken.None);
+
+        harness.Feed.Starts.Should().HaveCount(2, "a subscription that dropped is re-established while the topology runs");
+        controller.State.Feed.State.Should().Be(OutcomeFeedState.Listening);
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.OutcomeUnknown);
+    }
+
+    [Fact]
+    public async Task FeedThatNeverCameUp_IsNotRetriedOnEveryPoll()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        harness.Feed.QueueUnavailable("daprd is not on PATH");
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        for (var poll = 0; poll < 5; poll++)
+        {
+            harness.Time.Advance(TimeSpan.FromSeconds(30));
+            await controller.RefreshAsync(CancellationToken.None);
+        }
+
+        harness.Feed.Starts.Should().HaveCount(1, "a cause that does not fix itself must not spam the evidence feed");
+    }
+
+
+    [Fact]
+    public async Task DroppedFeed_IsNotRetriedMoreThanOncePerInterval()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+        // Every start respawns a sidecar. Without the interval the 1.5-second poll would spawn
+        // a fresh daprd several times a second for as long as the outage lasted.
+        harness.Feed.Queue(new OutcomeFeedStatus(OutcomeFeedState.Lost, LostAt: harness.Time.GetUtcNow()));
+
+        for (var poll = 0; poll < 5; poll++)
+        {
+            harness.Time.Advance(TimeSpan.FromSeconds(1));
+            await controller.RefreshAsync(CancellationToken.None);
+            await controller.FeedReconnectInFlight;
+        }
+
+        harness.Feed.Starts.Should().HaveCount(2, "one initial start plus a single retry inside the interval");
+    }
+
+    [Fact]
+    public async Task DroppedFeed_StopsRetryingAfterTheCapAndSaysSoOnce()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            harness.Feed.Queue(new OutcomeFeedStatus(OutcomeFeedState.Lost, LostAt: harness.Time.GetUtcNow()));
+        }
+
+        for (var poll = 0; poll < 10; poll++)
+        {
+            harness.Time.Advance(TimeSpan.FromMinutes(1));
+            await controller.RefreshAsync(CancellationToken.None);
+            await controller.FeedReconnectInFlight;
+        }
+
+        harness.Feed.Starts.Should().HaveCount(4, "one initial start plus a bounded three retries");
+        controller.State.Evidence.Count(record => record.Summary.Contains("stopped retrying"))
+            .Should().Be(1, "giving up is announced once, not on every poll");
+    }
+
+    [Fact]
+    public async Task SuccessfulReconnect_RestoresTheRetryBudgetForTheNextOutage()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        // Three outages, each recovered on the first retry. The cap is on consecutive failures,
+        // not on how many outages one session may survive.
+        for (var outage = 0; outage < 4; outage++)
+        {
+            harness.Feed.Fault(harness.Time.GetUtcNow());
+            harness.Time.Advance(TimeSpan.FromMinutes(1));
+            await controller.RefreshAsync(CancellationToken.None);
+            await controller.FeedReconnectInFlight;
+            controller.State.Feed.State.Should().Be(OutcomeFeedState.Listening);
+        }
+
+        harness.Feed.Starts.Should().HaveCount(5, "one initial start plus one successful reconnect per outage");
+    }
+
+    [Fact]
+    public async Task TrackedPayments_AreBoundedAndAnEvictedRowsOutcomeIsStillCalledOurs()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController(new OperatorConsoleOptions
+        {
+            PollInterval = TimeSpan.Zero,
+            TransitionTimeout = TimeSpan.FromSeconds(1),
+            MaximumTrackedPayments = 3,
+        });
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        for (var index = 0; index < 5; index++)
+        {
+            harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = $"tx-{index}" });
+            await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        }
+
+        controller.State.TrackedPayments.Should().HaveCount(3);
+        controller.State.TrackedPayments.Select(row => row.TransactionId).Should().Equal("tx-2", "tx-3", "tx-4");
+
+        harness.Feed.PushCompleted("tx-0", ProcessedAt);
+
+        controller.State.Evidence.Should().Contain(record =>
+            record.TransactionId == "tx-0" && record.Summary.Contains("submitted earlier this session"));
+        controller.State.Evidence.Should().NotContain(record =>
+            record.TransactionId == "tx-0" && record.Summary.Contains("was not submitted from this console"));
+    }
+
+    [Fact]
+    public async Task Resend_UpdatesTheExistingRowRatherThanAddingOneThatCanNeverResolve()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        // The instant rail may answer 202 first and 200 on the resend, and both are legal for
+        // it -- so the row must absorb the second answer rather than gaining a twin that could
+        // never resolve and would read "Awaiting settlement" for ever.
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending"),
+            Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        await controller.ResendLastPaymentAsync(CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Should().ContainSingle().Subject;
+        row.HttpOutcome.Should().Be(PaymentOutcome.Completed);
+        row.HttpStatusCode.Should().Be(200);
+    }
+
+    [Fact]
+    public async Task PreviousBurstsOutcome_IsNeverCalledAStrangersTransaction()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        await controller.RunBurstAsync(StandardPayment, 1, 1, CancellationToken.None);
+        var firstBurstTransaction = harness.Payments.Submissions[0].IdempotencyKey!;
+        await controller.RunBurstAsync(StandardPayment, 1, 1, CancellationToken.None);
+
+        harness.Feed.PushCompleted(firstBurstTransaction, ProcessedAt);
+
+        controller.State.Evidence.Should().NotContain(record =>
+            record.TransactionId == firstBurstTransaction
+            && record.Summary.Contains("was not submitted from this console"));
+        controller.State.Burst.Settled.Should().Be(0, "a previous burst's outcome never moves this burst's counters");
+    }
+
+    [Fact]
+    public async Task Burst_WhenTheFeedDrops_WithdrawsItsAwaitingClaimToo()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        await controller.RunBurstAsync(StandardPayment, 3, 1, CancellationToken.None);
+        controller.State.Burst.Awaiting.Should().Be(3);
+
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+
+        controller.State.Burst.Awaiting.Should().Be(
+            0,
+            "leaving 'awaiting 3' on screen with nobody listening is the same false wait the rows withdraw");
+        controller.State.Burst.Unknown.Should().Be(3);
+    }
+
+    [Fact]
+    public async Task HttpFailedBurstSubmission_NeverDrivesTheProvenLegNegative()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Failed, 200, "Failed") with { TransactionId = "tx-failed" });
+
+        await controller.RunBurstAsync(InstantPayment, 1, 1, CancellationToken.None);
+        harness.Feed.PushFailed("tx-failed", ProcessedAt, "insufficient funds");
+
+        controller.State.Burst.Failed.Should().Be(1, "the HTTP leg counted it as failed");
+        controller.State.Burst.Rejected.Should().Be(0, "its id never joined the proven leg, so nothing can go negative");
+        controller.State.Burst.Awaiting.Should().Be(0);
+        controller.State.Evidence.Should().NotContain(record =>
+            record.TransactionId == "tx-failed" && record.Summary.Contains("was not submitted from this console"));
+    }
+
+    [Fact]
+    public async Task BalanceLegsArrivingBeforeTheSubmissionResponse_AreStillApplied()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        // All three events can beat an instant-rail 200. Buffering only the terminal one left
+        // the row permanently reading "1 of 2 legs observed".
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        harness.Feed.PushBalance("transaction-id", "1001", -250m, 4750m);
+        harness.Feed.PushBalance("transaction-id", "2002", 250m, 1180m);
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Settled);
+        row.ObservedLegs.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public async Task AmbiguousSubmissionWithATransactionId_IsTrackedAtOutcomeNotObserved()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Ambiguous, 0, null, "no response"));
+
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Omitted, null, CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Should().ContainSingle().Subject;
+        row.State.Should().Be(
+            PaymentTrackingState.NotObserved,
+            "its own HTTP leg never proved it was accepted, so it is never 'Awaiting settlement'");
+        row.HttpOutcome.Should().Be(PaymentOutcome.Ambiguous);
+        row.Note.Should().Contain("Ambiguous");
+    }
+
+    [Fact]
+    public async Task BalanceLegForARejectedRow_IsNotRenderedBesideTheWordsThatDenyIt()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushFailed("transaction-id", ProcessedAt, "insufficient funds");
+        harness.Feed.PushBalance("transaction-id", "1001", -250m, 4750m);
+
+        controller.State.TrackedPayments.Single().ObservedLegs.Should().BeEmpty();
+        controller.State.Evidence.Should().Contain(record =>
+            record.Method == OutcomeEventTypes.BalanceUpdated,
+            "the event is still recorded in the feed, where the disagreement is visible");
+    }
+
+    [Fact]
+    public async Task InboundEvent_NeverRewritesTheMutationStatusLine()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        var statusLine = controller.State.StatusLine;
+
+        harness.Feed.PushBalance("tx-9004", "1001", -250m, 4750m);
+
+        controller.State.StatusLine.Should().Be(statusLine, "a pushed outcome never steals attention");
+        controller.State.Evidence.Last().Summary.Should().Contain("Balance updated");
+    }
+
+    [Fact]
+    public async Task InboundEvent_IsStampedWithTheFaultLevelsInForceWhenItArrived()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.DefaultSnapshot = OperatorHarness.ArmedSnapshot(TopologyProfile.Regular);
+        var controller = harness.CreateController();
+        controller.SetArming(true).Succeeded.Should().BeTrue();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        // Armed after the subscription was established. The levels are read when the event
+        // lands, not when the console subscribed, or every such record would file as fault-free.
+        controller.StageFaults(FaultLevels.AllZero with { ErrorRatePercent = 40 });
+        await controller.ApplyFaultsAsync(CancellationToken.None);
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+
+        controller.State.Evidence.Last(record => record.Kind == EvidenceKind.OutcomeEvent)
+            .FaultLevels.Should().NotBeNull("a settlement observed under injected faults is a different fact");
     }
 
     private static async Task<(OperatorConsoleController Controller, OperatorHarness Harness)> AttachedControllerAsync(

@@ -2,7 +2,11 @@
 
   <!-- Story 7.4 / ADR-015: standalone presentation console. Deliberately carries
        no ProjectReference to any banking implementation project, Messaging, or
-       DbContext — only the pinned Terminal.Gui UI package and the BCL. -->
+       DbContext. Its package set is the pinned Terminal.Gui UI package, the BCL,
+       and Dapr.Messaging — the client for the console's own outbound streaming
+       subscription to transaction-events, whose three event contracts are declared
+       here as local wire records (Application/Ports/IOutcomeFeed.cs) precisely so
+       the zero-banking-project-reference invariant stays intact. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
@@ -14,6 +18,7 @@
 
   <ItemGroup>
     <PackageReference Include="Terminal.Gui" />
+    <PackageReference Include="Dapr.Messaging" />
   </ItemGroup>
 
   <ItemGroup>
