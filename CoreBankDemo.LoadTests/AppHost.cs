@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using CommunityToolkit.Aspire.Hosting.Dapr;
+using DevProxy.Hosting;
 using Microsoft.Extensions.Configuration;
 
 var builder = DistributedApplication.CreateBuilder(args);
@@ -62,6 +63,24 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     .WaitFor(jaeger)
     .WaitFor(pubsub);
 
+// Opt-in latency injection (Features:UseDevProxy, default false). The profile
+// delays only CoreBankAPI's transaction endpoint, by more than the instant
+// rail's BudgetMilliseconds, so every inline forward attempt overruns its
+// budget and the payment falls back to 202 Pending for the background
+// processor to complete. Account validation stays fast, so the run still
+// exercises the normal path up to the forward. Deliberately off by default --
+// this is a manual stress scenario, never part of the /run-load-tests gate.
+IResourceBuilder<DevProxyExecutableResource>? devProxy = null;
+var useDevProxy = builder.Configuration.GetValue<bool>("Features:UseDevProxy");
+if (useDevProxy)
+{
+    var devProxyConfigFile = Path.Combine(
+        builder.AppHostDirectory, "devproxy", "config", "devproxyrc-latency.json");
+    devProxy = builder.AddDevProxyExecutable("devproxy")
+        .WithConfigFile(devProxyConfigFile)
+        .WithUrlsToWatch(() => ["http://127.0.0.1:5032/*"]);
+}
+
 var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payments-api", launchProfileName: "loadtest")
     .WithReplicas(2)
     .WithReference(paymentsDb)
@@ -90,6 +109,29 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     })
     .WaitFor(jaeger)
     .WaitFor(pubsub);
+
+if (devProxy is not null)
+{
+    const string devProxyUrl = "http://127.0.0.1:8001";
+    // Exclude the Dapr sidecar's pub/sub gRPC port (localhost:50001) from
+    // proxying; the Kiota HTTP call to CoreBankAPI is unaffected and still
+    // proxied.
+    const string noProxy = "localhost";
+
+    // Both casings, deliberately -- .NET's HttpEnvironmentProxy reads the
+    // lowercase names first and only falls back to the uppercase ones, so an
+    // inherited lowercase http_proxy (every dev container and sandbox exports
+    // one) would otherwise win and route CoreBankAPI calls to that outer proxy
+    // instead. Same reasoning as CoreBankDemo.AppHost/AppHost.cs.
+    paymentsApi
+        .WithEnvironment("HTTP_PROXY", devProxyUrl)
+        .WithEnvironment("HTTPS_PROXY", devProxyUrl)
+        .WithEnvironment("NO_PROXY", noProxy)
+        .WithEnvironment("http_proxy", devProxyUrl)
+        .WithEnvironment("https_proxy", devProxyUrl)
+        .WithEnvironment("no_proxy", noProxy)
+        .WaitFor(devProxy);
+}
 
 var loadTestSupport = builder.AddProject<Projects.CoreBankDemo_LoadTestSupport>("loadtest-support", launchProfileName: "loadtest")
     .WithReference(paymentsDb)
