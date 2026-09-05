@@ -2,6 +2,24 @@
   "$schema": "https://raw.githubusercontent.com/dotnet/dev-proxy/main/schemas/v3.2.0/rc.schema.json",
   "plugins": [
     {
+      "name": "RateLimitingPlugin",
+      "enabled": true,
+      "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
+      "configSection": "rateLimiting",
+      "urlsToWatch": [
+        "http://127.0.0.1:5032/api/*"
+      ]
+    },
+    {
+      "name": "LatencyPlugin",
+      "enabled": true,
+      "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
+      "configSection": "latency",
+      "urlsToWatch": [
+        "http://127.0.0.1:5032/api/*"
+      ]
+    },
+    {
       "name": "GenericRandomErrorPlugin",
       "enabled": true,
       "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
@@ -19,7 +37,7 @@
   },
   "rateLimiting": {
     "costPerRequest": 1,
-    "rateLimit": 10,
+    "rateLimit": 1000,
     "resetTimeWindowSeconds": 60
   },
   "latency": {

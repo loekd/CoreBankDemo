@@ -174,9 +174,35 @@ With `Features:UseDevProxy: true`, the AppHost starts Dev Proxy and the repo con
 PaymentsAPI→CoreBankAPI calls get an injected 503/429/500 — that's the intended ADR-005 resilience
 scenario, not a regression. Set `Features:UseDevProxy=false` for a clean demo run.
 
-The AppHost config also carries `rateLimiting` (10 req/60s) and `latency` (20–200 ms) sections, but
-**neither is in effect**: Dev Proxy only runs plugins listed in `plugins`, and that array holds
-`GenericRandomErrorPlugin` alone. Startup confirms it — `1 error responses loaded from
-devproxy-errors.json` and no rate-limiting or latency plugin line. Do not attribute slow or
-throttled CoreBank calls to those sections. (The v3 `rc` schema sets `additionalProperties: true`,
-so these dead sections still validate — schema validation will not flag them for you.)
+The AppHost config runs **three** plugins, all against `http://127.0.0.1:5032/api/*`:
+
+| Plugin | Config section | Effect |
+|---|---|---|
+| `RateLimitingPlugin` | `rateLimiting` | 1000 req / 60s, then `429` |
+| `LatencyPlugin` | `latency` | adds 20–200 ms per request |
+| `GenericRandomErrorPlugin` | `errorsCoreBank` | ~5% injected 503/429/500 |
+
+So with `Features:UseDevProxy: true`, expect every PaymentsAPI→CoreBankAPI call to carry
+20–200 ms of added latency and a ~5% error rate. That is the intended ADR-005 resilience scenario,
+not a regression. Set `Features:UseDevProxy=false` for a clean demo run.
+
+**The rate limit is deliberately set high (1000/60s) so it does not throttle normal runs.** The
+value as originally authored was 10/60s, which two `payments-api` replicas exhaust within seconds —
+lower it back to ~10 to actually demonstrate throttling, then restore it.
+
+**A config section only does something if a plugin references it.** Dev Proxy runs exactly the
+plugins listed in `plugins`; a section with no `configSection` pointing at it is silently dead.
+These three were inert for exactly that reason until the plugin entries were added. The v3 `rc`
+schema sets `additionalProperties: true`, so an orphaned section still validates — schema
+validation will not catch this for you. Startup logs do not list plugins either; the only reliable
+check is behavioural:
+
+```bash
+# with an upstream on :5032 and the proxy on :8000
+unset no_proxy NO_PROXY   # the sandbox bypasses 127.0.0.1 by default, which silently skips the proxy
+curl -s -o /dev/null -w "%{http_code} %{time_total}\n" \
+  --proxy http://127.0.0.1:8000 --noproxy "" http://127.0.0.1:5032/api/test
+```
+
+Latency shows up as a non-zero `time_total` (~0.02–0.20); a `0.00` means the request never went
+through the proxy at all.
