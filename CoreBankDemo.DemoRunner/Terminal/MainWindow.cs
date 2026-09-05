@@ -163,6 +163,7 @@ public sealed class MainWindow : Window
     private IReadOnlyList<long> _paymentLineOwners = [];
     private bool _paymentSelectionIsDeliberate;
     private bool _rebindingPaymentList;
+    private bool _rebindingEvidenceList;
     private bool _compactLayout;
     private string _message = string.Empty;
     private long _messageMark = -1;
@@ -493,6 +494,21 @@ public sealed class MainWindow : Window
         _inspectCoreBankInbox.X = Pos.Right(_inspectPaymentsOutbox) + 1;
         _inspectCoreBankInbox.Y = Pos.AnchorEnd(1);
 
+        // Moving through the list is how an operator reads the journal, so the pane follows the
+        // selection instead of waiting for Details to be pressed. Guarded against the rebind:
+        // Bind restores the selection, and reacting to that would call back into the controller
+        // on every render and pull the pane off whatever the operator had chosen.
+        _evidenceList.ValueChanged += (_, _) =>
+        {
+            if (_rebindingEvidenceList || _evidenceRows.Count == 0)
+            {
+                return;
+            }
+
+            var index = Math.Clamp(_evidenceList.SelectedItem ?? 0, 0, _evidenceRows.Count - 1);
+            _controller.SelectEvidence(_evidenceRows[index].Sequence);
+        };
+
         _detailsButton.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -504,6 +520,8 @@ public sealed class MainWindow : Window
 
             var index = Math.Clamp(_evidenceList.SelectedItem ?? 0, 0, _evidenceRows.Count - 1);
             _controller.SelectEvidence(_evidenceRows[index].Sequence);
+            // The pane is the point of the button, so put the reader in it.
+            _evidenceDetail.SetFocus();
         };
         _wrapButton.Accepting += (_, e) =>
         {
@@ -1063,9 +1081,18 @@ public sealed class MainWindow : Window
             ? ["○ No verified resources — refresh or attach a known topology"]
             : [.. model.Resources.Select(row => $"{row.Symbol} {row.Name,-20} {row.State,-11} {row.Detail} [{row.NextAction}]")]);
         _evidenceRows = model.Evidence;
-        _evidenceBinding.Bind(model.Evidence.Count == 0
-            ? ["○ No actions yet this session"]
-            : [.. model.Evidence.Select(row => $"{row.Summary} · {row.Provenance}")]);
+        _rebindingEvidenceList = true;
+        try
+        {
+            _evidenceBinding.Bind(model.Evidence.Count == 0
+                ? ["○ No actions yet this session"]
+                : [.. model.Evidence.Select(row => $"{row.Summary} · {row.Provenance}")]);
+        }
+        finally
+        {
+            _rebindingEvidenceList = false;
+        }
+
         if (!string.Equals(_evidenceDetail.Text, model.SelectedEvidenceDetail, StringComparison.Ordinal))
         {
             _evidenceDetail.Text = model.SelectedEvidenceDetail;
@@ -1654,6 +1681,9 @@ public sealed class MainWindow : Window
     internal void TriggerResourceActionForTest() => TriggerSelectedResourceAction();
     internal void RenderForTest() => Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
     internal ListView PaymentList => _paymentList;
+    internal ListView EvidenceList => _evidenceList;
+    internal int EvidenceRowCount => _evidenceList.Source?.Count ?? 0;
+    internal string EvidenceDetailText => _evidenceDetail.Text;
     internal IReadOnlyList<string> PaymentRowTexts =>
         [.. _paymentList.Source?.ToList().Cast<string>() ?? []];
     internal string FeedStatusText => _feedStatus.Text;

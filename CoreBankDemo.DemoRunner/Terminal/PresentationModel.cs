@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
 
@@ -160,19 +161,16 @@ public static class PresentationModelBuilder
                     ? $"< {StatusGlyph(record.Succeeded)} {record.Summary}"
                     : $"  {StatusGlyph(record.Succeeded)} {record.Summary}",
                 $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}{FaultProvenance(record)}",
-                $"{record.Method} {record.Target}{Environment.NewLine}HTTP {record.StatusCode?.ToString() ?? "n/a"} · {record.Duration.TotalMilliseconds:F0} ms{Environment.NewLine}"
-                + $"Faults: {FaultProvenanceDetail(record)}{Environment.NewLine}{record.Detail}",
+                EvidenceDetailText(record),
                 record.Succeeded))
             .ToList();
 
+        // One projection, used by both the row and the Details pane. They were built separately
+        // and had already drifted: the pane omitted the timestamp the row showed, so the same
+        // record read differently depending on where you looked at it.
         var selected = state.SelectedEvidence is null
-            ? "No action selected."
-            : $"{state.SelectedEvidence.Summary}{Environment.NewLine}"
-              + $"{KnownTopologyProfiles.DisplayName(state.SelectedEvidence.Profile)} · generation {state.SelectedEvidence.RunGeneration}{Environment.NewLine}"
-              + $"{state.SelectedEvidence.Method} {state.SelectedEvidence.Target}{Environment.NewLine}"
-              + $"HTTP {state.SelectedEvidence.StatusCode?.ToString() ?? "n/a"} · {state.SelectedEvidence.Duration.TotalMilliseconds:F0} ms{Environment.NewLine}"
-              + $"Faults: {FaultProvenanceDetail(state.SelectedEvidence)}{Environment.NewLine}"
-              + state.SelectedEvidence.Detail;
+            ? "No action selected. Select a row on the left, or press Details."
+            : EvidenceDetailText(state.SelectedEvidence);
 
         var loadResults = new List<string>();
         if (state.LastLoadResult is { } load)
@@ -412,6 +410,78 @@ public static class PresentationModelBuilder
 
     private static string FaultProvenance(EvidenceRecord record) =>
         record.FaultLevels is { } levels ? $" · faults {levels}" : string.Empty;
+
+    /// <summary>
+    /// The full readout for one evidence record: what happened, where, under what conditions,
+    /// then the payload. Shared by the list row and the Details pane so the same record cannot
+    /// read two different ways depending on which one you are looking at.
+    /// </summary>
+    internal static string EvidenceDetailText(EvidenceRecord record)
+    {
+        var lines = new List<string>
+        {
+            record.Summary,
+            $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}",
+            $"{record.Method} {record.Target}",
+            $"HTTP {record.StatusCode?.ToString() ?? "n/a"} · {record.Duration.TotalMilliseconds:F0} ms",
+            $"Faults: {FaultProvenanceDetail(record)}",
+        };
+
+        if (record.TransactionId is { Length: > 0 } transactionId)
+        {
+            lines.Add($"Transaction: {transactionId}");
+        }
+
+        var body = FormatBody(record.Detail);
+        lines.Add(string.Empty);
+        // Say so rather than trailing off into blank space: an empty pane reads as a broken
+        // console, while "no body" is a fact about the response.
+        lines.Add(string.IsNullOrWhiteSpace(body) ? "(no response body was recorded)" : body);
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// Re-indents a JSON body for reading. A single-line payload is where the interesting
+    /// fields hide during a demonstration, so it is pretty-printed; anything that is not JSON
+    /// is passed through untouched rather than mangled into looking like it.
+    /// </summary>
+    /// <remarks>
+    /// Display-only. The stored <see cref="EvidenceRecord.Detail"/> keeps the bytes the service
+    /// actually returned, already redacted, so the export and the clipboard still carry the
+    /// real payload rather than this console's reformatting of it.
+    /// </remarks>
+    internal static string FormatBody(string? detail)
+    {
+        var body = detail?.Trim();
+        if (string.IsNullOrEmpty(body))
+        {
+            return string.Empty;
+        }
+
+        // Cheap reject before paying for a parse: the overwhelming majority of details are
+        // process output or an error summary, not JSON.
+        if (body[0] is not ('{' or '['))
+        {
+            return detail!;
+        }
+
+        try
+        {
+            using var parsed = JsonDocument.Parse(
+                body,
+                new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
+            return JsonSerializer.Serialize(parsed.RootElement, IndentedJson);
+        }
+        catch (JsonException)
+        {
+            // A truncated or malformed body is still evidence. Showing it verbatim is the
+            // honest move; a parse failure is not licence to hide what the service sent.
+            return detail!;
+        }
+    }
+
+    private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
 
     private static string FaultProvenanceDetail(EvidenceRecord record) =>
         record.FaultLevels?.ToString() ?? "none in force";

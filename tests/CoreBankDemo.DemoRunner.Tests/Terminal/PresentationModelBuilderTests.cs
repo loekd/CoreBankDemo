@@ -54,6 +54,69 @@ public class PresentationModelBuilderTests
     }
 
     [Fact]
+    public void FormatBody_JsonPayload_IsIndentedForReading()
+    {
+        var formatted = PresentationModelBuilder.FormatBody(
+            "{\"transactionId\":\"tx-8821\",\"status\":\"Completed\",\"legs\":[{\"account\":\"1001\"}]}");
+
+        formatted.Should().Contain(Environment.NewLine, "a one-line payload hides its own fields on stage");
+        formatted.Should().Contain("  \"transactionId\": \"tx-8821\"");
+        formatted.Should().Contain("\"legs\": [");
+    }
+
+    [Theory]
+    [InlineData("aspire start exited with code 1")]
+    [InlineData("{ this is not json after all")]
+    [InlineData("")]
+    public void FormatBody_NonJson_IsPassedThroughUntouched(string body) =>
+        // A malformed or truncated body is still evidence; a parse failure is not licence to
+        // hide what the service actually sent.
+        PresentationModelBuilder.FormatBody(body).Should().Be(body);
+
+    [Fact]
+    public void EvidenceDetail_CarriesTheHeadersAndThePayload()
+    {
+        var record = new EvidenceRecord(
+            11,
+            DateTimeOffset.UnixEpoch,
+            TopologyProfile.Regular,
+            2,
+            EvidenceKind.Payment,
+            "Payment accepted 202",
+            "POST",
+            "/api/payments",
+            202,
+            TimeSpan.FromMilliseconds(45),
+            "{\"transactionId\":\"tx-8821\"}",
+            true,
+            null,
+            "tx-8821");
+        var state = OperatorConsoleState.Empty with { Evidence = [record], SelectedEvidence = record };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        model.SelectedEvidenceDetail.Should().Contain("Payment accepted 202")
+            .And.Contain("POST /api/payments")
+            .And.Contain("HTTP 202")
+            .And.Contain("Transaction: tx-8821")
+            .And.Contain("  \"transactionId\": \"tx-8821\"");
+        // The row and the pane are one projection, so they cannot drift apart again.
+        model.Evidence.Single().Detail.Should().Be(model.SelectedEvidenceDetail);
+    }
+
+    [Fact]
+    public void EvidenceDetail_EmptyBody_SaysSoRatherThanShowingABlankPane()
+    {
+        var record = new EvidenceRecord(
+            12, DateTimeOffset.UnixEpoch, TopologyProfile.Regular, 1, EvidenceKind.Topology,
+            "Topology attached", "attach", "Regular", null, TimeSpan.Zero, string.Empty, true);
+        var state = OperatorConsoleState.Empty with { Evidence = [record], SelectedEvidence = record };
+
+        PresentationModelBuilder.Build(state, Now).SelectedEvidenceDetail
+            .Should().Contain("(no response body was recorded)");
+    }
+
+    [Fact]
     public void Build_EvidenceAndLoadResults_ShowProvenanceAndIndividualVerdicts()
     {
         var evidence = new EvidenceRecord(
