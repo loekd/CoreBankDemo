@@ -8,7 +8,7 @@ description: |
   - When the Regular AppHost fails to start because `AddDevProxyExecutable("devproxy")` can't find the binary.
 
   **When NOT to use:**
-  - Do NOT use for `CoreBankDemo.LoadTests` — that AppHost has no Dev Proxy wiring at all; this only affects the Regular AppHost.
+  - Do NOT install this just to run `CoreBankDemo.LoadTests` — its Dev Proxy profile is opt-in and off by default (`Features:UseDevProxy: false`), so a standard load-test run never needs the binary.
   - Do NOT run this recipe on the macOS host — it is sandbox/Linux-specific (`/opt`, `sudo`, `/etc/sandbox-persistent.sh`).
   - Do NOT use if `devproxy --version` already reports 3.2.0 — skip straight to `aspire-launch`.
 ---
@@ -17,16 +17,16 @@ description: |
 
 ## Version: 3.2.0, matching the repo's config schemas
 
-The repo's four config files declare `schemas/v3.2.0`:
+The repo's three config files declare `schemas/v3.2.0`:
 
 ```
-CoreBankDemo.AppHost/devproxy/config/devproxyrc.json        -> v3.2.0/rc.schema.json
-CoreBankDemo.AppHost/devproxy/config/devproxy-errors.json   -> v3.2.0/genericrandomerrorplugin.errorsfile.schema.json
-CoreBankDemo.LoadTests/devproxy/config/devproxyrc.json      -> (same pair)
-CoreBankDemo.LoadTests/devproxy/config/devproxy-errors.json
+CoreBankDemo.AppHost/devproxy/config/devproxyrc.json          -> v3.2.0/rc.schema.json
+CoreBankDemo.AppHost/devproxy/config/devproxy-errors.json     -> v3.2.0/genericrandomerrorplugin.errorsfile.schema.json
+CoreBankDemo.LoadTests/devproxy/config/devproxyrc-latency.json -> v3.2.0/rc.schema.json
 ```
 
-Keep the binary and both schema pairs on the same version. If you move to a future major, migrate
+Each AppHost has exactly one profile — there is no second, unreferenced config to keep in sync.
+Keep the binary and every schema reference on the same version. If you move to a future major, migrate
 all four files in the same change — and note the **main config schema was renamed** in v3:
 `devproxyrc.schema.json` (v2) → `rc.schema.json` (v3). The errors-file schema kept its name. The v2
 config also pointed at the old `microsoft/dev-proxy` GitHub org; the current org is
@@ -141,8 +141,10 @@ info    Dev Proxy listening on 127.0.0.1:8000...
 ```
 
 Port 8000 matters — the AppHost injects `HTTP_PROXY=http://127.0.0.1:8000` into payments-api.
-(`CoreBankDemo.LoadTests`'s config uses 8001, but nothing wires it.) There is no "new version
-available" notice on 3.2.0; 2.1.0 nagged on every start.
+`CoreBankDemo.LoadTests` uses port 8001 for its own latency profile, which is wired but **off by
+default** (`Features:UseDevProxy: false`) — it delays only `/api/Transactions/*` past the instant
+rail's budget to demo the `202 Pending` fallback, and must never be on for an acceptance run. There
+is no "new version available" notice on 3.2.0; 2.1.0 nagged on every start.
 
 Confirm the port (`ss`/`netstat` are not installed in this sandbox):
 
