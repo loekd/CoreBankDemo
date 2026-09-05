@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
@@ -453,31 +454,47 @@ public static class PresentationModelBuilder
     /// </remarks>
     internal static string FormatBody(string? detail)
     {
-        var body = detail?.Trim();
-        if (string.IsNullOrEmpty(body))
+        if (string.IsNullOrWhiteSpace(detail))
         {
             return string.Empty;
         }
 
-        // Cheap reject before paying for a parse: the overwhelming majority of details are
-        // process output or an error summary, not JSON.
-        if (body[0] is not ('{' or '['))
+        // The payload is rarely the whole detail. A payment record is an idempotency line and
+        // then the response body; an inspection is a URL and then the body. So the JSON is
+        // found inside the text and reformatted in place, leaving everything around it alone.
+        var start = detail.IndexOfAny(['{', '[']);
+        if (start < 0)
         {
-            return detail!;
+            return detail;
         }
+
+        var bytes = Encoding.UTF8.GetBytes(detail[start..]);
+        var reader = new Utf8JsonReader(
+            bytes,
+            new JsonReaderOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
 
         try
         {
-            using var parsed = JsonDocument.Parse(
-                body,
-                new JsonDocumentOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
-            return JsonSerializer.Serialize(parsed.RootElement, IndentedJson);
+            if (!JsonDocument.TryParseValue(ref reader, out var parsed))
+            {
+                return detail;
+            }
+
+            using (parsed)
+            {
+                // Read one value and keep whatever followed it: a body is sometimes trailed by
+                // a note, and dropping that would be hiding evidence rather than formatting it.
+                var trailing = Encoding.UTF8.GetString(bytes[(int)reader.BytesConsumed..]);
+                return detail[..start]
+                    + JsonSerializer.Serialize(parsed.RootElement, IndentedJson)
+                    + trailing;
+            }
         }
         catch (JsonException)
         {
             // A truncated or malformed body is still evidence. Showing it verbatim is the
             // honest move; a parse failure is not licence to hide what the service sent.
-            return detail!;
+            return detail;
         }
     }
 

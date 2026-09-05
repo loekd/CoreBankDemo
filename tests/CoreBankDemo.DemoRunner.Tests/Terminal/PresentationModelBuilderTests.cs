@@ -64,6 +64,29 @@ public class PresentationModelBuilderTests
         formatted.Should().Contain("\"legs\": [");
     }
 
+    [Fact]
+    public void FormatBody_JsonAfterAPrefixLine_IsStillIndented()
+    {
+        // The real shape of a payment record: an idempotency line, then the response body.
+        // Testing only a bare-JSON detail is what let this ship unformatted the first time.
+        var formatted = PresentationModelBuilder.FormatBody(
+            "Idempotency Generated: generated-key" + Environment.NewLine
+            + "{\"paymentId\":\"pay-1\",\"status\":\"Pending\"}");
+
+        formatted.Should().StartWith("Idempotency Generated: generated-key", "the prefix is evidence too");
+        formatted.Should().Contain("  \"paymentId\": \"pay-1\"");
+    }
+
+    [Fact]
+    public void FormatBody_TextAfterTheJson_IsKeptRatherThanDropped()
+    {
+        var formatted = PresentationModelBuilder.FormatBody(
+            "{\"status\":\"Pending\"}" + Environment.NewLine + "(truncated by the server)");
+
+        formatted.Should().Contain("  \"status\": \"Pending\"")
+            .And.EndWith("(truncated by the server)");
+    }
+
     [Theory]
     [InlineData("aspire start exited with code 1")]
     [InlineData("{ this is not json after all")]
