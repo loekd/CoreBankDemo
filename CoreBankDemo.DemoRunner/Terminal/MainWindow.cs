@@ -33,7 +33,6 @@ public sealed class MainWindow : Window
     private readonly OperatorConsoleController _controller;
     private readonly Func<Task> _onExitRequested;
     private readonly IConfirmationService _confirmation;
-    private readonly ILinkFallbackPresenter _linkFallback;
     private readonly bool _marshalUpdates;
     private readonly CancellationTokenSource _pollCancellation = new();
     private readonly CancellationTokenSource _sessionCancellation = new();
@@ -133,17 +132,12 @@ public sealed class MainWindow : Window
         Func<Task> onExitRequested,
         IConfirmationService? confirmation,
         bool startPolling,
-        bool marshalUpdates = true,
-        ILinkFallbackPresenter? linkFallback = null)
+        bool marshalUpdates = true)
     {
         OperatorTheme.Register();
         _controller = controller;
         _onExitRequested = onExitRequested;
         _confirmation = confirmation ?? new TerminalConfirmationService();
-        _linkFallback = linkFallback ?? new TerminalLinkFallbackPresenter(
-            TerminalOut,
-            Environment.GetEnvironmentVariable("TERM"),
-            Environment.GetEnvironmentVariable("TMUX"));
         _marshalUpdates = marshalUpdates;
         _resourceBinding = new ListBinding(_resourceList);
         _evidenceBinding = new ListBinding(_evidenceList);
@@ -824,11 +818,12 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// Tries the OS default browser first (works wherever one is actually
-    /// reachable); when that fails, falls back to a dialog showing the URL for
-    /// terminal-native clicking/selection plus an explicit Copy link action --
-    /// the OS browser almost never exists in this sandbox, and the previous
-    /// silent no-op left the operator with no way to reach the link at all.
+    /// Tries the OS default browser (works wherever one is actually reachable
+    /// -- essentially never in this sandbox) and always copies the resolved
+    /// URL to the terminal clipboard besides, so the operator can paste it no
+    /// matter what. Copying and the status update are marshalled onto the UI
+    /// thread together with the OSC 52 write, since Terminal.Gui's own render
+    /// loop writes to the same stdout from that thread.
     /// </summary>
     private void OpenKnownLink(string title, string linkId) =>
         Dispatch(() => OpenKnownLinkAsync(title, linkId));
@@ -836,18 +831,23 @@ public sealed class MainWindow : Window
     private async Task OpenKnownLinkAsync(string title, string linkId)
     {
         var result = await _controller.OpenKnownLinkAsync(linkId, _sessionCancellation.Token);
-        if (result.Succeeded)
-        {
-            return;
-        }
-
         if (result.Url is null)
         {
             ShowMessage($"{title} is not available yet — attach or start a topology first.");
             return;
         }
 
-        RunOnUiThread(() => _linkFallback.Show(title, result.Url));
+        RunOnUiThread(() =>
+        {
+            var copy = TerminalClipboard.Copy(
+                result.Url,
+                TerminalOut,
+                Environment.GetEnvironmentVariable("TERM"),
+                Environment.GetEnvironmentVariable("TMUX"));
+            ShowMessage(copy.Succeeded
+                ? $"{title} link copied to your terminal clipboard: {result.Url}"
+                : $"{title}: {result.Url} — {copy.Message}");
+        });
     }
 
     internal Task TriggerOpenKnownLinkForTestAsync(string title, string linkId) => OpenKnownLinkAsync(title, linkId);

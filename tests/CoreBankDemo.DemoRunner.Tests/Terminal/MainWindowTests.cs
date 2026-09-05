@@ -294,48 +294,42 @@ public class MainWindowTests
         second.SuppliedKeyField.Text.ToString().Should().NotBe(first.SuppliedKeyField.Text.ToString());
     }
 
-    [Fact]
-    public async Task OpenJaegerLink_WhenTheOsCannotLaunchABrowser_ShowsTheFallbackWithTheResolvedUrl()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OpenJaegerLink_AlwaysCopiesTheResolvedUrlToTheTerminalClipboard(bool osBrowserOpens)
     {
+        // Copying always happens regardless of whether the OS-level browser
+        // launch itself succeeded: there is essentially never a default
+        // browser reachable from this sandbox, so a fallback gated on failure
+        // would never fire, and a modal popup here was found not to render at
+        // all when driven through the real async/background-thread path.
         var harness = new OperatorHarness();
         harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
-        harness.Browser.NextSucceeds = false;
+        harness.Browser.NextSucceeds = osBrowserOpens;
         var controller = harness.CreateController();
         await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
-        var fallback = new FakeLinkFallbackPresenter();
-        using var window = CreateWindow(controller, linkFallback: fallback);
+        using var window = CreateWindow(controller);
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
 
         await window.TriggerOpenKnownLinkForTestAsync("Jaeger", KnownLinks.Jaeger);
 
-        fallback.Shown.Should().ContainSingle().Which.Title.Should().Be("Jaeger");
-        fallback.Shown[0].Url.Should().Be(EndpointResolver.LinkFor(KnownLinks.Jaeger));
+        terminal.ToString().Should().StartWith("]52;c;").And.EndWith("");
+        window.LastUiMessage.Should().Contain("terminal clipboard").And.Contain(EndpointResolver.LinkFor(KnownLinks.Jaeger));
     }
 
     [Fact]
-    public async Task OpenAspireLink_WhenNoDashboardUrlIsVerifiedYet_SaysSoInsteadOfShowingTheFallback()
+    public async Task OpenAspireLink_WhenNoDashboardUrlIsVerifiedYet_SaysSoAndCopiesNothing()
     {
-        var fallback = new FakeLinkFallbackPresenter();
-        using var window = CreateWindow(new OperatorHarness().CreateController(), linkFallback: fallback);
+        using var window = CreateWindow(new OperatorHarness().CreateController());
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
 
         await window.TriggerOpenKnownLinkForTestAsync("Aspire dashboard", KnownLinks.AspireDashboard);
 
-        fallback.Shown.Should().BeEmpty();
+        terminal.ToString().Should().BeEmpty();
         window.LastUiMessage.Should().Contain("not available yet");
-    }
-
-    [Fact]
-    public async Task OpenJaegerLink_WhenTheOsBrowserOpensSuccessfully_NeverShowsTheFallback()
-    {
-        var harness = new OperatorHarness();
-        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
-        var controller = harness.CreateController();
-        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
-        var fallback = new FakeLinkFallbackPresenter();
-        using var window = CreateWindow(controller, linkFallback: fallback);
-
-        await window.TriggerOpenKnownLinkForTestAsync("Jaeger", KnownLinks.Jaeger);
-
-        fallback.Shown.Should().BeEmpty();
     }
 
     [Fact]
@@ -428,16 +422,8 @@ public class MainWindowTests
 
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
-        IConfirmationService? confirmation = null,
-        ILinkFallbackPresenter? linkFallback = null) =>
-        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false, linkFallback);
-
-    private sealed class FakeLinkFallbackPresenter : ILinkFallbackPresenter
-    {
-        public List<(string Title, string Url)> Shown { get; } = [];
-
-        public void Show(string title, string url) => Shown.Add((title, url));
-    }
+        IConfirmationService? confirmation = null) =>
+        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
 
     private sealed class FakeConfirmationService : IConfirmationService
     {
