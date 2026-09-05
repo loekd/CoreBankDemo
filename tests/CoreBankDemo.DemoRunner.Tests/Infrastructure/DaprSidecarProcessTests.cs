@@ -16,14 +16,19 @@ public class DaprSidecarProcessTests
         new("demorunner-console-test", "/tmp", 53910, 53911, 53912, 53913);
 
     [Fact]
-    public async Task StartAsync_ExecutableNotOnPath_ReportsItRatherThanThrowing()
+    public async Task StartAsync_ExecutableNotFound_NamesWhereItLookedRatherThanThrowing()
     {
         await using var sidecar = NewSidecar("a-binary-that-does-not-exist-anywhere");
 
         var result = await sidecar.StartAsync(Launch, CancellationToken.None);
 
         result.Succeeded.Should().BeFalse();
-        result.Detail.Should().Contain("not on PATH");
+        // The detail has to survive being read off a demo screen with no log to consult, so it
+        // names every location searched and the one command that fixes it. It must not claim
+        // "not on PATH": PATH is no longer the only place the console looks.
+        result.Detail.Should().Contain("PATH")
+            .And.Contain(Path.Combine(".dapr", "bin"))
+            .And.Contain("dapr init");
         sidecar.IsRunning.Should().BeFalse();
     }
 
@@ -101,6 +106,31 @@ public class DaprSidecarProcessTests
     [Fact]
     public void DefaultExecutable_IsTheDaprSidecarBinary() =>
         DaprSidecarProcess.DefaultExecutable.Should().Be("daprd");
+
+    [Fact]
+    public void CandidateExecutables_LookBeyondPathToWhereDaprInitActuallyInstalls()
+    {
+        // `dapr init` puts the CLI on PATH but installs the runtime into ~/.dapr/bin without
+        // adding it, so a PATH-only search reports "no feed" on a correctly installed machine.
+        var candidates = DaprSidecarProcess.CandidateExecutables();
+
+        candidates[0].Should().Be(
+            OperatingSystem.IsWindows() ? "daprd.exe" : "daprd",
+            "an explicitly installed daprd on PATH still wins over the default install");
+        candidates.Should().Contain(candidate =>
+            candidate.Contains(Path.Combine(".dapr", "bin"), StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ResolveExecutable_FallsBackToTheBareNameRatherThanGuessingAFailure()
+    {
+        // When nothing is found on disk the bare name is returned so the start attempt reports
+        // the failure with its own message, naming every location it searched.
+        var resolved = DaprSidecarProcess.ResolveExecutable();
+
+        resolved.Should().NotBeNullOrWhiteSpace();
+        DaprSidecarProcess.CandidateExecutables().Should().Contain(resolved);
+    }
 
     private static DaprSidecarProcess NewSidecar(string executable, TimeSpan? readinessTimeout = null) =>
         new(

@@ -95,7 +95,7 @@ public sealed class DaprSidecarProcess : IDaprSidecar
     {
         _terminator = terminator;
         _time = time;
-        _executable = executable ?? DefaultExecutable;
+        _executable = executable ?? ResolveExecutable();
         _readinessTimeout = readinessTimeout ?? DefaultReadinessTimeout;
         // Strictly loopback, and explicitly proxy-free: a machine with HTTP_PROXY set would
         // otherwise send the sidecar's own readiness probe out through the proxy.
@@ -103,6 +103,46 @@ public sealed class DaprSidecarProcess : IDaprSidecar
         {
             Timeout = TimeSpan.FromSeconds(2),
         };
+    }
+
+    /// <summary>
+    /// Where <c>daprd</c> is looked for, in order: the bare name so <c>PATH</c> wins when the
+    /// binary is on it, then the location <c>dapr init</c> actually installs to.
+    /// </summary>
+    /// <remarks>
+    /// <c>dapr init</c> puts the <c>dapr</c> CLI on <c>PATH</c> but installs the runtime into
+    /// <c>~/.dapr/bin</c>, which it deliberately does not add. Looking only on <c>PATH</c>
+    /// therefore reports "no feed" on an ordinary, correctly installed Dapr machine — the
+    /// common case rather than the broken one. The bare name stays first so an explicitly
+    /// installed or shimmed <c>daprd</c> still takes precedence over the default install.
+    /// </remarks>
+    internal static IReadOnlyList<string> CandidateExecutables()
+    {
+        var name = OperatingSystem.IsWindows() ? "daprd.exe" : DefaultExecutable;
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return string.IsNullOrEmpty(home)
+            ? [name]
+            : [name, Path.Combine(home, ".dapr", "bin", name)];
+    }
+
+    /// <summary>
+    /// The first candidate that exists on disk, falling back to the bare name so the failure
+    /// is reported by the start attempt — with its own message — rather than guessed at here.
+    /// </summary>
+    internal static string ResolveExecutable()
+    {
+        var candidates = CandidateExecutables();
+        foreach (var candidate in candidates)
+        {
+            // The bare name is not a path to probe: leave it to the process start, which
+            // searches PATH properly on every platform.
+            if (Path.IsPathRooted(candidate) && File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return candidates[0];
     }
 
     public bool IsRunning
@@ -187,7 +227,9 @@ public sealed class DaprSidecarProcess : IDaprSidecar
             return new DaprSidecarStartResult(
                 false,
                 null,
-                $"{_executable} is not on PATH or could not be started: {ex.Message}");
+                $"{_executable} could not be started ({ex.Message}). Looked on PATH and in "
+                    + $"{string.Join(", ", CandidateExecutables().Where(Path.IsPathRooted))}. "
+                    + "Run 'dapr init' if the runtime is not installed.");
         }
 
         process.BeginOutputReadLine();
