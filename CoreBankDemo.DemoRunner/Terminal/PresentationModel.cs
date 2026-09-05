@@ -53,6 +53,7 @@ public sealed record FaultsViewModel(
     bool CanApply,
     string ApplyCaption,
     string Detail,
+    string CostNote,
     FaultLevels Live,
     FaultLevels Staged);
 
@@ -271,9 +272,18 @@ public static class PresentationModelBuilder
             canApply,
             applyCaption,
             FaultDetail(state),
+            available ? CostNote : string.Empty,
             live,
             staged);
     }
+
+    /// <summary>
+    /// Stated up front, not discovered mid-talk. Applying a level restarts the Dev Proxy —
+    /// the only way Dev Proxy 3.2.0 picks up a new config (ADR-019) — so calls in flight
+    /// through the proxy can fail while it comes back. Panic-off pays the same cost.
+    /// </summary>
+    private const string CostNote =
+        "Apply and 0 both restart the Dev Proxy — calls through it can fail for a moment while it comes back.";
 
     /// <summary>
     /// Whether a Dev Proxy is actually running in the current snapshot. The chip may only

@@ -133,6 +133,7 @@ public sealed class MainWindow : Window
     private readonly Label _latencyValue = new();
     private readonly Label _throttleValue = new();
     private readonly Label _presetLabel = new();
+    private readonly Label _faultCostLabel = new();
     private readonly Button _applyFaultsButton = NewButton("Apply", isDefault: false);
     private readonly Button _panicOffButton = NewButton("0 Panic-off (all knobs to zero)");
     private readonly Label _faultsHint = new();
@@ -548,7 +549,11 @@ public sealed class MainWindow : Window
         _presetLabel.X = FaultLabelX;
         _presetLabel.Height = 1;
         _presetLabel.Width = Dim.Fill(1);
-        view.Add(_presetLabel);
+        _faultCostLabel.Y = 11;
+        _faultCostLabel.X = FaultLabelX;
+        _faultCostLabel.Height = 1;
+        _faultCostLabel.Width = Dim.Fill(1);
+        view.Add(_presetLabel, _faultCostLabel);
 
         _knobRows =
         [
@@ -734,6 +739,7 @@ public sealed class MainWindow : Window
         _applyFaultsButton.Enabled = faults.CanApply;
         _applyFaultsButton.Text = faults.ApplyCaption;
         _panicOffButton.Enabled = faults.Available;
+        _faultCostLabel.Text = faults.CostNote;
         _faultsHint.Text = Hint(faults.Available
             ? faults.Detail
             : $"{faults.DisabledReason} Levels shown are what would be applied.");
@@ -1507,6 +1513,7 @@ public sealed class MainWindow : Window
     internal Button ArmingButton => _armingButton;
     internal string FaultsHintText => _faultsHint.Text;
     internal string PresetLabelText => _presetLabel.Text;
+    internal string FaultCostText => _faultCostLabel.Text;
     internal IReadOnlyList<string> FaultValueTexts =>
         [_errorRateValue.Text, _latencyValue.Text, _throttleValue.Text];
     internal IReadOnlyList<bool> FaultKnobsEnabled =>

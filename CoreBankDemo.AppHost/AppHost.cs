@@ -108,6 +108,14 @@ if (useDevProxy)
         : Path.Combine(devProxyConfigFolder, "devproxyrc.json");
     devProxy = builder.AddDevProxyExecutable("devproxy")
         .WithConfigFile(devProxyConfigFile)
+        // Dev Proxy 3.2.0's restart-on-config-change is broken: after "Configuration file
+        // changed. Restarting proxy..." it accepts TCP connections and immediately closes
+        // them, and never serves again. DemoRunner therefore restarts this resource itself
+        // after writing a new session config (ADR-019); the watcher is dead weight that can
+        // only take the proxy down. Belt-and-braces only -- the console's atomic
+        // temp-then-move write already avoids firing the watcher -- so this line is safe to
+        // drop if it ever conflicts with how DevProxy.Hosting composes its own arguments.
+        .WithArgs("--no-watch")
         .WithUrlsToWatch(() => ["http://127.0.0.1:5032/*"]); // Watch the Core Bank API URL for availability
 
 }

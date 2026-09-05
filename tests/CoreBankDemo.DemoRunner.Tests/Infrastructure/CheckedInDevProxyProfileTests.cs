@@ -18,18 +18,30 @@ public class CheckedInDevProxyProfileTests
     public async Task CheckedInDefaults_MatchTheProfileTheyClaimToDescribe(TopologyProfile profile)
     {
         var root = RepositoryRoot();
-        var path = ProfileRegistry.CheckedInConfigPath(root, profile);
-        File.Exists(path).Should().BeTrue($"{path} is the read-only preset source for {profile}");
+        var source = ProfileRegistry.CheckedInConfigPath(root, profile);
+        File.Exists(source).Should().BeTrue($"{source} is the read-only preset source for {profile}");
 
-        // Read through the adapter, from the real file, with no generated config present.
-        var read = await new DevProxySessionConfigWriter(root).ReadAsync(profile, CancellationToken.None);
+        // Copied into a scratch root so the assertion is about the real file's contents and
+        // not about whether a live console session happens to hold a generated config right
+        // now. Read through the adapter so the real parse path is what is exercised.
+        var scratch = Path.Combine(Path.GetTempPath(), $"corebank-checkedin-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(ProfileRegistry.DevProxyConfigDirectory(scratch, profile));
+            File.Copy(source, ProfileRegistry.CheckedInConfigPath(scratch, profile));
 
-        read.Succeeded.Should().BeTrue();
-        read.FromGeneratedSession.Should().BeFalse(
-            "a generated session config must not survive a session — see ADR-019");
-        read.Levels.Should().Be(
-            FaultLevels.CheckedInDefaults(profile),
-            "the preset chips promise the levels the profile really ships");
+            var read = await new DevProxySessionConfigWriter(scratch).ReadAsync(profile, CancellationToken.None);
+
+            read.Succeeded.Should().BeTrue();
+            read.FromGeneratedSession.Should().BeFalse();
+            read.Levels.Should().Be(
+                FaultLevels.CheckedInDefaults(profile),
+                "the preset chips promise the levels the profile really ships");
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
     }
 
     [Theory]

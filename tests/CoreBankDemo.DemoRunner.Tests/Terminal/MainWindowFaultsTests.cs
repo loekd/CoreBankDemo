@@ -264,6 +264,19 @@ public class MainWindowFaultsTests
         window.PresetLabelText.Should().Contain("1 more preset not shown at this width");
     }
 
+    [Fact]
+    public async Task TheWorkspaceStatesTheRestartCostBeforeTheOperatorPaysIt()
+    {
+        var harness = ArmedHarness();
+        var controller = harness.CreateController();
+        using var window = CreateWindow(controller);
+        await ArmAsync(controller);
+        window.RenderForTest();
+
+        window.FaultCostText.Should().Contain("restart the Dev Proxy");
+        window.FaultCostText.Should().Contain("can fail for a moment");
+    }
+
     private static OperatorHarness ArmedHarness()
     {
         var harness = new OperatorHarness();

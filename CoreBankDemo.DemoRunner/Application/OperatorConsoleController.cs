@@ -1064,6 +1064,52 @@ public sealed class OperatorConsoleController
             return CommandResult.Rejected(error);
         }
 
+        // The written file is not enough. Dev Proxy 3.2.0's own restart-on-config-change is
+        // broken -- after "Configuration file changed. Restarting proxy..." it accepts TCP
+        // connections and immediately closes them, and never serves again -- so a controlled
+        // restart of the resource is the only way a new config actually takes effect. See
+        // ADR-019; the atomic temp-then-move write exists partly to keep that watcher quiet.
+        var restart = await RestartDevProxyAsync(context, ct);
+        if (!IsCurrent(context))
+        {
+            AddEvidence(
+                Provenance(context),
+                EvidenceKind.Fault,
+                $"{action} discarded — the topology changed while the Dev Proxy was restarting",
+                RestartCommandText,
+                KnownResources.DevProxy,
+                null,
+                TimeSpanSince(startedAt),
+                $"Captured for {context.Profile} generation {context.RunGeneration}; "
+                + $"now {State.Profile} generation {State.RunGeneration}.",
+                false);
+            return CommandResult.Rejected(
+                "The topology changed while the Dev Proxy was restarting; no level was applied to it.");
+        }
+
+        if (!restart.Succeeded)
+        {
+            // The config is on disk but no proxy has loaded it. Reporting it as applied would
+            // be exactly the "a written config is not a live fault" lie, one step later.
+            Update(current => current with
+            {
+                StagedFaults = retainStagedOnFailure ? current.StagedFaults : current.Applied,
+                FaultDetail = restart.Message,
+            });
+            AddEvidence(
+                Provenance(context),
+                EvidenceKind.Fault,
+                $"{action} written but not in force — the Dev Proxy did not restart",
+                RestartCommandText,
+                KnownResources.DevProxy,
+                null,
+                TimeSpanSince(startedAt),
+                $"{result.Path} holds {applied}, but no proxy has loaded it. {restart.Message}",
+                false);
+            return CommandResult.Rejected(
+                $"The config was written but the Dev Proxy did not come back, so no level is in force. {restart.Message}");
+        }
+
         Update(current => current with
         {
             AppliedFaults = applied,
@@ -1084,11 +1130,60 @@ public sealed class OperatorConsoleController
             result.Path,
             null,
             TimeSpanSince(startedAt),
-            applied.ToString(),
+            $"{applied}{Environment.NewLine}{restart.Message}",
             true);
         return CommandResult.Ok(applied.IsAllZero
             ? "Every fault knob is at zero."
             : $"Applied {applied}. Waiting for traffic to carry it.");
+    }
+
+    private const string RestartCommandText = "aspire resource devproxy restart";
+
+    /// <summary>
+    /// Restarts the <c>devproxy</c> resource so a freshly written session config is actually
+    /// loaded, through the same allow-listed Aspire command surface and the same wait-for-
+    /// confirmation loop every other resource command uses.
+    /// <para>
+    /// This exists because Dev Proxy 3.2.0 cannot reload its own configuration: its watcher
+    /// logs a restart and then leaves a proxy that accepts connections and immediately closes
+    /// them. A new process with the byte-identical config works, so restarting the resource is
+    /// the workaround (ADR-019). Deliberately does <b>not</b> go through
+    /// <see cref="ExecuteResourceCommandAsync"/>, which would take the single-action-in-flight
+    /// lock the fault controls are exempt from.
+    /// </para>
+    /// </summary>
+    private async Task<CommandResult> RestartDevProxyAsync(OperationContext context, CancellationToken ct)
+    {
+        var state = State;
+        if (context.Profile == TopologyProfile.None
+            || !state.FaultsArmed
+            || state.Ownership == TopologyOwnership.Attached)
+        {
+            // Nothing to restart. Apply and panic-off already refuse in these states; this is
+            // the belt to that brace, and it must never silently claim a restart happened.
+            return CommandResult.Rejected("There is no armed Dev Proxy in this topology to restart.");
+        }
+
+        MarkResourceTransition(KnownResources.DevProxy, ResourceCommand.Restart);
+        var dispatch = await _aspire.ExecuteResourceCommandAsync(
+            context.Profile,
+            KnownResources.DevProxy,
+            ResourceCommand.Restart,
+            ct);
+        if (dispatch.Status != ResourceDispatchStatus.Dispatched)
+        {
+            return CommandResult.Rejected($"{RestartCommandText} was {dispatch.Status}: {dispatch.Detail}");
+        }
+
+        var wait = await WaitForResourceAsync(context.Profile, KnownResources.DevProxy, ResourceCommand.Restart, ct);
+        if (wait.Snapshot is not null && IsCurrent(context))
+        {
+            Update(current => current with { Topology = wait.Snapshot });
+        }
+
+        return wait.Confirmed
+            ? CommandResult.Ok("Dev Proxy restarted and confirmed by Aspire; it loaded the new config on start.")
+            : CommandResult.Rejected($"Aspire did not confirm the Dev Proxy restart: {wait.Detail}");
     }
 
     /// <summary>

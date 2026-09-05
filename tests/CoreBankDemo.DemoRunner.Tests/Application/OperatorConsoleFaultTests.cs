@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
+using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Xunit;
 
@@ -544,5 +545,141 @@ public class OperatorConsoleFaultTests
         controller.State.FaultsAppliedAt.Should().BeNull();
         controller.State.Evidence.Should().Contain(record =>
             record.Kind == EvidenceKind.Fault && record.Summary.Contains("discarded"));
+    }
+
+    // --- Dev Proxy cannot reload: a controlled restart is the only mechanism ---
+
+    [Fact]
+    public async Task Apply_RestartsTheDevProxyResourceAfterWritingTheConfig()
+    {
+        var (harness, controller) = await ArmedAsync(FaultLevels.AllZero);
+        harness.Aspire.Commands.Clear();
+
+        controller.StageFaults(new FaultLevels(40, 800, 2000, 0));
+        var apply = await controller.ApplyFaultsAsync(CancellationToken.None);
+
+        apply.Succeeded.Should().BeTrue(apply.Message);
+        harness.Faults.Writes.Should().ContainSingle("the file is written first");
+        harness.Aspire.Commands.Should().ContainSingle().Which.Should().Be(
+            (TopologyProfile.Regular, KnownResources.DevProxy, ResourceCommand.Restart));
+        controller.State.Applied.ErrorRatePercent.Should().Be(40);
+        controller.State.Evidence.Last().Detail.Should().Contain("Dev Proxy restarted");
+    }
+
+    [Fact]
+    public async Task AFailedWriteNeverRestartsTheProxy()
+    {
+        var (harness, controller) = await ArmedAsync(FaultLevels.AllZero);
+        harness.Aspire.Commands.Clear();
+        harness.Faults.WriteSucceeds = false;
+
+        controller.StageFaults(new FaultLevels(40, 0, 0, 0));
+        (await controller.ApplyFaultsAsync(CancellationToken.None)).Succeeded.Should().BeFalse();
+
+        harness.Aspire.Commands.Should().BeEmpty(
+            "restarting the proxy is only worth its cost once a new config is actually on disk");
+    }
+
+    [Fact]
+    public async Task PanicOff_AlsoRestartsTheDevProxyResource()
+    {
+        var (harness, controller) = await ArmedAsync(RegularShipped);
+        harness.Aspire.Commands.Clear();
+
+        var panic = await controller.PanicOffAsync(CancellationToken.None);
+
+        panic.Succeeded.Should().BeTrue(panic.Message);
+        harness.Aspire.Commands.Should().ContainSingle().Which.Should().Be(
+            (TopologyProfile.Regular, KnownResources.DevProxy, ResourceCommand.Restart));
+        controller.State.Applied.IsAllZero.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Apply_RestartRejected_DoesNotReportTheLevelsAsAppliedAndSaysSoOnTheEvidenceStrip()
+    {
+        var (harness, controller) = await ArmedAsync(FaultLevels.AllZero);
+        harness.Aspire.CommandResult = new ResourceCommandResult(
+            ResourceDispatchStatus.Rejected, "devproxy refused the restart", [], []);
+
+        controller.StageFaults(new FaultLevels(40, 800, 2000, 0));
+        var apply = await controller.ApplyFaultsAsync(CancellationToken.None);
+
+        apply.Succeeded.Should().BeFalse();
+        apply.Message.Should().Contain("did not come back");
+        harness.Faults.Writes.Should().ContainSingle("the config really was written");
+        controller.State.Applied.IsAllZero.Should().BeTrue("no proxy has loaded it, so nothing is in force");
+        controller.State.Staged.ErrorRatePercent.Should().Be(40, "the operator's level is not discarded");
+        controller.State.FaultsAppliedAt.Should().BeNull();
+        controller.State.Evidence.Last().Summary.Should().Contain("written but not in force");
+        controller.State.Evidence.Last().Succeeded.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Apply_RestartNeverConfirmed_DoesNotReportTheLevelsAsApplied()
+    {
+        var (harness, controller) = await ArmedAsync(FaultLevels.AllZero);
+        // Dispatched, but the proxy never comes back healthy.
+        harness.Aspire.DefaultSnapshot = OperatorHarness.ArmedSnapshot(
+            TopologyProfile.Regular,
+            devProxyCondition: ResourceCondition.Stopped);
+
+        controller.StageFaults(new FaultLevels(0, 800, 2000, 0));
+        var apply = await controller.ApplyFaultsAsync(CancellationToken.None);
+
+        apply.Succeeded.Should().BeFalse();
+        controller.State.Applied.IsAllZero.Should().BeTrue();
+        controller.State.Evidence.Last().Summary.Should().Contain("written but not in force");
+    }
+
+    [Fact]
+    public async Task ASuccessfulRestartIsNotObservation()
+    {
+        var (harness, controller) = await ArmedAsync(FaultLevels.AllZero);
+
+        controller.StageFaults(new FaultLevels(0, 800, 2000, 0));
+        await controller.ApplyFaultsAsync(CancellationToken.None);
+
+        harness.Aspire.Commands.Should().Contain(
+            (TopologyProfile.Regular, KnownResources.DevProxy, ResourceCommand.Restart));
+        controller.State.FaultsObserved.Should().BeFalse(
+            "only traffic carrying the levels is proof; a restart is just the delivery mechanism");
+        controller.State.FaultsAppliedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task NoRestartIsAttemptedOnAnUnarmedTopology()
+    {
+        var harness = new OperatorHarness();
+        var controller = harness.CreateController();
+        await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Aspire.Commands.Clear();
+
+        (await controller.ApplyFaultsAsync(CancellationToken.None)).Succeeded.Should().BeFalse();
+        (await controller.PanicOffAsync(CancellationToken.None)).Succeeded.Should().BeFalse();
+
+        harness.Aspire.Commands.Should().BeEmpty();
+        harness.Faults.Writes.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task NoRestartIsAttemptedOnAnAttachedTopologyOrWithNoTopologyAtAll()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Discovered = [OperatorHarness.ArmedSnapshot(TopologyProfile.Regular)];
+        var controller = harness.CreateController();
+
+        // No topology at all.
+        (await controller.PanicOffAsync(CancellationToken.None)).Succeeded.Should().BeFalse();
+
+        await controller.InitializeAsync(CancellationToken.None);
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Aspire.Commands.Clear();
+
+        (await controller.ApplyFaultsAsync(CancellationToken.None)).Succeeded.Should().BeFalse();
+        (await controller.PanicOffAsync(CancellationToken.None)).Succeeded.Should().BeFalse();
+
+        controller.State.Ownership.Should().Be(TopologyOwnership.Attached);
+        harness.Aspire.Commands.Should().BeEmpty();
+        harness.Faults.Writes.Should().BeEmpty();
     }
 }

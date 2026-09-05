@@ -16,9 +16,21 @@ namespace CoreBankDemo.DemoRunner.Infrastructure;
 /// after the ones it does). Every write lands in a gitignored <c>generated/</c> directory
 /// that is a <i>sibling</i> of the checked-in file, because <c>errorsFile</c> resolves
 /// relative to the rc file. A zero knob disables its plugin instead of deleting it, so the
-/// file always describes all three knobs and a later read is never ambiguous. And the final
-/// file appears atomically via a temp-then-move, because Dev Proxy watches this path and
-/// would otherwise reload a half-written document.
+/// file always describes all three knobs and a later read is never ambiguous — except that at
+/// least one plugin is <b>always</b> left enabled, because Dev Proxy refuses to start
+/// otherwise (see <see cref="EnsureAtLeastOneEnabledPlugin"/>). And the final file appears via
+/// a temp-then-move.
+/// </para>
+/// <para>
+/// <b>The temp-then-move is load-bearing — do not "fix" it back to an in-place write.</b>
+/// Replacing the inode deliberately does <i>not</i> fire Dev Proxy's config-file watcher, and
+/// that is the point. Dev Proxy 3.2.0's restart-on-config-change is broken: an in-place write
+/// makes it log "Configuration file changed. Restarting proxy..." and then leave a proxy that
+/// accepts TCP connections and immediately closes them, serving nothing until it is killed. A
+/// brand-new process with the byte-identical config works perfectly, so the console restarts
+/// the <c>devproxy</c> resource itself after each write (ADR-019, and
+/// <c>OperatorConsoleController.RestartDevProxyAsync</c>). Both AppHosts additionally pass
+/// <c>--no-watch</c>. An in-place write here would resurrect the dead-proxy bug.
 /// </para>
 /// </summary>
 public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultInjector
@@ -138,6 +150,7 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
             var latencySection = EnsurePlugin(plugins, LatencyPlugin, DefaultLatencySection, pluginPath, watched, levels.InjectsLatency);
             var rateLimitSection = EnsurePlugin(plugins, RateLimitingPlugin, DefaultRateLimitingSection, pluginPath, watched, levels.InjectsThrottling);
             var errorSection = EnsurePlugin(plugins, ErrorPlugin, DefaultErrorSection, pluginPath, watched, levels.InjectsErrors);
+            EnsureAtLeastOneEnabledPlugin(plugins);
 
             // Mutated, never replaced: a section may declare properties this console does not
             // model, and rewriting the object wholesale would silently drop them.
@@ -172,8 +185,10 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
     }
 
     /// <summary>
-    /// Dev Proxy watches this path, so it must never see a partially written document: the
-    /// content lands in a sibling temp file first and is then moved into place in one step.
+    /// Writes via a sibling temp file and one <see cref="File.Move(string, string, bool)"/>.
+    /// This is not only about torn reads: replacing the inode is what keeps Dev Proxy 3.2.0's
+    /// broken config watcher from firing, leaving the console's controlled resource restart as
+    /// the single mechanism by which a new config takes effect. See the type remarks.
     /// </summary>
     private static void WriteAtomically(string path, string content)
     {
@@ -218,6 +233,41 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
     /// Returns the config section name the plugin reads, so the caller writes to the section
     /// the seed actually named rather than assuming the default.
     /// </summary>
+    /// <summary>
+    /// Guarantees the generated config always has at least one enabled plugin, whatever the
+    /// knobs read.
+    /// <para>
+    /// Dev Proxy will not start with every plugin disabled — it throws
+    /// <c>InvalidOperationException: No plugins configured or enabled. Please add a plugin to
+    /// the configuration file.</c> from <c>PluginServiceExtensions.AddPlugins</c>. Without this
+    /// guarantee, panic-off would be the console's most destructive control: it writes
+    /// all-zero, the restart brings up a proxy that exits immediately, and every call routed
+    /// through <c>HTTP_PROXY</c> fails outright. Arming would break the same way, because
+    /// <see cref="ResetAsync"/> writes all-zero before the AppHost starts.
+    /// </para>
+    /// <para>
+    /// The keep-alive is <c>LatencyPlugin</c> at <c>minMs: 0, maxMs: 0</c>, which is verified
+    /// to start normally and inject nothing (measured pass-through). "Enabled" here therefore
+    /// never means "injecting", and the readback is unchanged: a zero latency section still
+    /// reads as a zero latency knob, so all-zero still round-trips to
+    /// <see cref="FaultLevels.AllZero"/> and the chip still reads <c>Armed</c>.
+    /// </para>
+    /// </summary>
+    private static void EnsureAtLeastOneEnabledPlugin(JsonArray plugins)
+    {
+        if (plugins.OfType<JsonObject>().Any(plugin => AsBool(plugin["enabled"]) == true))
+        {
+            return;
+        }
+
+        foreach (var plugin in plugins
+            .OfType<JsonObject>()
+            .Where(plugin => string.Equals(AsString(plugin["name"]), LatencyPlugin, StringComparison.Ordinal)))
+        {
+            plugin["enabled"] = true;
+        }
+    }
+
     private static string EnsurePlugin(
         JsonArray plugins,
         string pluginName,

@@ -421,7 +421,7 @@ The console has five capability-driven workspaces:
 2. **Resources** — start or attach Regular/LoadTests, stop or switch only runner-owned AppHosts, and run confirmed allow-listed resource Start/Stop/Restart commands against a freshly fingerprinted graph.
 3. **Evidence/Results** — inspect bounded redacted request/response evidence with topology and generation provenance, optionally wrap the raw view, and explicitly export the current session.
 4. **Load Test** — run the accepted Reset → Run → Wait → Assert → Investigate workflow and read the five invariants plus inline-instant-settlement evidence.
-5. **Faults** — stage error-rate, latency-band, and throttling levels from named presets or by hand, apply them in one write, and drop every knob to zero with `0`. Levels are injected only through Dev Proxy, by writing a gitignored generated session config the proxy reloads on its own (ADR-019); no checked-in Dev Proxy profile is ever written. Arming is a launch-time property set in **Resources** before an AppHost start, and is **off by default** — Dev Proxy is opt-in.
+5. **Faults** — stage error-rate, latency-band, and throttling levels from named presets or by hand, apply them in one write, and drop every knob to zero with `0`. Levels are injected only through Dev Proxy, by writing a gitignored generated session config and then restarting the `devproxy` resource so it loads it — Dev Proxy 3.2.0 cannot reload a changed config (ADR-019), so applying costs a brief proxy restart, which the workspace states up front. No checked-in Dev Proxy profile is ever written. Arming is a launch-time property set in **Resources** before an AppHost start, and is **off by default** — Dev Proxy is opt-in.
 
 ### Shortcuts
 
@@ -445,7 +445,7 @@ All mouse actions have keyboard equivalents. Destructive actions open a modal wi
 - Evidence is session-local and never restored on relaunch. Explicit exports are written under the gitignored `.demo-runner-exports/` directory.
 - A topology switch retains earlier evidence with its original profile and run-generation label.
 - Every evidence record is stamped with the fault levels in force when it was captured, so a `202 Pending` observed under injected latency is never confused with one observed under none.
-- The console reports `Applied — not yet observed in traffic` until its own traffic actually carries an applied fault level; only then does the topology bar read `Faults in force`. The generated session config is deleted when the session stops owning the topology, so a later `aspire run` uses the checked-in profile again.
+- The console reports `Applied — not yet observed in traffic` until its own traffic actually carries an applied fault level; only then does the topology bar read `Faults in force`. A restart that fails leaves the levels reported as *not* applied. The generated session config is deleted when the session stops owning the topology, so a later `aspire run` uses the checked-in profile again.
 
 ### Manual fallback
 

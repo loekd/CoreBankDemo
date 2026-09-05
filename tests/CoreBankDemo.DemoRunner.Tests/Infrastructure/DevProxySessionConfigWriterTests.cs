@@ -96,14 +96,114 @@ public class DevProxySessionConfigWriterTests : IDisposable
     {
         var writer = new DevProxySessionConfigWriter(_root);
 
-        await writer.WriteAsync(TopologyProfile.Regular, FaultLevels.AllZero, CancellationToken.None);
+        // Latency only: the other two knobs are zero and must be present but disabled.
+        await writer.WriteAsync(TopologyProfile.Regular, new FaultLevels(0, 800, 2000, 0), CancellationToken.None);
 
         using var document = JsonDocument.Parse(
             File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, TopologyProfile.Regular)));
         var plugins = document.RootElement.GetProperty("plugins").EnumerateArray().ToList();
         plugins.Should().HaveCount(3, "the file always describes all three knobs so a later read is unambiguous");
-        plugins.Should().OnlyContain(plugin => plugin.GetProperty("enabled").GetBoolean() == false);
+        Enabled(plugins, "LatencyPlugin").Should().BeTrue();
+        Enabled(plugins, "RateLimitingPlugin").Should().BeFalse();
+        Enabled(plugins, "GenericRandomErrorPlugin").Should().BeFalse();
+        (await writer.ReadAsync(TopologyProfile.Regular, CancellationToken.None)).Levels
+            .Should().Be(new FaultLevels(0, 800, 2000, 0));
     }
+
+    [Fact]
+    public async Task Write_AllZero_KeepsOneInertPluginEnabledSoDevProxyCanStartAtAll()
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.WriteAsync(TopologyProfile.Regular, FaultLevels.AllZero, CancellationToken.None);
+
+        using var document = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, TopologyProfile.Regular)));
+        var root = document.RootElement;
+        var plugins = root.GetProperty("plugins").EnumerateArray().ToList();
+
+        // Dev Proxy throws "No plugins configured or enabled" and exits when every plugin is
+        // disabled, which would make panic-off kill the proxy outright.
+        plugins.Should().HaveCount(3);
+        Enabled(plugins, "LatencyPlugin").Should().BeTrue("one plugin must stay enabled or the proxy will not start");
+        Enabled(plugins, "RateLimitingPlugin").Should().BeFalse();
+        Enabled(plugins, "GenericRandomErrorPlugin").Should().BeFalse();
+
+        // Enabled never means injecting: the keep-alive plugin's own config is a no-op band.
+        root.GetProperty("latency").GetProperty("minMs").GetInt32().Should().Be(0);
+        root.GetProperty("latency").GetProperty("maxMs").GetInt32().Should().Be(0);
+
+        // And the readback is unchanged, so the chip still reads Armed rather than in force.
+        var read = await writer.ReadAsync(TopologyProfile.Regular, CancellationToken.None);
+        read.Levels.Should().Be(FaultLevels.AllZero);
+        read.Levels.IsAllZero.Should().BeTrue();
+        read.Levels.MatchingPresetName(TopologyProfile.Regular).Should().Be("All off");
+    }
+
+    [Fact]
+    public async Task Reset_AlsoLeavesAStartablePlugin_SoArmingCannotBringUpAProxyThatExits()
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.ResetAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        using var document = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, TopologyProfile.Regular)));
+        document.RootElement.GetProperty("plugins").EnumerateArray()
+            .Should().Contain(plugin => plugin.GetProperty("enabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData(0, 0, 0, 0)]
+    [InlineData(40, 0, 0, 0)]
+    [InlineData(0, 800, 2000, 0)]
+    [InlineData(0, 0, 0, 100)]
+    [InlineData(40, 800, 2000, 0)]
+    [InlineData(40, 0, 0, 100)]
+    [InlineData(0, 800, 2000, 100)]
+    [InlineData(40, 800, 2000, 100)]
+    public async Task EveryKnobCombination_LeavesAStartableConfigAndRoundTripsExactly(
+        int errorRate,
+        int floor,
+        int ceiling,
+        int throttle)
+    {
+        var levels = new FaultLevels(errorRate, floor, ceiling, throttle);
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.WriteAsync(TopologyProfile.Regular, levels, CancellationToken.None);
+
+        using var document = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, TopologyProfile.Regular)));
+        var plugins = document.RootElement.GetProperty("plugins").EnumerateArray().ToList();
+        plugins.Should().Contain(
+            plugin => plugin.GetProperty("enabled").GetBoolean(),
+            "Dev Proxy refuses to start with no enabled plugin, for every knob combination");
+        (await writer.ReadAsync(TopologyProfile.Regular, CancellationToken.None)).Levels.Should().Be(levels);
+    }
+
+    [Theory]
+    [InlineData(TopologyProfile.Regular)]
+    [InlineData(TopologyProfile.LoadTests)]
+    public async Task AllZero_LeavesNoPluginConfiguredToInjectAnything(TopologyProfile profile)
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.WriteAsync(profile, FaultLevels.AllZero, CancellationToken.None);
+
+        using var document = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, profile)));
+        var root = document.RootElement;
+        root.GetProperty("latency").GetProperty("minMs").GetInt32().Should().Be(0);
+        root.GetProperty("latency").GetProperty("maxMs").GetInt32().Should().Be(0);
+        root.GetProperty("rateLimiting").GetProperty("rateLimit").GetInt32().Should().Be(0);
+        root.GetProperty("errorsCoreBank").GetProperty("rate").GetInt32().Should().Be(0);
+        (await writer.ReadAsync(profile, CancellationToken.None)).Levels.IsAllZero.Should().BeTrue();
+    }
+
+    private static bool Enabled(IEnumerable<JsonElement> plugins, string name) =>
+        plugins.Single(plugin => plugin.GetProperty("name").GetString() == name)
+            .GetProperty("enabled").GetBoolean();
 
     [Fact]
     public async Task Write_AddsAPluginTheSeedProfileDoesNotDeclare()
@@ -278,7 +378,9 @@ public class DevProxySessionConfigWriterTests : IDisposable
                 StringComparison.Ordinal));
         var writer = new DevProxySessionConfigWriter(_root);
 
-        await writer.WriteAsync(TopologyProfile.LoadTests, FaultLevels.AllZero, CancellationToken.None);
+        // Errors on, latency at zero: something else is enabled, so the keep-alive plugin
+        // rule does not apply and every latency declaration must really go quiet.
+        await writer.WriteAsync(TopologyProfile.LoadTests, new FaultLevels(40, 0, 0, 0), CancellationToken.None);
 
         using var document = JsonDocument.Parse(
             File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, TopologyProfile.LoadTests)));
@@ -288,6 +390,32 @@ public class DevProxySessionConfigWriterTests : IDisposable
         latencyPlugins.Should().HaveCount(2);
         latencyPlugins.Should().OnlyContain(plugin => plugin.GetProperty("enabled").GetBoolean() == false,
             "one declaration left enabled would keep injecting after the knob reached zero");
+        (await writer.ReadAsync(TopologyProfile.LoadTests, CancellationToken.None)).Levels
+            .Should().Be(new FaultLevels(40, 0, 0, 0));
+    }
+
+    [Fact]
+    public async Task AllZero_WithADuplicatedKeepAlivePlugin_StillReadsBackAsQuiet()
+    {
+        File.WriteAllText(
+            ProfileRegistry.CheckedInConfigPath(_root, TopologyProfile.LoadTests),
+            LatencyProfile.Replace(
+                "\"plugins\": [",
+                "\"plugins\": [ { \"name\": \"LatencyPlugin\", \"enabled\": true, \"configSection\": \"latency\", \"urlsToWatch\": [\"http://127.0.0.1:5032/api/Accounts/*\"] },",
+                StringComparison.Ordinal));
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.WriteAsync(TopologyProfile.LoadTests, FaultLevels.AllZero, CancellationToken.None);
+
+        using var document = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedConfigPath(_root, TopologyProfile.LoadTests)));
+        var root = document.RootElement;
+        // Both declarations are re-enabled as the keep-alive, and both read the same 0/0
+        // section, so "enabled" still does not mean "injecting".
+        root.GetProperty("plugins").EnumerateArray()
+            .Where(plugin => plugin.GetProperty("name").GetString() == "LatencyPlugin")
+            .Should().OnlyContain(plugin => plugin.GetProperty("enabled").GetBoolean());
+        root.GetProperty("latency").GetProperty("maxMs").GetInt32().Should().Be(0);
         (await writer.ReadAsync(TopologyProfile.LoadTests, CancellationToken.None)).Levels
             .Should().Be(FaultLevels.AllZero);
     }
