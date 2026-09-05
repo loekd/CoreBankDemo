@@ -10,8 +10,8 @@ public sealed record CommandResult(bool Succeeded, string Message)
     public static CommandResult Rejected(string message) => new(false, message);
 }
 
-internal sealed record EvidenceProvenance(TopologyProfile Profile, int RunGeneration);
-internal sealed record OperationContext(TopologyProfile Profile, int RunGeneration, string Fingerprint);
+internal sealed record EvidenceProvenance(TopologyProfile Profile, int RunGeneration, FaultLevels? Faults);
+internal sealed record OperationContext(TopologyProfile Profile, int RunGeneration, string Fingerprint, FaultLevels? Faults);
 
 public sealed class OperatorConsoleController
 {
@@ -20,6 +20,7 @@ public sealed class OperatorConsoleController
     private readonly IPaymentGateway _payments;
     private readonly ILoadWorkflowRunner _loadWorkflow;
     private readonly IEvidenceExporter _exporter;
+    private readonly IFaultInjector _faults;
     private readonly IBrowserLauncher _browser;
     private readonly IPreflightRunner _preflight;
     private readonly TimeProvider _time;
@@ -28,6 +29,7 @@ public sealed class OperatorConsoleController
     private readonly string _sessionId = Guid.NewGuid().ToString("N");
     private readonly object _sync = new();
     private readonly TopologyObservationDebouncer _debouncer = new();
+    private readonly SemaphoreSlim _faultCommitGate = new(1, 1);
 
     private OperatorConsoleState _state = OperatorConsoleState.Empty;
     private TopologyHandle? _ownedHandle;
@@ -43,6 +45,7 @@ public sealed class OperatorConsoleController
         IPaymentGateway payments,
         ILoadWorkflowRunner loadWorkflow,
         IEvidenceExporter exporter,
+        IFaultInjector faults,
         IBrowserLauncher browser,
         IPreflightRunner preflight,
         TimeProvider time,
@@ -54,6 +57,7 @@ public sealed class OperatorConsoleController
         _payments = payments;
         _loadWorkflow = loadWorkflow;
         _exporter = exporter;
+        _faults = faults;
         _browser = browser;
         _preflight = preflight;
         _time = time;
@@ -99,7 +103,7 @@ public sealed class OperatorConsoleController
 
     public async Task InitializeAsync(CancellationToken ct)
     {
-        var preflight = await _preflight.RunAsync(ct);
+        var preflight = await _preflight.RunAsync(State.FaultArmingRequested, ct);
         var discovered = preflight.Profiles.Values
             .Select(profile => profile.Snapshot)
             .Where(snapshot => snapshot is not null)
@@ -228,7 +232,7 @@ public sealed class OperatorConsoleController
                         // Self-heal by still clearing local ownership state,
                         // recording the failure as evidence instead of losing it.
                         AddEvidence(
-                            new EvidenceProvenance(refreshContext.Profile, refreshContext.RunGeneration),
+                            Provenance(refreshContext),
                             EvidenceKind.Topology,
                             $"Failed to clear stale {state.Ownership} ownership for {refreshContext.Profile}",
                             "aspire ps --format Json",
@@ -242,15 +246,16 @@ public sealed class OperatorConsoleController
                     _ownedHandle = null;
                 }
 
-                var preflight = await _preflight.RunAsync(ct);
+                var preflight = await _preflight.RunAsync(State.FaultArmingRequested, ct);
                 if (!IsCurrent(refreshContext))
                 {
                     return;
                 }
 
                 _debouncer.Reset();
+                await DeleteSessionFaultConfigAsync(refreshContext.Profile, state.FaultsArmed, CancellationToken.None);
                 AddEvidence(
-                    new EvidenceProvenance(refreshContext.Profile, refreshContext.RunGeneration),
+                    Provenance(refreshContext),
                     EvidenceKind.Topology,
                     $"{state.Ownership} AppHost disappeared",
                     "aspire ps --format Json",
@@ -270,6 +275,12 @@ public sealed class OperatorConsoleController
                     CanResendLastPayment = false,
                     LastLoadResult = null,
                     LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run this session."),
+                    FaultsArmed = false,
+                    AppliedFaults = null,
+                    StagedFaults = null,
+                    FaultsAppliedAt = null,
+                    FaultsObserved = false,
+                    FaultDetail = string.Empty,
                     StatusLine = $"The {state.Ownership} AppHost is no longer running. Start or attach a known topology.",
                 });
                 return;
@@ -306,7 +317,7 @@ public sealed class OperatorConsoleController
             return CommandResult.Rejected("A topology is already detected or active. Attach it or stop it before starting another.");
         }
 
-        var preflight = await _preflight.RunAsync(ct);
+        var preflight = await _preflight.RunAsync(State.FaultArmingRequested, ct);
         Update(state => state with { Preflight = preflight });
         if (!preflight.CanStart(profile))
         {
@@ -320,9 +331,15 @@ public sealed class OperatorConsoleController
         }
 
         TopologyHandle? handle = null;
+        var armFaults = State.FaultArmingRequested;
         try
         {
-            handle = await _processes.StartOwnedAsync(profile, ct);
+            if (armFaults)
+            {
+                await ResetSessionFaultConfigAsync(profile, ct);
+            }
+
+            handle = await _processes.StartOwnedAsync(profile, armFaults, ct);
             _ownedHandle = handle;
             SetTopologyTransition(profile, TopologyOwnership.Owned, "Starting AppHost");
             var snapshot = await WaitForTopologyAsync(profile, expectPresent: true, ct);
@@ -336,6 +353,7 @@ public sealed class OperatorConsoleController
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
+            await AdoptFaultStateAsync(profile, armFaults, ct);
             AddEvidence(EvidenceKind.Topology, $"Started {profile} as Owned", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} started and verified.");
         }
@@ -391,6 +409,7 @@ public sealed class OperatorConsoleController
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Attached);
+            await AdoptFaultStateAsync(profile, armed: false, ct);
             AddEvidence(EvidenceKind.Topology, $"Attached to {profile}", "aspire describe", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} attached as unowned.");
         }
@@ -432,6 +451,7 @@ public sealed class OperatorConsoleController
             }
 
             var stoppedProfile = state.Profile;
+            await DeleteSessionFaultConfigAsync(stoppedProfile, state.FaultsArmed, CancellationToken.None);
             AddEvidence(EvidenceKind.Topology, $"Stopped {stoppedProfile}", $"aspire stop --apphost {ownedHandle.ProjectPath}", stoppedProfile.ToString(), null, TimeSpanSince(mutation.StartedAt), stop.Detail, true);
             _ownedHandle = null;
             _debouncer.Reset();
@@ -441,6 +461,12 @@ public sealed class OperatorConsoleController
                 Ownership = TopologyOwnership.None,
                 Topology = null,
                 ResourceAuthorityAvailable = false,
+                FaultsArmed = false,
+                AppliedFaults = null,
+                StagedFaults = null,
+                FaultsAppliedAt = null,
+                FaultsObserved = false,
+                FaultDetail = string.Empty,
                 StatusLine = $"{stoppedProfile} stopped. No topology active.",
             });
             return CommandResult.Ok($"{stoppedProfile} stopped.");
@@ -464,7 +490,7 @@ public sealed class OperatorConsoleController
             return CommandResult.Rejected("Choose the other known topology.");
         }
 
-        var preflight = await _preflight.RunAsync(ct);
+        var preflight = await _preflight.RunAsync(State.FaultArmingRequested, ct);
         Update(current => current with { Preflight = preflight });
         if (!preflight.DiscoveryReachable)
         {
@@ -483,12 +509,16 @@ public sealed class OperatorConsoleController
         }
 
         TopologyHandle? targetHandle = null;
+        var armTargetFaults = State.FaultArmingRequested;
         try
         {
             if (_ownedHandle is not null)
             {
+                var outgoingProfile = state.Profile;
+                var outgoingArmed = state.FaultsArmed;
                 await _processes.StopOwnedAsync(_ownedHandle, ct);
                 _ownedHandle = null;
+                await DeleteSessionFaultConfigAsync(outgoingProfile, outgoingArmed, CancellationToken.None);
                 Update(current => current with
                 {
                     Profile = TopologyProfile.None,
@@ -499,10 +529,21 @@ public sealed class OperatorConsoleController
                     CanResendLastPayment = false,
                     LastLoadResult = null,
                     LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for the new generation."),
+                    FaultsArmed = false,
+                    AppliedFaults = null,
+                    StagedFaults = null,
+                    FaultsAppliedAt = null,
+                    FaultsObserved = false,
+                    FaultDetail = string.Empty,
                 });
             }
 
-            targetHandle = await _processes.StartOwnedAsync(target, ct);
+            if (armTargetFaults)
+            {
+                await ResetSessionFaultConfigAsync(target, ct);
+            }
+
+            targetHandle = await _processes.StartOwnedAsync(target, armTargetFaults, ct);
             _ownedHandle = targetHandle;
             SetTopologyTransition(target, TopologyOwnership.Owned, "Switching AppHost");
             var snapshot = await WaitForTopologyAsync(target, expectPresent: true, ct);
@@ -515,6 +556,7 @@ public sealed class OperatorConsoleController
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
+            await AdoptFaultStateAsync(target, armTargetFaults, ct);
             AddEvidence(EvidenceKind.Topology, $"Switched to {target}", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"Switched to {target}.");
         }
@@ -673,7 +715,7 @@ public sealed class OperatorConsoleController
 
         var startedAt = _time.GetUtcNow();
         var context = CaptureContext(state);
-        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
+        var provenance = Provenance(context);
         var result = await _payments.QueryOutcomeAsync(context.Profile, transactionIdOrKey.Trim(), ct);
         AddEvidence(
             provenance,
@@ -699,7 +741,7 @@ public sealed class OperatorConsoleController
         var context = CaptureContext(state);
         var result = await _payments.InspectAsync(context.Profile, endpointId, ct);
         AddEvidence(
-            new EvidenceProvenance(context.Profile, context.RunGeneration),
+            Provenance(context),
             EvidenceKind.Inspection,
             result.Succeeded ? $"Inspected {endpointId}" : $"Inspection failed: {endpointId}",
             "GET",
@@ -745,7 +787,7 @@ public sealed class OperatorConsoleController
 
         using var burstCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var context = CaptureContext(State);
-        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
+        var provenance = Provenance(context);
         _burstCancellation = burstCts;
         var burstNumber = Interlocked.Increment(ref _burstSequence);
         Update(state => state with { Burst = new BurstProgress(count, 0, 0, 0, 0, false) });
@@ -849,6 +891,296 @@ public sealed class OperatorConsoleController
         }
     }
 
+    /// <summary>
+    /// Sets whether the *next* AppHost start brings up a Dev Proxy.
+    /// <c>Features:UseDevProxy</c> is read when the AppHost starts, so this can never be a
+    /// live on/off switch: on a running topology it is read-only, and on an Attached one it
+    /// is refused outright because this session did not start it.
+    /// </summary>
+    public CommandResult SetArming(bool armed)
+    {
+        var state = State;
+        if (state.Ownership == TopologyOwnership.Attached)
+        {
+            return CommandResult.Rejected(
+                "Attached — this AppHost is not owned by this session, so its arming cannot be changed.");
+        }
+
+        if (state.Ownership == TopologyOwnership.Owned)
+        {
+            return CommandResult.Rejected(
+                "Arming is read when the AppHost starts. Stop this AppHost and start it again to change it.");
+        }
+
+        Update(current => current with { FaultArmingRequested = armed });
+        return CommandResult.Ok(armed
+            ? "Faults armed on next AppHost start."
+            : "Faults not armed on next AppHost start.");
+    }
+
+    /// <summary>
+    /// Stages every knob without touching the running system. Staging is deliberately inert:
+    /// escalation is two-step, so a stray keypress can never make the system worse.
+    /// </summary>
+    public CommandResult StageFaults(FaultLevels levels)
+    {
+        var state = State;
+        if (!state.FaultsArmed)
+        {
+            return CommandResult.Rejected(FaultsUnavailableReason(state));
+        }
+
+        var staged = levels.Normalized();
+        Update(current => current with { StagedFaults = staged });
+        return CommandResult.Ok($"Staged {staged}. Nothing is applied until Apply fires.");
+    }
+
+    /// <summary>
+    /// Commits every staged knob in one config write, so the running system never observes
+    /// a half-applied combination.
+    /// <para>
+    /// Deliberately does <b>not</b> call <see cref="TryBeginMutation"/> — the fault controls
+    /// are the console's second named exemption from the single-action-in-flight lock, after
+    /// burst Cancel. Raising latency <i>while</i> a burst is in flight is the demonstration
+    /// itself, and it is safe because this mutates proxy configuration, never banking state.
+    /// </para>
+    /// </summary>
+    public Task<CommandResult> ApplyFaultsAsync(CancellationToken ct)
+    {
+        var state = State;
+        if (!state.FaultsArmed)
+        {
+            return Task.FromResult(CommandResult.Rejected(FaultsUnavailableReason(state)));
+        }
+
+        if (!state.HasStagedFaultChange)
+        {
+            return Task.FromResult(CommandResult.Rejected(
+                "Nothing is staged — move a slider or pick a preset before applying."));
+        }
+
+        return CommitFaultsAsync(state.Staged, "Apply faults", retainStagedOnFailure: true, ct);
+    }
+
+    /// <summary>
+    /// Sets every knob to zero and applies immediately, in one step, with no confirmation and
+    /// no staging — de-escalation must never be gated behind the thing currently going wrong.
+    /// Lock-exempt for the same reason <see cref="ApplyFaultsAsync"/> is.
+    /// </summary>
+    public Task<CommandResult> PanicOffAsync(CancellationToken ct)
+    {
+        var state = State;
+        if (!state.FaultsArmed)
+        {
+            return Task.FromResult(CommandResult.Rejected(FaultsUnavailableReason(state)));
+        }
+
+        return CommitFaultsAsync(FaultLevels.AllZero, "Panic-off", retainStagedOnFailure: false, ct);
+    }
+
+    public static string FaultsUnavailableReason(OperatorConsoleState state) => state switch
+    {
+        { Ownership: TopologyOwnership.Attached } =>
+            "Attached — this session did not start this AppHost and cannot arm its Dev Proxy. "
+            + "Stop it outside this console, then Start it here with faults armed.",
+        { Ownership: TopologyOwnership.None } =>
+            "No topology active — go to Resources (2) and Start one with faults armed.",
+        _ => "This topology started without a Dev Proxy. Stop it and start it again with faults armed.",
+    };
+
+    /// <summary>
+    /// The one place a fault level is committed. Serialized by <see cref="_faultCommitGate"/>
+    /// because Apply and panic-off are both lock-exempt and <c>0</c> is bound window-wide:
+    /// without it two commits can interleave and leave the reported levels disagreeing with
+    /// what is actually in the file.
+    /// </summary>
+    private async Task<CommandResult> CommitFaultsAsync(
+        FaultLevels levels,
+        string action,
+        bool retainStagedOnFailure,
+        CancellationToken ct)
+    {
+        await _faultCommitGate.WaitAsync(ct);
+        try
+        {
+            return await CommitFaultsCoreAsync(levels, action, retainStagedOnFailure, ct);
+        }
+        finally
+        {
+            _faultCommitGate.Release();
+        }
+    }
+
+    private async Task<CommandResult> CommitFaultsCoreAsync(
+        FaultLevels levels,
+        string action,
+        bool retainStagedOnFailure,
+        CancellationToken ct)
+    {
+        var context = CaptureContext(State);
+        var startedAt = _time.GetUtcNow();
+        var applied = levels.Normalized();
+        var result = await _faults.WriteAsync(context.Profile, applied, ct);
+        if (!IsCurrent(context))
+        {
+            // The topology was stopped or switched under this write. The file belongs to a
+            // profile/generation that is no longer active, so nothing may be stamped onto the
+            // current one -- the same discipline every other awaiting path here follows.
+            AddEvidence(
+                Provenance(context),
+                EvidenceKind.Fault,
+                $"{action} discarded — the topology changed while the config was being written",
+                "WRITE",
+                result.Path,
+                null,
+                TimeSpanSince(startedAt),
+                $"Captured for {context.Profile} generation {context.RunGeneration}; "
+                + $"now {State.Profile} generation {State.RunGeneration}.",
+                false);
+            return CommandResult.Rejected(
+                "The topology changed while the fault config was being written; no level was applied to it.");
+        }
+
+        if (!result.Succeeded)
+        {
+            var error = result.ErrorSummary ?? "The generated Dev Proxy session config could not be written.";
+            Update(current => current with
+            {
+                // Applied levels and the chip are both left untouched: nothing reached the
+                // proxy, so claiming otherwise would be the exact lie this console avoids.
+                StagedFaults = retainStagedOnFailure ? current.StagedFaults : current.Applied,
+                FaultDetail = error,
+            });
+            AddEvidence(
+                Provenance(context),
+                EvidenceKind.Fault,
+                $"{action} failed — no level reached the proxy",
+                "WRITE",
+                result.Path,
+                null,
+                TimeSpanSince(startedAt),
+                error,
+                false);
+            return CommandResult.Rejected(error);
+        }
+
+        Update(current => current with
+        {
+            AppliedFaults = applied,
+            StagedFaults = applied,
+            FaultsAppliedAt = _time.GetUtcNow(),
+            // All-zero lands on Armed immediately: there is no traffic effect to observe.
+            // Anything else stays "Applied — not yet observed in traffic" until proof arrives.
+            FaultsObserved = applied.IsAllZero,
+            FaultDetail = string.Empty,
+        });
+        AddEvidence(
+            new EvidenceProvenance(context.Profile, context.RunGeneration, applied.IsAllZero ? null : applied),
+            EvidenceKind.Fault,
+            applied.IsAllZero
+                ? $"{action} — every knob at zero, nothing is being injected"
+                : $"{action} — {applied}; applied, not yet observed in traffic",
+            "WRITE",
+            result.Path,
+            null,
+            TimeSpanSince(startedAt),
+            applied.ToString(),
+            true);
+        return CommandResult.Ok(applied.IsAllZero
+            ? "Every fault knob is at zero."
+            : $"Applied {applied}. Waiting for traffic to carry it.");
+    }
+
+    /// <summary>
+    /// Rewrites the generated session config quiet before an armed start, so a config left
+    /// behind by a prior session can never silently apply its levels to this one. A failure
+    /// here is recorded but never blocks the start: the AppHost simply falls back to its
+    /// checked-in profile, which the console then reads and reports honestly.
+    /// </summary>
+    private async Task ResetSessionFaultConfigAsync(TopologyProfile profile, CancellationToken ct)
+    {
+        var reset = await _faults.ResetAsync(profile, ct);
+        if (!reset.Succeeded)
+        {
+            AddEvidence(
+                EvidenceKind.Fault,
+                "Could not reset the generated Dev Proxy session config before arming",
+                "WRITE",
+                reset.Path,
+                null,
+                TimeSpan.Zero,
+                reset.ErrorSummary ?? string.Empty,
+                false);
+        }
+    }
+
+    /// <summary>
+    /// Reads the levels the topology is actually running under after a Start/Attach/Switch —
+    /// the generated session config if present, otherwise the checked-in profile, never an
+    /// invented zero. Sets the sliders only; it never sets <c>FaultsObserved</c>.
+    /// </summary>
+    /// <summary>
+    /// Removes the generated session config when this session stops owning a topology. Only
+    /// ever deletes a file this session armed and therefore wrote — a config another session
+    /// left behind is not ours to remove. A surviving file would shadow the checked-in profile
+    /// for every later non-console run and silently disable the shipped presets, so a failure
+    /// to delete is reported rather than swallowed.
+    /// </summary>
+    private async Task DeleteSessionFaultConfigAsync(TopologyProfile profile, bool armed, CancellationToken ct)
+    {
+        if (!armed || profile == TopologyProfile.None)
+        {
+            return;
+        }
+
+        var deleted = await _faults.DeleteAsync(profile, ct);
+        if (!deleted.Succeeded)
+        {
+            AddEvidence(
+                EvidenceKind.Fault,
+                "Could not remove the generated Dev Proxy session config — it will shadow the checked-in profile",
+                "DELETE",
+                deleted.Path,
+                null,
+                TimeSpan.Zero,
+                deleted.ErrorSummary ?? string.Empty,
+                false);
+        }
+    }
+
+    private async Task AdoptFaultStateAsync(TopologyProfile profile, bool armed, CancellationToken ct)
+    {
+        var read = await _faults.ReadAsync(profile, ct);
+        // Normalized here rather than trusting adapter discipline: the ladder invariant the
+        // sliders depend on is the controller's to hold, not an adapter's to remember.
+        var levels = read.Levels.Normalized();
+        Update(state => state with
+        {
+            FaultsArmed = armed,
+            AppliedFaults = levels,
+            StagedFaults = levels,
+            FaultsAppliedAt = null,
+            // Reading a config file sets the sliders and nothing else. Observation is proof
+            // that traffic carried a level, and no file read is ever that proof.
+            FaultsObserved = false,
+            FaultLevelsFromSession = read.FromGeneratedSession,
+            FaultDetail = read.ErrorSummary ?? string.Empty,
+        });
+
+        if (!read.Succeeded)
+        {
+            AddEvidence(
+                EvidenceKind.Fault,
+                "Could not read the Dev Proxy levels in force — showing the checked-in defaults",
+                "READ",
+                read.Path,
+                null,
+                TimeSpan.Zero,
+                read.ErrorSummary ?? string.Empty,
+                false);
+        }
+    }
+
     public async Task<LoadWorkflowResult> RunLoadTestAsync(int? expectedUniqueCount, CancellationToken ct)
     {
         var state = State;
@@ -873,7 +1205,7 @@ public sealed class OperatorConsoleController
         }
 
         var context = CaptureContext(State);
-        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
+        var provenance = Provenance(context);
         try
         {
             var progress = new InlineProgress<LoadWorkflowProgress>(value =>
@@ -910,7 +1242,7 @@ public sealed class OperatorConsoleController
         var state = State;
         var result = await _exporter.ExportAsync(state.Evidence, ct);
         AddEvidence(
-            new EvidenceProvenance(state.Profile, state.RunGeneration),
+            Provenance(state),
             EvidenceKind.Export,
             result.Succeeded ? "Session evidence exported" : "Evidence export failed",
             "WRITE",
@@ -952,8 +1284,11 @@ public sealed class OperatorConsoleController
 
         if (_ownedHandle is not null)
         {
+            var ownedProfile = _ownedHandle.Profile;
+            var armed = State.FaultsArmed;
             await _processes.StopOwnedAsync(_ownedHandle, ct);
             _ownedHandle = null;
+            await DeleteSessionFaultConfigAsync(ownedProfile, armed, ct);
         }
     }
 
@@ -980,7 +1315,7 @@ public sealed class OperatorConsoleController
         }
 
         var context = CaptureContext(State);
-        var provenance = new EvidenceProvenance(context.Profile, context.RunGeneration);
+        var provenance = Provenance(context);
         try
         {
             var result = await _payments.SubmitAsync(context.Profile, submission, ct);
@@ -1177,6 +1512,12 @@ public sealed class OperatorConsoleController
             CanResendLastPayment = false,
             LastLoadResult = null,
             LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for this generation."),
+            FaultsArmed = false,
+            AppliedFaults = null,
+            StagedFaults = null,
+            FaultsAppliedAt = null,
+            FaultsObserved = false,
+            FaultDetail = string.Empty,
             StatusLine = $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {ownership} · generation {state.RunGeneration + 1}",
         });
     }
@@ -1278,7 +1619,7 @@ public sealed class OperatorConsoleController
     {
         var state = State;
         AddEvidence(
-            new EvidenceProvenance(state.Profile, state.RunGeneration),
+            Provenance(state),
             kind,
             summary,
             method,
@@ -1315,7 +1656,8 @@ public sealed class OperatorConsoleController
                 statusCode,
                 duration,
                 JournalRedaction.Apply(detail ?? string.Empty),
-                succeeded);
+                succeeded,
+                provenance.Faults);
             records.Add(record);
             if (records.Count > _options.MaximumEvidenceRecords)
             {
@@ -1326,15 +1668,58 @@ public sealed class OperatorConsoleController
             {
                 Evidence = records,
                 SelectedEvidence = record,
+                FaultsObserved = state.FaultsObserved || CarriesAppliedFaults(state, record),
                 StatusLine = $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Summary}",
             };
         });
     }
 
+    /// <summary>
+    /// Decides whether one evidence record is proof that the applied levels reached real
+    /// traffic. Dev Proxy owns its own reload timing, so a written file is never proof; only
+    /// a call that actually carried the levels is.
+    /// <para>
+    /// Aggregate records (a whole burst, a whole load workflow) are deliberately excluded:
+    /// their duration is the duration of the batch, not of an intercepted call, and would
+    /// clear any latency floor without proving anything.
+    /// </para>
+    /// </summary>
+    private static bool CarriesAppliedFaults(OperatorConsoleState state, EvidenceRecord record)
+    {
+        if (!state.FaultsArmed
+            || state.FaultsAppliedAt is not { } appliedAt
+            || state.Applied.IsAllZero
+            || record.Timestamp < appliedAt
+            || record.Kind is not (EvidenceKind.Payment or EvidenceKind.OutcomeQuery or EvidenceKind.Inspection))
+        {
+            return false;
+        }
+
+        // A zero floor is never proof, and a duration wildly past the applied ceiling is a
+        // real outage rather than the injected band -- see FaultLevels.IsCarriedByDuration.
+        var carriesLatency = state.Applied.IsCarriedByDuration(record.Duration);
+        var carriesError = state.Applied.InjectsErrors && record.StatusCode is 503 or 429 or 500;
+        var carriesThrottling = state.Applied.InjectsThrottling && record.StatusCode is 429;
+        return carriesLatency || carriesError || carriesThrottling;
+    }
+
     private TimeSpan TimeSpanSince(DateTimeOffset startedAt) => _time.GetUtcNow() - startedAt;
 
     private OperationContext CaptureContext(OperatorConsoleState state) =>
-        new(state.Profile, state.RunGeneration, state.Topology?.Fingerprint ?? string.Empty);
+        new(state.Profile, state.RunGeneration, state.Topology?.Fingerprint ?? string.Empty, FaultsInForce(state));
+
+    /// <summary>
+    /// The levels actually being injected right now, or <c>null</c> when nothing is. An
+    /// armed proxy with every knob at zero is not a fault and must never be stamped as one.
+    /// </summary>
+    private static FaultLevels? FaultsInForce(OperatorConsoleState state) =>
+        state.FaultsArmed && !state.Applied.IsAllZero ? state.Applied : null;
+
+    private static EvidenceProvenance Provenance(OperationContext context) =>
+        new(context.Profile, context.RunGeneration, context.Faults);
+
+    private static EvidenceProvenance Provenance(OperatorConsoleState state) =>
+        new(state.Profile, state.RunGeneration, FaultsInForce(state));
 
     private bool IsCurrent(OperationContext context)
     {

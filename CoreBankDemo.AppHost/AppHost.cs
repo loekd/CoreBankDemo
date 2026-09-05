@@ -99,7 +99,13 @@ var useDevProxy = builder.Configuration.GetValue<bool>("Features:UseDevProxy");
 if (useDevProxy)
 {
     var devProxyConfigFolder = Path.Combine(builder.AppHostDirectory, "devproxy", "config");
-    var devProxyConfigFile = Path.Combine(devProxyConfigFolder, "devproxyrc.json");
+    // DemoRunner's Faults workspace steers levels by writing a gitignored session config
+    // beside the checked-in profile, which Dev Proxy then reloads on its own. Prefer it
+    // when present; the checked-in file stays a read-only preset source either way.
+    var generatedConfigFile = Path.Combine(devProxyConfigFolder, "generated", "devproxyrc.session.json");
+    var devProxyConfigFile = File.Exists(generatedConfigFile)
+        ? generatedConfigFile
+        : Path.Combine(devProxyConfigFolder, "devproxyrc.json");
     devProxy = builder.AddDevProxyExecutable("devproxy")
         .WithConfigFile(devProxyConfigFile)
         .WithUrlsToWatch(() => ["http://127.0.0.1:5032/*"]); // Watch the Core Bank API URL for availability

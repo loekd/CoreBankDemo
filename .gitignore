@@ -26,3 +26,8 @@ dotnet/runfile-discovery/CoreBankDemo-28ffb55a5460842cf50353e2d7ceb84e595d4bd536
 
 # Dev Proxy generates its root certificate on first start
 CoreBankDemo.AppHost/dev-proxy/
+
+# spec-demorunner-fault-injection-workspace: DemoRunner's Faults workspace writes a
+# per-session Dev Proxy config beside each AppHost's checked-in profile (which stays a
+# read-only preset source). Generated per session, never checked in.
+*/devproxy/config/generated/

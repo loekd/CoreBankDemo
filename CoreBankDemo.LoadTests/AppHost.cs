@@ -74,8 +74,13 @@ IResourceBuilder<DevProxyExecutableResource>? devProxy = null;
 var useDevProxy = builder.Configuration.GetValue<bool>("Features:UseDevProxy");
 if (useDevProxy)
 {
-    var devProxyConfigFile = Path.Combine(
-        builder.AppHostDirectory, "devproxy", "config", "devproxyrc-latency.json");
+    var devProxyConfigFolder = Path.Combine(builder.AppHostDirectory, "devproxy", "config");
+    // Symmetric with CoreBankDemo.AppHost: DemoRunner's generated session config wins when
+    // present, so the console can steer levels without ever writing a checked-in file.
+    var generatedConfigFile = Path.Combine(devProxyConfigFolder, "generated", "devproxyrc.session.json");
+    var devProxyConfigFile = File.Exists(generatedConfigFile)
+        ? generatedConfigFile
+        : Path.Combine(devProxyConfigFolder, "devproxyrc-latency.json");
     devProxy = builder.AddDevProxyExecutable("devproxy")
         .WithConfigFile(devProxyConfigFile)
         .WithUrlsToWatch(() => ["http://127.0.0.1:5032/*"]);

@@ -14,6 +14,12 @@ public sealed record DoctorReport(IReadOnlyList<DoctorCheckResult> Checks)
 
     public required bool EnvironmentReady { get; init; }
     public required bool DiscoveryReachable { get; init; }
+
+    /// <summary>
+    /// Whether the <c>devproxy</c> binary answered its version probe. Only load-bearing when
+    /// the operator asked for fault arming; Dev Proxy is opt-in otherwise.
+    /// </summary>
+    public bool DevProxyAvailable { get; init; } = true;
     public required IReadOnlyDictionary<TopologyProfile, ProfilePreflightResult> Profiles { get; init; }
 
     public bool CanStart(TopologyProfile profile) =>
@@ -35,7 +41,11 @@ public sealed record ProfilePreflightResult(
 
 public interface IPreflightRunner
 {
-    Task<DoctorReport> RunAsync(CancellationToken ct);
+    /// <param name="faultArmingRequested">
+    /// When true, the report treats a missing <c>devproxy</c> binary as a hard blocker, because
+    /// the next AppHost start would bring one up. When false it is reported as not required.
+    /// </param>
+    Task<DoctorReport> RunAsync(bool faultArmingRequested, CancellationToken ct);
 }
 
 public sealed class DoctorRunner(
@@ -46,7 +56,7 @@ public sealed class DoctorRunner(
     TimeProvider? time = null) : IPreflightRunner
 {
     /// <summary>
-    /// How long the three CLI probes are reused. The console re-runs preflight on every
+    /// How long the four CLI probes are reused. The console re-runs preflight on every
     /// poll while no topology is active; shelling out to 'dotnet', 'aspire' and
     /// 'docker info' that often is slow enough that a probe can hit its own timeout and
     /// report a phantom preflight failure.
@@ -58,9 +68,10 @@ public sealed class DoctorRunner(
     private EnvironmentAvailability? _environmentCache;
     private DateTimeOffset _environmentCapturedAt;
 
-    public async Task<DoctorReport> RunAsync(CancellationToken ct)
+    public async Task<DoctorReport> RunAsync(bool faultArmingRequested, CancellationToken ct)
     {
-        var (dotnetAvailable, aspireAvailable, containerAvailable) = await GetEnvironmentAsync(ct);
+        var (dotnetAvailable, aspireAvailable, containerAvailable, devProxyAvailable) =
+            await GetEnvironmentAsync(ct);
         var checks = new List<DoctorCheckResult>
         {
             dotnetAvailable
@@ -72,6 +83,17 @@ public sealed class DoctorRunner(
             containerAvailable
                 ? DoctorCheckResult.Ok("Container runtime available")
                 : DoctorCheckResult.Fail("Container runtime available", "Start Docker or the configured container runtime."),
+            (devProxyAvailable, faultArmingRequested) switch
+            {
+                (true, _) => DoctorCheckResult.Ok("Dev Proxy available"),
+                (false, false) => DoctorCheckResult.Ok(
+                    "Dev Proxy available",
+                    "not installed — not required while fault arming is off"),
+                (false, true) => DoctorCheckResult.Fail(
+                    "Dev Proxy available",
+                    "Fault arming is on but 'devproxy' is not on PATH. Install Dev Proxy 3.2.0, "
+                    + "or turn arming off in Resources before starting an AppHost."),
+            },
         };
 
         var portAvailability = new Dictionary<TopologyProfile, bool>
@@ -166,8 +188,12 @@ public sealed class DoctorRunner(
 
         return new DoctorReport(checks)
         {
-            EnvironmentReady = dotnetAvailable && aspireAvailable && containerAvailable,
+            EnvironmentReady = dotnetAvailable
+                && aspireAvailable
+                && containerAvailable
+                && (devProxyAvailable || !faultArmingRequested),
             DiscoveryReachable = discovered.IsReachable,
+            DevProxyAvailable = devProxyAvailable,
             Profiles = profiles,
         };
     }
@@ -185,7 +211,8 @@ public sealed class DoctorRunner(
             var fresh = new EnvironmentAvailability(
                 await environment.IsDotnetSdkAvailableAsync(ct),
                 await environment.IsAspireCliAvailableAsync(ct),
-                await environment.IsContainerRuntimeAvailableAsync(ct));
+                await environment.IsContainerRuntimeAvailableAsync(ct),
+                await environment.IsDevProxyAvailableAsync(ct));
             _environmentCache = fresh;
             _environmentCapturedAt = _time.GetUtcNow();
             return fresh;
@@ -196,7 +223,7 @@ public sealed class DoctorRunner(
         }
     }
 
-    private sealed record EnvironmentAvailability(bool Dotnet, bool Aspire, bool Container);
+    private sealed record EnvironmentAvailability(bool Dotnet, bool Aspire, bool Container, bool DevProxy);
 
     /// <summary>
     /// Describes a profile that Aspire does not report as running. Ports answering a known

@@ -822,6 +822,7 @@ public class OperatorConsoleControllerTests
             harness.Payments,
             harness.Load,
             harness.Exporter,
+            harness.Faults,
             harness.Browser,
             harness.Preflight,
             harness.Time,

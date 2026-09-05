@@ -15,6 +15,8 @@ public sealed class EnvironmentProbe : IEnvironmentProbe
 
     public Task<bool> IsContainerRuntimeAvailableAsync(CancellationToken ct) => RunProbeCommandAsync("docker", "info", ct);
 
+    public Task<bool> IsDevProxyAvailableAsync(CancellationToken ct) => RunProbeCommandAsync("devproxy", "--version", ct);
+
     public Task<bool> IsPortFreeAsync(int port, CancellationToken ct) =>
         Task.FromResult(IsLoopbackBindable(IPAddress.Loopback, port) && IsLoopbackBindable(IPAddress.IPv6Loopback, port));
 

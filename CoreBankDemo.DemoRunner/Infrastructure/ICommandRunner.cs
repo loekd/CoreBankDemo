@@ -25,10 +25,16 @@ public sealed record CommandOutput(
 
 public interface ICommandRunner
 {
+    /// <summary>
+    /// Runs a known command. <paramref name="environment"/> is applied on top of the
+    /// inherited environment and is optional — it trails the cancellation token precisely
+    /// so every existing call site and fake keeps compiling unchanged.
+    /// </summary>
     Task<CommandOutput> RunAsync(
         string fileName,
         IReadOnlyList<string> arguments,
         string workingDirectory,
         TimeSpan timeout,
-        CancellationToken ct);
+        CancellationToken ct,
+        IReadOnlyDictionary<string, string>? environment = null);
 }

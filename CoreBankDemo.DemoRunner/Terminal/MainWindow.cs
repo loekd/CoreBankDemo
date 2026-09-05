@@ -28,9 +28,20 @@ public sealed class MainWindow : Window
     private const int SecondLabelWidth = 11;
     private const int NarrowFieldWidth = 10;
 
-    private static readonly string[] NavigationLabels = ["Operations", "Resources", "Evidence", "Load Test"];
+    // Faults workspace grid. The value column is never sacrificed to preserve the track:
+    // the number is authoritative and the bar is reinforcement, so degradation drops the
+    // bar first (see ApplyFaultsLayout) and the number never.
+    private const int FaultLabelX = 1;
+    private const int FaultLabelWidth = 15;
+    private const int FaultTrackX = 17;
+    private const int FaultTrackWidthPreferred = 24;
+    private const int FaultTrackWidthCompact = 10;
+    private const int MaximumFaultPresets = 3;
+
+    private static readonly string[] NavigationLabels = ["Operations", "Resources", "Evidence", "Load Test", "Faults"];
 
     private readonly OperatorConsoleController _controller;
+    private readonly TimeProvider _time;
     private readonly Func<Task> _onExitRequested;
     private readonly IConfirmationService _confirmation;
     private readonly bool _marshalUpdates;
@@ -52,6 +63,7 @@ public sealed class MainWindow : Window
     private readonly View _resourcesView;
     private readonly View _evidenceView;
     private readonly View _loadView;
+    private readonly View _faultsView;
     private readonly View[] _workspaces;
     private View? _mountedWorkspace;
 
@@ -92,6 +104,7 @@ public sealed class MainWindow : Window
     private readonly Button _resourceActionButton = NewButton("Resource action");
     private readonly Button _restartResourceButton = NewButton("Restart selected");
     private readonly Button _refreshButton = NewButton("Refresh state");
+    private readonly Button _armingButton = NewButton("Faults: arming");
     private readonly Label _resourcesHint = new();
 
     private readonly ListView _evidenceList = new();
@@ -109,6 +122,26 @@ public sealed class MainWindow : Window
     private readonly Button _runLoadButton = NewButton("Run accepted load workflow");
     private readonly TextField _expectedUnique = new() { Text = "100" };
     private readonly Label _loadHint = new();
+
+    // Terminal.Gui 2.4.17 has no Slider<T>; LinearRange<int> is the range control.
+    // LeftBounded fills from the left for the single-handle knobs; Closed carries the
+    // latency band's two handles (floor and ceiling) on one track.
+    private readonly LinearRange<int> _errorRateRange = NewKnob(FaultLevels.ErrorRateSteps, LinearRangeSpanKind.LeftBounded);
+    private readonly LinearRange<int> _latencyRange = NewKnob(FaultLevels.LatencySteps, LinearRangeSpanKind.Closed);
+    private readonly LinearRange<int> _throttleRange = NewKnob(FaultLevels.ThrottleSteps, LinearRangeSpanKind.LeftBounded);
+    private readonly Label _errorRateValue = new();
+    private readonly Label _latencyValue = new();
+    private readonly Label _throttleValue = new();
+    private readonly Label _presetLabel = new();
+    private readonly Button _applyFaultsButton = NewButton("Apply", isDefault: false);
+    private readonly Button _panicOffButton = NewButton("0 Panic-off (all knobs to zero)");
+    private readonly Label _faultsHint = new();
+    private readonly List<Button> _presetButtons = [];
+    private IReadOnlyList<FaultPreset> _presets = [];
+    private bool _suppressKnobEvents;
+    private int _faultTrackWidth = FaultTrackWidthPreferred;
+    private int _faultsContentWidth = 100 - RailWidthPreferred - 4;
+    private FaultKnobRow[] _knobRows = [];
 
     private readonly ListBinding _resourceBinding;
     private readonly ListBinding _evidenceBinding;
@@ -132,10 +165,12 @@ public sealed class MainWindow : Window
         Func<Task> onExitRequested,
         IConfirmationService? confirmation,
         bool startPolling,
-        bool marshalUpdates = true)
+        bool marshalUpdates = true,
+        TimeProvider? time = null)
     {
         OperatorTheme.Register();
         _controller = controller;
+        _time = time ?? TimeProvider.System;
         _onExitRequested = onExitRequested;
         _confirmation = confirmation ?? new TerminalConfirmationService();
         _marshalUpdates = marshalUpdates;
@@ -154,6 +189,14 @@ public sealed class MainWindow : Window
         OperatorTheme.Apply(_stopButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_switchButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_runLoadButton, OperatorTheme.DestructiveScheme);
+        OperatorTheme.Apply(_applyFaultsButton, OperatorTheme.ActionScheme);
+        // The lock-exempt family, sharing one signature so the controls that stay live
+        // while everything else dims read as a family at a glance.
+        OperatorTheme.Apply(_cancelBurstButton, OperatorTheme.LockExemptScheme);
+        OperatorTheme.Apply(_panicOffButton, OperatorTheme.LockExemptScheme);
+        OperatorTheme.Apply(_errorRateRange, OperatorTheme.LockExemptScheme);
+        OperatorTheme.Apply(_latencyRange, OperatorTheme.LockExemptScheme);
+        OperatorTheme.Apply(_throttleRange, OperatorTheme.LockExemptScheme);
 
         _navigationButtons =
         [
@@ -161,6 +204,7 @@ public sealed class MainWindow : Window
             CreateNavigationButton(WorkspaceKind.Resources, 2),
             CreateNavigationButton(WorkspaceKind.Evidence, 4),
             CreateNavigationButton(WorkspaceKind.LoadTest, 6),
+            CreateNavigationButton(WorkspaceKind.Faults, 8),
         ];
         _navigation.Add(_navigationButtons);
 
@@ -168,7 +212,8 @@ public sealed class MainWindow : Window
         _resourcesView = BuildResourcesView();
         _evidenceView = BuildEvidenceView();
         _loadView = BuildLoadView();
-        _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView];
+        _faultsView = BuildFaultsView();
+        _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView, _faultsView];
 
         var statusBar = new StatusBar(
         [
@@ -176,6 +221,8 @@ public sealed class MainWindow : Window
             new Shortcut("2", "Resources", () => ActivateWorkspace(WorkspaceKind.Resources)),
             new Shortcut("3", "Evidence", () => ActivateWorkspace(WorkspaceKind.Evidence)),
             new Shortcut("4", "Load Test", () => ActivateWorkspace(WorkspaceKind.LoadTest)),
+            new Shortcut("5", "Faults", () => ActivateWorkspace(WorkspaceKind.Faults)),
+            new Shortcut("0", "Panic-off", () => Dispatch(() => SurfaceAsync(_controller.PanicOffAsync(_sessionCancellation.Token)))),
             new Shortcut("R", "Refresh", () => Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token))),
             new Shortcut("Q", "Quit", () => Dispatch(RequestExitAsync)),
         ]);
@@ -199,7 +246,7 @@ public sealed class MainWindow : Window
         UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
-        Render(PresentationModelBuilder.Build(_controller.State));
+        Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
         if (startPolling)
         {
             _ = PollAsync(_pollCancellation.Token);
@@ -300,6 +347,7 @@ public sealed class MainWindow : Window
         };
         StackButtons(actions, 0, _startRegularButton, _attachRegularButton, _startLoadButton, _attachLoadButton);
         StackButtons(actions, 5, _stopButton, _switchButton, _resourceActionButton, _restartResourceButton, _refreshButton);
+        StackButtons(actions, 11, _armingButton);
 
         _startRegularButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
         _attachRegularButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
@@ -359,6 +407,11 @@ public sealed class MainWindow : Window
             }
         };
         _refreshButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token)); };
+        _armingButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            Surface(_controller.SetArming(!_controller.State.FaultArmingRequested));
+        };
 
         LayoutHint(_resourcesHint);
         view.Add(_resourceList, actions, _resourcesHint);
@@ -458,6 +511,338 @@ public sealed class MainWindow : Window
         LayoutHint(_loadHint);
         view.Add(_loadPhase, _loadStatus, _loadResults, _runLoadButton, _loadHint);
         return view;
+    }
+
+    /// <summary>
+    /// The Faults workspace: three knobs above, the primary action anchored in the same fixed
+    /// lower region every other workspace uses, and panic-off beside it. Follows
+    /// <see cref="BuildLoadView"/>'s shape — a fixed set of labelled controls on the one
+    /// continuous surface, no boxed sub-panel and no nested navigation.
+    /// </summary>
+    private View BuildFaultsView()
+    {
+        var view = NewWorkspace("FAULTS");
+        var presetCaption = new Label { X = FaultLabelX, Y = 1, Height = 1, Width = FaultLabelWidth, Text = "Presets" };
+        view.Add(presetCaption);
+        for (var index = 0; index < MaximumFaultPresets; index++)
+        {
+            var button = NewButton(string.Empty);
+            button.Y = 1;
+            button.Visible = false;
+            var slot = index;
+            button.Accepting += (_, e) =>
+            {
+                e.Handled = true;
+                // A preset only ever stages. It goes through the identical Apply path as a
+                // hand-dragged value, so there is no second way to change the running system.
+                if (slot < _presets.Count)
+                {
+                    Surface(_controller.StageFaults(_presets[slot].Levels));
+                }
+            };
+            _presetButtons.Add(button);
+            view.Add(button);
+        }
+
+        _presetLabel.Y = 3;
+        _presetLabel.X = FaultLabelX;
+        _presetLabel.Height = 1;
+        _presetLabel.Width = Dim.Fill(1);
+        view.Add(_presetLabel);
+
+        _knobRows =
+        [
+            AddKnob(view, FaultKnobs.ErrorRate, _errorRateRange, _errorRateValue, 5),
+            AddKnob(view, FaultKnobs.LatencyBand, _latencyRange, _latencyValue, 7),
+            AddKnob(view, FaultKnobs.Throttling, _throttleRange, _throttleValue, 9),
+        ];
+
+        _errorRateRange.ValueChanged += (_, _) => OnKnobChanged();
+        _latencyRange.ValueChanged += (_, _) => OnKnobChanged();
+        _throttleRange.ValueChanged += (_, _) => OnKnobChanged();
+
+        // The band's keyboard path is taken over deliberately. Terminal.Gui's own bindings
+        // drive only one handle of a Closed range (Ctrl+arrow moves the same handle plain
+        // arrow does), and the first arrow press after a programmatic Value assignment snaps
+        // that handle to the ladder minimum because the control's focused-option index was
+        // never synced. Both would be visible on stage as the bar disagreeing with the number.
+        // Handling the keys here makes both handles reachable and deterministic; the mouse
+        // still drives the control directly through ValueChanged.
+        _latencyRange.KeyBindings.Remove(Key.CursorLeft.WithCtrl);
+        _latencyRange.KeyBindings.Remove(Key.CursorRight.WithCtrl);
+        _latencyRange.KeyDown += (_, key) => OnLatencyKey(key);
+
+        // Panic-off is reachable before Apply on purpose: the recovery control comes first in
+        // the tab order and the destructive-in-spirit control is last.
+        _panicOffButton.X = FaultLabelX;
+        _panicOffButton.Y = Pos.AnchorEnd(2);
+        _applyFaultsButton.X = Pos.Right(_panicOffButton) + 2;
+        _applyFaultsButton.Y = Pos.AnchorEnd(2);
+        _panicOffButton.Accepting += (_, e) => { e.Handled = true; PanicOff(); };
+        _applyFaultsButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            Dispatch(() => SurfaceAsync(_controller.ApplyFaultsAsync(_sessionCancellation.Token)));
+        };
+
+        LayoutHint(_faultsHint);
+        view.Add(_panicOffButton, _applyFaultsButton, _faultsHint);
+        return view;
+    }
+
+    private static FaultKnobRow AddKnob(View parent, string caption, LinearRange<int> range, Label value, int y)
+    {
+        var label = new Label { X = FaultLabelX, Y = y, Height = 1, Width = FaultLabelWidth, Text = caption };
+        range.X = FaultTrackX;
+        range.Y = y;
+        range.Height = 1;
+        range.Width = FaultTrackWidthPreferred;
+        value.X = FaultTrackX + FaultTrackWidthPreferred + 2;
+        value.Y = y;
+        value.Height = 1;
+        value.Width = Dim.Fill(1);
+        parent.Add(label, range, value);
+        return new FaultKnobRow(caption, label, value, range);
+    }
+
+    /// <summary>One rendered knob row, paired with the view-model name it draws.</summary>
+    private sealed record FaultKnobRow(string Name, Label Caption, Label Value, LinearRange<int> Range);
+
+    /// <summary>
+    /// Stages whatever the knobs now read. Moving a knob never touches the running system:
+    /// escalation is two-step (stage, then Apply), de-escalation is the single <c>0</c> key.
+    /// </summary>
+    private void OnKnobChanged()
+    {
+        if (_suppressKnobEvents)
+        {
+            return;
+        }
+
+        var latency = _latencyRange.Value;
+        var staged = new FaultLevels(
+            _errorRateRange.Value.End,
+            latency.Start,
+            latency.End,
+            _throttleRange.Value.End);
+        var result = _controller.StageFaults(staged);
+        if (!result.Succeeded)
+        {
+            ShowMessage(result.Message);
+        }
+    }
+
+    /// <summary>
+    /// The latency band's keyboard contract: arrows move the <b>floor</b> by one ladder step
+    /// and <c>Shift</c>+arrow by a coarse one; <c>Ctrl</c>+arrow moves the <b>ceiling</b>, and
+    /// <c>Ctrl</c>+<c>Shift</c>+arrow coarsely; <c>Home</c> drops the floor to zero and
+    /// <c>End</c> raises the ceiling to its maximum. Like every other knob movement it only
+    /// ever stages.
+    /// </summary>
+    private void OnLatencyKey(Key key)
+    {
+        const int coarse = 3;
+        var staged = _controller.State.Staged;
+        var floor = staged.LatencyFloorMs;
+        var ceiling = staged.LatencyCeilingMs;
+
+        if (key == Key.CursorLeft) { floor = Step(floor, -1); }
+        else if (key == Key.CursorRight) { floor = Step(floor, 1); }
+        else if (key == Key.CursorLeft.WithShift) { floor = Step(floor, -coarse); }
+        else if (key == Key.CursorRight.WithShift) { floor = Step(floor, coarse); }
+        else if (key == Key.CursorLeft.WithCtrl) { ceiling = Step(ceiling, -1); }
+        else if (key == Key.CursorRight.WithCtrl) { ceiling = Step(ceiling, 1); }
+        else if (key == Key.CursorLeft.WithCtrl.WithShift) { ceiling = Step(ceiling, -coarse); }
+        else if (key == Key.CursorRight.WithCtrl.WithShift) { ceiling = Step(ceiling, coarse); }
+        else if (key == Key.Home) { floor = FaultLevels.LatencySteps[0]; }
+        else if (key == Key.End) { ceiling = FaultLevels.LatencySteps[^1]; }
+        else { return; }
+
+        key.Handled = true;
+        // Normalized() orders the band, so pushing the floor past the ceiling swaps them
+        // rather than producing a range that reads backwards.
+        Surface(_controller.StageFaults(staged with { LatencyFloorMs = floor, LatencyCeilingMs = ceiling }));
+    }
+
+    private static int Step(int value, int by)
+    {
+        var steps = FaultLevels.LatencySteps;
+        var index = IndexOfStep(steps, value);
+        return index < 0 ? value : steps[Math.Clamp(index + by, 0, steps.Count - 1)];
+    }
+
+    private void PanicOff() =>
+        Dispatch(() => SurfaceAsync(_controller.PanicOffAsync(_sessionCancellation.Token)));
+
+    private void Surface(CommandResult result)
+    {
+        if (!result.Succeeded)
+        {
+            ShowMessage(result.Message);
+        }
+    }
+
+    private void RenderFaults(FaultsViewModel faults)
+    {
+        _presets = faults.Presets;
+        var hidden = LayoutPresetChips(faults);
+        _presetLabel.Text = hidden == 0
+            ? $"Selected: {faults.PresetLabel}"
+            // Never silently truncated: a preset the operator cannot see is a preset they
+            // will assume does not exist.
+            : $"Selected: {faults.PresetLabel} · {hidden} more preset{(hidden == 1 ? string.Empty : "s")} "
+              + "not shown at this width";
+
+        // Driven by the view model rather than by index, so adding or reordering a knob
+        // surfaces as a message instead of silently mislabelling a row.
+        foreach (var row in _knobRows)
+        {
+            var knob = faults.Knobs.FirstOrDefault(candidate =>
+                string.Equals(candidate.Name, row.Name, StringComparison.Ordinal));
+            if (knob is null)
+            {
+                ShowMessage($"The Faults workspace has no level for '{row.Name}'.");
+                continue;
+            }
+
+            row.Caption.Text = knob.Name;
+            row.Value.Text = knob.ValueText;
+        }
+
+        // Rendering the staged position back onto the knobs must not look like the operator
+        // moved them, or every render would re-stage and Apply could never settle.
+        _suppressKnobEvents = true;
+        try
+        {
+            SetKnob(_errorRateRange, FaultLevels.ErrorRateSteps, LinearRangeSpanKind.LeftBounded, 0, faults.Staged.ErrorRatePercent);
+            SetKnob(_latencyRange, FaultLevels.LatencySteps, LinearRangeSpanKind.Closed, faults.Staged.LatencyFloorMs, faults.Staged.LatencyCeilingMs);
+            SetKnob(_throttleRange, FaultLevels.ThrottleSteps, LinearRangeSpanKind.LeftBounded, 0, faults.Staged.ThrottleRequestsPerWindow);
+        }
+        finally
+        {
+            _suppressKnobEvents = false;
+        }
+
+        // Deliberately not gated on model.IsBusy: the fault controls are the console's second
+        // named exemption from the single-action-in-flight lock, and raising a level while a
+        // burst is running is the whole reason the capability exists.
+        foreach (var row in _knobRows)
+        {
+            row.Range.Enabled = faults.Available;
+        }
+
+        _applyFaultsButton.Enabled = faults.CanApply;
+        _applyFaultsButton.Text = faults.ApplyCaption;
+        _panicOffButton.Enabled = faults.Available;
+        _faultsHint.Text = Hint(faults.Available
+            ? faults.Detail
+            : $"{faults.DisabledReason} Levels shown are what would be applied.");
+    }
+
+    /// <summary>
+    /// Places the preset chips left to right, wrapping to a second row rather than hiding a
+    /// preset, and returns how many still did not fit so the caller can say so out loud.
+    /// </summary>
+    private int LayoutPresetChips(FaultsViewModel faults)
+    {
+        var left = FaultLabelX + FaultLabelWidth;
+        var x = left;
+        var y = 1;
+        var hidden = Math.Max(0, faults.Presets.Count - _presetButtons.Count);
+        for (var index = 0; index < _presetButtons.Count; index++)
+        {
+            var button = _presetButtons[index];
+            if (index >= faults.Presets.Count)
+            {
+                button.Visible = false;
+                button.Enabled = false;
+                continue;
+            }
+
+            var name = faults.Presets[index].Name;
+            var width = name.Length + 6;
+            if (x + width > _faultsContentWidth && x > left)
+            {
+                x = left;
+                y++;
+            }
+
+            if (y > 2 || x + width > _faultsContentWidth)
+            {
+                // Two chip rows is the budget before the knobs would be pushed off screen.
+                button.Visible = false;
+                button.Enabled = false;
+                hidden++;
+                continue;
+            }
+
+            button.Text = name;
+            button.X = x;
+            button.Y = y;
+            button.Visible = true;
+            button.Enabled = faults.Available;
+            x += width;
+        }
+
+        return hidden;
+    }
+
+    /// <summary>
+    /// Moves a knob's handles onto the ladder positions for the given values. Values always
+    /// arrive normalized, so an off-ladder one is a bug rather than input: it is left alone
+    /// and reported instead of being silently drawn at the floor while the label beside the
+    /// track prints the true number — a disagreement the operator would read as the bar lying.
+    /// </summary>
+    private void SetKnob(
+        LinearRange<int> range,
+        IReadOnlyList<int> steps,
+        LinearRangeSpanKind kind,
+        int start,
+        int end)
+    {
+        var startIndex = IndexOfStep(steps, start);
+        var endIndex = IndexOfStep(steps, end);
+        if (startIndex < 0 || endIndex < 0)
+        {
+            ShowMessage($"Fault level {(startIndex < 0 ? start : end)} is not a slider position; "
+                + "the bar is left where it was and the printed value is authoritative.");
+            return;
+        }
+
+        range.Value = new LinearRangeSpan<int>(kind, steps[startIndex], steps[endIndex], startIndex, endIndex);
+    }
+
+    private static int IndexOfStep(IReadOnlyList<int> steps, int value)
+    {
+        for (var index = 0; index < steps.Count; index++)
+        {
+            if (steps[index] == value)
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static LinearRange<int> NewKnob(IReadOnlyList<int> steps, LinearRangeSpanKind kind)
+    {
+        var range = new LinearRange<int>([.. steps], Orientation.Horizontal)
+        {
+            RangeKind = kind,
+            RangeAllowSingle = true,
+            ShowLegends = false,
+            ShowEndSpacing = false,
+            MinimumInnerSpacing = 0,
+            AllowEmpty = false,
+        };
+
+        // Terminal.Gui binds arrow to one step and Home/End to the knob's floor/ceiling out
+        // of the box, but leaves Shift+arrow free (its Ctrl+arrow moves the *other* handle,
+        // which is a different gesture). Three steps is the coarse move.
+        range.KeyBindings.Add(Key.CursorLeft.WithShift, Command.Left, Command.Left, Command.Left);
+        range.KeyBindings.Add(Key.CursorRight.WithShift, Command.Right, Command.Right, Command.Right);
+        return range;
     }
 
     private async Task SubmitPaymentAsync()
@@ -566,7 +951,7 @@ public sealed class MainWindow : Window
     private void ActivateWorkspace(WorkspaceKind workspace) => _controller.SelectWorkspace(workspace);
 
     private void OnStateChanged(OperatorConsoleState state) =>
-        RunOnUiThread(() => Render(PresentationModelBuilder.Build(state)));
+        RunOnUiThread(() => Render(PresentationModelBuilder.Build(state, _time.GetUtcNow())));
 
     private void RunOnUiThread(Action action)
     {
@@ -583,7 +968,7 @@ public sealed class MainWindow : Window
     public async Task RefreshAsync()
     {
         await _controller.InitializeAsync(_sessionCancellation.Token);
-        Render(PresentationModelBuilder.Build(_controller.State));
+        Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
     }
 
     /// <summary>
@@ -640,6 +1025,9 @@ public sealed class MainWindow : Window
         _operationsHint.Text = Hint(model.OperationsHint);
         _resourcesHint.Text = Hint(model.ResourcesHint);
         _loadHint.Text = Hint(model.LoadHint);
+        RenderFaults(model.Faults);
+        _armingButton.Text = model.ArmingCaption;
+        _armingButton.Enabled = model.CanChangeArming;
 
         _submitButton.Enabled = !model.IsBusy;
         _resendButton.Enabled = model.CanResend;
@@ -734,6 +1122,7 @@ public sealed class MainWindow : Window
         }
 
         ApplyOperationsRows();
+        ApplyFaultsLayout();
         UpdateNavigationText();
         if (layout == TerminalLayoutMode.BelowMinimum)
         {
@@ -764,6 +1153,29 @@ public sealed class MainWindow : Window
         _queryButton.Y = outcome + 1;
     }
 
+    /// <summary>
+    /// Below the preferred width the slider track shortens first and the value column keeps
+    /// its place — the printed number, not the bar, is the authoritative reading.
+    /// </summary>
+    private void ApplyFaultsLayout()
+    {
+        var track = _compactLayout ? FaultTrackWidthCompact : FaultTrackWidthPreferred;
+        _faultTrackWidth = track;
+        _faultsContentWidth = Math.Max(
+            FaultLabelX + FaultLabelWidth + 12,
+            Frame.Width - (_compactLayout ? RailWidthCompact : RailWidthPreferred) - 4);
+        foreach (var (range, value) in new (LinearRange<int>, Label)[]
+                 {
+                     (_errorRateRange, _errorRateValue),
+                     (_latencyRange, _latencyValue),
+                     (_throttleRange, _throttleValue),
+                 })
+        {
+            range.Width = track;
+            value.X = FaultTrackX + track + 2;
+        }
+    }
+
     private void UpdateNavigationText()
     {
         var active = _controller.State.ActiveWorkspace;
@@ -784,12 +1196,23 @@ public sealed class MainWindow : Window
             var value when value == Key.D2 => WorkspaceKind.Resources,
             var value when value == Key.D3 => WorkspaceKind.Evidence,
             var value when value == Key.D4 => WorkspaceKind.LoadTest,
+            var value when value == Key.D5 => WorkspaceKind.Faults,
             _ => (WorkspaceKind?)null,
         };
         if (workspace is not null)
         {
             key.Handled = true;
             ActivateWorkspace(workspace.Value);
+            return true;
+        }
+
+        // Panic-off is bound window-wide, reachable from every workspace without navigating
+        // to Faults first, because the moment it is needed is the moment navigating is
+        // hardest. Never confirmed, never gated by the in-flight lock.
+        if (key == Key.D0)
+        {
+            key.Handled = true;
+            PanicOff();
             return true;
         }
 
@@ -1030,6 +1453,7 @@ public sealed class MainWindow : Window
         WorkspaceKind.Resources => _resourcesView.Visible,
         WorkspaceKind.Evidence => _evidenceView.Visible,
         WorkspaceKind.LoadTest => _loadView.Visible,
+        WorkspaceKind.Faults => _faultsView.Visible,
         _ => false,
     };
     internal bool LoadRunEnabled => _runLoadButton.Enabled;
@@ -1077,7 +1501,26 @@ public sealed class MainWindow : Window
     internal Task TriggerInspectForTestAsync(string endpoint) => SurfaceAsync(
         _controller.InspectAsync(endpoint, _sessionCancellation.Token));
     internal void TriggerResourceActionForTest() => TriggerSelectedResourceAction();
-    internal void RenderForTest() => Render(PresentationModelBuilder.Build(_controller.State));
+    internal void RenderForTest() => Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
+    internal Button ApplyFaultsButton => _applyFaultsButton;
+    internal Button PanicOffButton => _panicOffButton;
+    internal Button ArmingButton => _armingButton;
+    internal string FaultsHintText => _faultsHint.Text;
+    internal string PresetLabelText => _presetLabel.Text;
+    internal IReadOnlyList<string> FaultValueTexts =>
+        [_errorRateValue.Text, _latencyValue.Text, _throttleValue.Text];
+    internal IReadOnlyList<bool> FaultKnobsEnabled =>
+        [_errorRateRange.Enabled, _latencyRange.Enabled, _throttleRange.Enabled];
+    internal int FaultTrackWidth => _faultTrackWidth;
+    internal int FaultsContentWidth => _faultsContentWidth;
+    internal int FaultValueColumn => FaultTrackX + _faultTrackWidth + 2;
+    internal IReadOnlyList<string> VisiblePresetNames =>
+        [.. _presetButtons.Where(button => button.Visible).Select(button => button.Text)];
+    internal bool SendFaultKnobKeyForTest(int knob, Key key) =>
+        new[] { _errorRateRange, _latencyRange, _throttleRange }[knob].NewKeyDownEvent(key);
+    internal void TriggerPresetForTest(int index) => Surface(_controller.StageFaults(_presets[index].Levels));
+    internal Task TriggerApplyFaultsForTestAsync() => SurfaceAsync(_controller.ApplyFaultsAsync(_sessionCancellation.Token));
+    internal void TriggerArmingToggleForTest() => Surface(_controller.SetArming(!_controller.State.FaultArmingRequested));
     internal bool HandleKeyForTest(Key key) => OnKeyDown(key);
     internal void SetIdempotencyModeForTest(IdempotencyMode mode)
     {

@@ -17,6 +17,7 @@ public sealed class OperatorHarness
     public FakePaymentGateway Payments { get; } = new();
     public FakeLoadWorkflowRunner Load { get; } = new();
     public FakeEvidenceExporter Exporter { get; } = new();
+    public FakeFaultInjector Faults { get; } = new();
     public FakeBrowserLauncher Browser { get; } = new();
     public FakePreflightRunner Preflight { get; } = new();
     public FakeTimeProvider Time { get; } = new();
@@ -30,6 +31,7 @@ public sealed class OperatorHarness
             Payments,
             Load,
             Exporter,
+            Faults,
             Browser,
             Preflight,
             Time,
@@ -56,6 +58,29 @@ public sealed class OperatorHarness
             resources.Length == 0 ? DefaultResources(profile) : resources,
             reachable && fingerprint ? null : "not verified",
             "https://localhost:17253");
+
+    /// <summary>
+    /// A snapshot that also carries a live <c>devproxy</c> resource. The fault chip refuses to
+    /// claim Armed or Faults in force without one, so every armed-topology test needs it.
+    /// </summary>
+    public static TopologySnapshot ArmedSnapshot(
+        TopologyProfile profile,
+        DateTimeOffset? capturedAt = null,
+        ResourceCondition devProxyCondition = ResourceCondition.Healthy) =>
+        Snapshot(
+            profile,
+            capturedAt,
+            resources: [.. DefaultResources(profile), DevProxyResource(devProxyCondition)]);
+
+    public static ResourceSnapshot DevProxyResource(ResourceCondition condition = ResourceCondition.Healthy) =>
+        new(
+            KnownResources.DevProxy,
+            condition,
+            condition.ToString(),
+            [],
+            1,
+            InstanceNames: [KnownResources.DevProxy],
+            AllowedCommands: Enum.GetValues<ResourceCommand>().ToHashSet());
 
     public static IReadOnlyList<ResourceSnapshot> DefaultResources(TopologyProfile profile)
     {
@@ -146,9 +171,12 @@ public sealed class FakeProcessAdapter : IProcessAdapter
     public Exception? StopException { get; set; }
     public Exception? ForgetException { get; set; }
 
-    public Task<TopologyHandle> StartOwnedAsync(TopologyProfile profile, CancellationToken ct)
+    public List<bool> ArmFaultsRequests { get; } = [];
+
+    public Task<TopologyHandle> StartOwnedAsync(TopologyProfile profile, bool armFaults, CancellationToken ct)
     {
         StartCount++;
+        ArmFaultsRequests.Add(armFaults);
         if (StartException is not null)
         {
             throw StartException;
@@ -286,12 +314,19 @@ public sealed class FakePreflightRunner : IPreflightRunner
         set => _report = value;
     }
     public int Calls { get; private set; }
+    public List<bool> ArmingRequests { get; } = [];
 
-    public Task<DoctorReport> RunAsync(CancellationToken ct)
+    public Task<DoctorReport> RunAsync(bool faultArmingRequested, CancellationToken ct)
     {
         Calls++;
-        return Task.FromResult(Report);
+        ArmingRequests.Add(faultArmingRequested);
+        return Task.FromResult(faultArmingRequested && !DevProxyAvailable
+            ? Report with { EnvironmentReady = false, DevProxyAvailable = false }
+            : Report);
     }
+
+    /// <summary>Mirrors the real runner: a missing binary only blocks when arming is requested.</summary>
+    public bool DevProxyAvailable { get; set; } = true;
 
     public static DoctorReport ReadyReport(
         TopologySnapshot? regular = null,
@@ -382,6 +417,92 @@ public sealed class FakeEvidenceExporter : IEvidenceExporter
     {
         Exported = records;
         return Task.FromResult(Result);
+    }
+}
+
+public sealed class FakeFaultInjector : IFaultInjector
+{
+    public List<(TopologyProfile Profile, FaultLevels Levels)> Writes { get; } = [];
+    public List<TopologyProfile> Resets { get; } = [];
+    public List<TopologyProfile> Deletes { get; } = [];
+    public bool DeleteSucceeds { get; set; } = true;
+    public string DeleteError { get; set; } = "the file is locked";
+    public List<TopologyProfile> Reads { get; } = [];
+
+    /// <summary>Tracks what the last write/reset left on disk. Defaults to quiet.</summary>
+    public FaultLevels Levels { get; set; } = FaultLevels.AllZero;
+
+    /// <summary>
+    /// Forces what <see cref="ReadAsync"/> reports, standing in for a config this console
+    /// did not write — a topology already running when the console launched.
+    /// </summary>
+    public FaultLevels? ReadOverride { get; set; }
+    public bool ReadSucceeds { get; set; } = true;
+    public bool FromGeneratedSession { get; set; }
+    public string? ReadError { get; set; }
+    public bool WriteSucceeds { get; set; } = true;
+    public string WriteError { get; set; } = "disk is read-only";
+    public string Path { get; set; } = "generated/devproxyrc.session.json";
+
+    public Task<FaultConfigReadResult> ReadAsync(TopologyProfile profile, CancellationToken ct)
+    {
+        Reads.Add(profile);
+        return Task.FromResult(new FaultConfigReadResult(
+            ReadSucceeds,
+            ReadOverride ?? Levels,
+            FromGeneratedSession,
+            Path,
+            ReadSucceeds ? null : ReadError ?? "unreadable"));
+    }
+
+    public TaskCompletionSource? WriteStarted { get; set; }
+    public TaskCompletionSource? ReleaseWrite { get; set; }
+
+    /// <summary>Highest number of writes seen in flight at once. Must never exceed one.</summary>
+    public int MaxConcurrentWrites { get; private set; }
+
+    private int _writesInFlight;
+
+    public async Task<FaultConfigWriteResult> WriteAsync(TopologyProfile profile, FaultLevels levels, CancellationToken ct)
+    {
+        var inFlight = Interlocked.Increment(ref _writesInFlight);
+        MaxConcurrentWrites = Math.Max(MaxConcurrentWrites, inFlight);
+        try
+        {
+            WriteStarted?.TrySetResult();
+            if (ReleaseWrite is not null)
+            {
+                await ReleaseWrite.Task.WaitAsync(ct);
+            }
+
+            if (!WriteSucceeds)
+            {
+                return new FaultConfigWriteResult(false, Path, WriteError);
+            }
+
+            Writes.Add((profile, levels));
+            Levels = levels;
+            return new FaultConfigWriteResult(true, Path, null);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _writesInFlight);
+        }
+    }
+
+    public Task<FaultConfigWriteResult> ResetAsync(TopologyProfile profile, CancellationToken ct)
+    {
+        Resets.Add(profile);
+        Levels = FaultLevels.AllZero;
+        return Task.FromResult(new FaultConfigWriteResult(true, Path, null));
+    }
+
+    public Task<FaultConfigWriteResult> DeleteAsync(TopologyProfile profile, CancellationToken ct)
+    {
+        Deletes.Add(profile);
+        return Task.FromResult(DeleteSucceeds
+            ? new FaultConfigWriteResult(true, Path, null)
+            : new FaultConfigWriteResult(false, Path, DeleteError));
     }
 }
 
