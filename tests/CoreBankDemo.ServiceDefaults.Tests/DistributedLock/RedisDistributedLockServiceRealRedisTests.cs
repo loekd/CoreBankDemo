@@ -59,11 +59,14 @@ public class RedisDistributedLockServiceRealRedisTests
         {
             holderStarted.SetResult();
             await release.Task;
-        });
+        }, TestContext.Current.CancellationToken);
         await holderStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
-        var skipped = await contender.ExecuteWithLockAsync(lockName, LockExpirySeconds, _ => Task.CompletedTask);
-        var waited = contender.ExecuteWithLockAsync(lockName, LockExpirySeconds, TimeSpan.FromSeconds(3), _ => Task.CompletedTask);
+        var skipped = await contender.ExecuteWithLockAsync(
+            lockName, LockExpirySeconds, _ => Task.CompletedTask, TestContext.Current.CancellationToken);
+        var waited = contender.ExecuteWithLockAsync(
+            lockName, LockExpirySeconds, TimeSpan.FromSeconds(3), _ => Task.CompletedTask,
+            TestContext.Current.CancellationToken);
         await Task.Delay(300, TestContext.Current.CancellationToken);
         waited.IsCompleted.Should().BeFalse("the bounded form queues behind the holder");
         release.SetResult();
