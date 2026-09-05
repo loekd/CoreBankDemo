@@ -19,6 +19,10 @@
     <PackageVersion Include="CommunityToolkit.Aspire.Hosting.Dapr" Version="13.0.0" />
     <PackageVersion Include="Dapr.AspNetCore" Version="1.18.5" />
     <PackageVersion Include="Dapr.Client" Version="1.18.5" />
+    <!-- Outcome feedback loop: the DemoRunner console's own streaming pub/sub
+         subscription to transaction-events, through a daprd sidecar it spawns and
+         owns. Same 1.18.x line as the rest of the Dapr SDK. -->
+    <PackageVersion Include="Dapr.Messaging" Version="1.18.5" />
     <!-- Dev Proxy -->
     <PackageVersion Include="DevProxy.Hosting" Version="0.3.5" />
     <!-- CloudEvents -->

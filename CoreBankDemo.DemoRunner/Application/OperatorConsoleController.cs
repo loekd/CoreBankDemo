@@ -23,6 +23,7 @@ public sealed class OperatorConsoleController
     private readonly IFaultInjector _faults;
     private readonly IBrowserLauncher _browser;
     private readonly IPreflightRunner _preflight;
+    private readonly IOutcomeFeed _outcomeFeed;
     private readonly TimeProvider _time;
     private readonly OperatorConsoleOptions _options;
     private readonly Func<string> _keyFactory;
@@ -31,13 +32,29 @@ public sealed class OperatorConsoleController
     private readonly TopologyObservationDebouncer _debouncer = new();
     private readonly SemaphoreSlim _faultCommitGate = new(1, 1);
 
+    /// <summary>
+    /// Transaction ids submitted by a burst, mapped to the burst that submitted them. A burst's
+    /// outcomes are counted, never followed row by row, so these never become tracked payments
+    /// -- but they are still attributed, which is what keeps them out of "Unattributed".
+    /// </summary>
+    private readonly ConcurrentDictionary<string, BurstTransaction> _burstTransactions = new(StringComparer.Ordinal);
+
     private OperatorConsoleState _state = OperatorConsoleState.Empty;
     private TopologyHandle? _ownedHandle;
     private CancellationTokenSource? _burstCancellation;
     private TaskCompletionSource? _activeMutationCompletion;
     private bool _shutdownRequested;
     private long _evidenceSequence;
+    private long _paymentSequence;
     private int _burstSequence;
+    private int _activeBurstNumber;
+
+    /// <summary>
+    /// The topology the current subscription belongs to. An event that arrives after a stop or
+    /// a switch is discarded against this, through the same staleness guard every other async
+    /// completion in this controller uses.
+    /// </summary>
+    private OperationContext? _feedContext;
 
     public OperatorConsoleController(
         IAspireAdapter aspire,
@@ -48,6 +65,7 @@ public sealed class OperatorConsoleController
         IFaultInjector faults,
         IBrowserLauncher browser,
         IPreflightRunner preflight,
+        IOutcomeFeed outcomeFeed,
         TimeProvider time,
         OperatorConsoleOptions? options = null,
         Func<string>? keyFactory = null)
@@ -60,9 +78,12 @@ public sealed class OperatorConsoleController
         _faults = faults;
         _browser = browser;
         _preflight = preflight;
+        _outcomeFeed = outcomeFeed;
         _time = time;
         _options = options ?? new OperatorConsoleOptions();
         _keyFactory = keyFactory ?? (() => Guid.NewGuid().ToString("D"));
+        _outcomeFeed.EventReceived += OnOutcomeEventReceived;
+        _outcomeFeed.StatusChanged += OnFeedStatusChanged;
     }
 
     public event Action<OperatorConsoleState>? StateChanged;
@@ -253,6 +274,7 @@ public sealed class OperatorConsoleController
                 }
 
                 _debouncer.Reset();
+                await StopOutcomeFeedAsync(CancellationToken.None);
                 await DeleteSessionFaultConfigAsync(refreshContext.Profile, state.FaultsArmed, CancellationToken.None);
                 AddEvidence(
                     Provenance(refreshContext),
@@ -270,6 +292,8 @@ public sealed class OperatorConsoleController
                     Ownership = TopologyOwnership.None,
                     Topology = null,
                     Preflight = preflight,
+                    TrackedPayments = [],
+                    Feed = OutcomeFeedStatus.NotStarted,
                     ResourceAuthorityAvailable = false,
                     LastPayment = null,
                     CanResendLastPayment = false,
@@ -303,6 +327,14 @@ public sealed class OperatorConsoleController
                 ? $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {current.Ownership} · generation {current.RunGeneration}"
                 : $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · Unreachable — {snapshot.ErrorSummary}",
         });
+
+        if (FeedReconnectInFlight.IsCompleted)
+        {
+            // Started, deliberately not awaited: re-establishing waits on a sidecar readiness
+            // probe of up to twenty seconds, and blocking the 1.5-second poll on that would
+            // freeze the topology chips and the whole UI behind it.
+            FeedReconnectInFlight = TryReestablishOutcomeFeedAsync(refreshContext, ct);
+        }
     }
 
     public async Task<CommandResult> StartAsync(TopologyProfile profile, CancellationToken ct)
@@ -354,6 +386,7 @@ public sealed class OperatorConsoleController
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
             await AdoptFaultStateAsync(profile, armFaults, ct);
+            await StartOutcomeFeedAsync(profile, ct);
             AddEvidence(EvidenceKind.Topology, $"Started {profile} as Owned", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} started and verified.");
         }
@@ -410,6 +443,7 @@ public sealed class OperatorConsoleController
 
             ActivateTopology(snapshot, TopologyOwnership.Attached);
             await AdoptFaultStateAsync(profile, armed: false, ct);
+            await StartOutcomeFeedAsync(profile, ct);
             AddEvidence(EvidenceKind.Topology, $"Attached to {profile}", "aspire describe", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} attached as unowned.");
         }
@@ -451,6 +485,7 @@ public sealed class OperatorConsoleController
             }
 
             var stoppedProfile = state.Profile;
+            await StopOutcomeFeedAsync(CancellationToken.None);
             await DeleteSessionFaultConfigAsync(stoppedProfile, state.FaultsArmed, CancellationToken.None);
             AddEvidence(EvidenceKind.Topology, $"Stopped {stoppedProfile}", $"aspire stop --apphost {ownedHandle.ProjectPath}", stoppedProfile.ToString(), null, TimeSpanSince(mutation.StartedAt), stop.Detail, true);
             _ownedHandle = null;
@@ -461,6 +496,8 @@ public sealed class OperatorConsoleController
                 Ownership = TopologyOwnership.None,
                 Topology = null,
                 ResourceAuthorityAvailable = false,
+                TrackedPayments = [],
+                Feed = OutcomeFeedStatus.NotStarted,
                 FaultsArmed = false,
                 AppliedFaults = null,
                 StagedFaults = null,
@@ -518,6 +555,7 @@ public sealed class OperatorConsoleController
                 var outgoingArmed = state.FaultsArmed;
                 await _processes.StopOwnedAsync(_ownedHandle, ct);
                 _ownedHandle = null;
+                await StopOutcomeFeedAsync(CancellationToken.None);
                 await DeleteSessionFaultConfigAsync(outgoingProfile, outgoingArmed, CancellationToken.None);
                 Update(current => current with
                 {
@@ -527,6 +565,8 @@ public sealed class OperatorConsoleController
                     ResourceAuthorityAvailable = false,
                     LastPayment = null,
                     CanResendLastPayment = false,
+                    TrackedPayments = [],
+                    Feed = OutcomeFeedStatus.NotStarted,
                     LastLoadResult = null,
                     LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for the new generation."),
                     FaultsArmed = false,
@@ -557,6 +597,7 @@ public sealed class OperatorConsoleController
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
             await AdoptFaultStateAsync(target, armTargetFaults, ct);
+            await StartOutcomeFeedAsync(target, ct);
             AddEvidence(EvidenceKind.Topology, $"Switched to {target}", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"Switched to {target}.");
         }
@@ -790,6 +831,16 @@ public sealed class OperatorConsoleController
         var provenance = Provenance(context);
         _burstCancellation = burstCts;
         var burstNumber = Interlocked.Increment(ref _burstSequence);
+        // The proven leg belongs to this burst alone; a previous burst's ids must never move
+        // this one's counters. They are retired rather than forgotten, so a still-in-flight
+        // outcome from the previous burst is not announced as a stranger's transaction.
+        foreach (var previous in _burstTransactions.Keys)
+        {
+            _retiredTransactions.Add(previous);
+        }
+
+        _burstTransactions.Clear();
+        Volatile.Write(ref _activeBurstNumber, burstNumber);
         Update(state => state with { Burst = new BurstProgress(count, 0, 0, 0, 0, false) });
 
         var accepted = 0;
@@ -822,6 +873,30 @@ public sealed class OperatorConsoleController
                     }
 
                     Interlocked.Increment(ref sent);
+                    if (result.TransactionId is { Length: > 0 } burstTransactionId)
+                    {
+                        // Attributed but never given a row: a burst's outcomes are counted,
+                        // not followed (EXPERIENCE.md, Why the outcome feedback loop adds no
+                        // surface). Registering the id is what keeps its events out of
+                        // "Unattributed".
+                        //
+                        // Only ids whose HTTP leg was accepted or completed join the proven
+                        // leg. An HTTP-failed submission is not part of `Accepted + Completed`,
+                        // so counting its broadcast would drive `awaiting` negative and the
+                        // clamp would hide a genuine HTTP-versus-broadcast disagreement --
+                        // exactly the finding this feature exists to surface. It is retired
+                        // instead: labelled as the console's own, counted toward nothing.
+                        if (result.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed)
+                        {
+                            _burstTransactions[burstTransactionId] = new BurstTransaction(burstNumber);
+                            ResolveBufferedBurstEvents(burstTransactionId, burstNumber);
+                        }
+                        else
+                        {
+                            _retiredTransactions.Add(burstTransactionId);
+                        }
+                    }
+
                     switch (result.Outcome)
                     {
                         case PaymentOutcome.Pending:
@@ -836,8 +911,20 @@ public sealed class OperatorConsoleController
                             break;
                     }
 
+                    // Only the HTTP leg is written here. The proven leg is moved solely by
+                    // received events, so a rewrite of the whole record would silently reset it.
                     Update(state => IsCurrent(context)
-                        ? state with { Burst = new BurstProgress(count, sent, accepted, completed, failed, false) }
+                        ? state with
+                        {
+                            Burst = state.Burst with
+                            {
+                                Requested = count,
+                                Sent = sent,
+                                Accepted = accepted,
+                                Completed = completed,
+                                Failed = failed,
+                            },
+                        }
                         : state);
                 });
         }
@@ -852,9 +939,12 @@ public sealed class OperatorConsoleController
         {
             _burstCancellation = null;
             var final = State.Burst;
-            var summary = final.Cancelled
-                ? $"Burst cancelled after {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}."
-                : $"Burst finished {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}.";
+            var summary = (final.Cancelled
+                    ? $"Burst cancelled after {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}."
+                    : $"Burst finished {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}.")
+                // The HTTP leg is what the API answered; the proven leg is what the broadcast
+                // confirmed, and it keeps moving after this record is written.
+                + $" Proven so far: settled {final.Settled}, rejected {final.Rejected}, awaiting {final.Awaiting}.";
             AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), string.Join(Environment.NewLine, failures), !final.Cancelled && final.Failed == 0);
             EndMutation();
         }
@@ -1377,6 +1467,12 @@ public sealed class OperatorConsoleController
             await activeMutation.WaitAsync(ct);
         }
 
+        // The sidecar is this console's child and dies with it -- an orphan daprd would keep a
+        // consumer group alive against a broker nobody is watching.
+        await StopOutcomeFeedAsync(ct);
+        _outcomeFeed.EventReceived -= OnOutcomeEventReceived;
+        _outcomeFeed.StatusChanged -= OnFeedStatusChanged;
+
         if (_ownedHandle is not null)
         {
             var ownedProfile = _ownedHandle.Profile;
@@ -1426,6 +1522,7 @@ public sealed class OperatorConsoleController
                 LastPayment = submission,
                 CanResendLastPayment = canResend,
             } : state);
+            TrackSubmittedPayment(context, submission, safeResult);
 
             var summary = safeResult.Outcome switch
             {
@@ -1445,13 +1542,809 @@ public sealed class OperatorConsoleController
                 safeResult.Duration == TimeSpan.Zero ? TimeSpanSince(mutation.StartedAt) : safeResult.Duration,
                 $"Idempotency {submission.IdempotencyMode}: {submission.IdempotencyKey ?? "(omitted)"}{Environment.NewLine}"
                 + (safeResult.Body ?? safeResult.ErrorSummary ?? string.Empty),
-                safeResult.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed or PaymentOutcome.Failed);
+                safeResult.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed or PaymentOutcome.Failed,
+                transactionId: safeResult.TransactionId);
             return safeResult;
         }
         finally
         {
             EndMutation();
         }
+    }
+
+    // --- Outcome feedback loop ------------------------------------------------------------
+    //
+    // The console listens to the outcome CoreBank already broadcasts. Everything below obeys
+    // three rules without exception: silence is never an outcome, the console never synthesises
+    // an event it did not receive, and a contradiction between HTTP and the broadcast is shown
+    // rather than resolved.
+
+    /// <summary>
+    /// Events that matched nothing when they arrived, kept briefly so a payment whose outcome
+    /// was broadcast <i>before</i> its own HTTP response returned still resolves. This is
+    /// correlation within one session, not replay: nothing from before the subscription started
+    /// is ever in here.
+    /// <para>
+    /// Keyed by transaction and holding a <i>list</i>, because a settlement is three events and
+    /// on the instant rail all three can beat the 200. Buffering only the terminal one left the
+    /// row permanently reading "1 of 2 legs observed".
+    /// </para>
+    /// </summary>
+    private readonly Dictionary<string, (long Arrival, List<OutcomeEvent> Events)> _unmatchedTerminalEvents =
+        new(StringComparer.Ordinal);
+    internal const int MaximumUnmatchedTerminalEvents = 200;
+    private long _unmatchedArrivalSequence;
+
+    /// <summary>
+    /// Transactions this console submitted that no longer have a row or a live burst slot — a
+    /// previous burst's ids, and rows evicted by <see cref="OperatorConsoleOptions.MaximumTrackedPayments"/>.
+    /// They count for nothing, but they stop a late outcome for the console's <i>own</i> payment
+    /// being announced as "not submitted from this console", which is simply false.
+    /// </summary>
+    private readonly BoundedTransactionIdSet _retiredTransactions = new(2000);
+
+    /// <summary>
+    /// How often, and how many times in a row, a dropped subscription is re-established.
+    /// Bounded on purpose: re-establishing respawns the sidecar, and a console that retried
+    /// forever would bury the evidence feed under its own failures. The budget is restored by a
+    /// reconnect that works, so the cap is on consecutive failures rather than on how many
+    /// outages one session may survive.
+    /// </summary>
+    private static readonly TimeSpan FeedReconnectInterval = TimeSpan.FromSeconds(15);
+    private const int MaximumFeedReconnectAttempts = 3;
+
+    private DateTimeOffset? _lastFeedReconnectAttempt;
+    private int _feedReconnectAttempts;
+    private bool _feedReconnectExhaustedReported;
+
+    /// <summary>
+    /// The in-flight reconnect, if any. <see cref="RefreshAsync"/> starts it but never awaits
+    /// it: re-establishing waits on a sidecar readiness probe, and blocking the poll on that
+    /// would freeze topology status and the UI behind it.
+    /// </summary>
+    internal Task FeedReconnectInFlight { get; private set; } = Task.CompletedTask;
+
+    private async Task StartOutcomeFeedAsync(
+        TopologyProfile profile,
+        CancellationToken ct,
+        bool resetCorrelation = true)
+    {
+        // Captured before the call: the adapter publishes its status synchronously from inside
+        // StartAsync, and the handler needs a context to check staleness against.
+        _feedContext = CaptureContext(State);
+        if (resetCorrelation)
+        {
+            // A new topology generation correlates nothing from the previous one.
+            lock (_unmatchedTerminalEvents)
+            {
+                _unmatchedTerminalEvents.Clear();
+            }
+
+            _burstTransactions.Clear();
+            _retiredTransactions.Clear();
+            _lastFeedReconnectAttempt = null;
+            _feedReconnectAttempts = 0;
+            _feedReconnectExhaustedReported = false;
+        }
+
+        try
+        {
+            await _outcomeFeed.StartAsync(profile, ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A feed that cannot start never blocks a payment: the rows simply say so and name
+            // the outcome query as the remedy.
+            OnFeedStatusChanged(new OutcomeFeedStatus(OutcomeFeedState.Unavailable, Detail: ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Re-establishes a subscription that dropped while a topology is still running. Only from
+    /// <see cref="OutcomeFeedState.Lost"/> — a feed that never came up is not retried, because
+    /// its cause (a missing binary, an occupied port) does not fix itself and the retry would
+    /// only spam the evidence feed. Rows already marked <c>Outcome unknown</c> stay that way:
+    /// a resumed subscription is not retroactive evidence.
+    /// </summary>
+    private async Task TryReestablishOutcomeFeedAsync(OperationContext context, CancellationToken ct)
+    {
+        var state = State;
+        if (state.Feed.State != OutcomeFeedState.Lost
+            || state.Profile == TopologyProfile.None
+            || !IsCurrent(context))
+        {
+            return;
+        }
+
+        if (_feedReconnectAttempts >= MaximumFeedReconnectAttempts)
+        {
+            // Giving up quietly would leave the console looking like it was still trying.
+            if (!_feedReconnectExhaustedReported)
+            {
+                _feedReconnectExhaustedReported = true;
+                AddEvidence(
+                    FeedProvenance(context),
+                    EvidenceKind.OutcomeEvent,
+                    OutcomeFeedNarrative.ReconnectExhausted(_feedReconnectAttempts),
+                    "SUBSCRIBE",
+                    OutcomeEventTypes.Topic,
+                    null,
+                    TimeSpan.Zero,
+                    state.Feed.Detail,
+                    false);
+            }
+
+            return;
+        }
+
+        var now = _time.GetUtcNow();
+        if (_lastFeedReconnectAttempt is { } last && now - last < FeedReconnectInterval)
+        {
+            return;
+        }
+
+        _lastFeedReconnectAttempt = now;
+        _feedReconnectAttempts++;
+        await StartOutcomeFeedAsync(state.Profile, ct, resetCorrelation: false);
+    }
+
+    private async Task StopOutcomeFeedAsync(CancellationToken ct)
+    {
+        _feedContext = null;
+        lock (_unmatchedTerminalEvents)
+        {
+            _unmatchedTerminalEvents.Clear();
+        }
+
+        _burstTransactions.Clear();
+        _retiredTransactions.Clear();
+        try
+        {
+            await _outcomeFeed.StopAsync(ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AddEvidence(
+                EvidenceKind.OutcomeEvent,
+                "The console's own Dapr sidecar did not stop cleanly",
+                "STOP",
+                OutcomeEventTypes.Topic,
+                null,
+                TimeSpan.Zero,
+                ex.Message,
+                false);
+        }
+    }
+
+    /// <summary>
+    /// The single place the feed's own state reaches the console. A drop is structural, not
+    /// decorative: every unresolved row <b>changes state</b>, so the words "Awaiting settlement"
+    /// leave the screen at the instant they stop being true.
+    /// </summary>
+    private void OnFeedStatusChanged(OutcomeFeedStatus status)
+    {
+        var context = _feedContext;
+        if (context is null || !IsCurrent(context))
+        {
+            return;
+        }
+
+        if (status.State == OutcomeFeedState.Listening)
+        {
+            // A reconnect that worked restores the full budget: the cap is on consecutive
+            // failures, not on how many outages one session may survive.
+            _feedReconnectAttempts = 0;
+            _lastFeedReconnectAttempt = null;
+            _feedReconnectExhaustedReported = false;
+        }
+
+        var withdrawn = 0;
+        Update(state =>
+        {
+            if (status.State != OutcomeFeedState.Lost)
+            {
+                return state with { Feed = status };
+            }
+
+            // A8: only the rows this drop actually withdrew. Counting every historical unknown
+            // row would attribute a previous outage's casualties to this one.
+            withdrawn = state.TrackedPayments.Count(payment => payment.IsOutstanding);
+            var stoppedAt = OutcomeFeedNarrative.Clock(status.LostAt ?? _time.GetUtcNow());
+            var payments = state.TrackedPayments
+                .Select(payment => payment.IsOutstanding
+                    ? payment with
+                    {
+                        State = PaymentTrackingState.OutcomeUnknown,
+                        Note = $"the console stopped listening at {stoppedAt}",
+                    }
+                    : payment)
+                .ToList();
+
+            // A7: the burst's proven leg is a claim about the same feed. Leaving "awaiting N"
+            // on screen with nobody listening is the very reading this feature removes from the
+            // payment rows, so the burst withdraws it in the same breath.
+            var burst = state.Burst.Outstanding > 0
+                ? state.Burst with { Unknown = state.Burst.Unknown + state.Burst.Outstanding }
+                : state.Burst;
+            return state with { Feed = status, TrackedPayments = payments, Burst = burst };
+        });
+
+        var (summary, succeeded) = status.State switch
+        {
+            OutcomeFeedState.Listening when status.GapStart is not null || status.GapEnd is not null =>
+                (OutcomeFeedNarrative.ListeningAgain(status.GapStart, status.GapEnd), true),
+            OutcomeFeedState.Listening =>
+                (OutcomeFeedNarrative.ListeningSince(status.ListeningSince), true),
+            OutcomeFeedState.Lost =>
+                (OutcomeFeedNarrative.FeedLost(status.LostAt, withdrawn), false),
+            OutcomeFeedState.Unavailable =>
+                (OutcomeFeedNarrative.Unavailable(status.Detail), false),
+            _ => (string.Empty, true),
+        };
+        if (summary.Length == 0)
+        {
+            return;
+        }
+
+        AddEvidence(
+            FeedProvenance(context),
+            EvidenceKind.OutcomeEvent,
+            summary,
+            "SUBSCRIBE",
+            OutcomeEventTypes.Topic,
+            null,
+            TimeSpan.Zero,
+            status.Detail,
+            succeeded);
+    }
+
+    /// <summary>
+    /// Provenance for a record the feed produced. The profile and generation come from the
+    /// subscription's context, but the <b>fault levels are read now</b>: a level armed after
+    /// the subscription started is still in force when the event lands, and stamping the
+    /// levels frozen at subscribe time would file every such record as fault-free.
+    /// </summary>
+    private EvidenceProvenance FeedProvenance(OperationContext context) =>
+        new(context.Profile, context.RunGeneration, FaultsInForce(State));
+
+    /// <summary>
+    /// One arriving event. Resolves its row <b>in place</b> — same list index, no re-sort, no
+    /// scroll, no focus change — and appends to Evidence whether or not it matched anything.
+    /// </summary>
+    private void OnOutcomeEventReceived(OutcomeEvent outcomeEvent)
+    {
+        var context = _feedContext;
+        if (context is null || !IsCurrent(context))
+        {
+            // The event belongs to a topology this console has since stopped or switched away
+            // from. Stamping it onto the current one would be a claim about the wrong system.
+            return;
+        }
+
+        var observedAt = _time.GetUtcNow();
+        var attribution = EventAttribution.Unattributed;
+        Update(state =>
+        {
+            var index = IndexOfTrackedPayment(state, outcomeEvent.TransactionId);
+            if (index < 0)
+            {
+                return state;
+            }
+
+            attribution = EventAttribution.Tracked;
+            var payments = state.TrackedPayments.ToList();
+            payments[index] = ResolveTrackedPayment(payments[index], outcomeEvent, observedAt);
+            return state with { TrackedPayments = payments };
+        });
+
+        if (attribution == EventAttribution.Unattributed
+            && _burstTransactions.TryGetValue(outcomeEvent.TransactionId, out var burstTransaction))
+        {
+            attribution = EventAttribution.Tracked;
+            CountForBurst(outcomeEvent, burstTransaction, context);
+        }
+
+        if (attribution == EventAttribution.Unattributed
+            && _retiredTransactions.Contains(outcomeEvent.TransactionId))
+        {
+            // A3/A4: this console did submit it -- in a previous burst, or in a row since
+            // evicted. It counts for nothing, but calling it a stranger's transaction is false.
+            attribution = EventAttribution.Retired;
+        }
+
+        if (attribution == EventAttribution.Unattributed)
+        {
+            // A5: legs are buffered too. On the instant rail all three events can beat the 200,
+            // and dropping the two legs left the row reading "1 of 2 legs observed" for ever.
+            RememberUnmatchedEvent(outcomeEvent);
+        }
+
+        AddEvidence(
+            FeedProvenance(context),
+            EvidenceKind.OutcomeEvent,
+            EventSummary(outcomeEvent, attribution),
+            // The meta line always prints the CloudEvent type verbatim and the transaction id.
+            outcomeEvent.EventType,
+            outcomeEvent.TransactionId,
+            null,
+            // The delivery delta, which is the transport's and never the bank's processing
+            // time. Deliberately not admitted as proof that injected faults reached traffic:
+            // Dev Proxy watches CoreBankAPI's HTTP surface, and the broadcast never crosses it
+            // (see CarriesAppliedFaults, which excludes this kind).
+            DeliveryDelta(outcomeEvent, observedAt),
+            EventDetail(outcomeEvent, observedAt),
+            outcomeEvent.Failed is null,
+            outcomeEvent.TransactionId,
+            // Never steals the Details pane from a record the operator is reading.
+            select: false);
+    }
+
+    private static TimeSpan DeliveryDelta(OutcomeEvent outcomeEvent, DateTimeOffset observedAt) =>
+        outcomeEvent.ProcessedAt is { } processedAt && observedAt > processedAt
+            ? observedAt - processedAt
+            : TimeSpan.Zero;
+
+    /// <summary>How much of a claim the console may make about one arriving event.</summary>
+    private enum EventAttribution
+    {
+        /// <summary>Matches no payment this console submitted.</summary>
+        Unattributed,
+
+        /// <summary>Matches a live row or the burst currently on screen.</summary>
+        Tracked,
+
+        /// <summary>This console's own payment, but no longer on screen or counted.</summary>
+        Retired,
+    }
+
+    /// <summary>
+    /// Applies one event to one row. Idempotent for a redelivered terminal event and for a
+    /// redelivered leg, because Dapr delivery is at-least-once and a second copy of a leg is
+    /// not a second leg.
+    /// </summary>
+    private static TrackedPayment ResolveTrackedPayment(
+        TrackedPayment payment,
+        OutcomeEvent outcomeEvent,
+        DateTimeOffset observedAt)
+    {
+        if (outcomeEvent.BalanceUpdated is { } leg)
+        {
+            if (payment.State == PaymentTrackingState.Rejected)
+            {
+                // A rejection emits no balance legs, and the row says so. Attaching one anyway
+                // would put a leg column beside the words "a rejection emits none". The event
+                // is still in the Evidence feed, where the disagreement is visible.
+                return payment;
+            }
+
+            var legs = payment.ObservedLegs;
+            if (legs.Any(existing =>
+                    string.Equals(existing.AccountNumber, leg.AccountNumber, StringComparison.Ordinal)
+                    && existing.Delta == leg.Delta
+                    && existing.NewBalance == leg.NewBalance))
+            {
+                return payment;
+            }
+
+            return payment with
+            {
+                Legs = [.. legs, new SettlementLeg(leg.AccountNumber, leg.Delta, leg.NewBalance, leg.Currency, observedAt)],
+            };
+        }
+
+        if (payment.BroadcastOutcome is not null)
+        {
+            return payment;
+        }
+
+        if (outcomeEvent.Completed is { } completed)
+        {
+            // HTTP already proved a rejection and the broadcast says otherwise. Both records
+            // stay, both stay labelled, and the console picks no winner.
+            var contradicts = payment.HttpOutcome == PaymentOutcome.Failed;
+            return payment with
+            {
+                BroadcastOutcome = PaymentOutcome.Completed,
+                State = contradicts ? PaymentTrackingState.Contradiction : PaymentTrackingState.Settled,
+                ProcessedAt = completed.ProcessedAt,
+                ObservedAt = observedAt,
+                Note = contradicts ? "HTTP proved Failed, broadcast says Completed" : null,
+            };
+        }
+
+        var failed = outcomeEvent.Failed!;
+        var failureContradicts = payment.HttpOutcome == PaymentOutcome.Completed;
+        return payment with
+        {
+            BroadcastOutcome = PaymentOutcome.Failed,
+            State = failureContradicts ? PaymentTrackingState.Contradiction : PaymentTrackingState.Rejected,
+            ProcessedAt = failed.ProcessedAt,
+            ObservedAt = observedAt,
+            ErrorReason = failed.ErrorReason,
+            Note = failureContradicts ? "HTTP proved Completed, broadcast says Failed" : null,
+        };
+    }
+
+    /// <summary>
+    /// Moves the burst's proven leg. Only a terminal event moves it, only once per transaction,
+    /// and only for the burst currently on screen.
+    /// </summary>
+    private void CountForBurst(OutcomeEvent outcomeEvent, BurstTransaction transaction, OperationContext context)
+    {
+        if (!outcomeEvent.IsTerminal
+            || transaction.BurstNumber != Volatile.Read(ref _activeBurstNumber)
+            || !transaction.TryMarkResolved())
+        {
+            return;
+        }
+
+        var settled = outcomeEvent.Completed is not null;
+        Update(state => IsCurrent(context)
+            ? state with
+            {
+                Burst = settled
+                    ? state.Burst with { Settled = state.Burst.Settled + 1 }
+                    : state.Burst with { Rejected = state.Burst.Rejected + 1 },
+            }
+            : state);
+    }
+
+    private void TrackSubmittedPayment(
+        OperationContext context,
+        PaymentSubmission submission,
+        PaymentResult result)
+    {
+        if (result.TransactionId is not { Length: > 0 } transactionId)
+        {
+            // No id means nothing to correlate by, and this console introduces no second
+            // correlation identifier to work around that.
+            return;
+        }
+
+        var submittedAt = _time.GetUtcNow();
+        var buffered = TakeBufferedEvents(transactionId);
+        var applied = false;
+        var evicted = new List<string>();
+
+        Update(state =>
+        {
+            if (!IsCurrent(context))
+            {
+                return state;
+            }
+
+            var payments = state.TrackedPayments.ToList();
+            var index = payments.FindIndex(payment =>
+                string.Equals(payment.TransactionId, transactionId, StringComparison.Ordinal));
+            if (index >= 0)
+            {
+                // A resend of the same key returns the same transaction; it updates the row it
+                // already has rather than adding a second one for the same payment -- a
+                // duplicate row could never resolve and would read "Awaiting settlement" for ever.
+                payments[index] = ApplyBuffered(
+                    payments[index] with
+                    {
+                        HttpOutcome = result.Outcome,
+                        HttpStatusCode = result.StatusCode,
+                    },
+                    buffered,
+                    submittedAt);
+                applied = buffered.Count > 0;
+                return state with { TrackedPayments = payments };
+            }
+
+            // A11: an Ambiguous or transport-failed submission that still returned a
+            // TransactionId is the case that needs the feed most. It gets a row, but never the
+            // words "Awaiting settlement": its own HTTP leg never proved it was accepted.
+            var proven = result.Outcome is PaymentOutcome.Pending
+                or PaymentOutcome.Completed
+                or PaymentOutcome.Failed;
+            var listening = state.Feed.IsListening && proven;
+            var row = new TrackedPayment(
+                Interlocked.Increment(ref _paymentSequence),
+                transactionId,
+                submission.Request.Rail,
+                submission.Request.Amount,
+                submission.Request.Currency,
+                submission.Request.FromAccount,
+                submission.Request.ToAccount,
+                submittedAt,
+                result.Outcome,
+                result.StatusCode,
+                // Never "Awaiting settlement" without a feed: nothing is awaiting anything.
+                listening ? PaymentTrackingState.Awaiting : PaymentTrackingState.NotObserved,
+                Note: listening
+                    ? null
+                    : proven
+                        ? NoFeedNote(state.Feed)
+                        : $"the submission's own outcome was {result.Outcome} — only an outcome query can move it forward");
+            row = ApplyBuffered(row, buffered, submittedAt);
+            applied = buffered.Count > 0;
+
+            payments.Add(row);
+            if (payments.Count > _options.MaximumTrackedPayments)
+            {
+                var overflow = payments.Count - _options.MaximumTrackedPayments;
+                evicted.AddRange(payments.Take(overflow).Select(payment => payment.TransactionId));
+                payments.RemoveRange(0, overflow);
+            }
+
+            return state with { TrackedPayments = payments };
+        });
+
+        // A4: an evicted row's later broadcast is still this console's own payment.
+        foreach (var id in evicted)
+        {
+            _retiredTransactions.Add(id);
+        }
+
+        if (!applied)
+        {
+            // A6: the buffer was read before the update, and the update may have declined to
+            // use it (a stale context). Putting it back keeps a real outcome available to the
+            // submission that eventually claims it, instead of silently discarding it.
+            RestoreBufferedEvents(transactionId, buffered);
+            return;
+        }
+
+        AddEvidence(
+            FeedProvenance(context),
+            EvidenceKind.OutcomeEvent,
+            $"{transactionId} attributed — its broadcast outcome arrived before this console's own submission response",
+            buffered[0].EventType,
+            transactionId,
+            null,
+            TimeSpan.Zero,
+            "Correlated within this session; no event from before the subscription started was used.",
+            true,
+            transactionId,
+            select: false);
+    }
+
+    private static TrackedPayment ApplyBuffered(
+        TrackedPayment row,
+        IReadOnlyList<OutcomeEvent> buffered,
+        DateTimeOffset observedAt)
+    {
+        foreach (var outcomeEvent in buffered)
+        {
+            row = ResolveTrackedPayment(row, outcomeEvent, observedAt);
+        }
+
+        return row;
+    }
+
+    /// <summary>
+    /// Claims buffered events for a burst id registered after they arrived. Same within-session
+    /// correlation as <see cref="TrackSubmittedPayment"/>, never replay.
+    /// </summary>
+    private void ResolveBufferedBurstEvents(string transactionId, int burstNumber)
+    {
+        // A6: every reason to decline is checked *before* the buffer is read, so a mismatch
+        // can never consume and discard a real outcome.
+        if (_feedContext is not { } context
+            || !_burstTransactions.TryGetValue(transactionId, out var transaction)
+            || transaction.BurstNumber != burstNumber)
+        {
+            return;
+        }
+
+        var buffered = TakeBufferedEvents(transactionId);
+        foreach (var outcomeEvent in buffered)
+        {
+            CountForBurst(outcomeEvent, transaction, context);
+        }
+    }
+
+    /// <summary>
+    /// Claims every buffered event for <paramref name="transactionId"/>. Removing them as they
+    /// are read keeps the buffer to events still waiting for a submission.
+    /// </summary>
+    private IReadOnlyList<OutcomeEvent> TakeBufferedEvents(string transactionId)
+    {
+        lock (_unmatchedTerminalEvents)
+        {
+            return _unmatchedTerminalEvents.Remove(transactionId, out var entry) ? entry.Events : [];
+        }
+    }
+
+    /// <summary>
+    /// Puts back events that were read but not applied, keeping their original arrival order so
+    /// eviction pressure still falls on the oldest.
+    /// </summary>
+    private void RestoreBufferedEvents(string transactionId, IReadOnlyList<OutcomeEvent> events)
+    {
+        if (events.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var outcomeEvent in events)
+        {
+            RememberUnmatchedEvent(outcomeEvent);
+        }
+    }
+
+    private void RememberUnmatchedEvent(OutcomeEvent outcomeEvent)
+    {
+        lock (_unmatchedTerminalEvents)
+        {
+            if (_unmatchedTerminalEvents.TryGetValue(outcomeEvent.TransactionId, out var existing))
+            {
+                existing.Events.Add(outcomeEvent);
+                return;
+            }
+
+            if (_unmatchedTerminalEvents.Count >= MaximumUnmatchedTerminalEvents)
+            {
+                // Evict by recorded arrival, not by enumeration order: a Dictionary that has
+                // had entries removed no longer enumerates in insertion order, so `Keys.First()`
+                // would drop an arbitrary event — quite possibly the newest, the one most likely
+                // still to be waiting for its own HTTP response.
+                var oldest = _unmatchedTerminalEvents
+                    .OrderBy(entry => entry.Value.Arrival)
+                    .First().Key;
+                _unmatchedTerminalEvents.Remove(oldest);
+            }
+
+            _unmatchedTerminalEvents[outcomeEvent.TransactionId] =
+                (++_unmatchedArrivalSequence, [outcomeEvent]);
+        }
+    }
+
+    private static int IndexOfTrackedPayment(OperatorConsoleState state, string transactionId)
+    {
+        for (var index = 0; index < state.TrackedPayments.Count; index++)
+        {
+            if (string.Equals(state.TrackedPayments[index].TransactionId, transactionId, StringComparison.Ordinal))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    internal static string NoFeedNote(OutcomeFeedStatus feed) => feed.State switch
+    {
+        OutcomeFeedState.Lost =>
+            $"the console stopped listening at {OutcomeFeedNarrative.Clock(feed.LostAt)}",
+        OutcomeFeedState.Unavailable => feed.Detail.Length > 0
+            ? feed.Detail
+            : "no subscription to transaction-events could be established",
+        _ => "the console is not subscribed to transaction-events",
+    };
+
+    /// <summary>
+    /// Past-tense grammar for something the system said, and the full "not submitted from this
+    /// console" label when it matched nothing. Dropping an unattributed event would make the
+    /// feed a lie by omission; attributing it would make it a lie outright.
+    /// </summary>
+    private static string EventSummary(OutcomeEvent outcomeEvent, EventAttribution attribution)
+    {
+        var subject = outcomeEvent.EventType switch
+        {
+            OutcomeEventTypes.TransactionCompleted => $"Settled — {outcomeEvent.TransactionId}",
+            OutcomeEventTypes.TransactionFailed =>
+                $"Rejected — {outcomeEvent.TransactionId} · ErrorReason: {outcomeEvent.Failed?.ErrorReason ?? "(none supplied)"}",
+            OutcomeEventTypes.BalanceUpdated =>
+                $"Balance updated — {outcomeEvent.TransactionId} · {LegText(outcomeEvent)}",
+            // A type this console does not model is still printed verbatim rather than
+            // flattened into one it happens to know.
+            _ => $"{outcomeEvent.EventType} — {outcomeEvent.TransactionId}",
+        };
+        return attribution switch
+        {
+            EventAttribution.Tracked => subject,
+            EventAttribution.Retired =>
+                $"{subject} · from a payment this console submitted earlier this session",
+            _ => $"{subject} · Unattributed — {outcomeEvent.TransactionId} was not submitted from this console",
+        };
+    }
+
+    private static string LegText(OutcomeEvent outcomeEvent) =>
+        outcomeEvent.BalanceUpdated is { } leg
+            ? new SettlementLeg(leg.AccountNumber, leg.Delta, leg.NewBalance, leg.Currency, default).ToString()
+            : string.Empty;
+
+    /// <summary>
+    /// Two clocks, never one: the event's own <c>ProcessedAt</c> and the console's observed-at
+    /// time, with the delta explicit. Delivery latency belongs to the transport, and presenting
+    /// it as the bank's processing time would be a lie of the same class as a written fault
+    /// config reported as a live fault.
+    /// </summary>
+    private static string EventDetail(OutcomeEvent outcomeEvent, DateTimeOffset observedAt)
+    {
+        var lines = new List<string> { outcomeEvent.EventType, $"TransactionId: {outcomeEvent.TransactionId}" };
+        if (outcomeEvent.ProcessedAt is { } processedAt)
+        {
+            lines.Add($"ProcessedAt {OutcomeFeedNarrative.PreciseClock(processedAt)}, observed here "
+                + $"{OutcomeFeedNarrative.PreciseClock(observedAt)} "
+                + $"(+{(observedAt - processedAt).TotalMilliseconds:F0} ms)");
+        }
+        else
+        {
+            lines.Add($"Observed here {OutcomeFeedNarrative.PreciseClock(observedAt)}; "
+                + "this event type carries no ProcessedAt.");
+        }
+
+        if (outcomeEvent.Completed is { } completed)
+        {
+            lines.Add($"Status: {completed.Status ?? "(none supplied)"}");
+        }
+
+        if (outcomeEvent.Failed is { } failed)
+        {
+            lines.Add($"Status: {failed.Status ?? "(none supplied)"}");
+            lines.Add($"ErrorReason: {failed.ErrorReason ?? "(none supplied)"}");
+        }
+
+        if (outcomeEvent.BalanceUpdated is not null)
+        {
+            lines.Add(LegText(outcomeEvent));
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// A bounded, insertion-ordered set of transaction ids. Bounded because a long session with
+    /// repeated bursts would otherwise grow it without limit; insertion-ordered so the ids
+    /// dropped under pressure are the oldest, which are the least likely to still produce an
+    /// outcome.
+    /// </summary>
+    private sealed class BoundedTransactionIdSet(int capacity)
+    {
+        private readonly Queue<string> _order = new();
+        private readonly HashSet<string> _ids = new(StringComparer.Ordinal);
+        private readonly object _sync = new();
+
+        public void Add(string transactionId)
+        {
+            lock (_sync)
+            {
+                if (!_ids.Add(transactionId))
+                {
+                    return;
+                }
+
+                _order.Enqueue(transactionId);
+                while (_order.Count > capacity)
+                {
+                    _ids.Remove(_order.Dequeue());
+                }
+            }
+        }
+
+        public bool Contains(string transactionId)
+        {
+            lock (_sync)
+            {
+                return _ids.Contains(transactionId);
+            }
+        }
+
+        public void Clear()
+        {
+            lock (_sync)
+            {
+                _order.Clear();
+                _ids.Clear();
+            }
+        }
+    }
+
+    /// <summary>
+    /// A burst transaction and whether its proven-leg counter has already moved. Dapr delivery
+    /// is at-least-once, so a redelivered terminal event must not be counted twice.
+    /// </summary>
+    private sealed class BurstTransaction(int burstNumber)
+    {
+        private int _resolved;
+
+        public int BurstNumber { get; } = burstNumber;
+
+        public bool TryMarkResolved() => Interlocked.CompareExchange(ref _resolved, 1, 0) == 0;
     }
 
     private PaymentResult EnforceRailSemantics(PaymentRail rail, PaymentResult result)
@@ -1605,6 +2498,10 @@ public sealed class OperatorConsoleController
             ResourceAuthorityAvailable = true,
             LastPayment = null,
             CanResendLastPayment = false,
+            // A new generation starts with no payment history, exactly as a relaunch does:
+            // nothing from the previous topology may be read as current.
+            TrackedPayments = [],
+            Feed = OutcomeFeedStatus.NotStarted,
             LastLoadResult = null,
             LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for this generation."),
             FaultsArmed = false,
@@ -1710,7 +2607,8 @@ public sealed class OperatorConsoleController
         int? statusCode,
         TimeSpan duration,
         string detail,
-        bool succeeded)
+        bool succeeded,
+        string? transactionId = null)
     {
         var state = State;
         AddEvidence(
@@ -1722,9 +2620,15 @@ public sealed class OperatorConsoleController
             statusCode,
             duration,
             detail,
-            succeeded);
+            succeeded,
+            transactionId);
     }
 
+    /// <param name="select">
+    /// False for records the operator did not ask for. An arriving broadcast outcome claims the
+    /// evidence strip, but it must never yank the Details pane away from a record the operator
+    /// is reading -- a pushed outcome never steals attention.
+    /// </param>
     private void AddEvidence(
         EvidenceProvenance provenance,
         EvidenceKind kind,
@@ -1734,7 +2638,9 @@ public sealed class OperatorConsoleController
         int? statusCode,
         TimeSpan duration,
         string detail,
-        bool succeeded)
+        bool succeeded,
+        string? transactionId = null,
+        bool select = true)
     {
         Update(state =>
         {
@@ -1752,19 +2658,31 @@ public sealed class OperatorConsoleController
                 duration,
                 JournalRedaction.Apply(detail ?? string.Empty),
                 succeeded,
-                provenance.Faults);
+                provenance.Faults,
+                transactionId);
             records.Add(record);
             if (records.Count > _options.MaximumEvidenceRecords)
             {
                 records.RemoveRange(0, records.Count - _options.MaximumEvidenceRecords);
             }
 
+            // C7: the operator's selection can be trimmed away by a flood of inbound events.
+            // Showing a details pane for a record no longer in the list is worse than falling
+            // back to the newest one that is.
+            var selected = select || (state.SelectedEvidence is { } current && records.Contains(current))
+                ? select ? record : state.SelectedEvidence
+                : record;
             return state with
             {
                 Evidence = records,
-                SelectedEvidence = record,
+                SelectedEvidence = selected,
                 FaultsObserved = state.FaultsObserved || CarriesAppliedFaults(state, record),
-                StatusLine = $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Summary}",
+                // A1: an arriving outcome claims the evidence strip (which reads the newest
+                // record) but never rewrites the mutation status line under the operator --
+                // that line belongs to what the operator is doing.
+                StatusLine = select
+                    ? $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Summary}"
+                    : state.StatusLine,
             };
         });
     }

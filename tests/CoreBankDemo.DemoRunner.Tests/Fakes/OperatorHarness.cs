@@ -20,6 +20,7 @@ public sealed class OperatorHarness
     public FakeFaultInjector Faults { get; } = new();
     public FakeBrowserLauncher Browser { get; } = new();
     public FakePreflightRunner Preflight { get; } = new();
+    public FakeOutcomeFeed Feed { get; } = new();
     public FakeTimeProvider Time { get; } = new();
 
     public OperatorConsoleController CreateController(
@@ -34,6 +35,7 @@ public sealed class OperatorHarness
             Faults,
             Browser,
             Preflight,
+            Feed,
             Time,
             options ?? new OperatorConsoleOptions
             {
@@ -503,6 +505,110 @@ public sealed class FakeFaultInjector : IFaultInjector
         return Task.FromResult(DeleteSucceeds
             ? new FaultConfigWriteResult(true, Path, null)
             : new FaultConfigWriteResult(false, Path, DeleteError));
+    }
+}
+
+/// <summary>
+/// Stands in for the console's own <c>transaction-events</c> listener. Pushes events and
+/// injects faults synchronously, so a test can assert exactly what one arriving event does to
+/// the state without any clock or timer involved.
+/// </summary>
+public sealed class FakeOutcomeFeed : IOutcomeFeed
+{
+    private OutcomeFeedStatus _status = OutcomeFeedStatus.NotStarted;
+
+    public event Action<OutcomeEvent>? EventReceived;
+    public event Action<OutcomeFeedStatus>? StatusChanged;
+
+    public List<TopologyProfile> Starts { get; } = [];
+    public int StopCount { get; private set; }
+
+    /// <summary>Scripted answers for successive <see cref="StartAsync"/> calls.</summary>
+    private readonly Queue<OutcomeFeedStatus> _startResults = new();
+
+    /// <summary>Thrown by <see cref="StartAsync"/>, standing in for an adapter that blew up.</summary>
+    public Exception? StartException { get; set; }
+
+    /// <summary>Thrown by <see cref="StopAsync"/>, standing in for a sidecar that would not die.</summary>
+    public Exception? StopException { get; set; }
+
+    public DateTimeOffset ListeningSince { get; set; } = new(2026, 9, 5, 12, 1, 4, TimeSpan.Zero);
+
+    /// <summary>What this fake last published. Not on the port: the console's single source of
+    /// truth for what it can hear is <c>OperatorConsoleState.Feed</c>.</summary>
+    public OutcomeFeedStatus Status => _status;
+
+    public void Queue(params OutcomeFeedStatus[] results)
+    {
+        foreach (var result in results)
+        {
+            _startResults.Enqueue(result);
+        }
+    }
+
+    /// <summary>Makes the next start report an unavailable feed with this exact reason.</summary>
+    public void QueueUnavailable(string detail) =>
+        Queue(new OutcomeFeedStatus(OutcomeFeedState.Unavailable, Detail: detail));
+
+    public Task<OutcomeFeedStatus> StartAsync(TopologyProfile profile, CancellationToken ct)
+    {
+        Starts.Add(profile);
+        if (StartException is not null)
+        {
+            throw StartException;
+        }
+
+        var status = _startResults.Count > 0
+            ? _startResults.Dequeue()
+            : new OutcomeFeedStatus(OutcomeFeedState.Listening, ListeningSince: ListeningSince);
+        return Task.FromResult(Publish(status));
+    }
+
+    public Task StopAsync(CancellationToken ct)
+    {
+        StopCount++;
+        if (StopException is not null)
+        {
+            throw StopException;
+        }
+
+        Publish(OutcomeFeedStatus.NotStarted);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>Delivers one event exactly as the real adapter would.</summary>
+    public void Push(OutcomeEvent outcomeEvent) => EventReceived?.Invoke(outcomeEvent);
+
+    public void PushCompleted(string transactionId, DateTimeOffset processedAt, string status = "Completed") =>
+        Push(OutcomeEvent.From(new TransactionCompletedWireEvent(transactionId, status, processedAt)));
+
+    public void PushFailed(string transactionId, DateTimeOffset processedAt, string errorReason) =>
+        Push(OutcomeEvent.From(new TransactionFailedWireEvent(transactionId, "Failed", processedAt, errorReason)));
+
+    public void PushBalance(string transactionId, string account, decimal delta, decimal newBalance, string currency = "EUR") =>
+        Push(OutcomeEvent.From(new BalanceUpdatedWireEvent(transactionId, account, delta, newBalance, currency)));
+
+    /// <summary>Drops a live subscription, the console's most dangerous condition.</summary>
+    public void Fault(DateTimeOffset lostAt, string detail = "the stream faulted") =>
+        Publish(new OutcomeFeedStatus(
+            OutcomeFeedState.Lost,
+            ListeningSince: _status.ListeningSince,
+            LostAt: lostAt,
+            Detail: detail));
+
+    /// <summary>Reconnects, stamping the window nobody observed. Never back-fills it.</summary>
+    public void Resume(DateTimeOffset resumedAt) =>
+        Publish(new OutcomeFeedStatus(
+            OutcomeFeedState.Listening,
+            ListeningSince: resumedAt,
+            GapStart: _status.LostAt,
+            GapEnd: resumedAt));
+
+    private OutcomeFeedStatus Publish(OutcomeFeedStatus status)
+    {
+        _status = status;
+        StatusChanged?.Invoke(status);
+        return status;
     }
 }
 

@@ -1,4 +1,5 @@
 using CoreBankDemo.DemoRunner.Application;
+using CoreBankDemo.DemoRunner.Application.Ports;
 
 namespace CoreBankDemo.DemoRunner.Terminal;
 
@@ -64,6 +65,32 @@ public sealed record EvidenceRowViewModel(
     string Detail,
     bool Succeeded);
 
+/// <summary>
+/// One submitted payment as the Operations list renders it. The list is projected in
+/// submission order and never re-sorted, so an arriving outcome updates the row in the
+/// position it already occupies.
+/// </summary>
+/// <param name="Headline">Bold verb/object line — the status label is part of it, never colour alone.</param>
+/// <param name="Meta">
+/// Muted detail beneath the headline. Carries the two clocks as separate figures and, for an
+/// awaiting row, the inline <c>(listening)</c> qualifier.
+/// </param>
+/// <param name="Legs">The balance legs observed so far, in a fixed column.</param>
+/// <param name="LegSummary">
+/// States a half-settled payment out loud (<c>1 of 2 legs observed</c>). A visibly half-settled
+/// payment is a real finding, not a rendering gap to paper over.
+/// </param>
+/// <param name="Remedy">The one-step way forward when the console cannot know the outcome.</param>
+public sealed record PaymentRowViewModel(
+    long Sequence,
+    string TransactionId,
+    string Symbol,
+    string Headline,
+    string Meta,
+    IReadOnlyList<string> Legs,
+    string LegSummary,
+    string Remedy);
+
 public sealed record OperatorPresentationModel(
     string TopologyBar,
     IReadOnlyList<NavigationItemViewModel> Navigation,
@@ -74,7 +101,10 @@ public sealed record OperatorPresentationModel(
     string SelectedEvidenceDetail,
     string MutationStatus,
     FaultsViewModel Faults,
+    IReadOnlyList<PaymentRowViewModel> Payments,
+    string FeedStatus,
     string BurstStatus,
+    string BurstProvenStatus,
     string LoadPhaseStatus,
     IReadOnlyList<string> LoadResults,
     bool IsBusy,
@@ -121,7 +151,14 @@ public static class PresentationModelBuilder
             .OrderByDescending(record => record.Sequence)
             .Select(record => new EvidenceRowViewModel(
                 record.Sequence,
-                $"{(record.Succeeded ? "●" : "✕")} {record.Summary}",
+                // An inbound gutter marker, not a colour: a scan down the list tells "what the
+                // bank said" from "what the operator did" without reading a word
+                // (DESIGN.md, Event row). It occupies a column *left of* the status gutter
+                // rather than replacing it -- swallowing the glyph made a failed inbound event
+                // indistinguishable from a settled one.
+                record.Kind == EvidenceKind.OutcomeEvent
+                    ? $"< {StatusGlyph(record.Succeeded)} {record.Summary}"
+                    : $"  {StatusGlyph(record.Succeeded)} {record.Summary}",
                 $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}{FaultProvenance(record)}",
                 $"{record.Method} {record.Target}{Environment.NewLine}HTTP {record.StatusCode?.ToString() ?? "n/a"} · {record.Duration.TotalMilliseconds:F0} ms{Environment.NewLine}"
                 + $"Faults: {FaultProvenanceDetail(record)}{Environment.NewLine}{record.Detail}",
@@ -157,6 +194,10 @@ public static class PresentationModelBuilder
             });
         }
 
+        var payments = state.TrackedPayments
+            .Select(payment => BuildPaymentRow(state, payment, now))
+            .ToList();
+
         var resourceSummary = resources.Count == 0
             ? "resources ○ Unknown"
             : string.Join(" ", resources.Select(resource => $"{Abbreviate(resource.Name)} {resource.Symbol}"));
@@ -180,7 +221,12 @@ public static class PresentationModelBuilder
                 ? state.StatusLine
                 : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running",
             faults,
-            $"Burst {state.Burst.Sent}/{state.Burst.Requested} · accepted {state.Burst.Accepted} · completed {state.Burst.Completed} · failed {state.Burst.Failed}{(state.Burst.Cancelled ? " · Cancelled" : string.Empty)}",
+            payments,
+            FeedStatusLine(state),
+            // The two legs are never merged: a burst is exactly where "acknowledged" and
+            // "finished" diverge.
+            $"HTTP leg · Burst {state.Burst.Sent}/{state.Burst.Requested} · accepted {state.Burst.Accepted} · completed {state.Burst.Completed} · failed {state.Burst.Failed}{(state.Burst.Cancelled ? " · Cancelled" : string.Empty)}",
+            BurstProvenLine(state.Burst),
             $"{state.LoadProgress.Phase} · {state.LoadProgress.Elapsed.TotalSeconds:F0}s · {state.LoadProgress.Detail}",
             loadResults,
             state.ActiveMutation is not null,
@@ -200,11 +246,170 @@ public static class PresentationModelBuilder
     }
 
     /// <summary>
+    /// The Evidence feed header, and the one place the feed's start time is stated. An empty
+    /// feed is only meaningful with a start time attached, so it always carries one — and a
+    /// reconnect stamps the window this console did not observe rather than back-filling it.
+    /// </summary>
+    private static string FeedStatusLine(OperatorConsoleState state) => state.Feed switch
+    {
+        { State: OutcomeFeedState.Listening, GapStart: not null } gap =>
+            OutcomeFeedNarrative.ListeningAgain(gap.GapStart, gap.GapEnd),
+        { State: OutcomeFeedState.Listening, GapEnd: not null } gap =>
+            OutcomeFeedNarrative.ListeningAgain(gap.GapStart, gap.GapEnd),
+        { State: OutcomeFeedState.Listening } listening =>
+            OutcomeFeedNarrative.ListeningSince(listening.ListeningSince),
+        { State: OutcomeFeedState.Lost } lost => OutcomeFeedNarrative.FeedLost(
+            lost.LostAt,
+            state.TrackedPayments.Count(payment => payment.State == PaymentTrackingState.OutcomeUnknown)),
+        { State: OutcomeFeedState.Unavailable } unavailable =>
+            OutcomeFeedNarrative.Unavailable(unavailable.Detail),
+        _ => OutcomeFeedNarrative.NotStarted(),
+    };
+
+    /// <summary>
+    /// Projects one tracked payment. Every state is carried in the row's own text, so it
+    /// survives a monochrome terminal, and the elapsed readout is only ever attached to a row
+    /// that is genuinely still waiting.
+    /// </summary>
+    private static PaymentRowViewModel BuildPaymentRow(
+        OperatorConsoleState state,
+        TrackedPayment payment,
+        DateTimeOffset now)
+    {
+        var legs = payment.ObservedLegs.Select(leg => leg.ToString()).ToList();
+        var http = $"HTTP {payment.HttpStatusCode} {payment.HttpOutcome}";
+        var request = $"{payment.Rail.ToString().ToLowerInvariant()} {payment.Amount:N2} {payment.Currency} "
+            + $"{payment.FromAccount} → {payment.ToAccount}";
+
+        // Meta lines are ordered by what must survive a narrow terminal: the qualifier, the
+        // clocks and the ErrorReason lead, and the request detail trails, because a row is
+        // truncated at its right edge and those are the parts read aloud
+        // (EXPERIENCE.md, Responsive & Platform).
+        var (symbol, headline, meta, remedy) = payment.State switch
+        {
+            PaymentTrackingState.Awaiting => (
+                "~",
+                $"Awaiting settlement — {payment.TransactionId}",
+                // The (listening) qualifier is part of the same string as the elapsed time, so
+                // the wait is never ambiguous about *who* is waiting.
+                $"{ElapsedText(now - payment.SubmittedAt)} ({AwaitingQualifier(state)}) · {http} · {request}",
+                string.Empty),
+
+            PaymentTrackingState.Settled => (
+                "●",
+                $"Settled — {payment.TransactionId}",
+                $"{ClockText(payment)} · {http} · {request}",
+                string.Empty),
+
+            PaymentTrackingState.Rejected => (
+                "✕",
+                $"Rejected — {payment.TransactionId}",
+                $"ErrorReason: {payment.ErrorReason ?? "(none supplied)"} · {ClockText(payment)} · "
+                + $"{http} · {request}",
+                string.Empty),
+
+            // Both records stay on screen, both stay labelled with their source and time. The
+            // console has no tie-break rule and should never acquire one.
+            PaymentTrackingState.Contradiction => (
+                "✕",
+                $"Contradiction — {payment.Note ?? "HTTP and the broadcast disagree"} — {payment.TransactionId}",
+                $"HTTP said {payment.HttpOutcome} ({payment.HttpStatusCode}) at "
+                + $"{OutcomeFeedNarrative.Clock(payment.SubmittedAt)} · "
+                + $"broadcast said {payment.BroadcastOutcome} at "
+                + $"{OutcomeFeedNarrative.Clock(payment.ProcessedAt)}, observed here "
+                + $"{OutcomeFeedNarrative.Clock(payment.ObservedAt)} · {request}",
+                OutcomeQueryRemedy),
+
+            PaymentTrackingState.OutcomeUnknown => (
+                "○",
+                $"Outcome unknown — {payment.Note ?? "the console stopped listening"} — {payment.TransactionId}",
+                $"{http} · {request}",
+                OutcomeQueryRemedy),
+
+            _ => (
+                "○",
+                $"Outcome not observed — no feed — {payment.TransactionId}",
+                $"{payment.Note ?? "the console is not subscribed to transaction-events"} · {http} · {request}",
+                OutcomeQueryRemedy),
+        };
+
+        return new PaymentRowViewModel(
+            payment.Sequence,
+            payment.TransactionId,
+            symbol,
+            headline,
+            meta,
+            legs,
+            LegSummary(payment),
+            remedy);
+    }
+
+    private const string OutcomeQueryRemedy =
+        "Query outcome with this transaction id — it is read-only and never blocked. "
+        + "Select this row and leave the outcome field blank to use it.";
+
+    /// <summary>
+    /// Two legs per settlement and none per rejection, so the console must never label a
+    /// payment settled on both legs on the strength of one.
+    /// </summary>
+    private static string LegSummary(TrackedPayment payment) => payment.State switch
+    {
+        PaymentTrackingState.Rejected => "No balance legs — a rejection emits none.",
+        _ => payment.ObservedLegs.Count switch
+        {
+            0 => payment.State == PaymentTrackingState.Settled ? "No balance legs observed yet." : string.Empty,
+            1 => "1 of 2 legs observed",
+            // Two legs is the whole settlement; the aligned amounts say it better than a label.
+            2 => string.Empty,
+            var count => $"{count} legs observed — a settlement emits two",
+        },
+    };
+
+    /// <summary>
+    /// Under injected faults a long wait is the expected result, so the row names the condition
+    /// rather than letting the audience read the delay as a defect.
+    /// </summary>
+    private static string AwaitingQualifier(OperatorConsoleState state) =>
+        state.FaultsArmed && !state.Applied.IsAllZero ? "listening, faults in force" : "listening";
+
+    /// <summary>
+    /// Two clocks, never one. Delivery latency belongs to the transport; presenting it as the
+    /// bank's processing time would be the same class of lie as a written fault config reported
+    /// as a live one.
+    /// </summary>
+    private static string ClockText(TrackedPayment payment)
+    {
+        if (payment.ProcessedAt is not { } processedAt || payment.ObservedAt is not { } observedAt)
+        {
+            return "no event clocks recorded";
+        }
+
+        return $"ProcessedAt {OutcomeFeedNarrative.PreciseClock(processedAt)}, observed here "
+            + $"+{(observedAt - processedAt).TotalMilliseconds:F0} ms";
+    }
+
+    private static string ElapsedText(TimeSpan elapsed) =>
+        elapsed < TimeSpan.Zero ? "0s" : $"{elapsed.TotalSeconds:F0}s";
+
+    /// <summary>
     /// The fault half of a record's provenance line. Present only when something was actually
     /// being injected when it was captured, so a quiet session's rows are not padded with
     /// "none" — but a record captured under 12 seconds of injected latency can never be
     /// mistaken for one captured under none (EXPERIENCE.md, Evidence provenance).
     /// </summary>
+    private static string StatusGlyph(bool succeeded) => succeeded ? "●" : "✕";
+
+    /// <summary>
+    /// The burst's proven leg. When the feed drops, the share it can no longer account for
+    /// moves out of <c>awaiting</c> and is named: leaving "awaiting 12" on screen with nobody
+    /// listening is the same false wait the payment rows withdraw.
+    /// </summary>
+    private static string BurstProvenLine(BurstProgress burst)
+    {
+        var line = $"Proven leg · settled {burst.Settled} · rejected {burst.Rejected} · awaiting {burst.Awaiting}";
+        return burst.Unknown > 0 ? $"{line} · outcome unknown {burst.Unknown}" : line;
+    }
+
     private static string FaultProvenance(EvidenceRecord record) =>
         record.FaultLevels is { } levels ? $" · faults {levels}" : string.Empty;
 

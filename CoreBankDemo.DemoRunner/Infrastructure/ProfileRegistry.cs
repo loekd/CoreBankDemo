@@ -28,6 +28,20 @@ public static class ProfileRegistry
         Path.GetDirectoryName(ProjectPath(repositoryRoot, profile))
         ?? throw new ArgumentOutOfRangeException(nameof(profile));
 
+    /// <summary>
+    /// The Dapr components directory a profile's sidecars are started with. Regular's Redis
+    /// listens on 6379 and LoadTests' on 6381, so the two directories are not interchangeable:
+    /// a sidecar started with the wrong one connects to a broker nobody is publishing to and
+    /// the feed is silently empty. Named here rather than guessed at the call site for exactly
+    /// that reason.
+    /// </summary>
+    public static string DaprComponentsDirectory(string repositoryRoot, TopologyProfile profile) => profile switch
+    {
+        TopologyProfile.Regular => Path.Combine(repositoryRoot, "dapr", "components"),
+        TopologyProfile.LoadTests => Path.Combine(repositoryRoot, "dapr", "components-loadtest"),
+        _ => throw new ArgumentOutOfRangeException(nameof(profile)),
+    };
+
     public static string DevProxyConfigDirectory(string repositoryRoot, TopologyProfile profile) =>
         Path.Combine(AppHostDirectory(repositoryRoot, profile), "devproxy", "config");
 

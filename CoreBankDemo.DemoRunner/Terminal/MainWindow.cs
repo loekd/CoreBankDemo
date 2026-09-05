@@ -86,8 +86,14 @@ public sealed class MainWindow : Window
     private readonly Button _resendButton = NewButton("Resend same key");
     private readonly Button _burstButton = NewButton("Run bounded burst");
     private readonly Button _cancelBurstButton = NewButton("Cancel active burst");
-    private readonly Button _queryButton = NewButton("Query outcome");
+    private readonly Button _queryButton = NewButton("Query outcome (blank = selected row)");
     private readonly Label _burstStatus = new();
+    private readonly Label _burstProvenStatus = new();
+    // Where a submitted payment resolves in place. Bound through the shared ListBinding, which
+    // preserves both the selection and the scroll offset, so an arriving outcome never moves
+    // the list under an operator who may be mid-sentence with a finger on a row.
+    private readonly ListView _paymentList = new();
+    private readonly Label _feedStatus = new();
     private readonly Label _operationsHint = new();
     private Label _omittedNote = null!;
     private Label _burstCountLabel = null!;
@@ -147,11 +153,16 @@ public sealed class MainWindow : Window
     private readonly ListBinding _resourceBinding;
     private readonly ListBinding _evidenceBinding;
     private readonly ListBinding _loadResultBinding;
+    private readonly ListBinding _paymentBinding;
 
     private PaymentRail _rail = PaymentRail.Standard;
     private IdempotencyMode _idempotencyMode = IdempotencyMode.Generated;
     private IReadOnlyList<ResourceRowViewModel> _resourceRows = [];
     private IReadOnlyList<EvidenceRowViewModel> _evidenceRows = [];
+    private IReadOnlyList<PaymentRowViewModel> _paymentRows = [];
+    private IReadOnlyList<long> _paymentLineOwners = [];
+    private bool _paymentSelectionIsDeliberate;
+    private bool _rebindingPaymentList;
     private bool _compactLayout;
     private string _message = string.Empty;
     private long _messageMark = -1;
@@ -178,6 +189,7 @@ public sealed class MainWindow : Window
         _resourceBinding = new ListBinding(_resourceList);
         _evidenceBinding = new ListBinding(_evidenceList);
         _loadResultBinding = new ListBinding(_loadResults);
+        _paymentBinding = new ListBinding(_paymentList);
         Title = "CoreBankDemo — Operator Console";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
@@ -315,16 +327,53 @@ public sealed class MainWindow : Window
             }
         };
 
-        _outcomeLabel = AddField(view, "Outcome key", _outcomeKey, LabelX, 13, LabelWidth, WideFieldWidth);
+        _burstProvenStatus.X = LabelX;
+        _burstProvenStatus.Y = 12;
+        _burstProvenStatus.Height = 1;
+        _burstProvenStatus.Width = Dim.Fill(1);
+
+        _outcomeLabel = AddField(view, "Outcome key", _outcomeKey, LabelX, 14, LabelWidth, WideFieldWidth);
         _queryButton.X = LabelX;
-        _queryButton.Y = 14;
+        _queryButton.Y = 15;
         _queryButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(_outcomeKey.Text.ToString() ?? string.Empty, _sessionCancellation.Token)));
+            Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(OutcomeQueryTarget(), _sessionCancellation.Token)));
         };
+
+        _paymentList.X = LabelX;
+        _paymentList.Y = 17;
+        _paymentList.Width = Dim.Fill(1);
+        _paymentList.Height = Dim.Fill(2);
+        // Only an operator's own selection may stand in for a blank outcome field. SelectedItem
+        // defaults to 0, so without this a blank field would quietly query the oldest payment.
+        _paymentList.ValueChanged += (_, _) =>
+        {
+            if (!_rebindingPaymentList)
+            {
+                _paymentSelectionIsDeliberate = true;
+            }
+        };
+
+        _feedStatus.X = LabelX;
+        _feedStatus.Y = Pos.AnchorEnd(2);
+        _feedStatus.Height = 1;
+        _feedStatus.Width = Dim.Fill(1);
+
         LayoutHint(_operationsHint);
-        view.Add(_railButton, _idempotencyButton, _submitButton, _resendButton, _burstButton, _cancelBurstButton, _burstStatus, _queryButton, _operationsHint);
+        view.Add(
+            _railButton,
+            _idempotencyButton,
+            _submitButton,
+            _resendButton,
+            _burstButton,
+            _cancelBurstButton,
+            _burstStatus,
+            _burstProvenStatus,
+            _queryButton,
+            _paymentList,
+            _feedStatus,
+            _operationsHint);
         return view;
     }
 
@@ -1022,9 +1071,25 @@ public sealed class MainWindow : Window
             _evidenceDetail.Text = model.SelectedEvidenceDetail;
         }
 
+        _paymentRows = model.Payments;
+        _rebindingPaymentList = true;
+        try
+        {
+            _paymentBinding.Bind(model.Payments.Count == 0
+                ? ["○ No payments submitted this session"]
+                : [.. BuildPaymentLines(model.Payments)]);
+        }
+        finally
+        {
+            _rebindingPaymentList = false;
+        }
+
+        _feedStatus.Text = model.FeedStatus;
+
         _statusLine.Text = model.MutationStatus;
         RenderMessageLine(model);
         _burstStatus.Text = model.BurstStatus;
+        _burstProvenStatus.Text = model.BurstProvenStatus;
         _loadStatus.Text = model.LoadPhaseStatus;
         _loadResultBinding.Bind(model.LoadResults);
 
@@ -1092,6 +1157,82 @@ public sealed class MainWindow : Window
         _mountedWorkspace = target;
     }
 
+    /// <summary>
+    /// Flattens the payment rows into Activity-row lines: a bold verb/object headline, its
+    /// muted detail beneath, and the balance legs in a fixed column. The order is submission
+    /// order and is never re-sorted, so a row that resolves stays exactly where it was.
+    /// </summary>
+    private IReadOnlyList<string> BuildPaymentLines(IReadOnlyList<PaymentRowViewModel> payments)
+    {
+        var lines = new List<string>();
+        var owners = new List<long>();
+        foreach (var payment in payments)
+        {
+            lines.Add($"{payment.Symbol} {payment.Headline}");
+            owners.Add(payment.Sequence);
+            lines.Add($"    {payment.Meta}");
+            owners.Add(payment.Sequence);
+            foreach (var leg in payment.Legs)
+            {
+                lines.Add($"    {leg}");
+                owners.Add(payment.Sequence);
+            }
+
+            if (payment.LegSummary.Length > 0)
+            {
+                lines.Add($"    {payment.LegSummary}");
+                owners.Add(payment.Sequence);
+            }
+
+            if (payment.Remedy.Length > 0)
+            {
+                lines.Add($"    {payment.Remedy}");
+                owners.Add(payment.Sequence);
+            }
+        }
+
+        _paymentLineOwners = owners;
+        return lines;
+    }
+
+    /// <summary>
+    /// What the outcome query looks up: whatever the operator typed, or — when the field is
+    /// empty and a row was <i>deliberately</i> selected — that row's transaction id. The
+    /// one-step remedy a row with an unknown outcome names is therefore one step away, while a
+    /// blank field with no chosen row never quietly queries the oldest payment.
+    /// </summary>
+    internal string OutcomeQueryTarget()
+    {
+        var typed = _outcomeKey.Text.ToString() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(typed))
+        {
+            return typed;
+        }
+
+        if (!_paymentSelectionIsDeliberate || _paymentRows.Count == 0 || _paymentLineOwners.Count == 0)
+        {
+            return typed;
+        }
+
+        var index = Math.Clamp(_paymentList.SelectedItem ?? 0, 0, _paymentLineOwners.Count - 1);
+        var owner = _paymentLineOwners[index];
+        return _paymentRows.FirstOrDefault(payment => payment.Sequence == owner)?.TransactionId ?? typed;
+    }
+
+    /// <summary>Marks the payment selection deliberate, as a real click or keypress would.</summary>
+    internal void SelectPaymentRowForTest(int index)
+    {
+        _paymentList.SelectedItem = index;
+        _paymentSelectionIsDeliberate = true;
+    }
+
+    /// <summary>Scrolls the payment list, as a real wheel or arrow key would.</summary>
+    internal void ScrollPaymentListForTest(int offsetY) =>
+        _paymentList.Viewport = _paymentList.Viewport with
+        {
+            Location = new Point(_paymentList.Viewport.Location.X, offsetY),
+        };
+
     private static string Hint(string hint) => hint.Length == 0 ? string.Empty : $"○ {hint}";
 
     /// <summary>
@@ -1144,7 +1285,7 @@ public sealed class MainWindow : Window
     {
         var submit = _compactLayout ? 6 : 7;
         var burst = _compactLayout ? 7 : 9;
-        var outcome = _compactLayout ? 10 : 13;
+        var outcome = _compactLayout ? 12 : 14;
         _submitButton.Y = submit;
         _resendButton.Y = submit;
         _burstCountLabel.Y = burst;
@@ -1154,9 +1295,13 @@ public sealed class MainWindow : Window
         _burstButton.Y = burst + 1;
         _cancelBurstButton.Y = burst + 1;
         _burstStatus.Y = burst + 2;
+        _burstProvenStatus.Y = burst + 3;
         _outcomeLabel.Y = outcome;
         _outcomeKey.Y = outcome;
         _queryButton.Y = outcome + 1;
+        // The payment list takes whatever is left. It is the last thing to give way, because
+        // it is where a submitted payment states its own outcome.
+        _paymentList.Y = outcome + 3;
     }
 
     /// <summary>
@@ -1500,7 +1645,7 @@ public sealed class MainWindow : Window
     internal Task TriggerBurstForTestAsync() => RunBurstAsync();
     internal Task TriggerResendForTestAsync() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token));
     internal Task TriggerQueryForTestAsync() => SurfaceAsync(
-        _controller.QueryOutcomeAsync(_outcomeKey.Text.ToString() ?? string.Empty, _sessionCancellation.Token));
+        _controller.QueryOutcomeAsync(OutcomeQueryTarget(), _sessionCancellation.Token));
     internal Task TriggerLoadForTestAsync(int expectedUnique) => SurfaceAsync(
         _controller.RunLoadTestAsync(expectedUnique, _sessionCancellation.Token));
     internal Task TriggerExportForTestAsync() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token));
@@ -1508,6 +1653,12 @@ public sealed class MainWindow : Window
         _controller.InspectAsync(endpoint, _sessionCancellation.Token));
     internal void TriggerResourceActionForTest() => TriggerSelectedResourceAction();
     internal void RenderForTest() => Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
+    internal ListView PaymentList => _paymentList;
+    internal IReadOnlyList<string> PaymentRowTexts =>
+        [.. _paymentList.Source?.ToList().Cast<string>() ?? []];
+    internal string FeedStatusText => _feedStatus.Text;
+    internal string BurstStatusText => _burstStatus.Text;
+    internal string BurstProvenStatusText => _burstProvenStatus.Text;
     internal Button ApplyFaultsButton => _applyFaultsButton;
     internal Button PanicOffButton => _panicOffButton;
     internal Button ArmingButton => _armingButton;
@@ -1583,11 +1734,22 @@ public sealed class MainWindow : Window
             }
 
             var selected = list.SelectedItem;
+            // SetSource resets the viewport to the top. An arriving broadcast outcome rewrites
+            // this list, and a list that scrolled itself under a live demonstration is a stage
+            // failure regardless of how good the news is -- so the offset is restored too.
+            var offset = list.Viewport.Location;
             _items = [.. items];
             list.SetSource(new ObservableCollection<string>(_items));
             if (_items.Length > 0)
             {
                 list.SelectedItem = Math.Clamp(selected ?? 0, 0, _items.Length - 1);
+                // Clamped to the last scrollable row, not the last item: a list that shrank
+                // would otherwise keep an offset past its own content and render blank.
+                var lastOffset = Math.Max(0, _items.Length - Math.Max(1, list.Viewport.Height));
+                list.Viewport = list.Viewport with
+                {
+                    Location = new Point(offset.X, Math.Clamp(offset.Y, 0, lastOffset)),
+                };
             }
         }
     }
