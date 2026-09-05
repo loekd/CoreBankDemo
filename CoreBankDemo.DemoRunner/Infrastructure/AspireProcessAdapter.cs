@@ -33,7 +33,14 @@ public sealed class AspireProcessAdapter : IProcessAdapter
         _terminator = terminator;
     }
 
-    public async Task<TopologyHandle> StartOwnedAsync(TopologyProfile profile, CancellationToken ct)
+    /// <summary>
+    /// Environment variable form of <c>Features:UseDevProxy</c>. Passed on every start so
+    /// the console's arming decision is explicit for both profiles rather than inherited
+    /// from whichever value each AppHost's appsettings.json happens to ship.
+    /// </summary>
+    internal const string ArmFaultsVariable = "Features__UseDevProxy";
+
+    public async Task<TopologyHandle> StartOwnedAsync(TopologyProfile profile, bool armFaults, CancellationToken ct)
     {
         if (profile == TopologyProfile.None)
         {
@@ -60,7 +67,11 @@ public sealed class AspireProcessAdapter : IProcessAdapter
             ],
             _repositoryRoot,
             CommandTimeout,
-            ct);
+            ct,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [ArmFaultsVariable] = armFaults ? "true" : "false",
+            });
         _output[profile] = JournalRedaction.Apply(
             string.Join(Environment.NewLine, new[] { result.StandardOutput, result.StandardError }.Where(value => !string.IsNullOrWhiteSpace(value))));
 

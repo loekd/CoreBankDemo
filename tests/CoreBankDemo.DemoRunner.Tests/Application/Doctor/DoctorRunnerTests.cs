@@ -17,6 +17,7 @@ public class DoctorRunnerTests
         environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsDevProxyAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsPortFreeAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(true);
         var health = new Mock<IHealthMonitor>();
         var aspire = new FakeAspireAdapter();
@@ -26,10 +27,10 @@ public class DoctorRunnerTests
                 health.Object,
                 aspire,
                 [new DoctorPortRequirement(TopologyProfile.Regular, "payments-api", 5294)])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.AllPassed.Should().BeTrue();
-        report.Checks.Should().HaveCount(6);
+        report.Checks.Should().HaveCount(7);
         health.VerifyNoOtherCalls();
     }
 
@@ -44,6 +45,7 @@ public class DoctorRunnerTests
         environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsDevProxyAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsPortFreeAsync(5294, It.IsAny<CancellationToken>())).ReturnsAsync(false);
         var health = new Mock<IHealthMonitor>();
         health.Setup(probe => probe.CheckAsync("payments-api", TopologyProfile.Regular, It.IsAny<CancellationToken>())).ReturnsAsync(status);
@@ -54,7 +56,7 @@ public class DoctorRunnerTests
                 health.Object,
                 aspire,
                 [new DoctorPortRequirement(TopologyProfile.Regular, "payments-api", 5294)])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.Checks.Single(check => check.Name.StartsWith("Port ", StringComparison.Ordinal)).Passed.Should().Be(expected);
     }
@@ -70,7 +72,7 @@ public class DoctorRunnerTests
         var aspire = new FakeAspireAdapter();
 
         var report = await new DoctorRunner(environment.Object, health.Object, aspire, [])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.AllPassed.Should().BeFalse();
         report.Checks.Take(3).Should().OnlyContain(check => !check.Passed);
@@ -83,6 +85,7 @@ public class DoctorRunnerTests
         environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsDevProxyAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         var health = new Mock<IHealthMonitor>();
         var aspire = new FakeAspireAdapter
         {
@@ -91,7 +94,7 @@ public class DoctorRunnerTests
         };
 
         var report = await new DoctorRunner(environment.Object, health.Object, aspire, [])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.AllPassed.Should().BeFalse();
         report.Checks.Should().Contain(check => check.Name.Contains("Regular") && check.Remediation == "partial");
@@ -108,7 +111,7 @@ public class DoctorRunnerTests
         };
 
         var report = await new DoctorRunner(environment.Object, health.Object, aspire, [])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.DiscoveryReachable.Should().BeFalse();
         report.CanStart(TopologyProfile.Regular).Should().BeFalse();
@@ -132,7 +135,7 @@ public class DoctorRunnerTests
         };
 
         var report = await new DoctorRunner(environment.Object, health.Object, aspire, requirements)
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.CanStart(TopologyProfile.Regular).Should().BeTrue();
         report.CanStart(TopologyProfile.LoadTests).Should().BeFalse();
@@ -145,10 +148,10 @@ public class DoctorRunnerTests
         var time = new FakeTimeProvider();
         var runner = new DoctorRunner(environment.Object, new Mock<IHealthMonitor>().Object, new FakeAspireAdapter(), [], time);
 
-        await runner.RunAsync(CancellationToken.None);
-        await runner.RunAsync(CancellationToken.None);
+        await runner.RunAsync(faultArmingRequested: false, CancellationToken.None);
+        await runner.RunAsync(faultArmingRequested: false, CancellationToken.None);
         time.Advance(TimeSpan.FromSeconds(16));
-        await runner.RunAsync(CancellationToken.None);
+        await runner.RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         environment.Verify(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
@@ -168,7 +171,7 @@ public class DoctorRunnerTests
                 health.Object,
                 aspire,
                 [new DoctorPortRequirement(TopologyProfile.Regular, "corebank-api", 5032)])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         var portCheck = report.Checks.Single(check => check.Name.StartsWith("Port ", StringComparison.Ordinal));
         portCheck.Passed.Should().BeFalse();
@@ -192,7 +195,7 @@ public class DoctorRunnerTests
                 health.Object,
                 new FakeAspireAdapter(),
                 [new DoctorPortRequirement(TopologyProfile.Regular, KnownResources.Jaeger, 16686)])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.CanStart(TopologyProfile.Regular).Should().BeTrue();
         report.Checks.Single(check => check.Name.StartsWith("Port ", StringComparison.Ordinal))
@@ -214,7 +217,7 @@ public class DoctorRunnerTests
                 health.Object,
                 new FakeAspireAdapter(),
                 [new DoctorPortRequirement(TopologyProfile.Regular, KnownResources.Jaeger, 16686)])
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.CanStart(TopologyProfile.Regular).Should().BeFalse();
         report.Checks.Single(check => check.Name.StartsWith("Port ", StringComparison.Ordinal))
@@ -237,7 +240,7 @@ public class DoctorRunnerTests
         };
 
         var report = await new DoctorRunner(environment.Object, health.Object, new FakeAspireAdapter(), requirements)
-            .RunAsync(CancellationToken.None);
+            .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.CanStart(TopologyProfile.Regular).Should().BeFalse();
         report.Profiles[TopologyProfile.Regular].CanAttach.Should().BeFalse();
@@ -253,6 +256,7 @@ public class DoctorRunnerTests
         environment.Setup(probe => probe.IsDotnetSdkAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsAspireCliAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsContainerRuntimeAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+        environment.Setup(probe => probe.IsDevProxyAvailableAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
         environment.Setup(probe => probe.IsPortFreeAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).ReturnsAsync(true);
         return environment;
     }

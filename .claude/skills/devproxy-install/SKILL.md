@@ -9,6 +9,7 @@ description: |
 
   **When NOT to use:**
   - Do NOT install this just to run `CoreBankDemo.LoadTests` — its Dev Proxy profile is opt-in and off by default (`Features:UseDevProxy: false`), so a standard load-test run never needs the binary.
+  - Do NOT install this just to start an AppHost from `CoreBankDemo.DemoRunner` — the console's fault arming is off by default and it passes `Features__UseDevProxy=false` on `aspire start`, which overrides the Regular AppHost's `appsettings.json`. Install it only when you intend to turn arming on in the Resources workspace (its preflight reports the missing binary and blocks Start with that reason). The rest of this recipe still applies to a direct `aspire run` of the Regular AppHost.
   - Do NOT run this recipe on the macOS host — it is sandbox/Linux-specific (`/opt`, `sudo`, `/etc/sandbox-persistent.sh`).
   - Do NOT use if `devproxy --version` already reports 3.2.0 — skip straight to `aspire-launch`.
 ---

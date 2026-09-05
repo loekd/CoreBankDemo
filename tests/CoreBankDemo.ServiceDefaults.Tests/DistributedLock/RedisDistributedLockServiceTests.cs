@@ -28,7 +28,20 @@ public class RedisDistributedLockServiceTests
         return (factory, logger, sut);
     }
 
-    private static Mock<IDistributedSynchronizationHandle> CreateHandleMock(CancellationToken handleLostToken = default)
+    /// <summary>A handle whose lease is never lost.</summary>
+    private static Mock<IDistributedSynchronizationHandle> CreateHandleMock() =>
+        CreateHandleMockLosingLease(CancellationToken.None);
+
+    /// <summary>
+    /// A handle whose lease-lost signal is <paramref name="handleLostToken"/>.
+    /// Deliberately *not* an overload of <see cref="CreateHandleMock()"/>:
+    /// xUnit1051 fires whenever any overload takes a <see cref="CancellationToken"/>,
+    /// and satisfying it here would thread the test's cancellation token into a
+    /// parameter that simulates the lock's own lease-lost signal -- conflating
+    /// "the test was cancelled" with "lock ownership was lost", which is the
+    /// exact distinction these tests exist to prove.
+    /// </summary>
+    private static Mock<IDistributedSynchronizationHandle> CreateHandleMockLosingLease(CancellationToken handleLostToken)
     {
         var handle = new Mock<IDistributedSynchronizationHandle>();
         handle.SetupGet(h => h.HandleLostToken).Returns(handleLostToken);
@@ -197,7 +210,7 @@ public class RedisDistributedLockServiceTests
     {
         var (factory, logger, sut) = CreateSut();
         using var handleLostCts = new CancellationTokenSource();
-        var handle = CreateHandleMock(handleLostCts.Token);
+        var handle = CreateHandleMockLosingLease(handleLostCts.Token);
         SetupAcquire(factory, "corebankdemo:lock:slow-lock", TimeSpan.FromSeconds(30), handle.Object);
         using var ambientCts = new CancellationTokenSource();
 
@@ -219,7 +232,7 @@ public class RedisDistributedLockServiceTests
     {
         var (factory, _, sut) = CreateSut();
         using var handleLostCts = new CancellationTokenSource();
-        var handle = CreateHandleMock(handleLostCts.Token);
+        var handle = CreateHandleMockLosingLease(handleLostCts.Token);
         SetupAcquire(factory, "corebankdemo:lock:slow-lock-2", TimeSpan.FromSeconds(30), handle.Object);
 
         await sut.ExecuteWithLockAsync("slow-lock-2", 30, workToken =>

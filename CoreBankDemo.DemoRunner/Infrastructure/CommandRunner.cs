@@ -10,7 +10,8 @@ public sealed class CommandRunner : ICommandRunner
         IReadOnlyList<string> arguments,
         string workingDirectory,
         TimeSpan timeout,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         using var process = new Process
         {
@@ -26,6 +27,16 @@ public sealed class CommandRunner : ICommandRunner
         foreach (var argument in arguments)
         {
             process.StartInfo.ArgumentList.Add(argument);
+        }
+
+        // Layered on top of the inherited environment rather than replacing it: the child
+        // still needs PATH, HOME and the rest to find and run the Aspire CLI.
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                process.StartInfo.Environment[name] = value;
+            }
         }
 
         try

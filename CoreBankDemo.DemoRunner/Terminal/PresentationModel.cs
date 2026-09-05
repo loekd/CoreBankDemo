@@ -14,6 +14,49 @@ public sealed record ResourceRowViewModel(
     bool CanMutate,
     bool CanRestart);
 
+/// <summary>
+/// The knob captions, named once. The Faults workspace renders its rows straight from
+/// <see cref="FaultsViewModel.Knobs"/>, so a knob added or reordered here cannot desync from
+/// the labels drawn beside it.
+/// </summary>
+public static class FaultKnobs
+{
+    public const string ErrorRate = "Error rate";
+    public const string LatencyBand = "Latency band";
+    public const string Throttling = "Throttling";
+}
+
+/// <summary>
+/// One fault knob, always carrying its exact number as text. The bar is reinforcement; the
+/// number is the authoritative reading and survives a monochrome terminal and a projector.
+/// </summary>
+/// <param name="ValueText">Live level alone, or the explicit delta (<c>5% → 40%</c>) when staged.</param>
+public sealed record FaultKnobViewModel(
+    string Name,
+    string LiveText,
+    string StagedText,
+    string ValueText,
+    bool IsStaged);
+
+/// <summary>
+/// The Faults workspace's whole readable state. Severity lives in the numbers and the bar
+/// length only — nothing here encodes it as a colour.
+/// </summary>
+public sealed record FaultsViewModel(
+    bool Available,
+    string DisabledReason,
+    string ChipSymbol,
+    string ChipLabel,
+    IReadOnlyList<FaultKnobViewModel> Knobs,
+    IReadOnlyList<FaultPreset> Presets,
+    string PresetLabel,
+    bool CanApply,
+    string ApplyCaption,
+    string Detail,
+    string CostNote,
+    FaultLevels Live,
+    FaultLevels Staged);
+
 public sealed record EvidenceRowViewModel(
     long Sequence,
     string Summary,
@@ -30,6 +73,7 @@ public sealed record OperatorPresentationModel(
     string EvidenceStrip,
     string SelectedEvidenceDetail,
     string MutationStatus,
+    FaultsViewModel Faults,
     string BurstStatus,
     string LoadPhaseStatus,
     IReadOnlyList<string> LoadResults,
@@ -40,11 +84,19 @@ public sealed record OperatorPresentationModel(
     bool CanResend,
     string OperationsHint,
     string ResourcesHint,
-    string LoadHint);
+    string LoadHint,
+    string ArmingCaption,
+    bool CanChangeArming);
 
 public static class PresentationModelBuilder
 {
-    public static OperatorPresentationModel Build(OperatorConsoleState state)
+    /// <summary>
+    /// Projects the console state for rendering. <paramref name="now"/> is required rather
+    /// than defaulted because it drives the "applied — not yet observed" readout: a caller
+    /// that forgot to pass a clock would silently render a console that never reports how
+    /// long it has been waiting for proof.
+    /// </summary>
+    public static OperatorPresentationModel Build(OperatorConsoleState state, DateTimeOffset now)
     {
         var resources = (state.Topology?.Resources ?? [])
             .Select(resource =>
@@ -70,8 +122,9 @@ public static class PresentationModelBuilder
             .Select(record => new EvidenceRowViewModel(
                 record.Sequence,
                 $"{(record.Succeeded ? "●" : "✕")} {record.Summary}",
-                $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}",
-                $"{record.Method} {record.Target}{Environment.NewLine}HTTP {record.StatusCode?.ToString() ?? "n/a"} · {record.Duration.TotalMilliseconds:F0} ms{Environment.NewLine}{record.Detail}",
+                $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}{FaultProvenance(record)}",
+                $"{record.Method} {record.Target}{Environment.NewLine}HTTP {record.StatusCode?.ToString() ?? "n/a"} · {record.Duration.TotalMilliseconds:F0} ms{Environment.NewLine}"
+                + $"Faults: {FaultProvenanceDetail(record)}{Environment.NewLine}{record.Detail}",
                 record.Succeeded))
             .ToList();
 
@@ -81,6 +134,7 @@ public static class PresentationModelBuilder
               + $"{KnownTopologyProfiles.DisplayName(state.SelectedEvidence.Profile)} · generation {state.SelectedEvidence.RunGeneration}{Environment.NewLine}"
               + $"{state.SelectedEvidence.Method} {state.SelectedEvidence.Target}{Environment.NewLine}"
               + $"HTTP {state.SelectedEvidence.StatusCode?.ToString() ?? "n/a"} · {state.SelectedEvidence.Duration.TotalMilliseconds:F0} ms{Environment.NewLine}"
+              + $"Faults: {FaultProvenanceDetail(state.SelectedEvidence)}{Environment.NewLine}"
               + state.SelectedEvidence.Detail;
 
         var loadResults = new List<string>();
@@ -106,12 +160,10 @@ public static class PresentationModelBuilder
         var resourceSummary = resources.Count == 0
             ? "resources ○ Unknown"
             : string.Join(" ", resources.Select(resource => $"{Abbreviate(resource.Name)} {resource.Symbol}"));
-        var devProxy = resources.FirstOrDefault(resource => resource.Name == KnownResources.DevProxy);
-        var devProxyText = devProxy is null
-            ? "DevProxy unavailable"
-            : $"DevProxy {(devProxy.State is "Healthy" or "Running" ? "ON" : "OFF")}";
+        var faults = BuildFaults(state, now);
         var profile = KnownTopologyProfiles.DisplayName(state.Profile);
-        var topologyBar = $"{profile} · {state.Ownership} · generation {state.RunGeneration} · {devProxyText} · {resourceSummary}";
+        var topologyBar = $"{profile} · {state.Ownership} · generation {state.RunGeneration} · "
+            + $"{faults.ChipSymbol} {faults.ChipLabel} · {resourceSummary}";
 
         return new OperatorPresentationModel(
             topologyBar,
@@ -127,6 +179,7 @@ public static class PresentationModelBuilder
             state.ActiveMutation is null
                 ? state.StatusLine
                 : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running",
+            faults,
             $"Burst {state.Burst.Sent}/{state.Burst.Requested} · accepted {state.Burst.Accepted} · completed {state.Burst.Completed} · failed {state.Burst.Failed}{(state.Burst.Cancelled ? " · Cancelled" : string.Empty)}",
             $"{state.LoadProgress.Phase} · {state.LoadProgress.Elapsed.TotalSeconds:F0}s · {state.LoadProgress.Detail}",
             loadResults,
@@ -141,7 +194,183 @@ public static class PresentationModelBuilder
             state.CanResendLastPayment && state.ActiveMutation is null,
             OperationsHint(state),
             ResourcesHint(state),
-            LoadHint(state));
+            LoadHint(state),
+            ArmingCaption(state),
+            state.Ownership == TopologyOwnership.None);
+    }
+
+    /// <summary>
+    /// The fault half of a record's provenance line. Present only when something was actually
+    /// being injected when it was captured, so a quiet session's rows are not padded with
+    /// "none" — but a record captured under 12 seconds of injected latency can never be
+    /// mistaken for one captured under none (EXPERIENCE.md, Evidence provenance).
+    /// </summary>
+    private static string FaultProvenance(EvidenceRecord record) =>
+        record.FaultLevels is { } levels ? $" · faults {levels}" : string.Empty;
+
+    private static string FaultProvenanceDetail(EvidenceRecord record) =>
+        record.FaultLevels?.ToString() ?? "none in force";
+
+    /// <summary>
+    /// Names the launch-time truth, never a bare "on": arming decides what the *next* start
+    /// does and can never mean "faults are happening now".
+    /// </summary>
+    private static string ArmingCaption(OperatorConsoleState state)
+    {
+        var setting = state.FaultArmingRequested ? "armed" : "not armed";
+        return state.Ownership switch
+        {
+            TopologyOwnership.Attached =>
+                $"Faults on next start: {setting} (read-only — this AppHost is Attached)",
+            TopologyOwnership.Owned =>
+                $"Faults on this running AppHost: {(state.FaultsArmed ? "armed" : "not armed")} "
+                + "(read-only — restart it to change)",
+            _ => $"Faults {setting} on next AppHost start",
+        };
+    }
+
+    /// <summary>
+    /// Builds the fault chip and the Faults workspace. The chip has exactly three symbols —
+    /// <c>-</c> Unavailable, <c>·</c> Armed, <c>!</c> Faults in force — and the console only
+    /// reaches the third once traffic has actually carried the applied levels.
+    /// </summary>
+    private static FaultsViewModel BuildFaults(OperatorConsoleState state, DateTimeOffset now)
+    {
+        var live = state.Applied;
+        var staged = state.Staged;
+        var proxyRunning = IsDevProxyRunning(state);
+        var available = state.FaultsArmed && proxyRunning;
+        var (symbol, label) = FaultChip(state, live, now, proxyRunning);
+
+        var knobs = new List<FaultKnobViewModel>
+        {
+            Knob(FaultKnobs.ErrorRate, live.ErrorRateText, staged.ErrorRateText),
+            Knob(FaultKnobs.LatencyBand, live.LatencyText, staged.LatencyText),
+            Knob(FaultKnobs.Throttling, live.ThrottleText, staged.ThrottleText),
+        };
+        var stagedCount = knobs.Count(knob => knob.IsStaged);
+        var canApply = available && stagedCount > 0;
+        var applyCaption = !available
+            ? "Apply (unavailable)"
+            : stagedCount == 0
+                ? "Apply (nothing staged)"
+                : $"Apply {stagedCount} staged knob{(stagedCount == 1 ? string.Empty : "s")}";
+
+        return new FaultsViewModel(
+            available,
+            available
+                ? string.Empty
+                : state.FaultsArmed
+                    ? "This topology was armed, but its Dev Proxy is not running — check the "
+                      + "devproxy resource in Resources (2) and start it."
+                    : OperatorConsoleController.FaultsUnavailableReason(state),
+            symbol,
+            label,
+            knobs,
+            FaultLevels.PresetsFor(state.Profile),
+            staged.MatchingPresetName(state.Profile) ?? "Custom",
+            canApply,
+            applyCaption,
+            FaultDetail(state),
+            available ? CostNote : string.Empty,
+            live,
+            staged);
+    }
+
+    /// <summary>
+    /// Stated up front, not discovered mid-talk. Applying a level restarts the Dev Proxy —
+    /// the only way Dev Proxy 3.2.0 picks up a new config (ADR-019) — so calls in flight
+    /// through the proxy can fail while it comes back. Panic-off pays the same cost.
+    /// </summary>
+    private const string CostNote =
+        "Apply and 0 both restart the Dev Proxy — calls through it can fail for a moment while it comes back.";
+
+    /// <summary>
+    /// Whether a Dev Proxy is actually running in the current snapshot. The chip may only
+    /// claim <c>Armed</c> or <c>Faults in force</c> when it is: intent to arm is not the same
+    /// fact as a live proxy, and reporting faults against a dead one is exactly the kind of
+    /// unearned confidence this console exists to avoid.
+    /// </summary>
+    private static bool IsDevProxyRunning(OperatorConsoleState state) =>
+        state.Topology?.FindResource(KnownResources.DevProxy) is
+            { Condition: ResourceCondition.Healthy or ResourceCondition.Running };
+
+    /// <summary>
+    /// The workspace's meta line: any read/write failure first, otherwise where the levels on
+    /// screen came from — a config this session wrote, or the checked-in profile.
+    /// </summary>
+    private static string FaultDetail(OperatorConsoleState state)
+    {
+        if (!string.IsNullOrWhiteSpace(state.FaultDetail))
+        {
+            return state.FaultDetail;
+        }
+
+        if (!state.FaultsArmed)
+        {
+            return string.Empty;
+        }
+
+        return state.FaultLevelsFromSession
+            ? "Levels read from this session's generated Dev Proxy config."
+            : $"Levels read from the checked-in {KnownTopologyProfiles.DisplayName(state.Profile)} Dev Proxy profile.";
+    }
+
+    private static FaultKnobViewModel Knob(string name, string liveText, string stagedText)
+    {
+        var isStaged = !string.Equals(liveText, stagedText, StringComparison.Ordinal);
+        return new FaultKnobViewModel(
+            name,
+            liveText,
+            stagedText,
+            // A staged number is never shown alone: a presenter glancing at the screen must
+            // never read an intended level as a current one.
+            isStaged ? $"{liveText} → {stagedText}" : liveText,
+            isStaged);
+    }
+
+    private static (string Symbol, string Label) FaultChip(
+        OperatorConsoleState state,
+        FaultLevels live,
+        DateTimeOffset now,
+        bool proxyRunning)
+    {
+        if (!state.FaultsArmed)
+        {
+            return ("-", "Faults unavailable");
+        }
+
+        if (!proxyRunning)
+        {
+            // Armed at launch, but there is no live proxy to inject anything right now.
+            return ("-", "Faults unavailable — Dev Proxy not running");
+        }
+
+        if (live.IsAllZero)
+        {
+            // An armed proxy injecting nothing must never look like an active fault.
+            return ("·", "Armed");
+        }
+
+        if (state.FaultsObserved)
+        {
+            return ("!", "Faults in force");
+        }
+
+        // Dev Proxy owns its own reload timing. Between the write and the first intercepted
+        // call carrying the new levels the console says so, never that the level is live —
+        // and the readout is bounded, because a number climbing past a minute tells the
+        // operator nothing the first few seconds did not.
+        if (state.FaultsAppliedAt is not { } appliedAt)
+        {
+            return ("·", "Applied — not yet observed in traffic");
+        }
+
+        var elapsed = now - appliedAt;
+        return elapsed >= FaultLevels.ObservationWindow
+            ? ("·", $"Applied — still not observed after {FaultLevels.ObservationWindow.TotalSeconds:F0}s; "
+                + "submit a payment, or check that Dev Proxy reloaded its config")
+            : ("·", $"Applied — not yet observed in traffic ({elapsed.TotalSeconds:F0}s)");
     }
 
     /// <summary>
@@ -211,6 +440,17 @@ public static class PresentationModelBuilder
     /// </summary>
     private static string LoadHint(OperatorConsoleState state)
     {
+        // Stated before Run fires, never after: a run whose conditions were injected can
+        // never present as a clean run against the accepted defaults.
+        var faultWarning = state.FaultsArmed && !state.Applied.IsAllZero
+            ? $"Fault injection is in force ({state.Applied}) — this run's conditions are not "
+              + "the accepted defaults. Press 0 to return every knob to zero first. "
+            : string.Empty;
+        return faultWarning + LoadHintCore(state);
+    }
+
+    private static string LoadHintCore(OperatorConsoleState state)
+    {
         if (state.ActiveMutation is { } mutation)
         {
             return $"Busy — {mutation.Kind} on {mutation.Target} is in flight; the load workflow unlocks when it settles.";
@@ -273,6 +513,7 @@ public static class PresentationModelBuilder
         WorkspaceKind.Resources => "Resources",
         WorkspaceKind.Evidence => "Evidence/Results",
         WorkspaceKind.LoadTest => "Load Test",
+        WorkspaceKind.Faults => "Faults",
         _ => workspace.ToString(),
     };
 

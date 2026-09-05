@@ -64,7 +64,7 @@ The Load Test workspace is an adapter over the accepted Reset → Run → Wait �
 - `CoreBankDemo.DemoRunner/Program.cs` — composition root and ordinary operator-console CLI binding only.
 - `CoreBankDemo.DemoRunner/Application/` — typed topology/resource/payment/burst/evidence/load state and commands behind process, Aspire, HTTP, health, browser, export, and time ports.
 - `CoreBankDemo.DemoRunner/Infrastructure/` — owned Aspire process lifecycle, supported Aspire state/resource CLI, allow-listed HTTP/LoadTestSupport operations, health monitor, browser opener, and bounded/redacted evidence export.
-- `CoreBankDemo.DemoRunner/Terminal/` — the four-workspace Terminal.Gui shell, bindings, responsive layout, confirmation modal, and theme; no process/HTTP/business logic.
+- `CoreBankDemo.DemoRunner/Terminal/` — the five-workspace Terminal.Gui shell (Operations, Resources, Evidence/Results, Load Test, Faults — see ADR-019), bindings, responsive layout, confirmation modal, and theme; no process/HTTP/business logic.
 - `tests/CoreBankDemo.DemoRunner.Tests/` — application-state, ownership/authority, resource transition, payment/idempotency, burst/cancellation, evidence provenance, load workflow, recovery, redaction, and presentation-model tests.
 - `Directory.Packages.props` pins `Terminal.Gui` at `2.4.17`; `CoreBankDemo.sln`/`CoreBankDemo.Rebuild.slnf` add both projects to the ordinary gate.
 - `.gitignore` excludes only generated local artifacts such as captured output and explicit evidence exports.

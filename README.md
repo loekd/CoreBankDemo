@@ -415,12 +415,13 @@ dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj
 dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj -- --doctor
 ```
 
-The console has four capability-driven workspaces:
+The console has five capability-driven workspaces:
 
 1. **Operations** — submit standard or instant payments, choose Generated/Supplied/Omitted idempotency, resend a stable key, query outcomes, and run cancellable bounded bursts.
 2. **Resources** — start or attach Regular/LoadTests, stop or switch only runner-owned AppHosts, and run confirmed allow-listed resource Start/Stop/Restart commands against a freshly fingerprinted graph.
 3. **Evidence/Results** — inspect bounded redacted request/response evidence with topology and generation provenance, optionally wrap the raw view, and explicitly export the current session.
 4. **Load Test** — run the accepted Reset → Run → Wait → Assert → Investigate workflow and read the five invariants plus inline-instant-settlement evidence.
+5. **Faults** — stage error-rate, latency-band, and throttling levels from named presets or by hand, apply them in one write, and drop every knob to zero with `0`. Levels are injected only through Dev Proxy, by writing a gitignored generated session config and then restarting the `devproxy` resource so it loads it — Dev Proxy 3.2.0 cannot reload a changed config (ADR-019), so applying costs a brief proxy restart, which the workspace states up front. No checked-in Dev Proxy profile is ever written. Arming is a launch-time property set in **Resources** before an AppHost start, and is **off by default** — Dev Proxy is opt-in.
 
 ### Shortcuts
 
@@ -430,6 +431,8 @@ The console has four capability-driven workspaces:
 | `2` | Resources |
 | `3` | Evidence/Results |
 | `4` | Load Test |
+| `5` | Faults |
+| `0` | Panic-off — every fault knob to zero, applied immediately, from any workspace, no confirmation |
 | `R` | Refresh live Aspire state |
 | `Q` | Quit (stops only child processes this session started; never touches an attached/unowned topology) |
 
@@ -441,6 +444,8 @@ All mouse actions have keyboard equivalents. Destructive actions open a modal wi
 - Generated and supplied idempotency keys are stable for **Resend same key**. Omitted-key ambiguity is labeled `Ambiguous — not yet reconciled` and is never retried automatically.
 - Evidence is session-local and never restored on relaunch. Explicit exports are written under the gitignored `.demo-runner-exports/` directory.
 - A topology switch retains earlier evidence with its original profile and run-generation label.
+- Every evidence record is stamped with the fault levels in force when it was captured, so a `202 Pending` observed under injected latency is never confused with one observed under none.
+- The console reports `Applied — not yet observed in traffic` until its own traffic actually carries an applied fault level; only then does the topology bar read `Faults in force`. A restart that fails leaves the levels reported as *not* applied. The generated session config is deleted when the session stops owning the topology, so a later `aspire run` uses the checked-in profile again.
 
 ### Manual fallback
 

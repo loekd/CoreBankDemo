@@ -194,7 +194,7 @@ public class AspireAdapterTests
             CommandOutput.Success("[]"));
         var adapter = new AspireProcessAdapter("/repo", commands);
 
-        var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+        var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
         await adapter.StopOwnedAsync(handle, CancellationToken.None);
 
         handle.ProcessId.Should().Be(pid);
@@ -203,6 +203,33 @@ public class AspireAdapterTests
             "start", "--apphost", project, "--format", "Json", "--non-interactive", "--nologo");
         commands.Calls[4].Arguments.Should().Equal(
             "stop", "--apphost", project, "--non-interactive", "--nologo");
+        commands.Calls[1].Environment.Should().NotBeNull()
+            .And.Contain(new KeyValuePair<string, string>("Features__UseDevProxy", "true"));
+        commands.Calls[0].Environment.Should().BeNull("only the start call carries the arming decision");
+    }
+
+    [Theory]
+    [InlineData(true, "true")]
+    [InlineData(false, "false")]
+    public async Task ProcessAdapter_Start_PassesTheArmingDecisionAsAnEnvironmentVariable(
+        bool armFaults,
+        string expected)
+    {
+        var project = "/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj";
+        var pid = DeadPid();
+        var commands = new RecordingCommandRunner();
+        commands.Queue(
+            CommandOutput.Success("[]"),
+            CommandOutput.Success($"{{\"appHostPid\":{pid}}}"),
+            CommandOutput.Success(Ps(project, pid)));
+        var adapter = new AspireProcessAdapter("/repo", commands);
+
+        await adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults, CancellationToken.None);
+
+        // Env beats appsettings.json, so the console's arming decision is explicit for both
+        // profiles rather than inherited from whichever default each AppHost ships.
+        commands.Calls[1].Environment.Should().Contain(
+            new KeyValuePair<string, string>("Features__UseDevProxy", expected));
     }
 
     [Fact]
@@ -217,7 +244,7 @@ public class AspireAdapterTests
             CommandOutput.Success());
         var adapter = new AspireProcessAdapter("/repo", commands);
 
-        var act = () => adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+        var act = () => adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*without a valid AppHost PID*");
         commands.Calls.Should().Contain(call => call.Arguments.First() == "stop");
@@ -236,7 +263,7 @@ public class AspireAdapterTests
             CommandOutput.Success());
         var adapter = new AspireProcessAdapter("/repo", commands);
 
-        var act = () => adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+        var act = () => adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
 
         await act.Should().ThrowAsync<TimeoutException>();
         commands.Calls.Should().Contain(call => call.Arguments.First() == "stop");
@@ -254,7 +281,7 @@ public class AspireAdapterTests
             CommandOutput.Success(Ps(project, 43)));
         var adapter = new AspireProcessAdapter("/repo", commands);
 
-        var act = () => adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+        var act = () => adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*PID verification failed*");
         commands.Calls.Should().NotContain(call => call.Arguments.First() == "stop");
@@ -271,7 +298,7 @@ public class AspireAdapterTests
             CommandOutput.Success(Ps(project, 42)),
             CommandOutput.Success(Ps(project, 43)));
         var adapter = new AspireProcessAdapter("/repo", commands);
-        var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+        var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
 
         var act = () => adapter.StopOwnedAsync(handle, CancellationToken.None);
 
@@ -295,7 +322,7 @@ public class AspireAdapterTests
                 stopResult,
                 CommandOutput.Success("[]"));
             var adapter = new AspireProcessAdapter("/repo", commands);
-            var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+            var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
 
             var result = await adapter.StopOwnedAsync(handle, CancellationToken.None);
 
@@ -315,7 +342,7 @@ public class AspireAdapterTests
             CommandOutput.Success(Ps(project, 42)),
             CommandOutput.Success("[]"));
         var adapter = new AspireProcessAdapter("/repo", commands);
-        var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, CancellationToken.None);
+        var handle = await adapter.StartOwnedAsync(TopologyProfile.Regular, armFaults: true, CancellationToken.None);
 
         await adapter.ForgetExitedOwnedAsync(handle, CancellationToken.None);
 
@@ -475,9 +502,10 @@ internal sealed class RecordingCommandRunner : ICommandRunner
         IReadOnlyList<string> arguments,
         string workingDirectory,
         TimeSpan timeout,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
-        Calls.Add(new CommandCall(fileName, arguments.ToList(), workingDirectory, timeout));
+        Calls.Add(new CommandCall(fileName, arguments.ToList(), workingDirectory, timeout, environment));
         return Task.FromResult(_results.Dequeue());
     }
 }
@@ -486,4 +514,5 @@ internal sealed record CommandCall(
     string FileName,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
-    TimeSpan Timeout);
+    TimeSpan Timeout,
+    IReadOnlyDictionary<string, string>? Environment = null);

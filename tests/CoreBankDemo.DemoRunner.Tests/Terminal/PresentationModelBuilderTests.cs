@@ -8,13 +8,16 @@ namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
 public class PresentationModelBuilderTests
 {
-    [Fact]
-    public void Build_EmptyState_ShowsFourWorkspacesAndColdPlaceholders()
-    {
-        var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty);
+    private static readonly DateTimeOffset Now = new(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
 
-        model.Navigation.Should().HaveCount(4);
+    [Fact]
+    public void Build_EmptyState_ShowsFiveWorkspacesAndColdPlaceholders()
+    {
+        var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty, Now);
+
+        model.Navigation.Should().HaveCount(5);
         model.Navigation.Should().Contain(item => item.Shortcut == "1" && item.Label == "Operations");
+        model.Navigation.Should().Contain(item => item.Shortcut == "5" && item.Label == "Faults");
         model.EvidenceStrip.Should().Be("No actions yet this session.");
         model.LoadResults.Should().HaveCount(6);
         model.LoadResults.Should().OnlyContain(value => value.Contains("not yet observed"));
@@ -40,7 +43,7 @@ public class PresentationModelBuilderTests
             ResourceAuthorityAvailable = true,
         };
 
-        var model = PresentationModelBuilder.Build(state);
+        var model = PresentationModelBuilder.Build(state, Now);
 
         model.TopologyBar.Should().Contain("Regular").And.Contain("Attached");
         model.Resources.Should().Contain(row => row.Name == KnownResources.CoreBankApi && row.Symbol == "●" && row.NextAction == "Stop");
@@ -81,7 +84,7 @@ public class PresentationModelBuilderTests
             LastLoadResult = result,
         };
 
-        var model = PresentationModelBuilder.Build(state);
+        var model = PresentationModelBuilder.Build(state, Now);
 
         model.Evidence.Single().Provenance.Should().Contain("LoadTests · generation 4");
         model.SelectedEvidenceDetail.Should().Contain("raw");
@@ -93,7 +96,7 @@ public class PresentationModelBuilderTests
     [Fact]
     public void Build_ColdState_ExplainsWhyEveryGatedControlIsUnavailable()
     {
-        var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty);
+        var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty, Now);
 
         model.OperationsHint.Should().Contain("No topology attached");
         model.ResourcesHint.Should().Contain("Preflight");
@@ -111,7 +114,7 @@ public class PresentationModelBuilderTests
             ResourceAuthorityAvailable = true,
         };
 
-        var model = PresentationModelBuilder.Build(state);
+        var model = PresentationModelBuilder.Build(state, Now);
 
         model.OperationsHint.Should().BeEmpty();
         model.ResourcesHint.Should().BeEmpty();
@@ -128,7 +131,7 @@ public class PresentationModelBuilderTests
             CanResendLastPayment = true,
         };
 
-        var model = PresentationModelBuilder.Build(state);
+        var model = PresentationModelBuilder.Build(state, Now);
 
         model.IsBusy.Should().BeTrue();
         model.CanCancelBurst.Should().BeTrue();

@@ -16,7 +16,8 @@ public class MainWindowTests
     [InlineData(2, WorkspaceKind.Resources)]
     [InlineData(3, WorkspaceKind.Evidence)]
     [InlineData(4, WorkspaceKind.LoadTest)]
-    public void Shortcuts_OneThroughFour_SelectEveryWorkspace(int number, WorkspaceKind expected)
+    [InlineData(5, WorkspaceKind.Faults)]
+    public void Shortcuts_OneThroughFive_SelectEveryWorkspace(int number, WorkspaceKind expected)
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
@@ -26,6 +27,7 @@ public class MainWindowTests
             2 => Key.D2,
             3 => Key.D3,
             4 => Key.D4,
+            5 => Key.D5,
             _ => throw new ArgumentOutOfRangeException(nameof(number)),
         };
 
@@ -42,14 +44,14 @@ public class MainWindowTests
         using var window = CreateWindow(controller);
 
         window.ResizeForTest(80, 24);
-        foreach (var key in new[] { Key.D1, Key.D2, Key.D3, Key.D4 })
+        foreach (var key in new[] { Key.D1, Key.D2, Key.D3, Key.D4, Key.D5 })
         {
             window.HandleKeyForTest(key);
         }
 
         window.NavigationFrameWidth.Should().Be(5);
-        controller.State.ActiveWorkspace.Should().Be(WorkspaceKind.LoadTest);
-        window.IsWorkspaceVisible(WorkspaceKind.LoadTest).Should().BeTrue();
+        controller.State.ActiveWorkspace.Should().Be(WorkspaceKind.Faults);
+        window.IsWorkspaceVisible(WorkspaceKind.Faults).Should().BeTrue();
     }
 
     [Fact]

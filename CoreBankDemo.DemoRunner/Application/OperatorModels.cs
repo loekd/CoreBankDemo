@@ -8,6 +8,10 @@ public enum WorkspaceKind
     Resources,
     Evidence,
     LoadTest,
+
+    // Appended last on purpose: the ordinal is load-bearing (MainWindow indexes
+    // its workspace array by it) and the nav rail's 1-5 keys follow it.
+    Faults,
 }
 
 public enum TopologyProfile
@@ -88,6 +92,7 @@ public enum EvidenceKind
     Inspection,
     LoadTest,
     Export,
+    Fault,
 }
 
 public enum LoadWorkflowPhase
@@ -209,7 +214,10 @@ public sealed record EvidenceRecord(
     int? StatusCode,
     TimeSpan Duration,
     string Detail,
-    bool Succeeded);
+    bool Succeeded,
+    // Provenance, for the same reason the topology is: a 202 captured under 12
+    // seconds of injected latency and one captured under none are different facts.
+    FaultLevels? FaultLevels = null);
 
 public sealed record BurstProgress(
     int Requested,
@@ -286,8 +294,33 @@ public sealed record OperatorConsoleState(
     BurstProgress Burst,
     LoadWorkflowProgress LoadProgress,
     LoadWorkflowResult? LastLoadResult,
-    string StatusLine)
+    string StatusLine,
+    // --- Fault injection -------------------------------------------------
+    // Arming is a launch-time property: this flag decides what the *next* start
+    // does, and is never a live on/off switch for a running topology. Off by
+    // default because Dev Proxy is opt-in -- defaulting on would make the binary
+    // a hard prerequisite for every console-started topology.
+    bool FaultArmingRequested = false,
+    // True only when this session started the current topology with a Dev Proxy.
+    // An Attached topology can be reported on, never re-armed.
+    bool FaultsArmed = false,
+    FaultLevels? AppliedFaults = null,
+    FaultLevels? StagedFaults = null,
+    DateTimeOffset? FaultsAppliedAt = null,
+    // A written config is not a live fault. Only traffic carrying the levels
+    // flips this, and only then does the chip read "Faults in force".
+    bool FaultsObserved = false,
+    // True when the levels came from a session config this console wrote, false when
+    // they were read from the checked-in profile the AppHost started with.
+    bool FaultLevelsFromSession = false,
+    string FaultDetail = "")
 {
+    public FaultLevels Applied => AppliedFaults ?? FaultLevels.AllZero;
+
+    public FaultLevels Staged => StagedFaults ?? Applied;
+
+    public bool HasStagedFaultChange => Staged != Applied;
+
     public static OperatorConsoleState Empty => new(
         WorkspaceKind.Operations,
         TopologyProfile.None,

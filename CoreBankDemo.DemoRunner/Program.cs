@@ -39,7 +39,10 @@ public static class Program
 
         if (options.Doctor)
         {
-            var report = await doctor.RunAsync(CancellationToken.None);
+            // Arming is off by default, so --doctor reports a missing Dev Proxy as "not
+            // required" rather than failing: the binary is only a prerequisite once the
+            // operator turns arming on in the Resources workspace.
+            var report = await doctor.RunAsync(faultArmingRequested: false, CancellationToken.None);
             foreach (var check in report.Checks)
             {
                 Console.WriteLine($"[{(check.Passed ? "OK  " : "FAIL")}] {check.Name}{(string.IsNullOrEmpty(check.Remediation) ? string.Empty : $" — {check.Remediation}")}");
@@ -54,6 +57,7 @@ public static class Program
             new HttpPaymentGateway(httpClient),
             new LoadWorkflowRunner(httpClient, aspire, TimeProvider.System),
             new SessionEvidenceExporter(repositoryRoot, TimeProvider.System),
+            new DevProxySessionConfigWriter(repositoryRoot),
             new BrowserLauncher(),
             doctor,
             TimeProvider.System);
