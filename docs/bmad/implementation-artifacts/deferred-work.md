@@ -178,21 +178,12 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-7-3-k6-run-and-first-full-acceptance-gate.md`
   summary: `k6/script.js`'s final assertion block reads `r.checks.stageCardinality.passed`/`r.checks.canonicalAccountSet.passed` without first checking those fields exist on the parsed response.
   evidence: Edge-case-hunter review found this would throw a `TypeError` (rather than fail a named check) if `/assert/results` ever omitted these new fields, e.g. under REST/MCP client-server version skew. Consistent with every other check in that same block, which has the same unguarded-property-access pattern; not a regression specific to this story's new fields.
-- source_spec: `docs/bmad/implementation-artifacts/spec-7-3-k6-run-and-first-full-acceptance-gate.md`
-  summary: `CoreBankDemo.LoadTests/appsettings.json` still sets `Features:UseDevProxy: true` and `CoreBankDemo.LoadTests/devproxy/config/devproxyrc.json` still exists, but `CoreBankDemo.LoadTests/AppHost.cs` has no DevProxy wiring at all.
-  evidence: Blind-hunter review found the dead config; confirmed via `git diff` against this story's baseline commit that both files are byte-for-byte unchanged, so this predates story 7.3 and is not caused by it.
 
 ## Deferred from: code review of spec-add-instant-rail-load-coverage.md (2026-09-03)
 
 - source_spec: `docs/bmad/implementation-artifacts/spec-add-instant-rail-load-coverage.md`
   summary: `k6/script.js`'s single shared `http_req_duration{type:payment}` threshold (`p(95)<2000ms`) now covers both standard and the new ~20% instant-scheme traffic, even though the instant rail can legitimately block for up to `AttemptTimeoutMilliseconds`/`BudgetMilliseconds` (2500ms/9000ms in `PaymentsAPI/appsettings.json`) — a run could fail on latency grounds unrelated to correctness if CoreBank is ever slower than usual.
   evidence: Blind-hunter review flagged the shared threshold. Not fixed now since it didn't manifest in this story's live run (all thresholds green) and choosing a new per-scheme threshold value or k6 request tag is a design decision, not a mechanical fix — left for whoever builds the DevProxy latency-injection follow-up (also tracked in this file), which will need to reason about instant-rail latency thresholds anyway.
-
-## Deferred from: drafting spec-add-instant-rail-load-coverage.md (2026-09-03)
-
-- source_spec: none
-  summary: Add a DevProxy latency-injection profile to `CoreBankDemo.LoadTests` (wiring `CoreBankDemo.LoadTests/AppHost.cs`'s already-set-but-dead `Features:UseDevProxy` flag, mirroring `CoreBankDemo.AppHost/AppHost.cs`'s accepted pattern) targeting CoreBankAPI's transaction endpoint with latency past the instant rail's `BudgetMilliseconds`, so a deliberate manual stress run can demonstrate the budget-timeout -> `202 Pending` -> background-completes-it fallback live. Off by default; never part of the standard `/run-load-tests` acceptance gate.
-  evidence: Split off `spec-add-instant-rail-load-coverage.md` at drafting time to keep that spec under the 1600-token target and single-goal — it is independently shippable from the k6 traffic-mix change and directly closes the dead-`UseDevProxy`-config gap already tracked above from story 7.3. The existing `devproxyrc.json`/`devproxy-errors.json` in `CoreBankDemo.LoadTests/devproxy/config/` inject transport *errors*, not latency, so a new profile is needed rather than reusing them as-is.
 
 ## Deferred from: three-layer adversarial review of story 7.4 (2026-09-04)
 
