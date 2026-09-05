@@ -23,7 +23,8 @@
       "extensions": [
         "ms-dotnettools.csharp",
         "ms-dotnettools.csdevkit",
-        "humao.rest-client"
+        "humao.rest-client",
+        "anthropic.claude-code"
       ]
     }
   },

@@ -6,58 +6,58 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- Aspire Packages -->
-    <PackageVersion Include="Aspire.Hosting.PostgreSQL" Version="13.4.0" />
-    <PackageVersion Include="Aspire.Hosting.Redis" Version="13.4.0" />
-    <PackageVersion Include="Aspire.Npgsql.EntityFrameworkCore.PostgreSQL" Version="13.4.0" />
+    <PackageVersion Include="Aspire.Hosting.PostgreSQL" Version="13.5.3" />
+    <PackageVersion Include="Aspire.Hosting.Redis" Version="13.5.3" />
+    <PackageVersion Include="Aspire.Npgsql.EntityFrameworkCore.PostgreSQL" Version="13.5.3" />
     <!-- Story 6.2: Aspire's Redis client integration, registering IConnectionMultiplexer
          from the shared "redis" resource for RedisDistributedLockService (ADR-011). -->
-    <PackageVersion Include="Aspire.StackExchange.Redis" Version="13.4.0" />
+    <PackageVersion Include="Aspire.StackExchange.Redis" Version="13.5.3" />
     <!-- Story 6.2: renewable Redis distributed locking (ADR-011) — replaces the
          Dapr lock adapter. -->
     <PackageVersion Include="DistributedLock.Redis" Version="1.1.1" />
     <!-- Dapr & Community Toolkit -->
     <PackageVersion Include="CommunityToolkit.Aspire.Hosting.Dapr" Version="13.0.0" />
-    <PackageVersion Include="Dapr.AspNetCore" Version="1.17.9" />
-    <PackageVersion Include="Dapr.Client" Version="1.17.9" />
+    <PackageVersion Include="Dapr.AspNetCore" Version="1.18.5" />
+    <PackageVersion Include="Dapr.Client" Version="1.18.5" />
     <!-- Dev Proxy -->
-    <PackageVersion Include="DevProxy.Hosting" Version="0.3.1" />
+    <PackageVersion Include="DevProxy.Hosting" Version="0.3.5" />
     <!-- CloudEvents -->
-    <PackageVersion Include="CloudNative.CloudEvents" Version="2.8.0" />
-    <PackageVersion Include="CloudNative.CloudEvents.AspNetCore" Version="2.8.0" />
+    <PackageVersion Include="CloudNative.CloudEvents" Version="2.9.0" />
+    <PackageVersion Include="CloudNative.CloudEvents.AspNetCore" Version="2.9.0" />
     <!-- Microsoft & ASP.NET Core -->
-    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.8" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.8" />
-    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.8" />
-    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.6.0" />
-    <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.6.0" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.9.0" />
+    <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.9.0" />
     <!-- Story 5.5: boots PaymentsAPI's real Program entry point in-process so
          the event-subscription-intake wiring test can POST a structured
          CloudEvent through the actual production middleware/DI/routing
          (never a reconstructed application). -->
-    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.8" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
     <!-- Database -->
-    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.2" />
+    <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <!-- Swagger -->
-    <PackageVersion Include="Swashbuckle.AspNetCore" Version="10.2.1" />
+    <PackageVersion Include="Swashbuckle.AspNetCore" Version="10.2.3" />
     <!-- OpenTelemetry -->
-    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
-    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.GrpcNetClient" Version="1.15.1-beta.1" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.15.1" />
-    <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.15.1" />
+    <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.18.0" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.18.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.18.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.GrpcNetClient" Version="1.18.0-beta.1" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Http" Version="1.18.0" />
+    <PackageVersion Include="OpenTelemetry.Instrumentation.Runtime" Version="1.18.0" />
     <!-- Model Context Protocol -->
-    <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />
+    <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
     <!-- Kiota (story 5.3): runtime dependencies consumed by the generated
          CoreBank client and its adapter. Pinned to a version known to be
          compatible with the CLI in .config/dotnet-tools.json. -->
-    <PackageVersion Include="Microsoft.Kiota.Bundle" Version="2.0.0" />
+    <PackageVersion Include="Microsoft.Kiota.Bundle" Version="2.1.1" />
     <!-- Story 5.3: the adapter recognizes the standard resilience pipeline's
          own timeout exception type explicitly. Pinned to the exact Polly.Core
-         version Microsoft.Extensions.Http.Resilience 10.6.0 already resolves
+         version Microsoft.Extensions.Http.Resilience 10.9.0 already resolves
          transitively; this is not a new runtime dependency, only an
          explicit reference to a type already on the graph. -->
-    <PackageVersion Include="Polly.Core" Version="8.4.2" />
+    <PackageVersion Include="Polly.Core" Version="8.7.0" />
     <!-- Test Stack (verified on NuGet 2026-08-21) -->
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
@@ -74,7 +74,7 @@
     <PackageVersion Include="Testcontainers.XunitV3" Version="4.14.0" />
     <!-- FakeTimeProvider: deterministic TimeProvider.CreateTimer-driven cancellation
          tests (story 3.2) without waiting on a real clock. -->
-    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.6.0" />
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.9.0" />
     <!-- Story 7.4: Terminal.Gui is the sole UI package for the standalone
          CoreBankDemo.DemoRunner presentation console (ADR-015). Pinned centrally
          so exactly one version is used repo-wide. -->
