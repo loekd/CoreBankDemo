@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/microsoft/dev-proxy/main/schemas/v2.1.0/devproxyrc.schema.json",
+  "$schema": "https://raw.githubusercontent.com/dotnet/dev-proxy/main/schemas/v3.2.0/rc.schema.json",
   "plugins": [
     {
       "name": "GenericRandomErrorPlugin",

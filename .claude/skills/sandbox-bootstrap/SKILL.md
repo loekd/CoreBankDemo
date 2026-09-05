@@ -45,9 +45,11 @@ flag installs the newest runtime, which may not match. Check the Docker image ca
 
 ## 3. Dev Proxy → skill: `devproxy-install`
 
-Pinned to **2.1.0** deliberately — the repo's `devproxyrc.json` and `devproxy-errors.json` declare
-`schemas/v2.1.0`. Do not take 3.x without migrating both configs in the same change. Needed only by
-the Regular AppHost, not `CoreBankDemo.LoadTests`.
+Pinned to **3.2.0**, matching the `schemas/v3.2.0` declared by the repo's four Dev Proxy config
+files. Keep binary and schemas on the same version; a future major means migrating all four configs
+in the same change. Needed only by the Regular AppHost, not `CoreBankDemo.LoadTests`. Two things
+bite here: the zip does not carry the executable bit (a missing `chmod +x` looks like a crash with
+a zero-byte log), and 3.x prints nothing for its first ~20s of startup.
 
 ## 4. Local tools → skill: `build`
 
