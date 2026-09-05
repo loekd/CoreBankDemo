@@ -916,8 +916,9 @@ public class OperatorConsoleControllerTests
 
         export.Succeeded.Should().BeTrue();
         harness.Exporter.Exported.Should().NotBeEmpty();
-        opened.Should().BeTrue();
-        blocked.Should().BeFalse();
+        opened.Succeeded.Should().BeTrue();
+        blocked.Succeeded.Should().BeFalse();
+        blocked.Url.Should().BeNull();
         harness.Browser.Opened.Should().ContainSingle().Which.Should().Be(KnownLinks.Jaeger);
         harness.Browser.VerifiedUrls.Should().ContainSingle().Which.Should().BeNull();
     }

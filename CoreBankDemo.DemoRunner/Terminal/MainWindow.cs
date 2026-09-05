@@ -187,12 +187,12 @@ public sealed class MainWindow : Window
         _aspireDashboardButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => _controller.OpenKnownLinkAsync(KnownLinks.AspireDashboard, _sessionCancellation.Token));
+            OpenKnownLink("Aspire dashboard", KnownLinks.AspireDashboard);
         };
         _jaegerButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => _controller.OpenKnownLinkAsync(KnownLinks.Jaeger, _sessionCancellation.Token));
+            OpenKnownLink("Jaeger", KnownLinks.Jaeger);
         };
 
         Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content, _statusLine, _messageLine, statusBar);
@@ -817,6 +817,41 @@ public sealed class MainWindow : Window
         await _onExitRequested();
     }
 
+    /// <summary>
+    /// Tries the OS default browser (works wherever one is actually reachable
+    /// -- essentially never in this sandbox) and always copies the resolved
+    /// URL to the terminal clipboard besides, so the operator can paste it no
+    /// matter what. Copying and the status update are marshalled onto the UI
+    /// thread together with the OSC 52 write, since Terminal.Gui's own render
+    /// loop writes to the same stdout from that thread.
+    /// </summary>
+    private void OpenKnownLink(string title, string linkId) =>
+        Dispatch(() => OpenKnownLinkAsync(title, linkId));
+
+    private async Task OpenKnownLinkAsync(string title, string linkId)
+    {
+        var result = await _controller.OpenKnownLinkAsync(linkId, _sessionCancellation.Token);
+        if (result.Url is null)
+        {
+            ShowMessage($"{title} is not available yet — attach or start a topology first.");
+            return;
+        }
+
+        RunOnUiThread(() =>
+        {
+            var copy = TerminalClipboard.Copy(
+                result.Url,
+                TerminalOut,
+                Environment.GetEnvironmentVariable("TERM"),
+                Environment.GetEnvironmentVariable("TMUX"));
+            ShowMessage(copy.Succeeded
+                ? $"{title} link copied to your terminal clipboard: {result.Url}"
+                : $"{title}: {result.Url} — {copy.Message}");
+        });
+    }
+
+    internal Task TriggerOpenKnownLinkForTestAsync(string title, string linkId) => OpenKnownLinkAsync(title, linkId);
+
     private void Dispatch(Func<Task> action)
     {
         var task = action();
@@ -1012,6 +1047,8 @@ public sealed class MainWindow : Window
     internal Button DetailsButton => _detailsButton;
 
     internal Button CopyButton => _copyButton;
+    internal Button JaegerButton => _jaegerButton;
+    internal Button AspireDashboardButton => _aspireDashboardButton;
 
     internal TextField SuppliedKeyField => _suppliedKey;
     internal Button RefreshButton => _refreshButton;

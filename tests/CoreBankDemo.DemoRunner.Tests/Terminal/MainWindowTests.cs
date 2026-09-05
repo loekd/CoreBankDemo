@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
+using CoreBankDemo.DemoRunner.Infrastructure;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
@@ -291,6 +292,44 @@ public class MainWindowTests
 
         first.SuppliedKeyField.Text.ToString().Should().StartWith("demo-key-").And.NotBe("demo-key-001");
         second.SuppliedKeyField.Text.ToString().Should().NotBe(first.SuppliedKeyField.Text.ToString());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task OpenJaegerLink_AlwaysCopiesTheResolvedUrlToTheTerminalClipboard(bool osBrowserOpens)
+    {
+        // Copying always happens regardless of whether the OS-level browser
+        // launch itself succeeded: there is essentially never a default
+        // browser reachable from this sandbox, so a fallback gated on failure
+        // would never fire, and a modal popup here was found not to render at
+        // all when driven through the real async/background-thread path.
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        harness.Browser.NextSucceeds = osBrowserOpens;
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
+
+        await window.TriggerOpenKnownLinkForTestAsync("Jaeger", KnownLinks.Jaeger);
+
+        terminal.ToString().Should().StartWith("]52;c;").And.EndWith("");
+        window.LastUiMessage.Should().Contain("terminal clipboard").And.Contain(EndpointResolver.LinkFor(KnownLinks.Jaeger));
+    }
+
+    [Fact]
+    public async Task OpenAspireLink_WhenNoDashboardUrlIsVerifiedYet_SaysSoAndCopiesNothing()
+    {
+        using var window = CreateWindow(new OperatorHarness().CreateController());
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
+
+        await window.TriggerOpenKnownLinkForTestAsync("Aspire dashboard", KnownLinks.AspireDashboard);
+
+        terminal.ToString().Should().BeEmpty();
+        window.LastUiMessage.Should().Contain("not available yet");
     }
 
     [Fact]
