@@ -1,473 +1,343 @@
-# Core Banking Demo - Building Resilient Mission-Critical Systems
+# CoreBankDemo
 
-A demonstration project showing resilience patterns for mission-critical banking systems, built with .NET 10 and orchestrated with .NET Aspire. Designed for a 55-minute conference talk.
+A runnable reference implementation of **exactly-once payment processing** across two services that
+fail independently. It is a working distributed system — .NET 10, .NET Aspire, PostgreSQL, Dapr,
+Redis and OpenTelemetry — built to show what it actually takes to not lose, duplicate, or reorder a
+payment when the network, the downstream, or a process goes away mid-flight.
 
-## What's Special
+Everything runs locally with one command. Nothing here talks to a real bank.
 
-- **One-Command Start** - `dotnet run --project CoreBankDemo.AppHost` launches everything
-- **.NET Aspire** - Modern orchestration with built-in observability
-- **Real-World Patterns** - Retry, Circuit Breaker, Outbox, Inbox, Ordering
-- **Shared Libraries** - Reusable inbox/outbox base classes eliminate duplication
-- **Type-Safe Constants** - No magic strings, centralized configuration
-- **Live Observability** - Aspire Dashboard + Jaeger tracing
-- **Chaos Testing** - Dev Proxy for failure injection
-- **Production-Ready** - Patterns used in actual banking systems
+## What it demonstrates
+
+| Concern | How it is solved here |
+|---|---|
+| Don't lose a request during an outage | **Transactional Outbox** — the payment is committed to `paymentsdb` in the same transaction that records the intent to forward it (ADR-002) |
+| Don't charge twice | **Idempotent Inbox** — every command is stored and de-duplicated on its idempotency key *before* any business logic runs (ADR-001) |
+| Don't reorder a customer's payments | **Partitioned processing** — messages are hashed onto 4 fixed partitions; one worker holds one partition at a time, so ordering holds per key while partitions run in parallel (ADR-004, ADR-010) |
+| Scale out without two workers racing | **Renewable Redis leases** — `DistributedLock.Redis` leases that renew while healthy and signal ownership loss (ADR-011) |
+| Survive transient faults | **Retry, circuit breaker, timeout** via `AddStandardResilienceHandler()` on the HTTP client (ADR-006, ADR-007) |
+| Answer "did it settle?" synchronously | **Instant rail** — `scheme: "instant"` attempts a budgeted inline forward and answers `200` with a committed outcome, or falls back to the same `202` store-and-forward path (ADR-018) |
+| See the whole journey | **W3C trace context** persisted on every message and restored by the consumer, so one payment is one trace across HTTP *and* pub/sub hops (ADR-003, ADR-017) |
+| Prove it, don't claim it | **k6 acceptance harness** asserting exactly-once, drain, balance conservation and stage cardinality under concurrent load (ADR-005) |
 
 ## Architecture
 
 ```
-┌─────────────────┐         ┌──────────────┐         ┌─────────────────┐
-│  Payments API   │────────▶│  Dev Proxy   │────────▶│ Core Bank API   │
-│  (Your Service) │         │  (Chaos)     │         │  (Legacy SaaS)  │
-└─────────────────┘         └──────────────┘         └─────────────────┘
-        │                                                      │
-        │ Outbox Pattern                                      │ Inbox Pattern
-        ▼                                                      ▼
-   ┌────────────┐                                     ┌────────────┐
-   │ PostgreSQL │                                     │ PostgreSQL │
-   └────────────┘                                     └────────────┘
-        │                                                      │
-        └──────────────────────────────────────────────────────┘
-                          Both send traces to
-                                  │
-                                  ▼
-                           ┌──────────┐
-                           │  Jaeger  │
-                           └──────────┘
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  DemoRunner — standalone terminal operator console               │
+  │  Operations · Resources · Evidence/Results · Load Test · Faults  │
+  │                                                                  │
+  │  Speaks only public HTTP and the Aspire CLI — never a database,  │
+  │  Redis, or Dapr socket directly:                                 │
+  │    POST /api/payments       →  Payments API                      │
+  │    aspire start/stop/list   →  the topology below                │
+  │    /reset · /assert/*       →  LoadTestSupport (LoadTests only)  │
+  └───────────────────┬──────────────────────────────────────────────┘
+                      │
+                      ▼
+
+   ┌──────────────────┐   HTTP (Kiota)      ┌────────────┐   ┌──────────────────┐
+   │   Payments API   │────────────────────▶│ Dev Proxy  │──▶│  Core Bank API   │
+   │   (2 replicas)   │ fault injection     │ (optional) │   │   (2 replicas)   │
+   │                  │                     └────────────┘   │                  │
+   │ Outbox → forward │                                      │ Inbox  → execute │
+   │ Inbox  ← events  │◀─────────────────────────────────────│ Outbox → publish │
+   └────────┬─────────┘   Dapr pub/sub over Redis            └────────┬─────────┘
+            │   topic: transaction-events                             │
+            ▼                                                         ▼
+     ┌──────────────┐             PostgreSQL 18.3              ┌──────────────┐
+     │  paymentsdb  │                                          │  corebankdb  │
+     └──────────────┘                                          └──────────────┘
+
+   Redis 7.4  — Dapr pub/sub broker and partition-lease store
+   Jaeger     — OTLP traces from every service and every Dapr sidecar
+   Dashboard  — http://localhost:15888
 ```
 
-## Quick Start
+The Payments API forwards to the Core Bank API over a **single HTTP integration** generated at build
+time by Kiota from the checked-in OpenAPI contract (ADR-008, ADR-013). Dapr is used only for the
+event hop back — the Core Bank API publishes `transaction.completed` / `transaction.failed` /
+`balance.updated` CloudEvents, which the Payments API consumes into its own inbox so a deferred
+payment eventually learns its committed outcome.
 
-### Option 1: Using Aspire (Recommended)
+Both APIs run **two replicas** behind a stable Aspire endpoint (ADR-014), which is what makes the
+distributed locking and partition ownership more than theoretical.
+
+## Repository layout
+
+| Project | Role |
+|---|---|
+| `CoreBankDemo.PaymentsAPI` | Accepts payments; Outbox forwarding, Inbox for CoreBank events, instant rail |
+| `CoreBankDemo.CoreBankAPI` | Executes transactions and owns balances; idempotent Inbox, messaging Outbox |
+| `CoreBankDemo.Messaging` | Transport-agnostic Inbox/Outbox kernel — base classes, `MessageConstants`, `PartitionHelper` |
+| `CoreBankDemo.ServiceDefaults` | OpenTelemetry, health checks, distributed locking, CloudEvent types, business metrics |
+| `CoreBankDemo.AppHost` | Aspire orchestration for regular development |
+| `CoreBankDemo.LoadTests` | Second AppHost: disposable topology, k6, acceptance assertions |
+| `CoreBankDemo.LoadTestSupport` | Test-only REST + MCP surface for reset, drain and invariant assertions |
+| `CoreBankDemo.LoadTestInitializer` | One-shot reset/validate/gate-release before k6 starts |
+| `CoreBankDemo.DemoRunner` | Standalone terminal operator console for driving demos |
+| `tests/` | Unit and PostgreSQL persistence test projects |
+
+## Prerequisites
+
+- [.NET 10 SDK](https://dotnet.microsoft.com/download)
+- A container runtime (Docker or Podman) — PostgreSQL, Redis and Jaeger run as containers
+- [.NET Aspire CLI](https://learn.microsoft.com/dotnet/aspire/cli/overview) (`aspire`)
+- [Dapr CLI](https://docs.dapr.io/getting-started/install-dapr-cli/), initialized (`dapr init`)
+- [Dev Proxy 3.2.0](https://learn.microsoft.com/microsoft-cloud/dev/dev-proxy/) — required by the
+  regular AppHost, which enables it by default (see [Fault injection](#fault-injection))
+
+A devcontainer with all of the above is provided in `.devcontainer/`.
+
+## Running it
 
 ```bash
-# Start everything with .NET Aspire
-cd CoreBankDemo.AppHost
-aspire run
+dotnet tool restore          # required: Kiota generates the CoreBank client at build time
+aspire run                   # uses aspire.config.json → CoreBankDemo.AppHost
 ```
 
-This will launch:
-- Payments API (http://127.0.0.1:5294)
-- Core Bank API (http://127.0.0.1:5032)
-- Dev Proxy (http://localhost:8000) - Chaos engineering proxy
-- PostgreSQL databases (paymentsdb, corebankdb)
-- Jaeger (http://localhost:16686)
-- Aspire Dashboard (http://localhost:15888)
+That starts PostgreSQL, Redis, Jaeger, both APIs with their Dapr sidecars, and Dev Proxy.
 
-**Everything runs automatically - no manual steps needed!**
+| UI | URL |
+|---|---|
+| Aspire Dashboard | http://localhost:15888 |
+| Jaeger | http://localhost:16686 |
+| Payments API | http://127.0.0.1:5294 |
+| Core Bank API | http://127.0.0.1:5032 |
+| pgAdmin / RedisInsight | linked from the Aspire Dashboard |
 
+**Running the AppHost inside a container?** The Aspire Dashboard and the Jaeger UI bind every
+interface (`0.0.0.0`) rather than loopback, so a host-side port publish can actually reach them. A
+devcontainer forwards them from the inside, where loopback would have been fine either way; a
+sandbox needs them published explicitly, e.g. `sbx ports <sandbox> --publish 15888:15888/tcp`. The
+APIs and the OTLP ingest ports stay on loopback on purpose — only in-container callers dial those.
 
-### Access UIs
+Health endpoints live at `/health` on both APIs. Neither API serves a Swagger UI — the Core Bank
+API's contract is the checked-in
+[`CoreBankDemo.CoreBankAPI/OpenApi/corebank-api.json`](CoreBankDemo.CoreBankAPI/OpenApi/corebank-api.json),
+which is also the source Kiota generates the Payments API's client from.
 
-- **Aspire Dashboard:** http://localhost:15888 (when using Aspire)
-- **Jaeger Tracing:** http://localhost:16686
-- **Payments API OpenAPI:** http://127.0.0.1:5294/openapi/v1.json
-- **Core Bank API OpenAPI:** http://127.0.0.1:5032/openapi/v1.json
-- **Health Checks:** 
-  - Payments API: http://127.0.0.1:5294/health
-  - Core Bank API: http://127.0.0.1:5032/health
+### Sending a payment
 
-## Demo Flow
+`demo-requests.http` and `payment-idempotency-tests.http` are ready-to-run request collections. The
+core call:
 
-### Stage 0: Baseline (5 min)
+```http
+POST http://127.0.0.1:5294/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-001
 
-**Goal:** Show basic architecture working perfectly.
-
-**Configuration:**
-- All features disabled
-- Direct calls to Core Bank API
-
-**Demo:**
-1. Send payment request via `demo-requests.http`
-2. Show successful processing
-3. Explain architecture: Payments API → Core Bank API
-
-**Key Point:** Works great when everything is perfect!
-
----
-
-### Stage 1: Retry & Circuit Breaker (10 min)
-
-**Goal:** Handle transient failures.
-
-**Setup:**
-1. Enable DevProxy: set `"enabled": true` in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json` for `GenericRandomErrorPlugin`
-2. Restart Aspire (Ctrl+C and `dotnet run` again)
-   - Aspire will automatically restart DevProxy with new configuration
-
-**Demo:**
-1. Show random failures (503, 429, 500)
-2. Explain `AddStandardResilienceHandler()` in `Program.cs:17`
-3. Show retries in logs
-4. Open Jaeger and show:
-   - Multiple HTTP spans for retries
-   - Latency measurements
-   - Success after retries
-
-**What's included:**
-- Exponential backoff retry
-- Circuit breaker
-- Timeout policies
-
-**Code Reference:** `CoreBankDemo.PaymentsAPI/Program.cs:17`
-
-**Key Point:** Handles ~95% of real-world transient issues.
-
----
-
-### Stage 2: Outbox Pattern (15 min)
-
-**Goal:** Handle longer outages without losing requests.
-
-**Configuration:**
-Already enabled in `appsettings.Development.json`:
-```json
-"Features": {
-  "UseOutbox": true
-}
-```
-
-**Demo:**
-1. Keep DevProxy error rate high or stop Core Bank API in Aspire Dashboard
-2. Send payment requests
-3. Show 202 Accepted response with "Pending" status
-4. Query outbox: `GET http://127.0.0.1:5294/api/outbox`
-5. Show messages stored in PostgreSQL (paymentsdb)
-6. Restart Core Bank API in Aspire Dashboard or reduce DevProxy errors
-7. Watch OutboxProcessor logs in Aspire Dashboard - see automatic retry
-8. Query outbox again - show "Completed" status
-
-**How it works:**
-- Payment requests stored in local database
-- Background service (`OutboxProcessor.cs`) polls every 5 seconds
-- Retries failed messages up to 5 times
-- Eventually consistent processing
-
-**Code References:**
-- Outbox storage: `CoreBankDemo.PaymentsAPI/Program.cs:53-79`
-- Background processor: `CoreBankDemo.PaymentsAPI/OutboxProcessor.cs`
-- Database model: `CoreBankDemo.PaymentsAPI/OutboxMessage.cs`
-
-**Key Point:** Don't lose customer requests! But this introduces new problems...
-
----
-
-### Stage 3: Inbox Pattern (10 min)
-
-**Goal:** Prevent duplicate processing (idempotency).
-
-**Problem:**
-- Retry can cause duplicate transactions
-- Customer charged twice!
-
-**Configuration:**
-Enable Inbox in Core Bank API `appsettings.Development.json`:
-```json
-"Features": {
-  "UseInbox": true
-}
-```
-
-**Demo:**
-1. Show idempotency key in transaction request
-2. Manually send same transaction twice:
-   ```http
-   POST http://127.0.0.1:5032/api/transactions/process
-   {
-     "fromAccount": "NL91ABNA0417164300",
-     "toAccount": "NL20INGB0001234567",
-     "amount": 100.00,
-     "currency": "EUR",
-     "idempotencyKey": "test-123"
-   }
-   ```
-3. Query inbox: `GET http://127.0.0.1:5032/api/inbox`
-4. Show same `transactionId` returned for duplicate
-5. Explain: first request creates transaction, second returns cached result
-
-**How it works:**
-- Core Bank API stores processed requests with idempotency key
-- Duplicate requests return original response
-- No duplicate charges
-
-**Code Reference:** `CoreBankDemo.CoreBankAPI/Program.cs:36-90`
-
-**Key Point:** Critical for financial systems - exactly-once processing.
-
----
-
-### Stage 4: Message Ordering (10 min)
-
-**Goal:** Maintain per-account ordering while scaling.
-
-**Problem:**
-- Multiple payments from same account processed out of order
-- Balance calculations can be wrong
-- Race conditions
-
-**Configuration:**
-Already enabled in `appsettings.Development.json`:
-```json
-"Features": {
-  "UseOrdering": true
-}
-```
-
-**Demo:**
-1. Create multiple payments from same account quickly
-2. Show `PartitionKey` in outbox (set to `FromAccount`)
-3. Explain processing logic:
-   - One message per partition at a time
-   - Multiple partitions processed concurrently
-   - Ordering preserved within each account
-4. Show logs: messages from different accounts processed in parallel
-
-**How it works:**
-- Each message partitioned by `FromAccount`
-- Processor takes oldest message per partition
-- Sequential processing per account
-- Parallel processing across accounts
-
-**Code References:**
-- Partition key: `CoreBankDemo.PaymentsAPI/Program.cs:73`
-- Ordering logic: `CoreBankDemo.PaymentsAPI/OutboxProcessor.cs:44-79`
-
-**Key Point:** Balance scalability with ordering guarantees.
-
----
-
-### Stage 5: Wrap-up (5 min)
-
-**Tools that help:**
-- **.NET Aspire:** Orchestration and observability (see [Aspire docs](https://learn.microsoft.com/en-us/dotnet/aspire/))
-- **Dev Proxy:** Chaos testing in development
-- **Jaeger:** Distributed tracing and observability
-- **DevContainer:** Consistent development environment
-- **Entity Framework:** Simple persistence
-- **OpenTelemetry:** Standard instrumentation
-
-**Pattern Layering:**
-1. **Retry/Circuit Breaker:** First line of defense (transient failures)
-2. **Outbox:** Second line (sustained outages)
-3. **Inbox:** Data integrity (idempotency)
-4. **Ordering:** Business logic guarantees (per-entity consistency)
-
-**Key Takeaways:**
-1. Resilience is layered - no single solution
-2. Observability is not optional
-3. Test failure scenarios in development
-4. Tools exist - don't build everything from scratch
-
-## Feature Flags
-
-Control patterns via `appsettings.json`:
-
-```json
-"Features": {
-  "UseOutbox": false,    // Store-and-forward for outages
-  "UseInbox": false,     // Idempotency/deduplication
-  "UseOrdering": false   // Per-account ordering
-}
-```
-
-## Test Accounts
-
-Valid accounts in Core Bank API:
-- `NL91ABNA0417164300`
-- `NL20INGB0001234567`
-- `NL39RABO0300065264`
-
-## DevProxy Configuration
-
-### Enable Random Errors
-Edit `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`:
-```json
 {
-  "name": "GenericRandomErrorPlugin",
-  "enabled": true  // Set to true
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 100.00,
+  "currency": "EUR",
+  "scheme": "standard"
 }
 ```
 
-### Add Latency
-```json
-{
-  "name": "LatencyPlugin",
-  "enabled": true  // Set to true
-}
-```
+- `scheme: "standard"` (or omitted) → **`202 Accepted`**, `Status: Pending`. The row is durable; the
+  background processor forwards it and retries up to 5 times before going terminally `Failed`.
+- `scheme: "instant"` → a budgeted inline attempt (9 s budget, 2.5 s per attempt, max 2 attempts).
+  A committed outcome answers **`200 OK`**; anything not settled in budget falls back to `202` and
+  the standard rail finishes it.
+- The `Idempotency-Key` header is optional. Supplied or generated, resending the same key **never**
+  creates a second row or a second delivery attempt — it replays the stored snapshot.
 
-### Rate Limiting
-```json
-{
-  "name": "RateLimitingPlugin",
-  "enabled": true  // Set to true
-}
-```
+Three demo accounts are seeded on startup:
 
-## Database Files
+| Account | Holder | Balance |
+|---|---|---|
+| `NL91ABNA0417164300` | John Doe | € 5,000 |
+| `NL20INGB0001234567` | Jane Smith | € 10,000 |
+| `NL39RABO0300065264` | Bob Johnson | € 2,500 |
 
-- `paymentsdb` - Payments API outbox and inbox (PostgreSQL)
-- `corebankdb` - Core Bank API inbox and messaging outbox (PostgreSQL)
+Core Bank API surface: `POST /api/transactions/process`, `GET /api/transactions/{idempotencyKey}`,
+`POST /api/accounts/validate`, `GET /api/accounts/{accountNumber}`.
 
-To reset state, delete the database containers or clear the tables.
+## Configuration
 
-## Security Notes
+Message processing is configured per store, and the partition count is a validated system invariant
+(ADR-010) — the services refuse to start on anything but 4.
 
-The load test configuration uses a hardcoded Redis password (`myredispassword123`) in the following files:
-- `CoreBankDemo.LoadTests/AppHost.cs`
-- `dapr/components/pubsub-redis.yaml`
-- `dapr/components-loadtest/pubsub-redis.yaml`
-
-This is intentional — the Redis instance is **disposable and local-only**, spun up and torn down by Aspire for each load test run. The password has no security implications outside that ephemeral container. Do not use these credentials for any real environment.
-
-## Troubleshooting
-
-**DevProxy not working?**
-```bash
-# Ensure the devproxy executable is in the project root
-./devproxy --help
-# Or check the devproxyrc.json configuration file
-```
-
-**Port already in use?**
-```bash
-lsof -ti:5032 | xargs kill  # Core Bank API
-lsof -ti:5294 | xargs kill  # Payments API
-lsof -ti:8000 | xargs kill  # Dev Proxy
-```
-
-**Jaeger not showing traces?**
-- Check `OTEL_EXPORTER_OTLP_ENDPOINT` in `appsettings.json`
-- Ensure docker compose is running: `docker compose ps`
-
-**Database errors?**
-```bash
-# Clear PostgreSQL databases via Aspire Dashboard or restart with clean volumes
-# Databases are automatically created on startup
-```
-
-## Automated Tests
-
-Tests are split into three tiers (see [ADR-016](docs/adr/ADR-016-postgresql-testcontainers-persistence-testing.md)):
-
-```bash
-# Tier 1 — fast unit tests. No Docker required.
-dotnet test CoreBankDemo.UnitTests.slnf
-
-# Tier 2 — persistence integration tests against a real, disposable PostgreSQL
-# container (postgres:18.3). Requires a running container runtime.
-dotnet test CoreBankDemo.IntegrationTests.slnf
-
-# Full gate — runs both tiers and enforces the >=90% line-coverage threshold.
-dotnet test CoreBankDemo.Rebuild.slnf
-```
-
-Tier 3 is the k6/Aspire acceptance harness described under **Load Testing** below.
-
-The persistence tier starts **one** PostgreSQL container per test assembly on a
-Testcontainers-generated host port (never a fixed port, so it cannot collide with a running
-AppHost) and gives every test its own freshly created database. If no container runtime is
-available the integration target fails with remediation instructions — it is never skipped or
-reported green. There is no SQLite or EF Core InMemory fallback anywhere in this repository.
-
-## Load Testing
-
-The project includes comprehensive load tests that validate the system under concurrent load:
-
-```bash
-# Start the disposable load-test topology and wait for the accepted k6 resource
-aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
-aspire wait loadtest-support --non-interactive
-aspire wait k6 --non-interactive
-```
-
-**What it tests:**
-- Exactly-once processing under concurrent load (10 VUs submitting 1000+ transactions)
-- Idempotency: ~10% are deliberate retry attempts with duplicate idempotency keys
-- End-to-end flow: Payments API outbox → Core Bank API inbox → transaction processing
-- No failed messages, no pending messages, no duplicate processing
-
-**Configuration:** Edit `CoreBankDemo.LoadTests/appsettings.json`:
-```json
-{
-  "LoadTest": {
-    "TransactionCount": "1000",  // Total unique transactions
-    "VuCount": "10"               // Concurrent virtual users
+```jsonc
+// CoreBankDemo.PaymentsAPI/appsettings.json
+"OutboxProcessing":  { "PartitionCount": 4, "LockExpirySeconds": 30, "PollingIntervalMs": 200 },
+"InboxProcessing":   { "PartitionCount": 4, "LockExpirySeconds": 30, "PollingIntervalMs": 200 },
+"Payments": {
+  "InstantRail": {
+    "Enabled": true,
+    "BudgetMilliseconds": 9000,
+    "AttemptTimeoutMilliseconds": 2500,
+    "MaxAttempts": 2
   }
 }
 ```
 
-The load test uses disposable PostgreSQL and Redis instances, seeded with 10 test accounts (€10M each). See [CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md) for details.
+```jsonc
+// CoreBankDemo.CoreBankAPI/appsettings.json
+"MessagingOutboxProcessing": { "PubSubName": "pubsub", "TopicName": "transaction-events", ... }
+```
 
-**MCP Integration:** The LoadTestSupport service exposes an MCP server at `http://localhost:5181/` for agent-based orchestration. See `mcp-config.example.json` and [CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md) for connection instructions.
+There are no `UseOutbox` / `UseInbox` / `UseOrdering` feature switches — the patterns are the
+system, not a demo toggle. The only host-level flag is `Features:UseDevProxy`.
 
-## Presentation Console (DemoRunner)
+## Fault injection
 
-`CoreBankDemo.DemoRunner` is a standalone, mouse-and-keyboard terminal operator console for live demonstrations (Story 7.4, ADR-015). It is a local tool only: it references no banking implementation project, connects to no database/Redis/Dapr/container socket directly, and is never a prerequisite for development, tests, or the banking services themselves. It uses only known HTTP endpoints and supported Aspire CLI operations. `demo-requests.http` and `payment-idempotency-tests.http` remain the supported fallback whenever the console is unavailable.
+Dev Proxy sits between the Payments API and the Core Bank API and is enabled by default in
+`CoreBankDemo.AppHost/appsettings.json`. It watches `http://127.0.0.1:5032/api/*` and, out of the
+box, injects a 5% error rate (`devproxy-errors.json`), 20–200 ms of latency, and a 1000-request/min
+rate limit — tune those in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`.
 
-### One-command start
+To run without it (and without needing the binary on `PATH`):
 
 ```bash
-# Open the reusable operator console
+aspire run -- --Features:UseDevProxy=false
+```
+
+Dev Proxy 3.2.0 cannot reload a changed config file, so config edits take a proxy restart
+(ADR-019). DemoRunner starts the AppHost with `Features__UseDevProxy=false` unless you arm faults
+in its **Resources** workspace, so the console's topology is Dev-Proxy-free by default.
+
+## Operator console (DemoRunner)
+
+`CoreBankDemo.DemoRunner` is a standalone mouse-and-keyboard terminal console for driving live
+demonstrations (ADR-015). It is a **local tool only**: it references no banking project, touches no
+database, Redis, Dapr or container socket directly, and is never a prerequisite for development,
+tests, or the services themselves — it speaks only known HTTP endpoints and supported Aspire CLI
+operations.
+
+```bash
 dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj
 
 # Print prerequisites and current port state; starts nothing
 dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj -- --doctor
 ```
 
-The console has five capability-driven workspaces:
+Five workspaces, reachable with `1`–`5`:
 
-1. **Operations** — submit standard or instant payments, choose Generated/Supplied/Omitted idempotency, resend a stable key, query outcomes, and run cancellable bounded bursts.
-2. **Resources** — start or attach Regular/LoadTests, stop or switch only runner-owned AppHosts, and run confirmed allow-listed resource Start/Stop/Restart commands against a freshly fingerprinted graph.
-3. **Evidence/Results** — inspect bounded redacted request/response evidence with topology and generation provenance, optionally wrap the raw view, and explicitly export the current session.
-4. **Load Test** — run the accepted Reset → Run → Wait → Assert → Investigate workflow and read the five invariants plus inline-instant-settlement evidence.
-5. **Faults** — stage error-rate, latency-band, and throttling levels from named presets or by hand, apply them in one write, and drop every knob to zero with `0`. Levels are injected only through Dev Proxy, by writing a gitignored generated session config and then restarting the `devproxy` resource so it loads it — Dev Proxy 3.2.0 cannot reload a changed config (ADR-019), so applying costs a brief proxy restart, which the workspace states up front. No checked-in Dev Proxy profile is ever written. Arming is a launch-time property set in **Resources** before an AppHost start, and is **off by default** — Dev Proxy is opt-in.
+1. **Operations** — submit standard or instant payments, choose Generated/Supplied/Omitted
+   idempotency, resend a stable key, query outcomes, run cancellable bounded bursts.
+2. **Resources** — start or attach the Regular/LoadTests topology, stop or switch only
+   runner-owned AppHosts, run confirmed allow-listed Start/Stop/Restart against a freshly
+   fingerprinted resource graph.
+3. **Evidence/Results** — inspect bounded, redacted request/response evidence stamped with topology
+   and run-generation provenance; export the session explicitly to the gitignored
+   `.demo-runner-exports/`.
+4. **Load Test** — run the Reset → Run → Wait → Assert → Investigate workflow and read the
+   invariants plus inline-instant-settlement evidence.
+5. **Faults** — stage error-rate, latency-band and throttling levels from named presets or by hand
+   and apply them in one write. Levels are injected only through Dev Proxy, by writing a gitignored
+   session config and then restarting the `devproxy` resource so it loads it — 3.2.0 cannot reload a
+   changed config (ADR-019), so applying costs a brief proxy restart, which the workspace says up
+   front. The checked-in Dev Proxy profile is never written to. Arming is a launch-time property set
+   in **Resources** before a start, and is **off by default**.
 
-### Shortcuts
+`0` is panic-off — every fault knob to zero, applied immediately, from any workspace, without
+confirmation. `R` refreshes live Aspire state; `Q` quits, stopping only child processes this session
+started and never touching an attached topology. Every mouse action has a keyboard equivalent,
+destructive actions open a modal with **Cancel** focused, and the layout stays usable at 80×24.
 
-| Key | Action |
-|---|---|
-| `1` | Operations |
-| `2` | Resources |
-| `3` | Evidence/Results |
-| `4` | Load Test |
-| `5` | Faults |
-| `0` | Panic-off — every fault knob to zero, applied immediately, from any workspace, no confirmation |
-| `R` | Refresh live Aspire state |
-| `Q` | Quit (stops only child processes this session started; never touches an attached/unowned topology) |
+Evidence is session-local and is never restored on relaunch. Each record is stamped with the fault
+levels in force when it was captured, so a `202 Pending` observed under injected latency is never
+confused with one observed under none. The console reports `Applied — not yet observed in traffic`
+until its own traffic actually carries an applied level; only then does the topology bar read
+`Faults in force`, and a restart that fails leaves the levels reported as *not* applied.
 
-All mouse actions have keyboard equivalents. Destructive actions open a modal with **Cancel focused**; uppercase `Y` confirms and Escape cancels. At 80×24 the navigation rail compacts but remains visible.
+If the console is unavailable, the `.http` files remain the supported fallback — banking behavior is
+identical either way.
 
-### Recovery and evidence
+## Tests
 
-- Resource and topology transitions resolve only from fresh Aspire snapshots. `Unknown` and `Unreachable` are distinct and disable mutation.
-- Generated and supplied idempotency keys are stable for **Resend same key**. Omitted-key ambiguity is labeled `Ambiguous — not yet reconciled` and is never retried automatically.
-- Evidence is session-local and never restored on relaunch. Explicit exports are written under the gitignored `.demo-runner-exports/` directory.
-- A topology switch retains earlier evidence with its original profile and run-generation label.
-- Every evidence record is stamped with the fault levels in force when it was captured, so a `202 Pending` observed under injected latency is never confused with one observed under none.
-- The console reports `Applied — not yet observed in traffic` until its own traffic actually carries an applied fault level; only then does the topology bar read `Faults in force`. A restart that fails leaves the levels reported as *not* applied. The generated session config is deleted when the session stops owning the topology, so a later `aspire run` uses the checked-in profile again.
+Three tiers, cheapest first (ADR-012, ADR-016):
 
-### Manual fallback
+```bash
+dotnet tool restore                                # once — Kiota client generation
 
-If the console is unavailable, use `demo-requests.http` / `payment-idempotency-tests.http` directly against the regular AppHost and the load-test/Aspire workflow for the acceptance proof. Banking behavior is unchanged.
+dotnet test CoreBankDemo.UnitTests.slnf            # tier 1: fast, no Docker
+dotnet test CoreBankDemo.IntegrationTests.slnf     # tier 2: real postgres:18.3 Testcontainer
+dotnet test CoreBankDemo.Rebuild.slnf              # both tiers + the ≥90% line-coverage gate
+```
 
-## Architecture & Technical Details
+Tier 2 starts one PostgreSQL container per test assembly on a Testcontainers-assigned port (never a
+fixed one, so it cannot collide with a running AppHost) and gives every test a freshly created
+database. With no container runtime available it **fails with remediation instructions** — it is
+never skipped or reported green. There is no SQLite or EF Core InMemory substitute anywhere in this
+repository.
 
-For detailed architecture information, database schemas, and implementation details, see:
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete technical architecture documentation
-  - Shared library design (CoreBankDemo.Messaging)
-  - Pattern implementations (Inbox/Outbox/Partitioning)
-  - Database schemas
-  - Configuration options
-  - Design decisions and rationale
-  - Load testing strategy
+`.github/workflows/ci.yml` runs `CoreBankDemo.Rebuild.slnf` on every push and PR to `main`.
 
-## Further Reading
+## Load testing (tier 3)
 
-- [.NET Aspire Documentation](https://learn.microsoft.com/en-us/dotnet/aspire/)
-- [Resilience Patterns](https://learn.microsoft.com/en-us/dotnet/core/resilience/)
-- [Transactional Outbox Pattern](https://microservices.io/patterns/data/transactional-outbox.html)
-- [Idempotent Consumer Pattern](https://microservices.io/patterns/communication-style/idempotent-consumer.html)
-- [Dev Proxy](https://learn.microsoft.com/en-us/microsoft-cloud/dev/dev-proxy/)
+The acceptance harness is a second, fully disposable Aspire topology that runs k6 against the real
+services and then asserts the system's invariants.
+
+```bash
+aspire start --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive
+aspire wait loadtest-support --non-interactive
+aspire wait k6 --non-interactive
+```
+
+Ten load-test accounts (`NL01LOAD0000000001` → `NL10LOAD0000000010`, € 10 M each) are seeded, k6's
+virtual users race to submit payments, and ~10% are deliberate resends of an existing idempotency
+key. After drain, `GET /assert/results?expectedUnique=<n>` checks:
+
+- no failed and no pending/processing inbox messages,
+- no idempotency key processed more than once,
+- completed unique keys == the configured transaction count,
+- inbox completed count == outbox submitted count,
+- stage cardinality N/N/3N/3N across the four message stores,
+- exactly the ten seeded accounts exist, with balances conserved.
+
+Scale is set in `CoreBankDemo.LoadTests/appsettings.json` (`TransactionCount`, `VuCount`).
+LoadTestSupport also exposes an **MCP server** at `http://localhost:5181/` for agent-driven
+orchestration — see `mcp-config.example.json` and
+[CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md). Full details in
+[CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md).
+
+## Security note
+
+The local topologies use fixed, non-secret credentials (for example the Redis password
+`myredispassword123` in `dapr/components*/pubsub-redis.yaml` and the AppHosts). These containers are
+disposable and local-only, spun up and torn down by Aspire. They are not secrets and must never be
+reused anywhere real.
+
+## Troubleshooting
+
+**Build fails with `dotnet tool run kiota generate ... exited with code 1`**
+Run `dotnet tool restore` — the Payments API generates its CoreBank client from the checked-in
+OpenAPI contract at build time.
+
+**The AppHost won't start / `devproxy` not found**
+Either install Dev Proxy 3.2.0 on `PATH` or start with `aspire run -- --Features:UseDevProxy=false`.
+
+**No traces in Jaeger**
+Check that the `jaeger` container is running in the Aspire Dashboard; the OTLP endpoint is resolved
+from Aspire and injected as `JAEGER_OTLP_ENDPOINT`, so it is never a hardcoded port.
+
+**Ports already in use** (5294, 5032, 8000, 15888, 16686, 5432, 6379)
+The PostgreSQL, Redis and Jaeger containers use `ContainerLifetime.Persistent` and survive an
+AppHost stop by design. Stop the stragglers, or reset state by removing those containers.
+
+**Payments stay `Pending`**
+Look at the Payments API outbox processor logs in the dashboard. A high Dev Proxy error rate, a
+stopped Core Bank API, or a missing Redis lease will all park messages until the downstream returns;
+after 5 failed attempts a message goes terminally `Failed`.
+
+## Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — component detail, database schemas, data flow
+- **[docs/adr/](docs/adr/)** — 19 accepted decision records; these govern the system's behavior
+- **[docs/bmad/](docs/bmad/)** — planning, implementation and test artifacts, plus
+  `constraints.md` (the binding invariants, external API surface, ports and test rules)
+- **[AGENTS.md](AGENTS.md)** — orientation for AI agents working in this repository
+
+## Further reading
+
+- [.NET Aspire](https://learn.microsoft.com/dotnet/aspire/)
+- [Resilience in .NET](https://learn.microsoft.com/dotnet/core/resilience/)
+- [Transactional Outbox pattern](https://microservices.io/patterns/data/transactional-outbox.html)
+- [Idempotent Consumer pattern](https://microservices.io/patterns/communication-style/idempotent-consumer.html)
+- [Dapr](https://dapr.io/)
+- [Dev Proxy](https://learn.microsoft.com/microsoft-cloud/dev/dev-proxy/)
 - [OpenTelemetry .NET](https://opentelemetry.io/docs/languages/net/)
-- [Dapr Distributed Application Runtime](https://dapr.io/)
