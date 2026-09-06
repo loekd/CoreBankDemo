@@ -57,7 +57,15 @@ public class DaprSidecarProcessTests
         var result = await sidecar.StartAsync(Launch with { HttpPort = 53914 }, CancellationToken.None);
 
         result.Succeeded.Should().BeFalse();
-        result.Detail.Should().Contain("before it became ready");
+        // Which of the two death detectors wins is a race against how fast the OS reaps a
+        // process that rejects its arguments: StartAsync's post-launch HasExited guard (the
+        // one that refuses to claim a recycled PID) reports "exited immediately", while
+        // WaitForReadyAsync's loop reports "before it became ready". Both are correct
+        // reports of the same fact, and both satisfy what this test is really about — stated
+        // failure, exit code surfaced, nothing owned. Asserting on only one of them made this
+        // pass on a slower machine and fail on a fast CI runner.
+        result.Detail.Should().ContainAny("before it became ready", "exited immediately with code");
+        result.Detail.Should().Contain("code 1");
         sidecar.IsRunning.Should().BeFalse("a sidecar that never became ready is torn down, never orphaned");
     }
 
