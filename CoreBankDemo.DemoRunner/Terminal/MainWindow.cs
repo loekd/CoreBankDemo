@@ -28,6 +28,27 @@ public sealed class MainWindow : Window
     private const int SecondLabelWidth = 11;
     private const int NarrowFieldWidth = 10;
 
+    /// <summary>Rows 0-4 of the Operations form: the payment fields and the two mode buttons.</summary>
+    private const int FormFieldRows = 5;
+
+    /// <summary>Inner height at which the Operations form can afford its blank separator rows.</summary>
+    private const int SpaciousOperationsHeight = 22;
+
+    /// <summary>Rows the payment list keeps before the workspace hint is sacrificed for it.</summary>
+    private const int PaymentListMinimumRows = 2;
+
+    /// <summary>Rows reserved below the payment list for the feed status and the workspace hint.</summary>
+    private const int PaymentListBottomMargin = 2;
+
+    /// <summary>
+    /// Rows between the terminal's own height and the Operations workspace's inner area: the
+    /// window border (2), the topology bar (1), the three rows <c>_content</c>'s
+    /// <c>Dim.Fill(3)</c> reserves for the status/message/evidence band, the content frame's
+    /// border (2) and the workspace frame's border (2). Derived from <c>Frame.Height</c> rather
+    /// than read from <c>Viewport</c>, which is not yet recomputed when the responsive pass runs.
+    /// </summary>
+    private const int OperationsChromeRows = 10;
+
     // Faults workspace grid. The value column is never sacrificed to preserve the track:
     // the number is authoritative and the bar is reinforcement, so degradation drops the
     // bar first (see ApplyFaultsLayout) and the number never.
@@ -297,6 +318,9 @@ public sealed class MainWindow : Window
                 _ => IdempotencyMode.Generated,
             };
             _idempotencyButton.Text = $"Idempotency: {_idempotencyMode}";
+            // The note's row belongs to the payment list outside Omitted mode, so the ladder is
+            // re-run here rather than only on resize.
+            ApplyOperationsRows();
         };
 
         _omittedNote = new Label { X = LabelX, Y = 5, Height = 1, Width = Dim.Fill(1), Text = "Omitted mode: not retry-safe after an ambiguous outcome." };
@@ -1306,14 +1330,38 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// Drops the blank spacer rows from the Operations form on short terminals so the
-    /// outcome lookup stays on screen at the supported 80x24 minimum.
+    /// Places the Operations form and, beneath it, the payment list.
+    /// <para>
+    /// The list is budgeted first and the form is compressed into what is left, because the list
+    /// is where a submitted payment states its own outcome. Row positions are derived from the
+    /// workspace's real inner height rather than from fixed constants: the constants counted rows
+    /// the workspace did not have, since they ignored both the FrameView's own border and the two
+    /// rows <see cref="Dim.Fill(int)"/> reserves at the bottom. The list was therefore squeezed to
+    /// zero rows on any terminal shorter than about 28 - including the documented 80x24 minimum
+    /// and the 100x30 preferred baseline, where it rendered a single row - so a submitted payment
+    /// appeared in Evidence but nowhere in Operations.
+    /// </para>
     /// </summary>
     private void ApplyOperationsRows()
     {
-        var submit = _compactLayout ? 6 : 7;
-        var burst = _compactLayout ? 7 : 9;
-        var outcome = _compactLayout ? 12 : 14;
+        var inner = Math.Max(0, Frame.Height - OperationsChromeRows);
+
+        // The note speaks only about Omitted mode, so outside that mode it is a row of noise and
+        // the first one reclaimed.
+        _omittedNote.Visible = _idempotencyMode == IdempotencyMode.Omitted;
+        var note = _omittedNote.Visible ? 1 : 0;
+
+        // The blank rows separating the three form groups are cosmetic, so they give way next.
+        var gap = inner >= SpaciousOperationsHeight ? 1 : 0;
+
+        var submit = FormFieldRows + note + gap;
+        var burst = submit + 1 + gap;
+        // Burst occupies four rows: the count/concurrency fields, the buttons, the HTTP leg and
+        // the proven leg.
+        var outcome = burst + 4 + gap;
+        var query = outcome + 1;
+        var list = query + 1 + gap;
+
         _submitButton.Y = submit;
         _resendButton.Y = submit;
         _burstCountLabel.Y = burst;
@@ -1326,10 +1374,18 @@ public sealed class MainWindow : Window
         _burstProvenStatus.Y = burst + 3;
         _outcomeLabel.Y = outcome;
         _outcomeKey.Y = outcome;
-        _queryButton.Y = outcome + 1;
-        // The payment list takes whatever is left. It is the last thing to give way, because
-        // it is where a submitted payment states its own outcome.
-        _paymentList.Y = outcome + 3;
+        _queryButton.Y = query;
+
+        // The list never gives up its last rows. When even the compressed ladder cannot leave it
+        // PaymentListMinimumRows, the workspace hint surrenders its row and the feed status moves
+        // down into it -- the hint restates what the controls already say, while the feed status
+        // is load-bearing (an unresolved payment must never look awaited while nothing is
+        // listening) and so is kept.
+        var tight = inner - list - PaymentListBottomMargin < PaymentListMinimumRows;
+        _operationsHint.Visible = !tight;
+        _feedStatus.Y = Pos.AnchorEnd(tight ? 1 : 2);
+        _paymentList.Y = list;
+        _paymentList.Height = Dim.Fill(tight ? 1 : PaymentListBottomMargin);
     }
 
     /// <summary>
@@ -1725,10 +1781,15 @@ public sealed class MainWindow : Window
     internal Task TriggerApplyFaultsForTestAsync() => SurfaceAsync(_controller.ApplyFaultsAsync(_sessionCancellation.Token));
     internal void TriggerArmingToggleForTest() => Surface(_controller.SetArming(!_controller.State.FaultArmingRequested));
     internal bool HandleKeyForTest(Key key) => OnKeyDown(key);
+    internal Button QueryButton => _queryButton;
+
+    internal bool OmittedNoteVisible => _omittedNote.Visible;
+
     internal void SetIdempotencyModeForTest(IdempotencyMode mode)
     {
         _idempotencyMode = mode;
         _idempotencyButton.Text = $"Idempotency: {_idempotencyMode}";
+        ApplyOperationsRows();
     }
 
     internal void ResizeForTest(int width, int height)
