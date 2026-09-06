@@ -15,6 +15,15 @@ var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0"
     .WithEndpoint(port: 4318, targetPort: 4318, name: "otlp-http")
     .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true")
     .WithEndpointProxySupport(false)
+    // Publish the Jaeger UI on every interface, not just loopback. Aspire binds a
+    // container's host ports to `TargetHost`, which defaults to "localhost", so the
+    // UI answered only on 127.0.0.1. That is invisible when the AppHost runs in a
+    // devcontainer -- the editor forwards ports from the inside, where loopback is
+    // fine -- and fatal when it runs directly in a sandbox, where the only way out
+    // is a host-side port publish that has to reach the sandbox's eth0. The OTLP
+    // endpoints below are deliberately left alone: only in-sandbox services dial
+    // them, and their resolved URL is handed to those services verbatim.
+    .WithEndpoint("jaeger-ui", endpoint => endpoint.TargetHost = "0.0.0.0")
     .WithLifetime(ContainerLifetime.Persistent);
 
 // Resolve the host-visible Jaeger OTLP endpoint from Aspire.
