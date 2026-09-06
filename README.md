@@ -324,6 +324,14 @@ Look at the Payments API outbox processor logs in the dashboard. A high Dev Prox
 stopped Core Bank API, or a missing Redis lease will all park messages until the downstream returns;
 after 5 failed attempts a message goes terminally `Failed`.
 
+**`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Apple Silicon)**
+A bug in the published image, not in this repository, and harmless — RedisInsight is an optional
+Redis GUI that nothing here depends on. `redis/redisinsight:3.4` ships a `keytar.node` linked with
+4 KB ELF page alignment, so on a kernel whose page size is 16 KB it cannot be mapped and segfaults
+on load; the image's own `node` and its `better_sqlite3.node` are 64 KB-aligned and load fine.
+Check yours with `getconf PAGESIZE` — on a 4 KB host the resource starts normally. Ignore the red
+resource, or drop `.WithRedisInsight(...)` from `CoreBankDemo.AppHost/AppHost.cs`.
+
 ## Documentation
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — component detail, database schemas, data flow
