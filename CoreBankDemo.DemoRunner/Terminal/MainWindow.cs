@@ -168,8 +168,8 @@ public sealed class MainWindow : Window
     private string _message = string.Empty;
     private long _messageMark = -1;
 
-    public MainWindow(OperatorConsoleController controller, Func<Task> onExitRequested)
-        : this(controller, onExitRequested, null, true)
+    public MainWindow(OperatorConsoleController controller, Func<Task> onExitRequested, ThemeMode theme = ThemeMode.Dark)
+        : this(controller, onExitRequested, null, true, theme: theme)
     {
     }
 
@@ -179,9 +179,10 @@ public sealed class MainWindow : Window
         IConfirmationService? confirmation,
         bool startPolling,
         bool marshalUpdates = true,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        ThemeMode theme = ThemeMode.Dark)
     {
-        OperatorTheme.Register();
+        OperatorTheme.Register(theme);
         _controller = controller;
         _time = time ?? TimeProvider.System;
         _onExitRequested = onExitRequested;
@@ -1391,6 +1392,20 @@ public sealed class MainWindow : Window
         {
             key.Handled = true;
             PanicOff();
+            return true;
+        }
+
+        // Light/dark toggle. Like 1-5 and 0, this only reaches the window when focus is not
+        // in a text field, so typing a 't' into an account or key field is unaffected. The
+        // swap remaps the six schemes in place and redraws: no focus move, no scroll reset,
+        // no in-flight action disturbed, so it is safe to hit mid-demo when the projector
+        // turns out to be washing the dark canvas out.
+        if (key == Key.T || key == Key.T.WithShift)
+        {
+            key.Handled = true;
+            var mode = OperatorTheme.Toggle();
+            SetNeedsDraw();
+            ShowMessage($"Theme: {(mode == ThemeMode.Light ? "light" : "dark")}");
             return true;
         }
 

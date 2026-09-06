@@ -212,7 +212,19 @@ dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj
 
 # Print prerequisites and current port state; starts nothing
 dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj -- --doctor
+
+# Start in the light palette, for presenting on a projector
+dotnet run --project CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj -- --light
 ```
+
+The console ships two palettes: the default dark cockpit surface, and a light surface for
+projectors, where the near-black canvas washes out. Pick one with `--light`/`--dark`, pin one for a
+terminal profile with `COREBANK_DEMO_THEME=light|dark`, or press `T` to switch live from any
+workspace. Switching is a repaint only — it never moves focus, changes workspace, or disturbs a
+staged fault level or an action in flight. The two palettes differ in colour values alone: every
+state is carried by a symbol and a text label in both, so nothing is readable in one and not the
+other. Both clear WCAG AA against their own canvas, and the light palette is anchored to the
+Ghostty **GitHub Light Default** theme so the console blends into the terminal hosting it.
 
 Five workspaces, reachable with `1`–`5`:
 
@@ -234,7 +246,7 @@ Five workspaces, reachable with `1`–`5`:
    in **Resources** before a start, and is **off by default**.
 
 `0` is panic-off — every fault knob to zero, applied immediately, from any workspace, without
-confirmation. `R` refreshes live Aspire state; `Q` quits, stopping only child processes this session
+confirmation. `T` toggles the light/dark palette. `R` refreshes live Aspire state; `Q` quits, stopping only child processes this session
 started and never touching an attached topology. Every mouse action has a keyboard equivalent,
 destructive actions open a modal with **Cancel** focused, and the layout stays usable at 80×24.
 

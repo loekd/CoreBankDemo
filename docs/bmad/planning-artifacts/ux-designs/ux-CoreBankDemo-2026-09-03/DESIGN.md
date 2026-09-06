@@ -19,7 +19,7 @@ sources:
   - ../../../../../CoreBankDemo.ServiceDefaults/CloudEventTypes/TransactionFailedEvent.cs
   - ../../../../../CoreBankDemo.ServiceDefaults/CloudEventTypes/BalanceUpdatedEvent.cs
   - ../../../../../README.md
-updated: 2026-09-05
+updated: 2026-09-06
 colors:
   surface-base: '#0B1220'
   surface-raised: '#132036'
@@ -36,6 +36,24 @@ colors:
   state-ambiguous: '#D8A93B'
   state-failed: '#D9534F'
   state-failed-on-raised: '#E06862'
+  text-on-accent: '#E8ECF1'
+colors-light:
+  surface-base: '#FFFFFF'
+  surface-raised: '#EAEEF2'
+  surface-overlay: '#D8DEE4'
+  text-primary: '#1F2328'
+  text-secondary: '#57606A'
+  text-muted: '#5F6873'
+  border-hairline: '#C6CFD8'
+  accent-teal: '#136066'
+  accent-navy: '#325F8C'
+  state-healthy: '#116329'
+  state-running: '#7A5309'
+  state-neutral: '#57606A'
+  state-ambiguous: '#7A5309'
+  state-failed: '#A40E26'
+  state-failed-on-raised: '#A40E26'
+  text-on-accent: '#FFFFFF'
 typography:
   label:
     note: 'Terminal monospace inherited from the host emulator; bold attribute — pane headers, resource names, primary action captions'
@@ -79,7 +97,10 @@ components:
   nav-rail-item:
     background-active: '{colors.accent-navy}'
     background-inactive: '{colors.surface-raised}'
-    foreground: '{colors.text-primary}'
+    foreground-active: '{colors.text-on-accent}'
+    foreground-inactive: '{colors.text-primary}'
+    marker-active: '▸'
+    marker-inactive: ' '
   status-chip-healthy:
     foreground: '{colors.state-healthy}'
     symbol: '●'
@@ -243,7 +264,7 @@ components:
 
 This is a **Terminal.Gui** cockpit, not a web or mobile surface — there is no CSS box model, no font-loading, no hover state, and color rendering depends entirely on the host terminal's capability (24-bit truecolor down to a 16-color ANSI palette). Every token below is written as a hex value for a truecolor terminal; the **Colors** section states the 16-color fallback mapping in prose, because the frontmatter spec fixes color values to hex strings.
 
-The retired `mission-critical-talk-v7.json` cue player leaned on the visual language of the author's deck — a restrained teal-on-navy control-room palette. That posture is preserved **only** where it does not compete with the harder requirement: legibility at projector distance and truthful state that never depends on color perception alone. Where the two pull apart, legibility and text/symbol redundancy win. `[ASSUMPTION]` The exact teal/navy hex values below are a reasonable interpretation of "restrained cockpit language," not a value confirmed against the actual deck; `[ASSUMPTION]` no dark/light mode split is modeled — the console has one dark cockpit surface, matching the brief's "no i18n, no dark/light theming beyond legibility."
+The retired `mission-critical-talk-v7.json` cue player leaned on the visual language of the author's deck — a restrained teal-on-navy control-room palette. That posture is preserved **only** where it does not compete with the harder requirement: legibility at projector distance and truthful state that never depends on color perception alone. Where the two pull apart, legibility and text/symbol redundancy win. `[ASSUMPTION]` The exact teal/navy hex values below are a reasonable interpretation of "restrained cockpit language," not a value confirmed against the actual deck; The console now ships **two palettes**, not one. The dark cockpit surface remains the default and the brand identity; a light palette exists because the same near-black canvas that reads as a control room on a laptop washes out under a projector lamp, and legibility at projector distance is the harder requirement this spine already commits to. This supersedes this file's earlier assumption that no dark/light split would be modeled. Both palettes are held to the same accessibility floor, and the split changes token *values* only — no component, state, symbol, or behaviour differs between modes.
 
 **Composition reference:** [`imports/operator-console-inspiration.png`](imports/operator-console-inspiration.png) is a **user-supplied operator-console composition reference** (not a Docker Sandboxes screenshot — see `.memlog.md`'s rename decision), used **only** for the composition principles listed once in `EXPERIENCE.md` Inspiration & Anti-patterns (cross-referenced from here rather than restated). None of its branding, exact colors, labels, or literal layout are carried over; every principle is re-expressed in this console's own restrained teal/navy cockpit language and Terminal.Gui constraints. Where the reference and this spine's stated requirements conflict, **this spine (and its paired `EXPERIENCE.md`) wins**.
 
@@ -271,6 +292,37 @@ The retired `mission-critical-talk-v7.json` cue player leaned on the visual lang
 - **16-color fallback.** On a terminal without truecolor, the resolver maps: `state-failed`/`state-failed-on-raised`→ANSI Red, `state-healthy`→ANSI Green, `state-running`/`state-ambiguous`→ANSI Yellow, `accent-teal`→ANSI Cyan, `accent-navy`→ANSI Blue, `text-primary`→ANSI White/Bright White, `text-secondary`/`text-muted`→ANSI White with the `Dim` attribute (Terminal.Gui has no separate gray in the base 16), `surface-base`/`surface-raised`/`surface-overlay`→ANSI Black/Bright Black via the `Bold`/background-intensity bit. `[ASSUMPTION]` This mapping has not been rendered and screenshotted against a real 16-color terminal; it is the designer's best-effort interpretation of the nearest ANSI neighbor for each hex value.
 - **Avoid:** gradients (Terminal.Gui cannot render them), a second chromatic accent beyond teal/navy, and any state communicated by hue alone.
 
+### Light mode
+
+A second palette (`colors-light` in the frontmatter), for presenting on a projector. It is selected with `--light`, with `COREBANK_DEMO_THEME=light`, or by pressing `T` while the console is running; dark remains the default. Behaviour is defined in `EXPERIENCE.md` Interaction Primitives.
+
+**Light mode is a different set of hexes, not the dark set on a pale background.** This was measured rather than assumed. Every dark token above, placed as a foreground on a white canvas, contrasts as follows: `state-running` 2.17:1, `state-healthy` 2.37:1, `accent-teal` 2.48:1, `text-secondary` 2.44:1, `text-muted` 3.43:1, `state-failed` 3.96:1, `text-primary` 1.19:1. Eight of the ten fail the 4.5:1 floor and the amber, green and teal are effectively invisible at projector distance. That is the expected result for a palette tuned light-on-dark, and it is why the light mode carries its own values.
+
+**Anchored to the host terminal.** The light surfaces are taken from the Ghostty **GitHub Light Default** theme this console is presented in: `surface-base` is that theme's exact background (`#FFFFFF`) and `text-primary` its exact foreground (`#1F2328`). The state and accent hues are drawn from the same theme's ANSI palette (GitHub Primer), which is itself contrast-tuned for a light terminal. Two consequences worth stating: the console does not read as a foreign rectangle inside the terminal hosting it, and the 16-colour fallback below degrades to *the same colours* rather than to approximations of them.
+
+**Measured contrast, light mode.** Every value clears WCAG AA (4.5:1) on both backgrounds it is drawn on, and every state and accent token clears 6:1 on the canvas — the reading that matters from the back of a room:
+
+| token | hex | on `surface-base` | on `surface-raised` |
+| --- | --- | --- | --- |
+| `text-primary` | `#1F2328` | 17.53:1 | 15.46:1 |
+| `text-secondary` / `state-neutral` | `#57606A` | 7.52:1 | 6.63:1 |
+| `text-muted` | `#5F6873` | 5.65:1 | 4.85:1 |
+| `accent-teal` | `#136066` | 7.26:1 | 6.23:1 |
+| `accent-navy` | `#325F8C` | 6.66:1 | 5.88:1 |
+| `state-healthy` | `#116329` | 7.39:1 | 6.34:1 |
+| `state-running` / `state-ambiguous` | `#7A5309` | 6.84:1 | 5.87:1 |
+| `state-failed` | `#A40E26` | 7.87:1 | 6.75:1 |
+
+Notes on the deviations from a straight mirror of the dark palette:
+
+- **`accent-navy` is the single token identical in both modes.** At `#325F8C` it measures 5.62:1 against the dark `text-primary` and 6.66:1 against white, so it clears the floor from both directions. Keeping one fixed structural accent is deliberate: it is the token that says *which section you are in*, and that meaning should not shift with the lighting in the room.
+- **`state-failed-on-raised` collapses onto `state-failed` in light mode.** The dark palette needs a lightened red (`#E06862`) because the base red measures a sub-AA 4.12:1 on `surface-raised`. The light red measures 6.75:1 there, so no separate tint is warranted and inventing one would be decoration. The token is retained so both palettes fill the same shape and no component has to know which mode is in force.
+- **`text-muted` is `#5F6873`, not the theme's own `#6E7781`.** The theme value measures 3.90:1 on `surface-raised` and fails; `#5F6873` reaches 4.85:1 while staying visibly dimmer than `text-secondary`. This is the same adjustment, for the same reason, that raised the dark palette's `text-muted` from `#5B6B80` to `#7C8CA0`, and it lands at effectively the same floor (4.85:1 light, 4.75:1 dark).
+- **Amber is darkened hardest.** `state-running` goes to `#7A5309`, a deep ochre rather than the dark palette's bright `#D8A93B`. Amber is the worst-behaved hue on white, and this is the state the brief cares most about reading correctly ("nine seconds must look like it is working, not like it hung"). Its identity survives because, per the rule above, the *text label* is the primary discriminator for this state and the colour was never carrying it alone.
+- **`text-muted` on `surface-overlay`** measures 4.19:1 and is below the floor — exactly as the dark palette's equivalent pairing measures 4.21:1. Neither mode renders muted text on the overlay: the confirmation modal uses `text-primary` only. The constraint is identical in both modes, so light mode introduces no accessibility debt the dark mode did not already carry.
+
+**16-colour fallback, light mode.** `state-failed` → ANSI Red, `state-healthy` → ANSI Green, `state-running`/`state-ambiguous` → ANSI Yellow, `accent-teal` → ANSI Cyan, `accent-navy` → ANSI Blue, `text-primary` → ANSI Black, `text-secondary`/`text-muted` → ANSI Bright Black, `surface-base`/`surface-raised`/`surface-overlay` → ANSI White/Bright White. Unlike the dark mapping, this one is not an approximation when the host terminal is GitHub Light Default: the palette above *is* that terminal's ANSI set, so a degraded terminal renders very nearly the same colours.
+
 ## Typography
 
 Terminal.Gui has no font family or size control — the host terminal emulator owns the actual glyph rendering, always monospace. "Typography" here means **attribute roles**, not font choices: `label` (bold) for headers/captions/primary-action text, `body` (normal) for the bulk of tables and forms, `meta` (dim) for timestamps/ids/footnotes, and `evidence-mono` (unstyled, never truncated or silently re-wrapped — pannable by default, with an explicit opt-in wrap toggle) for raw HTTP/JSON bodies and log lines where byte-for-byte fidelity matters more than compactness. `[ASSUMPTION]` "Projector legibility" for typography is delegated to the operator's terminal font-size setting outside this console's control; the console's own obligation is to never rely on a text size distinction to convey meaning (for example, no "small print" disclaimers) and to keep line lengths compatible with a compact/narrow terminal (see `EXPERIENCE.md` Responsive & Platform). `[ASSUMPTION]` A recommended projector baseline — legible from the back of a ~250-seat room — is 100×30 cells at roughly 18–20pt monospace; this is a starting point for dress rehearsal, not a verified claim, and is promoted to tested fact only after a real-terminal rehearsal (see `EXPERIENCE.md` Projector mode).
@@ -296,7 +348,7 @@ There is no corner radius in a terminal — "shape" is expressed through **box-d
 Every component below is paired with a same-named **Component Patterns** row in `EXPERIENCE.md` (behavioral rules there; visual tokens here) — see that file for the behavior each visual spec supports.
 
 - **Topology bar** (`{components.topology-bar}`) — persistent, one row, top of shell, on `surface-base` like the canvas beneath it. Shows the current AppHost profile (Regular/LoadTests), Owned/Attached badge, the persistent fault chip (`{components.status-chip-fault}`), and a horizontal strip of resource status chips. Never scrolls out of view. Refresh cadence, hysteresis, and immediate command-state behavior are defined in `EXPERIENCE.md` Component Patterns.
-- **Navigation rail** (`{components.nav-rail}`) — persistent, compact, fixed-width (`{spacing.nav-rail-width}`) column on the left edge of the shell, `surface-raised` with a single hairline-right divider. Hosts one **nav rail item** (`{components.nav-rail-item}`) per workspace — `accent-navy` fill when active, `surface-raised` when inactive — each reachable by a single keypress (`1`–`5`) or click; never nested, never a horizontal tab strip. Below `{spacing.preferred-width}`, shrinks to `{spacing.nav-rail-width-compact}` (icon+shortcut only, labels hidden).
+- **Navigation rail** (`{components.nav-rail}`) — persistent, compact, fixed-width (`{spacing.nav-rail-width}`) column on the left edge of the shell, `surface-raised` with a single hairline-right divider. Hosts one **nav rail item** (`{components.nav-rail-item}`) per workspace — marked active by a leading `▸` glyph (`marker-active`), optionally reinforced by an `accent-navy` fill, with `surface-raised` and a leading space when inactive — each reachable by a single keypress (`1`–`5`) or click; never nested, never a horizontal tab strip. **The marker, not the fill, is what carries the active state**, so which workspace you are in survives a monochrome terminal and both palettes identically; the fill is reinforcement. An active item's label takes `foreground-active` (`{colors.text-on-accent}`), never `text-primary`: `text-primary` inverts between modes while `accent-navy` deliberately does not, so a straight token swap would put dark text on mid-navy at 2.37:1 in light mode. Below `{spacing.preferred-width}`, shrinks to `{spacing.nav-rail-width-compact}` (icon+shortcut only, labels hidden).
 - **Status chip** (`{components.status-chip-healthy}` / `{components.status-chip-running}` / `{components.status-chip-unknown}` / `{components.status-chip-failed}`) — symbol + short label + color, per the **Colors** rule that color is never the sole channel. Used in the topology bar and, per **Activity row** below, in the left-hand status gutter of every activity/resource row. Each chip is an individually focusable/Tab-reachable control (see `EXPERIENCE.md` Accessibility Floor for the literal focus order); Enter/click on a resource chip opens that resource's detail in the Resources workspace.
 - **Feed status, inline** (`{components.feed-status-inline}`) — not a component with a fixed screen position but a `meta`-typography qualifier that travels with the thing it qualifies. It appears in exactly two places: parenthesised at the end of an awaiting payment row's elapsed readout (`Awaiting settlement — 14s (listening)`, `foreground-listening`), and as the Evidence feed's header line (`Listening since 12:01:04 — events before this time were not observed`). There is no third place and no chip; when the feed is lost the payment row changes **state** rather than gaining a badge: it renders `symbol-lost` (`○`, ASCII fallback `[ ]`) in `foreground-lost` (`state-neutral`), exactly like every other genuinely-unknown state in this console (see `EXPERIENCE.md` State Patterns, Payment: Outcome unknown).
 - **Activity row** (`{components.activity-row}`) — the atomic unit of every workspace's main content (resource rows, payment/evidence entries, invariant chips): a bold verb/object headline (`label` typography, `foreground-headline`) — for example, "Stop — corebank-api" — with a muted command/request detail line directly beneath it (`meta` typography, `foreground-meta`) — for example, the exact Aspire command or HTTP call issued — and a fixed-width status marker rendered in a left gutter (`gutter-width`) column, never inline-mixed with the headline text. Sits directly on `surface-base`, borderless, so a scrolling list of rows reads as one continuous surface rather than stacked cards. An empty workspace renders a single muted (`text-muted`) placeholder row in the same slot — for example, "No payments submitted this session" — never a blank void.
@@ -346,4 +398,7 @@ Every component below is paired with a same-named **Component Patterns** row in 
 | Keep Apply on `primary-action-button` tokens and panic-off always enabled | Dress a reversible fault change in the destructive red/double-border treatment |
 | Re-state an unresolved payment as `Outcome unknown` (`state-neutral`) when the feed drops | Render a dropped subscription in red, asserting a payment failure nothing proved |
 | Reuse `state-healthy`/`state-failed`/`state-running` for settled/rejected/awaiting | Add a settlement-specific color token, or give feed status the teal treatment |
+| Carry the active workspace on the `▸` marker, with any `accent-navy` fill as reinforcement | Let the fill alone say which workspace is active |
+| Give both palettes their own measured hexes against their own canvas | Reuse the dark hexes on a light background, where eight of ten fall below AA |
+| Keep light and dark differing in token values only | Let a component, state, symbol, or behaviour vary by palette |
 | Distinguish a system-produced row by its inbound gutter marker | Rely on color or position alone to separate what the bank said from what the operator did |

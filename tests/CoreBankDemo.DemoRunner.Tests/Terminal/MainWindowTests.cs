@@ -6,9 +6,11 @@ using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
 using Xunit;
+using CoreBankDemo.DemoRunner.Tests;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
+[Collection(OperatorThemeCollection.Name)]
 public class MainWindowTests
 {
     [Theory]
@@ -569,6 +571,69 @@ public class MainWindowTests
         window.RenderForTest();
 
         controller.State.SelectedEvidence!.Sequence.Should().Be(chosen);
+    }
+
+    /// <summary>
+    /// The palette toggle is reachable from every workspace, like panic-off, because a
+    /// projector that washes the dark canvas out is discovered mid-talk, not before it.
+    /// </summary>
+    [Fact]
+    public void ShortcutT_TogglesThePaletteFromAnyWorkspace()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        var started = OperatorTheme.Mode;
+
+        window.HandleKeyForTest(Key.T).Should().BeTrue();
+        OperatorTheme.Mode.Should().NotBe(started);
+
+        window.HandleKeyForTest(Key.T).Should().BeTrue();
+        OperatorTheme.Mode.Should().Be(started);
+    }
+
+    /// <summary>
+    /// Toggling is a redraw, not a navigation: it must not move the operator off the
+    /// workspace they were presenting from.
+    /// </summary>
+    [Fact]
+    public void ShortcutT_DoesNotChangeTheActiveWorkspace()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.HandleKeyForTest(Key.D4);
+
+        window.HandleKeyForTest(Key.T);
+
+        controller.State.ActiveWorkspace.Should().Be(WorkspaceKind.LoadTest);
+        window.IsWorkspaceVisible(WorkspaceKind.LoadTest).Should().BeTrue();
+        OperatorTheme.Register(ThemeMode.Dark);
+    }
+
+    /// <summary>
+    /// End-to-end wiring, not just the scheme table: a window constructed in light mode must
+    /// have its actual views resolve to the light canvas. Views hold only a scheme *name* and
+    /// resolve it through SchemeManager at draw time, which is what lets the T toggle repaint
+    /// without walking the view tree - so this also pins the mechanism the toggle depends on.
+    /// </summary>
+    [Theory]
+    [InlineData(ThemeMode.Dark, false)]
+    [InlineData(ThemeMode.Light, true)]
+    public void Window_ResolvesTheRequestedPalette(ThemeMode mode, bool expectLightCanvas)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = new MainWindow(
+            controller,
+            () => Task.CompletedTask,
+            new FakeConfirmationService(),
+            startPolling: false,
+            marshalUpdates: false,
+            theme: mode);
+
+        var canvas = window.GetScheme().Normal.Background;
+        var isLight = canvas.R > 200 && canvas.G > 200 && canvas.B > 200;
+
+        isLight.Should().Be(expectLightCanvas);
+        OperatorTheme.Register(ThemeMode.Dark);
     }
 
     private static MainWindow CreateWindow(

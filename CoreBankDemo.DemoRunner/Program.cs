@@ -68,11 +68,15 @@ public static class Program
             outcomeFeed,
             TimeProvider.System);
 
-        return RunConsole(controller);
+        var theme = CliOptions.ResolveTheme(
+            options.Theme,
+            Environment.GetEnvironmentVariable(CliOptions.ThemeEnvironmentVariable));
+
+        return RunConsole(controller, theme);
     }
 
 #pragma warning disable CS0618
-    private static int RunConsole(OperatorConsoleController controller)
+    private static int RunConsole(OperatorConsoleController controller, ThemeMode theme)
     {
         AppTerminal.Init();
 
@@ -92,7 +96,7 @@ public static class Program
         {
             await controller.ShutdownAsync(CancellationToken.None);
             AppTerminal.RequestStop();
-        });
+        }, theme);
         clipboard.Copied += window.ShowClipboardResult;
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
