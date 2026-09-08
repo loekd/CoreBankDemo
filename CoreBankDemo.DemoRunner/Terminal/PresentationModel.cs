@@ -228,7 +228,7 @@ public static class PresentationModelBuilder
             FeedStatusLine(state),
             // The two legs are never merged: a burst is exactly where "acknowledged" and
             // "finished" diverge.
-            $"HTTP leg · Burst {state.Burst.Sent}/{state.Burst.Requested} · accepted {state.Burst.Accepted} · completed {state.Burst.Completed} · failed {state.Burst.Failed}{(state.Burst.Cancelled ? " · Cancelled" : string.Empty)}",
+            $"HTTP leg · Burst {state.Burst.Sent}/{state.Burst.Requested} · accepted {state.Burst.Accepted} · completed {state.Burst.Completed} · cancelled {state.Burst.CancelledPayments} · failed {state.Burst.Failed}{(state.Burst.Cancelled ? " · Cancelled" : string.Empty)}",
             BurstProvenLine(state.Burst),
             $"{state.LoadProgress.Phase} · {state.LoadProgress.Elapsed.TotalSeconds:F0}s · {state.LoadProgress.Detail}",
             loadResults,
@@ -323,6 +323,14 @@ public static class PresentationModelBuilder
                 + $"{OutcomeFeedNarrative.Clock(payment.ObservedAt)} · {request}",
                 OutcomeQueryRemedy),
 
+            // Proven by HTTP alone: the rail withdrew the payment, so there is no settlement to
+            // await and no clock from a broadcast to show.
+            PaymentTrackingState.Cancelled => (
+                "✕",
+                $"Cancelled — withdrawn before execution — {payment.TransactionId}",
+                $"{payment.Note ?? "nothing executed; a retry with a new key is safe"} · {http} · {request}",
+                string.Empty),
+
             PaymentTrackingState.OutcomeUnknown => (
                 "○",
                 $"Outcome unknown — {payment.Note ?? "the console stopped listening"} — {payment.TransactionId}",
@@ -358,6 +366,7 @@ public static class PresentationModelBuilder
     private static string LegSummary(TrackedPayment payment) => payment.State switch
     {
         PaymentTrackingState.Rejected => "No balance legs — a rejection emits none.",
+        PaymentTrackingState.Cancelled => "No balance legs — a cancellation emits none.",
         _ => payment.ObservedLegs.Count switch
         {
             0 => payment.State == PaymentTrackingState.Settled ? "No balance legs observed yet." : string.Empty,

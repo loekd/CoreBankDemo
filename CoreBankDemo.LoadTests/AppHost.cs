@@ -64,12 +64,17 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     .WaitFor(pubsub);
 
 // Opt-in latency injection (Features:UseDevProxy, default false). The profile
-// delays only CoreBankAPI's transaction endpoint, by more than the instant
-// rail's BudgetMilliseconds, so every inline forward attempt overruns its
-// budget and the payment falls back to 202 Pending for the background
-// processor to complete. Account validation stays fast, so the run still
-// exercises the normal path up to the forward. Deliberately off by default --
-// this is a manual stress scenario, never part of the /run-load-tests gate.
+// delays every CoreBankAPI transaction endpoint -- process AND cancel, since
+// the cancel travels through the same faulted hop (ADR-020) -- by more than
+// the instant rail's BudgetMilliseconds, so every inline forward attempt
+// overruns its forward phase and the cancel that follows overruns its
+// allowance too: the payment typically ends as the residual honest 202
+// Pending for the background processor to complete. A 504 Cancelled appears
+// only when CoreBank provably never received or executed the command (the
+// acceptance gate then counts that row terminal Cancelled). Account
+// validation stays fast, so the run still exercises the normal path up to the
+// forward. Deliberately off by default -- this is a manual stress scenario,
+// never part of the /run-load-tests gate.
 IResourceBuilder<DevProxyExecutableResource>? devProxy = null;
 var useDevProxy = builder.Configuration.GetValue<bool>("Features:UseDevProxy");
 if (useDevProxy)

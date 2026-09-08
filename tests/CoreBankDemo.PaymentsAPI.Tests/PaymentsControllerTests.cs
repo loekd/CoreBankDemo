@@ -339,6 +339,93 @@ public class PaymentsControllerTests
         response.Status.Should().Be("Pending");
     }
 
+    // ---- spec: instant-rail-timeout-cancel -- 504/Cancelled ----
+
+    [Fact]
+    public async Task ProcessPayment_maps_a_cancelled_instant_forward_to_504_with_cancelled_status()
+    {
+        var snapshot = Snapshot(idempotencyKey: "key-c1", transactionId: "txn-c1", status: "Pending");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Stored, snapshot, []));
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 9, TimeSpan.Zero);
+        _instantHandler
+            .Setup(h => h.ForwardAsync(snapshot, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new InstantForwardResult(InstantDeliveryOutcome.Cancelled, cancelledAt));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var gatewayTimeout = result.Should().BeOfType<ObjectResult>().Subject;
+        gatewayTimeout.StatusCode.Should().Be(StatusCodes.Status504GatewayTimeout);
+        var response = gatewayTimeout.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Should().Be(new PaymentResponse("key-c1", "txn-c1", "Cancelled", 50m, "EUR", cancelledAt));
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_cancelled_instant_duplicate_as_504_with_the_persisted_cancellation_time()
+    {
+        // Matrix: "Duplicate key of a cancelled instant row" -- same 504/
+        // Cancelled, persisted ProcessedAt, no new row, no delivery attempt.
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 9, TimeSpan.Zero);
+        var payload = JsonSerializer.Serialize(new TransactionSubmission("txn-c2", "Cancelled", cancelledAt));
+        var winner = Snapshot(idempotencyKey: "key-c2", transactionId: "txn-c2", status: "Cancelled", responsePayload: payload);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var gatewayTimeout = result.Should().BeOfType<ObjectResult>().Subject;
+        gatewayTimeout.StatusCode.Should().Be(StatusCodes.Status504GatewayTimeout);
+        var response = gatewayTimeout.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Cancelled");
+        response.PaymentId.Should().Be("key-c2");
+        response.ProcessedAt.Should().Be(cancelledAt);
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_replays_a_cancelled_instant_duplicate_without_a_payload_using_created_at()
+    {
+        var winner = Snapshot(idempotencyKey: "key-c3", transactionId: "txn-c3", status: "Cancelled", responsePayload: null);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var gatewayTimeout = result.Should().BeOfType<ObjectResult>().Subject;
+        gatewayTimeout.StatusCode.Should().Be(StatusCodes.Status504GatewayTimeout);
+        var response = gatewayTimeout.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Cancelled");
+        response.ProcessedAt.Should().Be(new DateTimeOffset(DateTime.SpecifyKind(winner.CreatedAt, DateTimeKind.Utc)));
+    }
+
+    [Fact]
+    public async Task ProcessPayment_standard_rail_duplicate_of_a_cancelled_row_stays_byte_identical_202()
+    {
+        // Boundary: the standard rail is untouched -- a standard-scheme resend
+        // still replays the raw kernel status with 202, exactly as today.
+        var winner = Snapshot(idempotencyKey: "key-c4", transactionId: "txn-c4", status: "Cancelled");
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        accepted.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Cancelled");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
     [Fact]
     public async Task ProcessPayment_never_forwards_a_standard_scheme_payment()
     {

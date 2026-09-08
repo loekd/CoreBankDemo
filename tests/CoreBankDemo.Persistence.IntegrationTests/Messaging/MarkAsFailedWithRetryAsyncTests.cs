@@ -92,6 +92,38 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     }
 
     [Fact]
+    public async Task Call_on_a_cancelled_message_is_a_no_op_and_never_revives_it_to_pending()
+    {
+        // spec: instant-rail-timeout-cancel -- the guard must use the shared
+        // "is terminal" definition, not "== Failed": a late "release the
+        // claim" after a cancel would otherwise put the row back to Pending
+        // and the background rail would deliver a payment the caller was
+        // told never executed.
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+
+        var message = new TestInboxMessage
+        {
+            IdempotencyKey = "already-cancelled",
+            Status = MessageConstants.Status.Cancelled,
+            RetryCount = 2,
+            LastError = "Instant rail budget exhausted",
+            ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        context.InboxMessages.Add(message);
+        await context.SaveChangesAsync(ct);
+
+        var outcome = await repository.MarkAsFailedWithRetryAsync(message, "late release", ct);
+
+        outcome.Should().Be(MessageTransitionOutcome.AlreadyTerminal);
+        var reloaded = await context.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct);
+        reloaded.Status.Should().Be(MessageConstants.Status.Cancelled);
+        reloaded.RetryCount.Should().Be(2);
+        reloaded.LastError.Should().Be("Instant rail budget exhausted");
+    }
+
+    [Fact]
     public async Task Detached_message_from_a_different_context_is_attached_and_the_transition_persists()
     {
         var ct = TestContext.Current.CancellationToken;

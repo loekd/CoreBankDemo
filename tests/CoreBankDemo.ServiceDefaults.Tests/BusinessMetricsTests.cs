@@ -107,6 +107,7 @@ public class BusinessMetricsTests
     [InlineData(BusinessMetrics.InstantPaymentOutcome.Settled, "settled")]
     [InlineData(BusinessMetrics.InstantPaymentOutcome.Rejected, "rejected")]
     [InlineData(BusinessMetrics.InstantPaymentOutcome.Deferred, "deferred")]
+    [InlineData(BusinessMetrics.InstantPaymentOutcome.Cancelled, "cancelled")]
     public void RecordInstantPaymentDuration_emits_exactly_one_measurement_with_only_the_outcome_tag(
         BusinessMetrics.InstantPaymentOutcome outcome, string expectedTag)
     {

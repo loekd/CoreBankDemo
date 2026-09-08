@@ -87,7 +87,11 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         try
         {
             var cached = JsonSerializer.Deserialize<TransactionSubmission>(responsePayload);
-            return cached?.Status is MessageConstants.Status.Completed or MessageConstants.Status.Failed;
+            // Cancelled is terminal too (spec: instant-rail-timeout-cancel):
+            // a cached cancellation is never overwritten by a later event.
+            return cached?.Status is MessageConstants.Status.Completed
+                or MessageConstants.Status.Failed
+                or MessageConstants.Status.Cancelled;
         }
         catch (JsonException)
         {

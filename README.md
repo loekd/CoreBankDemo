@@ -16,7 +16,7 @@ Everything runs locally with one command. Nothing here talks to a real bank.
 | Don't reorder a customer's payments | **Partitioned processing** — messages are hashed onto 4 fixed partitions; one worker holds one partition at a time, so ordering holds per key while partitions run in parallel (ADR-004, ADR-010) |
 | Scale out without two workers racing | **Renewable Redis leases** — `DistributedLock.Redis` leases that renew while healthy and signal ownership loss (ADR-011) |
 | Survive transient faults | **Retry, circuit breaker, timeout** via `AddStandardResilienceHandler()` on the HTTP client (ADR-006, ADR-007) |
-| Answer "did it settle?" synchronously | **Instant rail** — `scheme: "instant"` attempts a budgeted inline forward and answers `200` with a committed outcome, or falls back to the same `202` store-and-forward path (ADR-018) |
+| Answer "did it settle?" synchronously | **Instant rail** — `scheme: "instant"` attempts a budgeted inline forward and answers `200` with a committed outcome; on budget exhaustion it cancels the payment and answers `504 Cancelled` once nothing can execute, or falls back to the same `202` store-and-forward path only when that cannot be established (ADR-018, ADR-020) |
 | See the whole journey | **W3C trace context** persisted on every message and restored by the consumer, so one payment is one trace across HTTP *and* pub/sub hops (ADR-003, ADR-017) |
 | Prove it, don't claim it | **k6 acceptance harness** asserting exactly-once, drain, balance conservation and stage cardinality under concurrent load (ADR-005) |
 
@@ -138,9 +138,13 @@ Idempotency-Key: demo-001
 
 - `scheme: "standard"` (or omitted) → **`202 Accepted`**, `Status: Pending`. The row is durable; the
   background processor forwards it and retries up to 5 times before going terminally `Failed`.
-- `scheme: "instant"` → a budgeted inline attempt (9 s budget, 2.5 s per attempt, max 2 attempts).
-  A committed outcome answers **`200 OK`**; anything not settled in budget falls back to `202` and
-  the standard rail finishes it.
+- `scheme: "instant"` → a budgeted inline attempt (9 s budget, 2.5 s per attempt, max 2 attempts,
+  1.5 s of the budget reserved for a cancel). A committed outcome answers **`200 OK`**. When the
+  forward phase runs out, the payment is cancelled — locally if it never left PaymentsAPI, otherwise
+  through Core Bank's `POST /api/transactions/cancel` — and answers **`504 Gateway Timeout`** with
+  `Status: Cancelled`: nothing executed, the same key replays the same `504`, and a retry with a new
+  key is safe. Only when neither a cancel nor a committed outcome can be established in budget does
+  it fall back to `202` and let the standard rail finish it (ADR-020).
 - The `Idempotency-Key` header is optional. Supplied or generated, resending the same key **never**
   creates a second row or a second delivery attempt — it replays the stored snapshot.
 
@@ -251,8 +255,8 @@ started and never touching an attached topology. Every mouse action has a keyboa
 destructive actions open a modal with **Cancel** focused, and the layout stays usable at 80×24.
 
 Evidence is session-local and is never restored on relaunch. Each record is stamped with the fault
-levels in force when it was captured, so a `202 Pending` observed under injected latency is never
-confused with one observed under none. The console reports `Applied — not yet observed in traffic`
+levels in force when it was captured, so a `202 Pending` or a `504 Cancelled` observed under injected
+latency is never confused with one observed under none. The console reports `Applied — not yet observed in traffic`
 until its own traffic actually carries an applied level; only then does the topology bar read
 `Faults in force`, and a restart that fails leaves the levels reported as *not* applied.
 
@@ -335,6 +339,15 @@ AppHost stop by design. Stop the stragglers, or reset state by removing those co
 Look at the Payments API outbox processor logs in the dashboard. A high Dev Proxy error rate, a
 stopped Core Bank API, or a missing Redis lease will all park messages until the downstream returns;
 after 5 failed attempts a message goes terminally `Failed`.
+
+**Instant payments answer `504 Cancelled`**
+Not a fault in the demo: the instant rail's budget ran out before Core Bank confirmed anything, and
+the cancel that followed *succeeded* — the payment was provably withdrawn before it could execute
+(ADR-020). Nothing moved and no event will follow; resending the same `Idempotency-Key` replays the
+same `504`, and a retry with a new key is safe. You see it when the process call fails but Core
+Bank still answers the cancel (a rejected or dropped process call, partition-lock starvation, a
+failed lock backend). With Core Bank stopped, or under the latency preset, the cancel fails or is
+delayed too and the honest `202 Pending` remains: the background rail settles the payment later.
 
 **`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Apple Silicon)**
 A bug in the published image, not in this repository, and harmless — RedisInsight is an optional

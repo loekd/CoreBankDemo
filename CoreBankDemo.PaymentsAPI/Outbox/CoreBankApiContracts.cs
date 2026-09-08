@@ -24,7 +24,17 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 internal enum CoreBankClientOutcome
 {
     Success,
-    Retry
+    Retry,
+
+    /// <summary>
+    /// CoreBankAPI answered <c>409</c> to a cancellation (spec:
+    /// instant-rail-timeout-cancel): the command cannot be cancelled because
+    /// it is in flight or terminally failed. Distinct from <see cref="Retry"/>
+    /// because a retry would be pointless and a <see cref="Success"/> would be
+    /// a lie -- <see cref="CoreBankResult{T}.Value"/> carries the current
+    /// status CoreBankAPI reported, for the caller's diagnostics only.
+    /// </summary>
+    Conflict
 }
 
 /// <summary>
@@ -52,8 +62,9 @@ internal enum CoreBankRetryReason
 
 /// <summary>
 /// Uniform result envelope every <see cref="ICoreBankApiClient"/> method
-/// returns. <see cref="Value"/> is populated only when <see cref="Outcome"/>
-/// is <see cref="CoreBankClientOutcome.Success"/>. <see cref="RetryReason"/>
+/// returns. <see cref="Value"/> is populated when <see cref="Outcome"/>
+/// is <see cref="CoreBankClientOutcome.Success"/> (and, carrying the reported
+/// current state, for <see cref="CoreBankClientOutcome.Conflict"/>). <see cref="RetryReason"/>
 /// and <see cref="StatusCode"/> are populated only when <see cref="Outcome"/>
 /// is <see cref="CoreBankClientOutcome.Retry"/>; <see cref="StatusCode"/> is
 /// further only ever set for <see cref="CoreBankRetryReason.TransportRejection"/>
@@ -88,6 +99,10 @@ internal sealed record CoreBankResult<T>
 
     public static CoreBankResult<T> Retry(CoreBankRetryReason reason, int? statusCode = null) =>
         new(CoreBankClientOutcome.Retry, value: default, reason, statusCode);
+
+    /// <summary>A <c>409</c> answer whose body <paramref name="value"/> is the current state CoreBankAPI reported.</summary>
+    public static CoreBankResult<T> Conflict(T value) =>
+        new(CoreBankClientOutcome.Conflict, value, retryReason: null, statusCode: 409);
 }
 
 /// <summary>

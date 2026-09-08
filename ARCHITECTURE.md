@@ -185,6 +185,7 @@ Status.Pending      // "Pending"
 Status.Processing   // "Processing"
 Status.Completed    // "Completed"
 Status.Failed       // "Failed"
+Status.Cancelled    // "Cancelled" -- terminal; instant rail withdrew the command before execution (ADR-020)
 
 Defaults.MaxRetryCount       // 5 attempts
 Defaults.BatchSize           // 10 messages per batch
@@ -368,7 +369,7 @@ Defaults.PollingInterval     // 5 seconds
 - ProcessedAt (datetime, nullable)
 - RetryCount (int)
 - LastError (string, nullable)
-- Status (string: Pending|Processing|Completed|Failed)
+- Status (string: Pending|Processing|Completed|Failed|Cancelled — Cancelled is terminal, written only by the instant rail's cancellation path, ADR-020)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
 ```
@@ -417,7 +418,7 @@ Defaults.PollingInterval     // 5 seconds
 - ProcessedAt (datetime, nullable)
 - RetryCount (int)
 - LastError (string, nullable)
-- Status (string: Pending|Processing|Completed|Failed)
+- Status (string: Pending|Processing|Completed|Failed|Cancelled — Cancelled is terminal, written only by the instant rail's cancellation path, ADR-020)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
 ```
@@ -671,10 +672,11 @@ The `CoreBankDemo.LoadTests` project is a complete Aspire-orchestrated load test
 | Check | Pass Condition | Validates |
 |-------|---------------|-----------|
 | `no failed inbox messages` | Zero `Failed` inbox messages | Error handling works correctly |
-| `no pending inbox messages` | Zero `Pending`/`Processing` messages | All messages processed to completion |
+| `no pending inbox messages` | Zero `Pending`/`Processing` messages (`Cancelled` is terminal, ADR-020) | All messages reached a terminal state |
 | `no duplicate processing` | Each idempotency key processed exactly once | Idempotency guarantees hold |
-| `expected unique count processed` | Completed unique idempotency keys == configured transaction count | Intended workload actually ran |
-| `all submitted transactions processed` | Inbox completed count == outbox submitted count | No message loss |
+| `expected unique count processed` | Completed unique idempotency keys + cancelled outbox rows == configured transaction count | Intended workload actually ran; a withdrawn instant payment is accounted for, never lost |
+| `all submitted transactions processed` | Inbox completed count == outbox completed count, and outbox total == completed + cancelled | No message loss, and nothing executed after being cancelled |
+| `stage cardinality N/N/3N/3N` | Outbox N (completed + cancelled), Core Bank inbox one `Completed` per completed payment plus at most one `Cancelled` per cancelled one, event stores 3 × completed | A cancel publishes no events and moves no money |
 
 ### Configuration
 

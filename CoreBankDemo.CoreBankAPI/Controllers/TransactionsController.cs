@@ -15,7 +15,10 @@ namespace CoreBankDemo.CoreBankAPI.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-public class TransactionsController(ITransactionIntakeHandler handler, BusinessMetrics businessMetrics) : ControllerBase
+public class TransactionsController(
+    ITransactionIntakeHandler handler,
+    ITransactionCancellationHandler cancellationHandler,
+    BusinessMetrics businessMetrics) : ControllerBase
 {
     /// <summary>
     /// Optional inline-execution opt-in (spec: add-instant-payment-rail).
@@ -44,13 +47,7 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
 
         var executeInline = string.Equals(
             Request.Headers[ExecuteModeHeader].FirstOrDefault(), ExecuteModeInline, StringComparison.OrdinalIgnoreCase);
-        var priority = int.TryParse(
-            Request.Headers[PaymentPriorityHeader].FirstOrDefault(),
-            System.Globalization.NumberStyles.Integer,
-            System.Globalization.CultureInfo.InvariantCulture,
-            out var parsedPriority) && parsedPriority > MessageConstants.Priority.Standard
-            ? parsedPriority
-            : MessageConstants.Priority.Standard;
+        var priority = ReadPriorityHeader();
 
         TransactionIntakeResult result;
         try
@@ -111,6 +108,36 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
         };
     }
 
+    /// <summary>
+    /// Instant-rail cancellation (spec: instant-rail-timeout-cancel). The body
+    /// is the original <see cref="TransactionRequest"/>. <c>200</c> carries a
+    /// <c>Cancelled</c> response when the command is provably dead, or the
+    /// committed <see cref="TransactionResponse"/> when CoreBank already
+    /// executed it; <c>409</c> carries the current status when the row cannot
+    /// be cancelled (in flight or terminally failed). Never touches the ledger.
+    /// </summary>
+    [HttpPost("cancel")]
+    public async Task<IActionResult> CancelTransaction(
+        [FromBody] TransactionRequest request, CancellationToken cancellationToken)
+    {
+        if (!ModelState.IsValid)
+        {
+            var errors = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage);
+            return BadRequest(new { Errors = errors });
+        }
+
+        var result = await cancellationHandler.CancelAsync(request, cancellationToken, ReadPriorityHeader());
+
+        return result.Outcome switch
+        {
+            TransactionCancellationOutcome.Cancelled => Ok(result.Response),
+            TransactionCancellationOutcome.AlreadyCommitted => Ok(result.Response),
+            TransactionCancellationOutcome.InFlight => Conflict(result.Response),
+            TransactionCancellationOutcome.StoreFailed => BadRequest(new { Errors = result.Errors }),
+            _ => throw new InvalidOperationException($"Unhandled transaction cancellation outcome: {result.Outcome}")
+        };
+    }
+
     [HttpGet("{idempotencyKey}")]
     public async Task<IActionResult> GetTransactionStatus(string idempotencyKey, CancellationToken cancellationToken)
     {
@@ -125,4 +152,13 @@ public class TransactionsController(ITransactionIntakeHandler handler, BusinessM
             ? Ok(result.CachedResponse)
             : Ok(result.StatusResponse);
     }
+
+    private int ReadPriorityHeader() =>
+        int.TryParse(
+            Request.Headers[PaymentPriorityHeader].FirstOrDefault(),
+            System.Globalization.NumberStyles.Integer,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsedPriority) && parsedPriority > MessageConstants.Priority.Standard
+            ? parsedPriority
+            : MessageConstants.Priority.Standard;
 }

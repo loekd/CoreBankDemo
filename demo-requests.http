@@ -38,6 +38,36 @@ Idempotency-Key: demo-instant-001
   "scheme": "instant"
 }
 
+### 2c. Instant rail timed out -> 504 Gateway Timeout, Status: Cancelled (ADR-020)
+### The 504 needs Core Bank to be reachable for the cancel while the process
+### call fails: e.g. Dev Proxy configured to reject (not delay) only
+### /api/transactions/process, or Redis stopped so the partition lock backend
+### fails and the row is cancelled locally before it ever leaves PaymentsAPI.
+### Then the instant rail exhausts its forward phase, cancels the payment before
+### anything can execute, and answers 504/Cancelled instead of 202/Pending.
+### Nothing moved, no event follows. Resend this exact request: the same key
+### replays the same 504 with the original cancellation time -- no new row, no
+### delivery. A retry with a NEW key is safe. NOTE: with Core Bank API stopped
+### the cancel call fails too, and the honest answer is the residual 202
+### Pending (the background rail settles it once Core Bank is back); the same
+### happens under Dev Proxy latency, which delays the cancel as well.
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+Idempotency-Key: demo-instant-cancelled-001
+
+{
+  "fromAccount": "NL91ABNA0417164300",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 25.00,
+  "currency": "EUR",
+  "scheme": "instant"
+}
+
+### 2d. Core Bank's view of a cancelled command: the tombstone / cancelled row
+### (200 with Status: Cancelled once 2c has answered 504; 404 if the command
+### never reached Core Bank at all and was cancelled locally).
+GET http://localhost:5032/api/transactions/demo-instant-cancelled-001
+
 ### ===== STAGE 1: RETRY & CIRCUIT BREAKER =====
 ### (Enable GenericRandomErrorPlugin in devproxy.json first)
 

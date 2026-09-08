@@ -36,6 +36,7 @@ public class MessageConstantsTests
             MessageConstants.Status.Processing,
             MessageConstants.Status.Completed,
             MessageConstants.Status.Failed,
+            MessageConstants.Status.Cancelled,
         };
 
         statuses.Should().OnlyHaveUniqueItems("a duplicated status literal would corrupt every state machine");

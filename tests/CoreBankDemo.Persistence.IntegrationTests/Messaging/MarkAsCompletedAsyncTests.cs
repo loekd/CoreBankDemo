@@ -154,6 +154,37 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
     }
 
     [Fact]
+    public async Task Call_on_a_cancelled_message_is_a_no_op_and_does_not_revive_it()
+    {
+        // spec: instant-rail-timeout-cancel -- Cancelled is terminal everywhere
+        // terminality is decided. A completion report that arrives after the
+        // instant rail withdrew the command must not flip it to Completed.
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+
+        var cancelledAt = new DateTime(2026, 9, 8, 12, 0, 0, DateTimeKind.Utc);
+        var message = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "already-cancelled",
+            EventType = "Debited",
+            Status = MessageConstants.Status.Cancelled,
+            ProcessedAt = cancelledAt,
+            LastError = "Instant rail budget exhausted",
+        };
+        context.OutboxEventMessages.Add(message);
+        await context.SaveChangesAsync(ct);
+        TimeProvider.Advance(TimeSpan.FromSeconds(5));
+
+        var outcome = await repository.MarkAsCompletedAsync(message, ct);
+
+        outcome.Should().Be(MessageTransitionOutcome.AlreadyTerminal);
+        var reloaded = await context.OutboxEventMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct);
+        reloaded.Status.Should().Be(MessageConstants.Status.Cancelled);
+        reloaded.ProcessedAt.Should().Be(cancelledAt);
+    }
+
+    [Fact]
     public async Task Rejects_null_message()
     {
         var ct = TestContext.Current.CancellationToken;

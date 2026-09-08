@@ -1,3 +1,4 @@
+using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
@@ -53,6 +54,19 @@ public class InstantPaymentForwardingHandlerTests
         Status = MessageConstants.Status.Processing,
         CreatedAt = Payment.CreatedAt
     };
+
+    private static TransactionSubmission CancelledSubmission(DateTimeOffset? at = null) =>
+        new(Payment.TransactionId, MessageConstants.Status.Cancelled, at ?? DateTimeOffset.UtcNow);
+
+    /// <summary>The claim-by-id + cancel pair every locally-cancelled path ends with.</summary>
+    private OutboxMessage SetUpLocalCancel()
+    {
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        return claimed;
+    }
 
     private InstantPaymentForwardingHandler CreateHandler(
         InstantRailOptions? options = null,
@@ -164,20 +178,184 @@ public class InstantPaymentForwardingHandlerTests
         // consume the whole 120 ms, leaving exactly one.
         var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
         _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(50));
+        var claimed = SetUpLocalCancel();
         var handler = CreateHandler(
             new InstantRailOptions
             {
-                BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1,
+                BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20,
             },
             timeProvider: clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
+        // spec: instant-rail-timeout-cancel -- the forward phase is Budget - CancelTimeout
+        // (120 - 20 = 100 ms), spent 50 ms at a time: attempts at +0 and +50 have forward
+        // budget left, and the third check finds the forward deadline reached at +100. The
+        // command never left PaymentsAPI, so the row is cancelled locally and the answer is
+        // Cancelled (504), never the old "honest unknown" 202. Asserting the exact count is what
+        // makes this a test of the budget arithmetic rather than of the scheduler.
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _lock.LockNames.Should().HaveCount(2, "the lock is retried until the forward phase runs out");
+        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.LocalCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        _forwarder.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ForwardAsync_defers_when_the_local_cancel_claim_is_lost_to_the_processor()
+    {
+        // Budget spent waiting, but by the time this request tries to claim
+        // the row by id the background processor has it: it may still be
+        // delivered, so 504 would be a lie -- honest 202.
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((OutboxMessage?)null);
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(50));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
+            businessMetrics,
+            clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
-        // 120 ms of budget spent 50 ms at a time: attempts at +0, +50 and +100 all have budget
-        // left, and the fourth check finds the deadline passed at +150. Asserting the exact count
-        // is what makes this a test of the budget arithmetic rather than of the scheduler.
-        _lock.LockNames.Should().HaveCount(3, "the lock is retried until the budget runs out");
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
+            .Which.Tags["outcome"].Should().Be("deferred");
+    }
+
+    [Fact]
+    public async Task ForwardAsync_local_cancel_persists_a_cancelled_payload_and_records_the_cancelled_metric()
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        var claimed = SetUpLocalCancel();
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
+            businessMetrics,
+            clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        result.ProcessedAt.Should().Be(clock.GetUtcNow(), "the answer carries the cancellation timestamp");
+        var payload = JsonSerializer.Deserialize<TransactionSubmission>(claimed.ResponsePayload!);
+        payload.Should().Be(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Cancelled, clock.GetUtcNow()));
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
+            .Which.Tags["outcome"].Should().Be("cancelled");
+    }
+
+    [Theory]
+    [InlineData(MessageTransitionOutcome.AlreadyTerminal)]
+    [InlineData(MessageTransitionOutcome.Conflicted)]
+    public async Task ForwardAsync_defers_when_the_local_cancel_is_not_applied(MessageTransitionOutcome transition)
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(transition);
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred, "only an applied cancel is a provably dead row");
+    }
+
+    [Fact]
+    public async Task ForwardAsync_defers_when_persisting_the_local_cancel_throws()
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("db unavailable"));
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_defers_when_the_local_cancel_claim_itself_throws()
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("db unavailable"));
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_returns_the_forwarded_outcome_when_the_lock_backend_throws_after_the_workload_ran()
+    {
+        // Review finding: a release/renew failure AFTER the delegate ran must
+        // not discard a committed outcome and cancel locally -- CoreBank may
+        // have executed the command; a 504 here would be a lie.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        var processedAt = new DateTimeOffset(2026, 9, 8, 12, 0, 2, TimeSpan.Zero);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, processedAt));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        _lock.ThrowAfterWorkload = new InvalidOperationException("redis lease release failed");
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Completed);
+        result.ProcessedAt.Should().Be(processedAt);
+        _store.Verify(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_cancels_locally_when_the_status_read_fails_while_waiting()
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("db unavailable"));
+        var claimed = SetUpLocalCancel();
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _store.Verify(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
         _forwarder.VerifyNoOtherCalls();
     }
 
@@ -326,13 +504,91 @@ public class InstantPaymentForwardingHandlerTests
             .Which.Tags["outcome"].Should().Be("settled");
     }
 
+    // ---- spec: instant-rail-timeout-cancel -- attempts exhausted, still under the lock ----
+
     [Fact]
-    public async Task ForwardAsync_releases_the_claim_when_every_attempt_fails()
+    public async Task ForwardAsync_cancels_through_CoreBank_when_every_attempt_fails_and_CoreBank_never_stored_it()
     {
+        // Matrix: "Attempts exhausted, CoreBank never stored it" -- CoreBank
+        // stores a tombstone and answers 200/Cancelled; the outbox row is
+        // cancelled under the lock and the caller gets 504/Cancelled.
         var claimed = ClaimedMessage();
         _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("transport failure"));
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 7, TimeSpan.Zero);
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission(cancelledAt));
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 2 },
+            businessMetrics);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        result.ProcessedAt.Should().Be(cancelledAt);
+        _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Exactly(2));
+        _forwarder.Verify(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.CoreBankCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _lock.LockNames.Should().ContainSingle("the cancel happens inside the one lock acquisition, never after releasing it");
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
+            .Which.Tags["outcome"].Should().Be("cancelled");
+    }
+
+    [Theory]
+    [InlineData(MessageConstants.Status.Completed, InstantDeliveryOutcome.Completed, "settled")]
+    [InlineData(MessageConstants.Status.Failed, InstantDeliveryOutcome.Rejected, "rejected")]
+    public async Task ForwardAsync_reports_the_committed_outcome_when_CoreBank_had_already_executed_before_the_cancel(
+        string coreBankStatus, InstantDeliveryOutcome expected, string expectedMetric)
+    {
+        // Matrix: "Attempts exhausted, CoreBank already executed" -- the
+        // cancel answers 200 with the cached TransactionResponse; the outbox
+        // row is completed with that payload and the caller gets the 200.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        var processedAt = new DateTimeOffset(2026, 9, 8, 12, 0, 5, TimeSpan.Zero);
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, coreBankStatus, processedAt));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 }, businessMetrics);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(expected);
+        result.ProcessedAt.Should().Be(processedAt);
+        _store.Verify(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
+            .Which.Tags["outcome"].Should().Be(expectedMetric);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_releases_the_claim_and_defers_when_the_cancel_establishes_nothing()
+    {
+        // Matrix: "Cancel itself fails" -- 409 (Processing/Failed at
+        // CoreBank) or a transport error: the forwarder reports null, the
+        // claim goes back to Pending (unchanged path) and the caller gets
+        // the residual honest 202.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((TransactionSubmission?)null);
         _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         var businessMetrics = new BusinessMetrics();
@@ -346,10 +602,101 @@ public class InstantPaymentForwardingHandlerTests
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
         _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Exactly(2));
         _store.Verify(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("deferred");
+    }
+
+    [Fact]
+    public async Task ForwardAsync_releases_the_claim_and_defers_when_the_cancel_throws()
+    {
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("cancel transport failure"));
+        _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 });
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_bounds_the_cancel_by_the_cancel_allowance_and_defers_when_it_times_out()
+    {
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .Returns<OutboxMessage, CancellationToken>(async (_, ct) =>
+            {
+                // Never answers on its own: only the cancel allowance's
+                // linked token ends it.
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return null;
+            });
+        _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler(new InstantRailOptions
+        {
+            BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 1, CancelTimeoutMilliseconds = 50,
+        });
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(MessageTransitionOutcome.AlreadyTerminal)]
+    [InlineData(MessageTransitionOutcome.Conflicted)]
+    public async Task ForwardAsync_defers_when_CoreBank_cancelled_but_the_outbox_cancel_was_not_applied(MessageTransitionOutcome transition)
+    {
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission());
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(transition);
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 });
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_cancels_the_row_when_a_forward_attempt_replays_a_CoreBank_cancellation()
+    {
+        // A tombstone from an earlier cancel this side never heard about is
+        // a terminal nothing-executed answer, not a delivery to complete.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 1, TimeSpan.Zero);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission(cancelledAt));
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler();
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        result.ProcessedAt.Should().Be(cancelledAt);
+        _store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -383,8 +730,12 @@ public class InstantPaymentForwardingHandlerTests
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
+        // The whole budget is gone, so there is no allowance left for a cancel
+        // either: the claim is released and the honest 202 remains.
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
         _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Once);
+        _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -450,6 +801,8 @@ public class InstantPaymentForwardingHandlerTests
         _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((TransactionSubmission?)null);
         _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("db unavailable"));
         var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 });
@@ -485,18 +838,22 @@ public class InstantPaymentForwardingHandlerTests
     }
 
     [Fact]
-    public async Task ForwardAsync_defers_gracefully_when_the_lock_backend_throws()
+    public async Task ForwardAsync_cancels_locally_when_the_lock_backend_throws()
     {
-        // Patch 2 regression test: an exception from ExecuteWithLockAsync
-        // itself (e.g. a Redis connection failure) must degrade gracefully
-        // to Deferred, matching every other transport hiccup in this method,
-        // rather than propagating out of ForwardAsync.
+        // Patch 2 regression test, re-based on spec: instant-rail-timeout-
+        // cancel: an exception from ExecuteWithLockAsync itself (e.g. a Redis
+        // connection failure) must degrade gracefully rather than propagate
+        // out of ForwardAsync -- and since the command never left
+        // PaymentsAPI, the row is cancelled locally (504), never forwarded.
         _lock.ThrowException = new InvalidOperationException("redis connection failure");
+        var claimed = SetUpLocalCancel();
         var handler = CreateHandler();
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
-        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _store.Verify(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.LocalCancelReason, It.IsAny<CancellationToken>()), Times.Once);
         _store.VerifyNoOtherCalls();
         _forwarder.VerifyNoOtherCalls();
     }
@@ -578,6 +935,9 @@ public class InstantPaymentForwardingHandlerTests
         /// <summary>When set, the call throws instead of returning -- simulating a lock backend failure (e.g. Redis connection failure).</summary>
         public Exception? ThrowException { get; set; }
 
+        /// <summary>When set, the workload runs to completion and THEN the call throws -- a release/renew failure after the work happened.</summary>
+        public Exception? ThrowAfterWorkload { get; set; }
+
         public List<string> LockNames { get; } = [];
 
         /// <summary>
@@ -605,6 +965,11 @@ public class InstantPaymentForwardingHandlerTests
             }
 
             await workload(cancellationToken);
+            if (ThrowAfterWorkload is not null)
+            {
+                throw ThrowAfterWorkload;
+            }
+
             return !LoseOwnershipAfterWorkload;
         }
     }

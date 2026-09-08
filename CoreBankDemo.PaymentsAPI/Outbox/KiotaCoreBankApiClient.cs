@@ -21,7 +21,9 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// <see cref="CoreBankClientOutcome.Success"/>; every non-2xx response (the
 /// generated client throws <see cref="ApiException"/> for those), empty or
 /// malformed required success data, a timeout, or any other exception is
-/// <see cref="CoreBankClientOutcome.Retry"/> — this adapter never retries
+/// <see cref="CoreBankClientOutcome.Retry"/> — with one documented exception,
+/// the cancellation's <c>409</c>, which is CoreBank's own answer and is
+/// classified as <see cref="CoreBankClientOutcome.Conflict"/> — this adapter never retries
 /// anything itself, it only classifies the outcome for a future delivery
 /// strategy (story 5.4) to act on. Each retry outcome preserves *why* it
 /// happened via <see cref="CoreBankRetryReason"/>, and a non-2xx response
@@ -138,34 +140,91 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
                                 configuration.Headers.Add("X-Execute-Mode", "inline");
                             }
 
-                            // Only ever on the wire for a non-standard priority,
-                            // so the standard rail's request stays byte-identical.
-                            if (request.Priority != MessageConstants.Priority.Standard)
-                            {
-                                configuration.Headers.Add(
-                                    "X-Payment-Priority",
-                                    request.Priority.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                            }
+                            ConfigurePriorityHeader(configuration, request.Priority);
                         },
                         ct)
                     .ConfigureAwait(false);
 
-                if (response?.TransactionId is null
-                    || response.Status is null
-                    || response.ProcessedAt is null
-                    || IsBlank(response.TransactionId)
-                    || IsBlank(response.Status)
-                    || IsMismatchedIdentifier(request.TransactionId, response.TransactionId))
-                {
-                    return null;
-                }
-
-                return new TransactionSubmission(
-                    response.TransactionId,
-                    response.Status,
-                    response.ProcessedAt.Value);
+                return ToSubmission(request.TransactionId, response?.TransactionId, response?.Status, response?.ProcessedAt);
             },
             cancellationToken);
+    }
+
+    /// <summary>
+    /// Only ever on the wire for a non-standard priority, so the standard
+    /// rail's request stays byte-identical.
+    /// </summary>
+    private static void ConfigurePriorityHeader<TQueryParameters>(
+        RequestConfiguration<TQueryParameters> configuration, int priority)
+        where TQueryParameters : class, new()
+    {
+        if (priority != MessageConstants.Priority.Standard)
+        {
+            configuration.Headers.Add(
+                "X-Payment-Priority",
+                priority.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+    }
+
+    /// <summary>
+    /// The shared well-formedness gate for every <c>TransactionResponse</c>-
+    /// shaped body: <see langword="null"/> (malformed) unless every required
+    /// field is present, non-blank, and the echoed identifier matches.
+    /// </summary>
+    private static TransactionSubmission? ToSubmission(
+        string requestedTransactionId, string? transactionId, string? status, DateTimeOffset? processedAt)
+    {
+        if (transactionId is null
+            || status is null
+            || processedAt is null
+            || IsBlank(transactionId)
+            || IsBlank(status)
+            || IsMismatchedIdentifier(requestedTransactionId, transactionId))
+        {
+            return null;
+        }
+
+        return new TransactionSubmission(transactionId, status, processedAt.Value);
+    }
+
+    public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+        TransactionSubmissionRequest request, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        return ExecuteAsync(
+            async ct =>
+            {
+                var body = new GeneratedModels.TransactionRequest
+                {
+                    FromAccount = request.FromAccount,
+                    ToAccount = request.ToAccount,
+                    Amount = request.Amount,
+                    Currency = request.Currency,
+                    TransactionId = request.TransactionId
+                };
+                var response = await client.Api.Transactions.Cancel
+                    .PostAsync(
+                        body,
+                        configuration =>
+                        {
+                            ConfigureTraceContext(configuration);
+                            ConfigurePriorityHeader(configuration, request.Priority);
+                        },
+                        ct)
+                    .ConfigureAwait(false);
+
+                return ToSubmission(request.TransactionId, response?.TransactionId, response?.Status, response?.ProcessedAt);
+            },
+            cancellationToken,
+            // A 409 is CoreBank's own answer ("not cancellable, here is the
+            // current state"), never a transport fault: classified as
+            // Conflict with the reported state, or -- when its body is
+            // unreadable -- left to the ordinary non-2xx retry classification.
+            exception => exception is GeneratedModels.TransactionConflictResponse conflict
+                && ToSubmission(request.TransactionId, conflict.TransactionId, conflict.Status, conflict.ProcessedAt) is { } current
+                    ? CoreBankResult<TransactionSubmission>.Conflict(current)
+                    : null);
     }
 
     public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
@@ -207,7 +266,8 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
     /// </summary>
     private static async Task<CoreBankResult<T>> ExecuteAsync<T>(
         Func<CancellationToken, Task<T?>> operation,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<ApiException, CoreBankResult<T>?>? classifyApiException = null)
         where T : class
     {
         var statusCapture = LastResponseStatusHandler.BeginCapture();
@@ -234,10 +294,13 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
         catch (ApiException ex)
         {
             // Any non-2xx response -- a mapped ErrorResponse (itself an
-            // ApiException) or an unmapped status. Preserve only the status
-            // code the generated client already surfaces on the base
-            // ApiException type; never the generated error body.
-            return CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, ex.ResponseStatusCode);
+            // ApiException) or an unmapped status. An operation may first
+            // classify a specific mapped status as a non-retry outcome (the
+            // cancel's 409); otherwise preserve only the status code the
+            // generated client already surfaces on the base ApiException
+            // type, never the generated error body.
+            return classifyApiException?.Invoke(ex)
+                ?? CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, ex.ResponseStatusCode);
         }
         catch (TimeoutRejectedException)
         {

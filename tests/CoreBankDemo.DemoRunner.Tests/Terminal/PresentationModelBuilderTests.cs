@@ -365,6 +365,45 @@ public class PresentationModelBuilderTests
     }
 
     [Fact]
+    public void Build_CancelledRow_SaysItWasWithdrawnAndExplainsTheEmptyLegColumn()
+    {
+        // ADR-020: proven by HTTP alone -- no settlement to await, no broadcast clock.
+        var cancelled = Submitted(
+            state: PaymentTrackingState.Cancelled,
+            httpOutcome: PaymentOutcome.Cancelled,
+            statusCode: 504) with
+        {
+            Rail = PaymentRail.Instant,
+            Note = "withdrawn by the instant rail before execution — safe to retry with a new key",
+        };
+
+        var row = PresentationModelBuilder.Build(Listening(cancelled), Now).Payments.Single();
+
+        row.Symbol.Should().Be("✕");
+        row.Headline.Should().Be("Cancelled — withdrawn before execution — tx-8821");
+        row.Meta.Should().Contain("safe to retry with a new key").And.Contain("504");
+        row.Meta.Should().NotContain("Awaiting");
+        row.Legs.Should().BeEmpty();
+        row.LegSummary.Should().Contain("a cancellation emits none");
+        row.Remedy.Should().BeEmpty("nothing is unresolved: the rail gave a binary answer");
+    }
+
+    [Fact]
+    public void Build_Burst_CountsCancelledPaymentsOnTheHttpLegOnly()
+    {
+        var state = Listening() with
+        {
+            Burst = new BurstProgress(10, 10, 6, 3, 0, false, Settled: 2, Rejected: 0, CancelledPayments: 1),
+        };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        model.BurstStatus.Should().Contain("cancelled 1").And.Contain("failed 0");
+        model.BurstProvenStatus.Should().Be("Proven leg · settled 2 · rejected 0 · awaiting 7",
+            "a cancelled payment is never part of the proven leg's outstanding count");
+    }
+
+    [Fact]
     public void Build_ContradictionRow_ShowsBothSourcesAndOffersTheOutcomeQuery()
     {
         var contradicted = Submitted(state: PaymentTrackingState.Contradiction, httpOutcome: PaymentOutcome.Completed, statusCode: 200) with

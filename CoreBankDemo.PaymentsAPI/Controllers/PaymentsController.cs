@@ -70,8 +70,9 @@ public class PaymentsController(
     /// exactly (<c>202</c>). On the instant rail, delegates the budgeted
     /// inline attempt to <see cref="IInstantPaymentForwardingHandler"/>: a
     /// committed outcome (business success or rejection) answers <c>200</c>
-    /// with that outcome; anything deferred to the background rail answers
-    /// <c>202</c> exactly like the standard rail.
+    /// with that outcome; a provable cancellation on budget exhaustion answers
+    /// <c>504</c>/<c>Cancelled</c>; anything deferred to the background rail
+    /// answers <c>202</c> exactly like the standard rail.
     /// </summary>
     private async Task<IActionResult> ToStoredResultAsync(
         PaymentSnapshot snapshot, string scheme, CancellationToken cancellationToken)
@@ -87,6 +88,14 @@ public class PaymentsController(
             InstantDeliveryOutcome.Deferred => ToAcceptedResult(snapshot),
             InstantDeliveryOutcome.Completed or InstantDeliveryOutcome.Rejected =>
                 Ok(ToInstantResponse(snapshot, forward)),
+            // spec: instant-rail-timeout-cancel. The settlement did not
+            // answer in time AND the command is provably withdrawn, so this
+            // is the SCT Inst time-out rejection: 504 says the rail timed
+            // out, the frozen body's Status carries the business meaning --
+            // nothing executed, the same key replays the same answer, and a
+            // retry with a new key is safe.
+            InstantDeliveryOutcome.Cancelled =>
+                ToCancelledResult(snapshot, forward.ProcessedAt),
             _ => throw new InvalidOperationException($"Unhandled instant forward outcome: {forward.Outcome}")
         };
     }
@@ -105,7 +114,10 @@ public class PaymentsController(
     /// distinguishes a business success from a business rejection (AD-11;
     /// review loop 1) -- a terminal <c>Failed</c> row (transport permanently
     /// exhausted via <c>MarkAsFailedWithRetryAsync</c>) replays <c>202</c>
-    /// with the wire word <c>Failed</c>, never masked as still-in-flight --
+    /// with the wire word <c>Failed</c>, never masked as still-in-flight -- a
+    /// <c>Cancelled</c> row replays <c>504</c> with the wire word
+    /// <c>Cancelled</c> and its persisted cancellation timestamp (spec:
+    /// instant-rail-timeout-cancel) --
     /// and anything else (<c>Pending</c>, or internally <c>Processing</c>
     /// under a live claim) replays <c>202</c> with the wire word <c>Pending</c>:
     /// that internal <c>Processing</c> value is never one of the outcomes
@@ -137,6 +149,15 @@ public class PaymentsController(
             }
         }
 
+        // A cancelled row replays the same 504/Cancelled its first request
+        // received, with the persisted cancellation timestamp -- no new row,
+        // no delivery (spec: instant-rail-timeout-cancel).
+        if (snapshot.Status == MessageConstants.Status.Cancelled)
+        {
+            var (_, cancelledAt) = ResolveDeliveredResponse(snapshot);
+            return ToCancelledResult(snapshot, cancelledAt);
+        }
+
         var wireStatus = snapshot.Status == MessageConstants.Status.Failed
             ? MessageConstants.Status.Failed
             : MessageConstants.Status.Pending;
@@ -151,6 +172,17 @@ public class PaymentsController(
                 snapshot.Currency,
                 new DateTimeOffset(DateTime.SpecifyKind(snapshot.CreatedAt, DateTimeKind.Utc))));
     }
+
+    private ObjectResult ToCancelledResult(PaymentSnapshot snapshot, DateTimeOffset cancelledAt) =>
+        StatusCode(
+            StatusCodes.Status504GatewayTimeout,
+            new PaymentResponse(
+                snapshot.IdempotencyKey,
+                snapshot.TransactionId,
+                MessageConstants.Status.Cancelled,
+                snapshot.Amount,
+                snapshot.Currency,
+                cancelledAt));
 
     private AcceptedResult ToAcceptedResult(PaymentSnapshot snapshot) =>
         Accepted(

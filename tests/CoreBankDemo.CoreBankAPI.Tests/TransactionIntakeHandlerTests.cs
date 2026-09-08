@@ -122,6 +122,60 @@ public class TransactionIntakeHandlerTests
         _repository.VerifyNoOtherCalls();
     }
 
+    [Fact]
+    public async Task ProcessAsync_replays_the_cached_cancellation_for_a_cancelled_duplicate_and_never_executes()
+    {
+        // spec: instant-rail-timeout-cancel -- a late-arriving original for a
+        // tombstoned/cancelled command replays 200/Cancelled and never runs,
+        // even when it asks for inline execution.
+        var cached = new TransactionResponse(TransactionId, MessageConstants.Status.Cancelled, _timeProvider.GetUtcNow().AddSeconds(-5));
+        var existing = ExistingMessage(MessageConstants.Status.Cancelled, responsePayload: JsonSerializer.Serialize(cached));
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        using var listener = new MetricsTestListener(_businessMetrics);
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.Replayed);
+        result.Response.Should().Be(cached);
+        _executionHandler.VerifyNoOtherCalls();
+        _inboxStore.VerifyNoOtherCalls();
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.transaction.intake")
+            .Which.Tags["outcome"].Should().Be("replayed");
+    }
+
+    [Fact]
+    public async Task ProcessAsync_reports_a_cancelled_duplicate_without_a_readable_payload_as_in_flight_with_its_status()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Cancelled, responsePayload: "{not-valid-json");
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InFlight);
+        result.Response!.Status.Should().Be(MessageConstants.Status.Cancelled);
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_returns_the_deserialized_cached_response_for_a_cancelled_row()
+    {
+        var cached = new TransactionResponse(TransactionId, MessageConstants.Status.Cancelled, _timeProvider.GetUtcNow());
+        var existing = ExistingMessage(MessageConstants.Status.Cancelled, responsePayload: JsonSerializer.Serialize(cached));
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        var handler = CreateHandler();
+
+        var result = await handler.GetStatusAsync(TransactionId, TestContext.Current.CancellationToken);
+
+        result.Found.Should().BeTrue();
+        result.CachedResponse.Should().Be(cached);
+        result.StatusResponse.Should().BeNull();
+    }
+
     [Theory]
     [InlineData(MessageConstants.Status.Pending)]
     [InlineData(MessageConstants.Status.Processing)]

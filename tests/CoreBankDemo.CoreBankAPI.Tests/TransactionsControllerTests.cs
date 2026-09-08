@@ -27,13 +27,14 @@ public class TransactionsControllerTests
     private const string TransactionId = "txn-123";
 
     private readonly Mock<ITransactionIntakeHandler> _handler = new(MockBehavior.Strict);
+    private readonly Mock<ITransactionCancellationHandler> _cancellationHandler = new(MockBehavior.Strict);
     private readonly BusinessMetrics _businessMetrics = new();
 
     private static TransactionRequest ValidRequest() => new(FromAccount, ToAccount, 50m, "EUR", TransactionId);
 
     private TransactionsController CreateController()
     {
-        var controller = new TransactionsController(_handler.Object, _businessMetrics)
+        var controller = new TransactionsController(_handler.Object, _cancellationHandler.Object, _businessMetrics)
         {
             ControllerContext = new ControllerContext
             {
@@ -279,6 +280,90 @@ public class TransactionsControllerTests
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries")
             .Which.Tags["outcome"].Should().Be("succeeded");
+    }
+
+    // ---- spec: instant-rail-timeout-cancel -- POST /api/transactions/cancel ----
+
+    [Fact]
+    public async Task CancelTransaction_returns_bad_request_with_all_errors_when_model_state_is_invalid()
+    {
+        var controller = CreateController();
+        controller.ModelState.AddModelError("Amount", "Amount is required");
+        controller.ModelState.AddModelError("Currency", "Currency is required");
+
+        var result = await controller.CancelTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var badRequest = result.Should().BeOfType<BadRequestObjectResult>().Subject;
+        GetErrors(badRequest.Value).Should().BeEquivalentTo(["Amount is required", "Currency is required"]);
+        _cancellationHandler.VerifyNoOtherCalls();
+    }
+
+    [Theory]
+    [InlineData(TransactionCancellationOutcome.Cancelled, MessageConstants.Status.Cancelled)]
+    [InlineData(TransactionCancellationOutcome.AlreadyCommitted, MessageConstants.Status.Completed)]
+    [InlineData(TransactionCancellationOutcome.AlreadyCommitted, MessageConstants.Status.Failed)]
+    public async Task CancelTransaction_maps_cancelled_and_already_committed_to_200_with_the_response(
+        TransactionCancellationOutcome outcome, string status)
+    {
+        var response = new TransactionResponse(TransactionId, status, DateTimeOffset.UtcNow);
+        _cancellationHandler
+            .Setup(h => h.CancelAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), MessageConstants.Priority.Standard))
+            .ReturnsAsync(new TransactionCancellationResult(outcome, response, null));
+        var controller = CreateController();
+
+        var result = await controller.CancelTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<OkObjectResult>().Subject.Value.Should().Be(response);
+    }
+
+    [Fact]
+    public async Task CancelTransaction_maps_in_flight_to_409_with_the_current_status()
+    {
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Processing, DateTimeOffset.UtcNow);
+        _cancellationHandler
+            .Setup(h => h.CancelAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), MessageConstants.Priority.Standard))
+            .ReturnsAsync(new TransactionCancellationResult(TransactionCancellationOutcome.InFlight, response, null));
+        var controller = CreateController();
+
+        var result = await controller.CancelTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var conflict = result.Should().BeOfType<ConflictObjectResult>().Subject;
+        conflict.Value.Should().Be(response);
+    }
+
+    [Fact]
+    public async Task CancelTransaction_maps_store_failed_to_bad_request_with_errors()
+    {
+        _cancellationHandler
+            .Setup(h => h.CancelAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), MessageConstants.Priority.Standard))
+            .ReturnsAsync(new TransactionCancellationResult(TransactionCancellationOutcome.StoreFailed, null, ["boom"]));
+        var controller = CreateController();
+
+        var result = await controller.CancelTransaction(ValidRequest(), TestContext.Current.CancellationToken);
+
+        GetErrors(result.Should().BeOfType<BadRequestObjectResult>().Subject.Value).Should().Equal("boom");
+    }
+
+    [Theory]
+    [InlineData("100", 100)]
+    [InlineData("garbage", 0)]
+    [InlineData(null, 0)]
+    public async Task CancelTransaction_passes_the_payment_priority_header_like_process_does(string? headerValue, int expectedPriority)
+    {
+        var request = ValidRequest();
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Cancelled, DateTimeOffset.UtcNow);
+        _cancellationHandler
+            .Setup(h => h.CancelAsync(request, It.IsAny<CancellationToken>(), expectedPriority))
+            .ReturnsAsync(new TransactionCancellationResult(TransactionCancellationOutcome.Cancelled, response, null));
+        var controller = CreateController();
+        if (headerValue is not null)
+        {
+            controller.Request.Headers["X-Payment-Priority"] = headerValue;
+        }
+
+        await controller.CancelTransaction(request, TestContext.Current.CancellationToken);
+
+        _cancellationHandler.Verify(h => h.CancelAsync(request, It.IsAny<CancellationToken>(), expectedPriority), Times.Once);
     }
 
     [Fact]

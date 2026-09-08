@@ -355,6 +355,174 @@ public class LoadTestAssertionServiceTests
         result.AllPassed.Should().BeTrue();
     }
 
+    // ---- spec: instant-rail-timeout-cancel -- Cancelled is terminal ----
+
+    [Fact]
+    public void Summarize_counts_cancelled_as_terminal_never_as_non_terminal()
+    {
+        var summary = LoadTestAssertionService.Summarize(
+            ["Completed", "Completed", "Failed", "Cancelled", "Pending", "Processing"]);
+
+        summary.Should().Be(new MessageStoreSummary(Total: 6, Completed: 2, Failed: 1, NonTerminal: 2, Cancelled: 1));
+        (summary.Completed + summary.Failed + summary.Cancelled + summary.NonTerminal).Should().Be(summary.Total);
+    }
+
+    [Fact]
+    public void A_run_with_cancelled_instant_rows_passes_every_gate_when_the_downstream_counts_follow_the_completed_rows()
+    {
+        // N=3 submitted: 2 completed, 1 cancelled. CoreBank holds 2 completed
+        // rows and a Cancelled tombstone for the withdrawn one; exactly 3
+        // events per COMPLETED payment flowed downstream; no ledger movement
+        // for the cancelled one.
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 3,
+            PaymentsOutbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
+            CoreBankInbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
+            CoreBankOutbox: new MessageStoreSummary(6, 6, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(6, 6, 0, 0),
+            CompletedTransactions:
+            [
+                new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "key-1"),
+                new CompletedTransaction(AccountNumber(2), AccountNumber(1), 1m, "key-2")
+            ],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 3,
+            LoadTestAccounts: UntouchedAccounts(),
+            OrderingObservations:
+            [
+                new OrderingObservation("CoreBankInbox", 0, "key-1", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
+                new OrderingObservation("CoreBankInbox", 0, "key-2", new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
+                new OrderingObservation("PaymentsOutbox", 0, "key-3", new DateTime(2026, 1, 1, 0, 0, 4), new DateTime(2026, 1, 1, 0, 0, 13)),
+            ],
+            InlineInstantSettlementCount: 1));
+
+        result.Checks.NoPendingMessages.Passed.Should().BeTrue("Cancelled is terminal");
+        result.Checks.NoFailedMessages.Passed.Should().BeTrue("Cancelled is not Failed");
+        result.Checks.ExpectedUniqueProcessed.Passed.Should().BeTrue("completed + cancelled == submitted");
+        result.Checks.AllSubmittedProcessed.Passed.Should().BeTrue();
+        result.Checks.StageCardinality.Passed.Should().BeTrue();
+        result.Checks.PerKeyOrdering.Passed.Should().BeTrue("a cancelled row carries ProcessedAt like any terminal row");
+        result.AllPassed.Should().BeTrue();
+        result.Summary.PaymentsOutbox.Cancelled.Should().Be(1);
+    }
+
+    [Fact]
+    public void A_cancelled_row_withdrawn_before_an_older_row_completed_is_not_an_ordering_inversion()
+    {
+        // Review finding: instant A (older) holds the partition lock through
+        // its forward phase and cancel; the cancel times out; A is released
+        // to Pending and completed later by the background rail. Instant B,
+        // waiting behind A, hits its own forward deadline first and is
+        // cancelled locally with an EARLIER ProcessedAt. B never executed,
+        // so it is no step in execution order -- not an inversion.
+        var enqueuedA = new DateTime(2026, 1, 1, 0, 0, 0);
+        var enqueuedB = new DateTime(2026, 1, 1, 0, 0, 1);
+        var observations = new List<OrderingObservation>
+        {
+            new("PaymentsOutbox", 0, "A", enqueuedA, new DateTime(2026, 1, 1, 0, 0, 30), Guid.NewGuid(), 100, "Completed"),
+            new("PaymentsOutbox", 0, "B", enqueuedB, new DateTime(2026, 1, 1, 0, 0, 8), Guid.NewGuid(), 100, "Cancelled"),
+            // The same shape at CoreBank: a tombstone (ReceivedAt == ProcessedAt)
+            // stored while an older command was still pending.
+            new("CoreBankInbox", 0, "A", enqueuedA, new DateTime(2026, 1, 1, 0, 0, 30), Guid.NewGuid(), 100, "Completed"),
+            new("CoreBankInbox", 0, "B", new DateTime(2026, 1, 1, 0, 0, 8), new DateTime(2026, 1, 1, 0, 0, 8), Guid.NewGuid(), 100, "Cancelled"),
+        };
+
+        // Without the exclusion this is exactly the inversion the review named.
+        var withoutStatus = observations.Select(o => o with { Status = null }).ToList();
+        LoadTestAssertionCalculator.FindOrderingViolations(withoutStatus).Should().HaveCount(2);
+
+        LoadTestAssertionCalculator.FindOrderingViolations(observations).Should().BeEmpty();
+
+        var result = Compute(
+            expectedUnique: 2,
+            completedCount: 1,
+            completedTransactions: [new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "A")],
+            totalOutbox: 2,
+            outboxCompleted: 1,
+            orderingObservations: observations,
+            loadTestAccounts: UntouchedAccounts());
+        result.Checks.PerKeyOrdering.Passed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_cancelled_row_without_a_processed_at_still_fails_the_missing_timestamp_check()
+    {
+        var observations = new List<OrderingObservation>
+        {
+            new("PaymentsOutbox", 0, "A", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1), Guid.NewGuid(), 0, "Completed"),
+            new("PaymentsOutbox", 0, "B", new DateTime(2026, 1, 1, 0, 0, 2), null, Guid.NewGuid(), 100, "Cancelled"),
+        };
+
+        var result = Compute(orderingObservations: observations, loadTestAccounts: UntouchedAccounts());
+
+        result.Checks.PerKeyOrdering.Passed.Should().BeFalse("every terminal row, cancelled included, must carry ProcessedAt");
+        result.Checks.PerKeyOrdering.Detail.Should().Contain("1 ordering observation(s) have no ProcessedAt");
+    }
+
+    [Fact]
+    public void A_cancelled_row_without_a_tombstone_at_CoreBank_still_passes_the_stage_gate()
+    {
+        // Locally cancelled (never reached CoreBank): no inbox row at all.
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 2,
+            PaymentsOutbox: new MessageStoreSummary(2, 1, 0, 0, Cancelled: 1),
+            CoreBankInbox: new MessageStoreSummary(1, 1, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(3, 3, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(3, 3, 0, 0),
+            CompletedTransactions: [new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "key-1")],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 2,
+            LoadTestAccounts: UntouchedAccounts(),
+            OrderingObservations:
+            [
+                new OrderingObservation("CoreBankInbox", 0, "key-1", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
+            ],
+            InlineInstantSettlementCount: 1));
+
+        result.Checks.StageCardinality.Passed.Should().BeTrue();
+        result.Checks.AllSubmittedProcessed.Passed.Should().BeTrue();
+        result.Checks.ExpectedUniqueProcessed.Passed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_payment_that_executed_at_CoreBank_after_being_cancelled_fails_the_stage_gate()
+    {
+        // The invariant the cancel exists to protect: an outbox row says
+        // Cancelled, yet CoreBank completed it (and published its events).
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 2,
+            PaymentsOutbox: new MessageStoreSummary(2, 1, 0, 0, Cancelled: 1),
+            CoreBankInbox: new MessageStoreSummary(2, 2, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(6, 6, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(6, 6, 0, 0),
+            CompletedTransactions: [],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 2,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.StageCardinality.Passed.Should().BeFalse();
+        result.Checks.AllSubmittedProcessed.Passed.Should().BeFalse("inbox completed (2) != outbox completed (1)");
+        result.AllPassed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void An_outbox_row_that_is_neither_completed_nor_cancelled_fails_all_submitted_processed()
+    {
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 2,
+            PaymentsOutbox: new MessageStoreSummary(2, 1, 0, 1),
+            CoreBankInbox: new MessageStoreSummary(1, 1, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(3, 3, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(3, 3, 0, 0),
+            CompletedTransactions: [],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 2,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.AllSubmittedProcessed.Passed.Should().BeFalse();
+        result.Checks.NoPendingMessages.Passed.Should().BeFalse();
+    }
+
     [Fact]
     public void Ordering_inversion_fails_with_exact_partition_evidence()
     {

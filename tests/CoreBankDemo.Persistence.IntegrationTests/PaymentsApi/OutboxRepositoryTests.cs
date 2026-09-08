@@ -58,6 +58,32 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
     }
 
     [Fact]
+    public async Task RecordCommittedOutcomeAsync_never_overwrites_a_cached_cancellation()
+    {
+        // spec: instant-rail-timeout-cancel -- Cancelled is terminal: a
+        // transaction event arriving for a cancelled row (a contradiction the
+        // console surfaces, not something to reconcile silently) must leave
+        // the cached cancellation untouched.
+        await using var store = CreateStore();
+        await using var context = store.CreateContext();
+        var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
+        var message = PaymentsApiTestData.Outbox("cancelled-key");
+        message.Status = MessageConstants.Status.Cancelled;
+        message.ProcessedAt = new DateTime(2026, 9, 8, 12, 0, 9, DateTimeKind.Utc);
+        message.ResponsePayload = """{"TransactionId":"cancelled-key","Status":"Cancelled","ProcessedAt":"2026-09-08T12:00:09+00:00"}""";
+        (await repository.StoreIfNewAsync(message, TestContext.Current.CancellationToken)).Should().BeTrue();
+
+        var recorded = await repository.RecordCommittedOutcomeAsync(
+            "cancelled-key", MessageConstants.Status.Completed, new DateTimeOffset(2026, 9, 8, 12, 0, 30, TimeSpan.Zero), TestContext.Current.CancellationToken);
+
+        recorded.Should().BeFalse("a cached cancellation is a committed, terminal outcome");
+        await using var verification = store.CreateContext();
+        var row = verification.OutboxMessages.Single(row => row.TransactionId == "cancelled-key");
+        row.Status.Should().Be(MessageConstants.Status.Cancelled);
+        row.ResponsePayload.Should().Contain("\"Status\":\"Cancelled\"").And.Contain("12:00:09");
+    }
+
+    [Fact]
     public async Task RecordCommittedOutcomeAsync_ignores_unknown_transactions()
     {
         await using var store = CreateStore();

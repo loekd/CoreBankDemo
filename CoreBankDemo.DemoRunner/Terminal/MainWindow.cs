@@ -1584,6 +1584,14 @@ public sealed class MainWindow : Window
         {
             ShowMessage(result.ErrorSummary ?? result.Outcome.ToString());
         }
+        else if (result.Outcome == PaymentOutcome.Cancelled)
+        {
+            // Not an error, but not the 200 the operator was demonstrating either: say what the
+            // rail said, in its own terms (ADR-020).
+            ShowMessage(
+                $"{result.StatusCode} Cancelled — the instant rail timed out and withdrew the payment before it executed. "
+                + "Nothing moved; a retry with a new key is safe.");
+        }
     }
 
     private async Task SurfaceAsync(Task<InspectionResult> task)

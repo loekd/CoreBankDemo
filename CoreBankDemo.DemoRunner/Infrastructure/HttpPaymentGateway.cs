@@ -157,7 +157,13 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
         string? idempotencyKey,
         string body)
     {
-        if (statusCode is < HttpStatusCode.OK or >= HttpStatusCode.MultipleChoices)
+        // The instant rail's time-out rejection (ADR-020): 504 whose body says Cancelled is a
+        // contractual answer -- the payment was withdrawn before it executed -- not an error.
+        // A 504 carrying any other body is still what it looks like: a gateway failure.
+        var isCancellation = statusCode == HttpStatusCode.GatewayTimeout
+            && !parsed.IsMalformed
+            && MapOutcome(parsed.Status) == PaymentOutcome.Cancelled;
+        if (statusCode is < HttpStatusCode.OK or >= HttpStatusCode.MultipleChoices && !isCancellation)
         {
             return $"PaymentsAPI returned HTTP {(int)statusCode}{Excerpt(body)}";
         }
@@ -208,6 +214,7 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
         "completed" => PaymentOutcome.Completed,
         "failed" => PaymentOutcome.Failed,
         "pending" or "processing" => PaymentOutcome.Pending,
+        "cancelled" => PaymentOutcome.Cancelled,
         _ => PaymentOutcome.TransportFailure,
     };
 

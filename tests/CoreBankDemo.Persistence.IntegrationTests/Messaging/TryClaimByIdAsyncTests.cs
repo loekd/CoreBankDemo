@@ -52,6 +52,7 @@ public class TryClaimByIdAsyncTests(PostgresContainerFixture fixture) : Messagin
     [InlineData(MessageConstants.Status.Processing)]
     [InlineData(MessageConstants.Status.Completed)]
     [InlineData(MessageConstants.Status.Failed)]
+    [InlineData(MessageConstants.Status.Cancelled)]
     public async Task Returns_null_for_a_row_that_is_not_pending(string status)
     {
         var ct = TestContext.Current.CancellationToken;

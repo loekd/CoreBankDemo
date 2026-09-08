@@ -42,6 +42,22 @@ public interface IInboxMessageStore<TMessage>
         TMessage message, string errorMessage, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Cancellation transition (spec: instant-rail-timeout-cancel): terminal
+    /// <see cref="MessageConstants.Status.Cancelled"/> with <c>ProcessedAt</c>
+    /// stamped and <paramref name="reason"/> recorded as <c>LastError</c>.
+    /// Accepts any non-terminal row; it is the caller's responsibility to
+    /// guarantee no delivery can be in flight for it -- a row it has just
+    /// claimed itself via <see cref="TryClaimByIdAsync"/>, or a row it has
+    /// just inserted that nobody else can have claimed. A row already
+    /// terminal is a no-op; a concurrent change since the caller last saw
+    /// the row is reported as <see cref="MessageTransitionOutcome.Conflicted"/>,
+    /// never re-applied. See
+    /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.MarkAsCancelledAsync"/>.
+    /// </summary>
+    Task<MessageTransitionOutcome> MarkAsCancelledAsync(
+        TMessage message, string reason, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Claims exactly the row identified by <paramref name="id"/>, if it is
     /// currently <c>Pending</c> — mirrors
     /// <see cref="IOutboxMessageStore{TMessage}.TryClaimByIdAsync"/> exactly

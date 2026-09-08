@@ -41,6 +41,22 @@ public sealed class K6ScriptContractTests
     }
 
     [Fact]
+    public void Instant_calls_admit_a_504_only_with_the_cancelled_wire_word_and_keep_http_req_failed_honest()
+    {
+        // spec: instant-rail-timeout-cancel / ADR-020.
+        Script.Should().Contain("http.expectedStatuses(200, 202, 504)");
+        Script.Should().Contain("params.responseCallback = INSTANT_EXPECTED_STATUSES");
+        Script.Should().Contain("'payment (instant): 504 carries Cancelled'");
+        Script.Should().Contain("'retry (instant): 504 carries Cancelled'");
+        Script.Should().Contain("new Counter('instant_cancelled')");
+        Script.Should().Contain("res.status === 504 && parsedStatus === 'Cancelled'");
+        Script.Should().Contain("instantCancelledCounter.add(1)");
+        // The standard rail is untouched: still 202 only, no expected-status override.
+        Script.Should().Contain("'payment accepted (202)': (r) => r.status === 202");
+        Script.Should().NotContain("'instant_cancelled': [", "cancellations are informational, never a gate");
+    }
+
+    [Fact]
     public void Malformed_endpoint_json_records_a_failed_check_before_returning()
     {
         Script.Should().Contain("state gate: drain endpoint returned valid JSON': () => false");

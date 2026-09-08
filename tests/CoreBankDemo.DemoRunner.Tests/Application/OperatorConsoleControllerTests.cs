@@ -563,6 +563,173 @@ public class OperatorConsoleControllerTests
         controller.State.Evidence.Select(record => record.Summary).Should().Contain(summary => summary.Contains("202 Pending"));
     }
 
+    // ---- ADR-020: 504 Cancelled on the instant rail ----
+
+    [Fact]
+    public async Task InstantCancelled504_IsAProvenOutcomeReportedInTheRailsOwnWords()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+
+        var result = await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentOutcome.Cancelled);
+        result.ErrorSummary.Should().BeNull("a cancellation is the rail's answer, not a transport failure");
+        var record = controller.State.Evidence.Last();
+        record.Summary.Should().Contain("504 Cancelled").And.Contain("nothing executed");
+        record.Succeeded.Should().BeTrue("the API answered truthfully; the demo shows exactly that");
+        controller.State.CanResendLastPayment.Should().BeTrue("the same key replays the same 504 -- a safe thing to demonstrate");
+    }
+
+    [Fact]
+    public async Task Standard504_IsReportedAsTransportFailure_TheStandardRailNeverCancels()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+
+        var result = await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentOutcome.TransportFailure);
+        result.ErrorSummary.Should().Contain("202 Pending");
+    }
+
+    [Fact]
+    public async Task Instant504WithoutACancelledOutcome_IsReportedAsTransportFailure()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 504, "Pending"));
+
+        var result = await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentOutcome.TransportFailure);
+        result.ErrorSummary.Should().Contain("504 Cancelled");
+    }
+
+    [Fact]
+    public async Task Cancelled_TrackedRowIsProvenByHttpAloneAndNeverAwaitsSettlement()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Cancelled);
+        row.IsOutstanding.Should().BeFalse("nothing will ever be broadcast for a withdrawn payment");
+        row.HttpOutcome.Should().Be(PaymentOutcome.Cancelled);
+        row.HttpStatusCode.Should().Be(504);
+        row.Note.Should().Contain("safe to retry with a new key");
+    }
+
+    [Fact]
+    public async Task Cancelled_ALaterBroadcastIsAContradictionNeverAResolution()
+    {
+        // A cancellation promises nothing executed. A settlement broadcast for that key means
+        // HTTP and the broadcast disagree: both records stay, the console picks no winner.
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Contradiction);
+        row.HttpOutcome.Should().Be(PaymentOutcome.Cancelled, "the HTTP record is never overwritten");
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Completed);
+        row.Note.Should().Contain("HTTP proved Cancelled, broadcast says Completed");
+    }
+
+    [Fact]
+    public async Task Cancelled_ALaterFailedBroadcastIsAContradictionToo()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushFailed("transaction-id", ProcessedAt, "insufficient funds");
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Contradiction);
+        row.Note.Should().Contain("HTTP proved Cancelled, broadcast says Failed");
+    }
+
+    [Fact]
+    public async Task Resend_504CancelledOntoAnAwaitingRow_MovesItToCancelled()
+    {
+        // A deferred instant payment (202) whose resend replays 504 Cancelled:
+        // HTTP has now proved nothing will ever be broadcast for it.
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending"),
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Awaiting);
+
+        await controller.ResendLastPaymentAsync(CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Cancelled);
+        row.IsOutstanding.Should().BeFalse();
+        row.HttpOutcome.Should().Be(PaymentOutcome.Cancelled);
+        row.HttpStatusCode.Should().Be(504);
+    }
+
+    [Fact]
+    public async Task Resend_504CancelledOntoAnOutcomeUnknownRow_MovesItToCancelled()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending"),
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.OutcomeUnknown);
+
+        await controller.ResendLastPaymentAsync(CancellationToken.None);
+
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Cancelled,
+            "the feed gap no longer matters: HTTP proved nothing will be broadcast");
+    }
+
+    [Fact]
+    public async Task Resend_504CancelledOntoASettledRow_NeverOverwritesTheSettlement()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending"),
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Settled);
+
+        await controller.ResendLastPaymentAsync(CancellationToken.None);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().NotBe(PaymentTrackingState.Cancelled, "a broadcast-proven settlement is never overwritten by a later HTTP answer");
+        row.State.Should().Be(PaymentTrackingState.Settled);
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Completed);
+        row.HttpOutcome.Should().Be(PaymentOutcome.Cancelled, "the HTTP record is updated, so the disagreement stays visible");
+    }
+
+    [Fact]
+    public async Task Burst_CancelledPaymentsAreTalliedOnTheHttpLegAndNeverCountedAsFailures()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"),
+            Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        var result = await controller.RunBurstAsync(InstantPayment, 2, 1, CancellationToken.None);
+
+        result.Succeeded.Should().BeTrue("a withdrawn payment is the rail's answer, not a failed request");
+        controller.State.Burst.CancelledPayments.Should().Be(1);
+        controller.State.Burst.Completed.Should().Be(1);
+        controller.State.Burst.Failed.Should().Be(0);
+        controller.State.Burst.Awaiting.Should().Be(1, "only the completed payment can still produce a broadcast");
+        controller.State.Evidence.Last().Summary.Should().Contain("cancelled 1");
+        controller.State.Evidence.Last().Succeeded.Should().BeTrue();
+    }
+
     [Fact]
     public async Task Payment_WrongStatusForRail_IsReportedAsTransportFailure()
     {

@@ -138,6 +138,48 @@
         }
       }
     },
+    "/api/transactions/cancel": {
+      "post": {
+        "operationId": "CancelTransaction",
+        "summary": "Withdraws a submitted transaction before it executes (instant rail, ADR-020).",
+        "description": "The body is the original TransactionRequest. 200 with status Cancelled means the command is provably dead: a Cancelled tombstone was stored before the original arrived (a late original replays it and never executes), a still-Pending inbox row was cancelled, or an earlier cancel is replayed. 200 with status Completed or Failed means CoreBank already executed the command and reports that committed outcome instead. 409 means the row cannot be cancelled (Processing under a live claim, or terminally Failed) and carries its current status. 400 covers request-shape validation failures. A cancel never moves the ledger and never publishes an event.",
+        "tags": ["Transactions"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TransactionRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The transaction is cancelled (status Cancelled), or it already executed and its committed response is replayed (status Completed/Failed).",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransactionResponse" }
+              }
+            }
+          },
+          "409": {
+            "description": "The transaction cannot be cancelled: it is in flight or terminally failed. The body is a TransactionResponse (same shape) reporting its current status.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/TransactionConflictResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Request-shape validation failure.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/transactions/{idempotencyKey}": {
       "get": {
         "operationId": "GetTransactionStatus",
@@ -252,6 +294,16 @@
         }
       },
       "TransactionResponse": {
+        "type": "object",
+        "required": ["transactionId", "status", "processedAt"],
+        "properties": {
+          "transactionId": { "type": "string" },
+          "status": { "type": "string" },
+          "processedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TransactionConflictResponse": {
+        "description": "Byte-identical wire shape to TransactionResponse, declared separately so the generated client can classify the 409 of CancelTransaction as a distinct non-retry outcome without turning the success model into an error type.",
         "type": "object",
         "required": ["transactionId", "status", "processedAt"],
         "properties": {

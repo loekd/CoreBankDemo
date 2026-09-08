@@ -7,7 +7,8 @@ namespace CoreBankDemo.PaymentsAPI.Models;
 /// rail), bound and validated at startup following the Story 3.1 pattern
 /// (<c>AddOptions&lt;T&gt;().Bind(...).ValidateDataAnnotations().Validate(...)
 /// .ValidateOnStart()</c>): every value must be positive, and
-/// <see cref="AttemptTimeoutMilliseconds"/> x <see cref="MaxAttempts"/> must
+/// <see cref="AttemptTimeoutMilliseconds"/> x <see cref="MaxAttempts"/> plus
+/// <see cref="CancelTimeoutMilliseconds"/> must
 /// never exceed <see cref="BudgetMilliseconds"/> -- an over-budget
 /// configuration fails fast at startup rather than silently holding a
 /// request thread beyond its budget at runtime.
@@ -39,4 +40,16 @@ public sealed record InstantRailOptions
     /// <summary>Maximum number of inline attempts made within the budget.</summary>
     [Range(1, int.MaxValue, ErrorMessage = "MaxAttempts must be positive.")]
     public int MaxAttempts { get; init; } = 2;
+
+    /// <summary>
+    /// Allowance, in milliseconds, reserved <em>inside</em>
+    /// <see cref="BudgetMilliseconds"/> for the cancellation call CoreBankAPI
+    /// receives once every forward attempt is exhausted (spec:
+    /// instant-rail-timeout-cancel). The forward phase ends at
+    /// <c>Budget - CancelTimeout</c>, so a request thread is never held beyond
+    /// the budget; <c>AttemptTimeoutMilliseconds * MaxAttempts + CancelTimeoutMilliseconds</c>
+    /// must not exceed the budget.
+    /// </summary>
+    [Range(1, int.MaxValue, ErrorMessage = "CancelTimeoutMilliseconds must be positive.")]
+    public int CancelTimeoutMilliseconds { get; init; } = 1500;
 }

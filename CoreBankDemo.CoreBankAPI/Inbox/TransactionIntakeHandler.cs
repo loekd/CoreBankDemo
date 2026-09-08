@@ -196,9 +196,12 @@ internal sealed class TransactionIntakeHandler(
             return new TransactionStatusResult(false, null, null);
         }
 
-        if (existing.Status == MessageConstants.Status.Completed &&
+        if (existing.Status is MessageConstants.Status.Completed or MessageConstants.Status.Cancelled &&
             TryDeserializeResponse(existing.ResponsePayload, out var cachedResponse))
         {
+            // A Cancelled row (spec: instant-rail-timeout-cancel) carries a
+            // cached Cancelled payload exactly like a Completed row carries
+            // its committed outcome, and is served the same way.
             return new TransactionStatusResult(true, cachedResponse, null);
         }
 
@@ -215,14 +218,17 @@ internal sealed class TransactionIntakeHandler(
     /// Shared "found an existing row" branching for <see cref="ProcessAsync"/>
     /// (used both on the first dedupe check and on the re-query after losing a
     /// store race — spec-4-4): <c>Completed</c> with a validly-deserializing
-    /// cached payload replays it verbatim; terminal <c>Failed</c> reports the
+    /// cached payload replays it verbatim -- and so does <c>Cancelled</c>
+    /// (spec: instant-rail-timeout-cancel): the original <c>process</c> for
+    /// a tombstoned or cancelled command replays <c>200</c>/<c>Cancelled</c>
+    /// and never executes; terminal <c>Failed</c> reports the
     /// cached error; anything else (<c>Pending</c>/<c>Processing</c>, and
     /// defensively a <c>Completed</c> row whose payload failed to deserialize)
     /// is reported in-flight with its current status — never a crash.
     /// </summary>
     private TransactionIntakeResult BuildIntakeResultForExisting(InboxMessage existing)
     {
-        if (existing.Status == MessageConstants.Status.Completed &&
+        if (existing.Status is MessageConstants.Status.Completed or MessageConstants.Status.Cancelled &&
             TryDeserializeResponse(existing.ResponsePayload, out var cachedResponse))
         {
             logger.LogInformation("Replaying cached response for transaction {TransactionId}", existing.TransactionId);

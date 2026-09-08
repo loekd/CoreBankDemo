@@ -61,6 +61,23 @@ function isInstantKey(keyIndex) {
 // like a failed check it fails the whole run (non-zero k6 exit code).
 const instantSettledInlineCounter = new Counter('instant_settled_inline');
 
+// Informational (no threshold): fresh instant-scheme requests the rail timed
+// out and provably withdrew -- 504 with status Cancelled (ADR-020). Nothing
+// executed for these, the same key replays the same 504, and the acceptance
+// gate counts their rows as terminal Cancelled, never as pending or failed.
+// Zero under the default profile is expected; the latency preset is where
+// they appear.
+const instantCancelledCounter = new Counter('instant_cancelled');
+
+// The instant rail's contract admits 504/Cancelled as a genuine answer, so a
+// per-request responseCallback stops k6's built-in http_req_failed from
+// counting every instant 504 as a failed request. It sees only the status
+// code, never the body: the real gate is the named '504 carries Cancelled'
+// check below (fail-closed via the 'checks' threshold), which is what rejects
+// a 504 that is a genuine gateway failure. Standard-rail calls keep k6's
+// default (2xx/3xx only).
+const INSTANT_EXPECTED_STATUSES = http.expectedStatuses(200, 202, 504);
+
 // IMPORTANT: __ITER is per-VU. Use scenario.iterationInTest for a deterministic
 // global sequence shared across all VUs.
 
@@ -207,19 +224,30 @@ export default function () {
         },
         tags: { type: 'payment' },
     };
+    if (isInstant) {
+        params.responseCallback = INSTANT_EXPECTED_STATUSES;
+    }
 
     const res = http.post(`${PAYMENTS_URL}/api/payments`, payload, params);
     //console.log(`Added payment, status=${res.status}, body: ${res.body}`);
     
     // Detailed checks for better visibility, especially for chaos testing.
     // Standard-rail checks are byte-identical to before. Instant-rail checks
-    // accept the frozen wire contract's 200 (settled inline) OR 202
-    // (deferred to the background rail) split instead of asserting 202 only
-    // (spec: add-instant-rail-load-coverage) -- never a genuine error status.
+    // accept the frozen wire contract's 200 (settled inline), 202 (deferred to
+    // the background rail) or 504 (withdrawn on budget exhaustion, status
+    // Cancelled -- ADR-020) instead of asserting 202 only (spec:
+    // add-instant-rail-load-coverage) -- never a genuine error status.
     if (isRetry) {
         if (isInstant) {
+            let retryStatus = null;
+            try {
+                retryStatus = JSON.parse(res.body).status;
+            } catch (_) {
+                // The named response checks below report malformed bodies.
+            }
             check(res, {
-                'retry (instant): 200 (completed replay) or 202 (still pending)': (r) => r.status === 200 || r.status === 202,
+                'retry (instant): 200 (completed replay), 202 (still pending) or 504 (cancelled replay)': (r) => r.status === 200 || r.status === 202 || r.status === 504,
+                'retry (instant): 504 carries Cancelled': (r) => r.status !== 504 || retryStatus === 'Cancelled',
                 'retry (instant): not 404 (endpoint exists)': (r) => r.status !== 404,
                 'retry (instant): not 500 (no server error)': (r) => r.status !== 500,
                 'retry (instant): not 503 (service available)': (r) => r.status !== 503,
@@ -241,8 +269,9 @@ export default function () {
                 // The named response checks below report malformed success bodies.
             }
             check(res, {
-                'payment (instant): 200 (completed/failed) or 202 (deferred)': (r) => r.status === 200 || r.status === 202,
+                'payment (instant): 200 (completed/failed), 202 (deferred) or 504 (cancelled)': (r) => r.status === 200 || r.status === 202 || r.status === 504,
                 'payment (instant): 200 has committed status': (r) => r.status !== 200 || parsedStatus === 'Completed' || parsedStatus === 'Failed',
+                'payment (instant): 504 carries Cancelled': (r) => r.status !== 504 || parsedStatus === 'Cancelled',
                 'payment (instant): not 400 (valid request)': (r) => r.status !== 400,
                 'payment (instant): not 404 (endpoint exists)': (r) => r.status !== 404,
                 'payment (instant): not 500 (no server error)': (r) => r.status !== 500,
@@ -260,6 +289,9 @@ export default function () {
                 check(evidenceRes, {
                     'inline settlement evidence recorded': (r) => r.status === 200,
                 });
+            } else if (res.status === 504 && parsedStatus === 'Cancelled') {
+                // The rail timed out and provably withdrew the payment (ADR-020).
+                instantCancelledCounter.add(1);
             }
         } else {
             check(res, {
@@ -305,7 +337,8 @@ export function teardown(data) {
     console.log(
         `Instant-vs-standard rail split: ${instantUniqueCount}/${UNIQUE_COUNT} unique transactions ` +
         `(${instantPercent}%) used scheme=instant, ${standardUniqueCount} used the standard rail. ` +
-        `Each instant response was checked as 200 (Completed/Failed) or 202 (deferred); ` +
+        `Each instant response was checked as 200 (Completed/Failed), 202 (deferred) or 504 (Cancelled: ` +
+        `withdrawn on budget exhaustion, counted in 'instant_cancelled'); ` +
         `each standard response was checked as 202 only -- see the 'checks' summary for pass/fail ` +
         `confirmation, and the 'instant_settled_inline' threshold in THRESHOLDS for proof the inline ` +
         `path settled at least one payment inline (200), not just accepted instant-scheme traffic.`

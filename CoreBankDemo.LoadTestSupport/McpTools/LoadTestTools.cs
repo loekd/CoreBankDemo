@@ -64,8 +64,9 @@ public sealed class LoadTestTools
     public static async Task<string> PollUntilDrained(
         LoadTestAssertionService assertionService,
         IProgress<ProgressNotificationValue> progress,
-        [Description("Minimum number of completed inbox messages required before the system can be " +
-                     "considered drained. Use this to prevent false positives when k6 is still " +
+        [Description("Minimum number of processed messages (completed or failed CoreBank inbox rows plus " +
+                     "cancelled payments outbox rows -- Cancelled is terminal, ADR-020) required before the " +
+                     "system can be considered drained. Use this to prevent false positives when k6 is still " +
                      "submitting payments. Set to the expected unique transaction count (e.g. 1000).")]
         int minimumExpectedCompleted = 0,
         [Description("Maximum seconds to wait for drain (default 120, max 300)")]
@@ -85,7 +86,8 @@ public sealed class LoadTestTools
 
                 var drain = await assertionService.CheckDrainAsync(ct);
 
-                int processed = drain.Completed + drain.Failed;
+                // Cancelled is terminal too (spec: instant-rail-timeout-cancel).
+                int processed = drain.Completed + drain.Failed + drain.Cancelled;
                 int currentTotal = processed + drain.OutboxPending + drain.InboxPending
                     + drain.CoreBankOutboxPending + drain.PaymentsInboxPending;
 
@@ -124,7 +126,8 @@ public sealed class LoadTestTools
                         drain.CoreBankOutboxPending,
                         drain.PaymentsInboxPending,
                         drain.Completed,
-                        drain.Failed
+                        drain.Failed,
+                        drain.Cancelled
                     }, McpJsonOptions);
                 }
 
@@ -145,7 +148,8 @@ public sealed class LoadTestTools
                 final.CoreBankOutboxPending,
                 final.PaymentsInboxPending,
                 final.Completed,
-                final.Failed
+                final.Failed,
+                final.Cancelled
             }, McpJsonOptions);
         }
         catch (Exception ex)

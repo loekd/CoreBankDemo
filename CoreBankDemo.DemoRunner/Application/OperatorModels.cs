@@ -82,6 +82,13 @@ public enum PaymentOutcome
     Ambiguous,
     Rejected,
     TransportFailure,
+
+    /// <summary>
+    /// The instant rail timed out and provably withdrew the payment before it executed
+    /// (<c>504</c> with <c>Status: Cancelled</c>). Nothing moved, no event will follow, and a
+    /// retry with a new key is safe. A proven outcome, not a transport failure.
+    /// </summary>
+    Cancelled,
 }
 
 /// <summary>
@@ -107,6 +114,13 @@ public enum PaymentTrackingState
 
     /// <summary>HTTP and the broadcast disagree. Both records stay; the console picks no winner.</summary>
     Contradiction,
+
+    /// <summary>
+    /// HTTP proved a <c>504 Cancelled</c>: the instant rail withdrew the payment before it
+    /// executed. Proven by the HTTP leg alone -- no broadcast is awaited, and one that does
+    /// arrive is a <see cref="Contradiction"/>.
+    /// </summary>
+    Cancelled,
 
     /// <summary>The feed dropped while this payment was outstanding. Never entered by a timeout.</summary>
     OutcomeUnknown,
@@ -340,7 +354,12 @@ public sealed record BurstProgress(
     int Rejected = 0,
     // Withdrawn, not resolved: the share of the proven leg the console stopped being able to
     // observe when the feed dropped. It is never moved by a timeout, only by feed loss.
-    int Unknown = 0)
+    int Unknown = 0,
+    // HTTP leg: instant payments the rail timed out and provably withdrew (504 Cancelled).
+    // Neither accepted nor failed -- nothing executed and nothing will be broadcast, so they
+    // never join the proven leg. Distinct from <see cref="Cancelled"/>, which is the operator
+    // aborting the burst itself.
+    int CancelledPayments = 0)
 {
     public static BurstProgress Empty => new(0, 0, 0, 0, 0, false);
 

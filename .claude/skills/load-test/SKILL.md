@@ -129,7 +129,7 @@ data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToke
 Final response when drained:
 ```
 event: message
-data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCount\":15,\"outboxPending\":0,\"inboxPending\":0,\"completed\":1000,\"failed\":0}"}]},"id":3,"jsonrpc":"2.0"}
+data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCount\":15,\"outboxPending\":0,\"inboxPending\":0,\"coreBankOutboxPending\":0,\"paymentsInboxPending\":0,\"completed\":1000,\"failed\":0,\"cancelled\":0}"}]},"id":3,"jsonrpc":"2.0"}
 ```
 
 ## 4. Assert results (MCP tool: `get_assertion_results`)

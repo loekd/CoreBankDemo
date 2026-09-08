@@ -2,13 +2,16 @@ using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Outbox;
+using System.Text.Json;
 using CoreBankDemo.LoadTestSupport;
+using CoreBankDemo.LoadTestSupport.McpTools;
 using CoreBankDemo.LoadTestSupport.Services;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
 using CoreBankDemo.Persistence.IntegrationTests.PaymentsApi;
 using Microsoft.EntityFrameworkCore;
+using ModelContextProtocol;
 using Xunit;
 
 namespace CoreBankDemo.Persistence.IntegrationTests.LoadTestSupport;
@@ -156,6 +159,48 @@ public sealed class AssertEndpointsIntegrationTests(PostgresContainerFixture fix
         result.PaymentsInboxPending.Should().Be(0);
         result.Completed.Should().Be(1);
         result.Failed.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Drain_counts_a_locally_cancelled_payment_as_processed_even_though_CoreBank_never_saw_it()
+    {
+        // Review finding: a payment cancelled before it ever left PaymentsAPI
+        // leaves a Cancelled outbox row and NO CoreBank row. It is terminal
+        // and must count toward "processed", or poll_until_drained would time
+        // out at minimumExpectedCompleted on a fully drained system.
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var coreBank = CreateCoreBankContext();
+        await using var payments = CreatePaymentsContext();
+        coreBank.InboxMessages.Add(CoreBankInbox("settled", MessageConstants.Status.Completed));
+        payments.OutboxMessages.Add(CompletedOutbox("settled"));
+        var cancelledOutbox = PaymentsApiTestData.Outbox("cancelled-locally");
+        cancelledOutbox.Status = MessageConstants.Status.Cancelled;
+        cancelledOutbox.ProcessedAt = new DateTime(2026, 9, 8, 12, 0, 9, DateTimeKind.Utc);
+        payments.OutboxMessages.Add(cancelledOutbox);
+        await coreBank.SaveChangesAsync(cancellationToken);
+        await payments.SaveChangesAsync(cancellationToken);
+        var service = new LoadTestAssertionService(coreBank, payments);
+
+        var drain = await service.CheckDrainAsync(cancellationToken);
+
+        drain.IsDrained.Should().BeTrue();
+        drain.Completed.Should().Be(1);
+        drain.Failed.Should().Be(0);
+        drain.Cancelled.Should().Be(1);
+        drain.OutboxPending.Should().Be(0);
+
+        var polled = await LoadTestTools.PollUntilDrained(
+            service,
+            new Progress<ProgressNotificationValue>(),
+            minimumExpectedCompleted: 2,
+            timeoutSeconds: 5,
+            cancellationToken);
+
+        using var json = JsonDocument.Parse(polled);
+        json.RootElement.GetProperty("isDrained").GetBoolean().Should().BeTrue("1 completed + 1 cancelled meets the minimum of 2");
+        json.RootElement.GetProperty("completed").GetInt32().Should().Be(1);
+        json.RootElement.GetProperty("cancelled").GetInt32().Should().Be(1);
+        json.RootElement.TryGetProperty("error", out _).Should().BeFalse();
     }
 
     [Fact]

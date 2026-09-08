@@ -66,6 +66,34 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     }
 
     [Fact]
+    public async Task Excludes_cancelled_rows()
+    {
+        // spec: instant-rail-timeout-cancel -- a Cancelled row is terminal and
+        // must never be claimed by the background processor, even though it
+        // is under MaxRetryCount and sits in the claimable partition.
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+
+        var cancelled = new TestInboxMessage
+        {
+            IdempotencyKey = "cancelled",
+            Status = MessageConstants.Status.Cancelled,
+            ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime,
+            ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        var pending = new TestInboxMessage { IdempotencyKey = "pending", ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime };
+        context.InboxMessages.AddRange(cancelled, pending);
+        await context.SaveChangesAsync(ct);
+
+        var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
+
+        claimed.Should().ContainSingle().Which.Id.Should().Be(pending.Id);
+        (await context.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == cancelled.Id, ct)).Status
+            .Should().Be(MessageConstants.Status.Cancelled);
+    }
+
+    [Fact]
     public async Task Excludes_rows_in_other_partitions()
     {
         var ct = TestContext.Current.CancellationToken;

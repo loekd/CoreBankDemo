@@ -399,6 +399,166 @@ public class CoreBankApiClientTests
         await act.Should().ThrowAsync<ArgumentNullException>();
     }
 
+    // ---- spec: instant-rail-timeout-cancel -- CancelTransactionAsync ----
+
+    [Fact]
+    public async Task CancelTransactionAsync_posts_the_original_request_to_the_cancel_operation_and_maps_200_to_success()
+    {
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        using var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            request.Method.Should().Be(HttpMethod.Post);
+            request.RequestUri!.AbsolutePath.Should().Be("/api/transactions/cancel");
+            using var body = ReadJson(request);
+            body.RootElement.GetProperty("fromAccount").GetString().Should().Be(AccountNumber);
+            body.RootElement.GetProperty("toAccount").GetString().Should().Be("NL20INGB0001234567");
+            body.RootElement.GetProperty("amount").GetDecimal().Should().Be(100m);
+            body.RootElement.GetProperty("currency").GetString().Should().Be("EUR");
+            body.RootElement.GetProperty("transactionId").GetString().Should().Be("txn-1");
+            return JsonResponse(HttpStatusCode.OK, new { transactionId = "txn-1", status = "Cancelled", processedAt = cancelledAt });
+        });
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.CancelTransactionAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+        result.Value.Should().Be(new TransactionSubmission("txn-1", "Cancelled", cancelledAt));
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_maps_a_committed_200_to_success_carrying_that_status()
+    {
+        var processedAt = new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero);
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            JsonResponse(HttpStatusCode.OK, new { transactionId = "txn-1", status = "Completed", processedAt }));
+        var client = CreateClient(handler);
+
+        var result = await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+        result.Value!.Status.Should().Be("Completed");
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_maps_409_to_a_conflict_carrying_the_reported_status_never_a_retry()
+    {
+        var receivedAt = new DateTimeOffset(2026, 9, 8, 11, 59, 0, TimeSpan.Zero);
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            JsonResponse(HttpStatusCode.Conflict, new { transactionId = "txn-1", status = "Processing", processedAt = receivedAt }));
+        var client = CreateClient(handler);
+
+        var result = await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Conflict);
+        result.StatusCode.Should().Be(409);
+        result.RetryReason.Should().BeNull();
+        result.Value.Should().Be(new TransactionSubmission("txn-1", "Processing", receivedAt));
+    }
+
+    [Theory]
+    [InlineData("""{"transactionId":"someone-else","status":"Processing","processedAt":"2026-09-08T12:00:00Z"}""")]
+    [InlineData("""{"transactionId":"txn-1","status":"   ","processedAt":"2026-09-08T12:00:00Z"}""")]
+    [InlineData("""{"transactionId":"txn-1"}""")]
+    public async Task CancelTransactionAsync_treats_a_409_with_an_unusable_body_as_a_transport_rejection(string body)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.Conflict)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        var client = CreateClient(handler);
+
+        var result = await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
+        result.StatusCode.Should().Be(409);
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_treats_400_as_retry_without_throwing()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            JsonResponse(HttpStatusCode.BadRequest, new { errors = new[] { "TransactionId is required" } }));
+        var client = CreateClient(handler);
+
+        var result = await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
+        result.StatusCode.Should().Be(400);
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_treats_a_mismatched_transaction_id_as_retry()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            JsonResponse(HttpStatusCode.OK, new { transactionId = "other", status = "Cancelled", processedAt = DateTimeOffset.UtcNow }));
+        var client = CreateClient(handler);
+
+        var result = await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_carries_the_priority_header_only_for_a_non_standard_priority()
+    {
+        var seen = new List<string?>();
+        using var handler = new FakeHttpMessageHandler((request, _) =>
+        {
+            seen.Add(request.Headers.Contains("X-Payment-Priority")
+                ? request.Headers.GetValues("X-Payment-Priority").Single()
+                : null);
+            request.Headers.Contains("X-Execute-Mode").Should().BeFalse("a cancel never executes anything");
+            return JsonResponse(HttpStatusCode.OK, new { transactionId = "txn-1", status = "Cancelled", processedAt = DateTimeOffset.UtcNow });
+        });
+        var client = CreateClient(handler);
+
+        await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1"),
+            TestContext.Current.CancellationToken);
+        await client.CancelTransactionAsync(
+            new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1", MessageConstants.Priority.Instant),
+            TestContext.Current.CancellationToken);
+
+        seen.Should().Equal(null, "100");
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_throws_for_null_request_instead_of_reporting_a_transport_retry()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) => throw new InvalidOperationException("must not be reached"));
+        var client = CreateClient(handler);
+
+        var act = () => client.CancelTransactionAsync(null!, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task CancelTransactionAsync_propagates_current_trace_context() =>
+        await AssertTraceContextAsync(
+            new { transactionId = "txn-1", status = "Cancelled", processedAt = DateTimeOffset.UtcNow },
+            async (client, ct) =>
+            {
+                var request = new TransactionSubmissionRequest(AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+                var result = await client.CancelTransactionAsync(request, ct);
+                result.Outcome.Should().Be(CoreBankClientOutcome.Success);
+            });
+
     [Fact]
     public async Task GetTransactionStatusAsync_maps_cached_response_shape_to_success()
     {

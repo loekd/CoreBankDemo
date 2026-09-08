@@ -19,6 +19,15 @@ public static class MessageConstants
 
         /// <summary>Terminal: transport gave up after <see cref="Defaults.MaxRetryCount"/>.</summary>
         public const string Failed = "Failed";
+
+        /// <summary>
+        /// Terminal: the instant rail withdrew the command before it executed
+        /// (spec: instant-rail-timeout-cancel). Nothing moved on the ledger and
+        /// no event was published; the row keeps a cached <c>Cancelled</c>
+        /// payload so a duplicate replays the same answer. Never written by the
+        /// standard rail.
+        /// </summary>
+        public const string Cancelled = "Cancelled";
     }
 
     /// <summary>

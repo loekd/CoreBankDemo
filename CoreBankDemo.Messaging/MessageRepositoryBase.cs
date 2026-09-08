@@ -338,11 +338,13 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         ArgumentNullException.ThrowIfNull(message);
         ArgumentNullException.ThrowIfNull(errorMessage);
 
-        if (message.Status == MessageConstants.Status.Failed)
+        if (IsTerminal(message))
         {
             // Already terminal — a repeat report of failure for a row that has
             // already been given up on must be a no-op, not another
-            // RetryCount increment past MaxRetryCount.
+            // RetryCount increment past MaxRetryCount. A Cancelled row is
+            // terminal too: a late "release the claim" after a cancel must
+            // never revive it to Pending (spec: instant-rail-timeout-cancel).
             return MessageTransitionOutcome.AlreadyTerminal;
         }
 
@@ -369,11 +371,12 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             // conflict is treated as a genuine anomaly and propagates.
             await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
 
-            if (message.Status == MessageConstants.Status.Failed)
+            if (IsTerminal(message))
             {
-                // The concurrent change already drove this row to terminal
-                // Failed (e.g. another caller's retry hit MaxRetryCount) —
-                // nothing further for this call to do.
+                // The concurrent change already drove this row to a terminal
+                // state (Failed via another caller's retry hitting
+                // MaxRetryCount, Completed, or Cancelled by the instant rail)
+                // — nothing further for this call to do.
                 return MessageTransitionOutcome.AlreadyTerminal;
             }
 
@@ -409,7 +412,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// change is retried exactly once against the row's current database
     /// values before giving up), AND its terminal-status guard: a
     /// <paramref name="message"/> whose current <c>Status</c> is already
-    /// terminal (<c>Completed</c> or <c>Failed</c>) is left untouched
+    /// terminal (<c>Completed</c>, <c>Failed</c> or <c>Cancelled</c>) is left untouched
     /// (no-op) rather than re-stamping <c>ProcessedAt</c> or, worse, reviving
     /// a row a concurrent caller already drove to terminal <c>Failed</c> (e.g.
     /// its retries were exhausted) back to <c>Completed</c>. Checked both
@@ -467,13 +470,107 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         return MessageTransitionOutcome.Applied;
     }
 
+    /// <summary>
+    /// The single definition of "terminal" for every transition in this base
+    /// (spec: instant-rail-timeout-cancel's boundaries): <c>Completed</c>,
+    /// <c>Failed</c> and <c>Cancelled</c>. A row in any of these is never
+    /// claimed, never revived to <c>Pending</c>, and never re-stamped.
+    /// </summary>
     private static bool IsTerminal(TMessage message) =>
-        message.Status is MessageConstants.Status.Completed or MessageConstants.Status.Failed;
+        message.Status is MessageConstants.Status.Completed
+            or MessageConstants.Status.Failed
+            or MessageConstants.Status.Cancelled;
 
     private void ApplyCompletionTransition(TMessage message)
     {
         message.Status = MessageConstants.Status.Completed;
         message.ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime;
+    }
+
+    /// <summary>
+    /// Cancellation transition (spec: instant-rail-timeout-cancel): the ONLY
+    /// path that writes terminal <see cref="MessageConstants.Status.Cancelled"/>.
+    /// Sets <c>Status = Cancelled</c>, stamps <c>ProcessedAt</c> from
+    /// <see cref="TimeProvider"/> and records <paramref name="reason"/> as
+    /// <c>LastError</c>, so the ordering gate, drain and duplicate replay all
+    /// see a terminal row with a processing timestamp. Modelled on
+    /// <see cref="MarkAsCompletedAsync"/> exactly: the same detach/attach
+    /// handling, the same single retry against the row's current database
+    /// values on a <see cref="DbUpdateConcurrencyException"/> (<c>Status</c>
+    /// is the concurrency token), and the same terminal-status guard — a row
+    /// already <c>Completed</c>, <c>Failed</c> or <c>Cancelled</c> is left
+    /// untouched (<see cref="MessageTransitionOutcome.AlreadyTerminal"/>).
+    /// </summary>
+    /// <remarks>
+    /// Who may call this is the caller's responsibility, not this method's:
+    /// the method accepts any non-terminal row, and it is the caller that
+    /// must guarantee no delivery is in flight for it — by cancelling only a
+    /// row it has just claimed itself (<see cref="TryClaimByIdAsync"/>), or a
+    /// row it has just inserted and nobody else can have seen. A concurrency
+    /// conflict observed here therefore means another writer touched the row
+    /// since the caller last saw it; after the reload a terminal row reports
+    /// <see cref="MessageTransitionOutcome.AlreadyTerminal"/> and anything
+    /// else reports <see cref="MessageTransitionOutcome.Conflicted"/> — the
+    /// cancel is never re-applied, both because the spec's boundary "never
+    /// cancel a row that is Processing" outranks finishing this call's own
+    /// intent and because the reload has discarded the caller's cached-payload
+    /// mutation.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="message"/> or <paramref name="reason"/> is <see langword="null"/>.</exception>
+    /// <exception cref="DbUpdateConcurrencyException">
+    /// The retried save still conflicted with a second concurrent change to
+    /// <paramref name="message"/>'s row; propagates unchanged.
+    /// </exception>
+    public virtual async Task<MessageTransitionOutcome> MarkAsCancelledAsync(
+        TMessage message, string reason, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(reason);
+
+        if (IsTerminal(message))
+        {
+            return MessageTransitionOutcome.AlreadyTerminal;
+        }
+
+        if (DbContext.Entry(message).State == EntityState.Detached)
+        {
+            DbContext.Attach(message);
+        }
+
+        ApplyCancellationTransition(message, reason);
+
+        try
+        {
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+
+            if (IsTerminal(message))
+            {
+                return MessageTransitionOutcome.AlreadyTerminal;
+            }
+
+            // Never re-applied. Someone else moved the row since this caller
+            // last saw it: Processing means a delivery may be in flight
+            // (cancelling would let the caller answer "nothing executed" for
+            // a command executing right now), and even a row back at Pending
+            // has been through another writer's hands -- and the reload has
+            // discarded this caller's cached-payload mutation, so re-applying
+            // would persist a Cancelled row with no payload. The caller keeps
+            // its honest unknown.
+            return MessageTransitionOutcome.Conflicted;
+        }
+
+        return MessageTransitionOutcome.Applied;
+    }
+
+    private void ApplyCancellationTransition(TMessage message, string reason)
+    {
+        message.Status = MessageConstants.Status.Cancelled;
+        message.ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime;
+        message.LastError = reason;
     }
 
     /// <summary>

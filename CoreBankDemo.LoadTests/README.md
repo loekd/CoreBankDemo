@@ -34,13 +34,13 @@ Verifies that the CoreBankDemo system processes every payment transaction **exac
 | Check | Pass condition |
 |---|---|
 | `no failed inbox messages` | Zero `Failed` inbox messages |
-| `no pending inbox messages` | Zero `Pending`/`Processing` inbox messages |
+| `no pending inbox messages` | Zero `Pending`/`Processing` inbox messages (`Cancelled` is terminal, ADR-020) |
 | `no duplicate processing` | No idempotency key processed more than once |
-| `expected unique count processed` | Completed unique idempotency keys == configured transaction count |
-| `all submitted transactions processed` | Inbox completed count == outbox submitted count |
-| `stage cardinality N/N/3N/3N` | Payments Outbox/CoreBank Inbox/CoreBank Outbox/Payments Inbox completed rows equal N/N/3N/3N |
+| `expected unique count processed` | Completed unique idempotency keys + cancelled outbox rows == configured transaction count |
+| `all submitted transactions processed` | Inbox completed count == outbox completed count, and outbox total == completed + cancelled |
+| `stage cardinality N/N/3N/3N` | Payments Outbox holds N rows (completed + cancelled); CoreBank Inbox one `Completed` per completed payment plus at most one `Cancelled` per cancelled one; CoreBank Outbox/Payments Inbox hold 3 × completed (a cancel publishes nothing). With no cancellations this is N/N/3N/3N verbatim |
 | `canonical account set exact` | Exactly the 10 seeded load-test accounts exist |
-| `no failed/non-terminal messages` | Every one of the four stores is terminal and successful |
+| `no failed/non-terminal messages` | Every one of the four stores is terminal: `Completed`, or `Cancelled` on the instant rail — never `Failed`, `Pending` or `Processing` |
 
 ## Running
 

@@ -21,7 +21,12 @@ public sealed record DrainResult(
     int CoreBankOutboxPending,
     int PaymentsInboxPending,
     int Completed,
-    int Failed);
+    int Failed,
+    // Additive (spec: instant-rail-timeout-cancel): payments outbox rows the
+    // instant rail withdrew -- terminal, so they count as processed for
+    // drain progress, never as pending. Outbox, not CoreBank inbox: a
+    // locally cancelled payment leaves no CoreBank row at all.
+    int Cancelled = 0);
 
 /// <summary>One pass/fail invariant check with a human-readable detail string.</summary>
 public sealed record AssertionCheck(bool Passed, string Detail);
@@ -66,7 +71,13 @@ public sealed record OrderingObservation(
     DateTime EnqueuedAt,
     DateTime? ProcessedAt,
     Guid Id = default,
-    int Priority = 0);
+    int Priority = 0,
+    // spec: instant-rail-timeout-cancel. A Cancelled row never executed, so
+    // it has no place in execution order: FindOrderingViolations leaves it
+    // out of the FIFO comparison (it still counts as terminal with a
+    // ProcessedAt for the missing-timestamp check). Defaulted so existing
+    // call sites keep compiling.
+    string? Status = null);
 
 public sealed record OrderingViolation(
     string Store,
@@ -102,8 +113,12 @@ public sealed record BalancesCorrectCheck(
     string Detail,
     IReadOnlyList<BalanceDiscrepancy> Discrepancies);
 
-/// <summary>Status counts for one durable message store.</summary>
-public sealed record MessageStoreSummary(int Total, int Completed, int Failed, int NonTerminal);
+/// <summary>
+/// Status counts for one durable message store. <paramref name="Cancelled"/>
+/// (spec: instant-rail-timeout-cancel) is terminal: it is never part of
+/// <paramref name="NonTerminal"/>, and <c>Total == Completed + Failed + Cancelled + NonTerminal</c>.
+/// </summary>
+public sealed record MessageStoreSummary(int Total, int Completed, int Failed, int NonTerminal, int Cancelled = 0);
 
 /// <summary>Expected and actual message counts at each processing stage.</summary>
 public sealed record StageCardinalityCheck(
@@ -214,6 +229,13 @@ public sealed class LoadTestAssertionService(
 
         var completed = await coreBankDb.InboxMessages.CountAsync(m => m.Status == Status.Completed, ct);
         var failed = await coreBankDb.InboxMessages.CountAsync(m => m.Status == Status.Failed, ct);
+        // Counted on the payments outbox, not CoreBank's inbox: every
+        // cancellation -- local (never reached CoreBank), through CoreBank,
+        // or replayed to the background rail -- ends as a Cancelled outbox
+        // row, whereas only some leave a CoreBank row behind. Counting the
+        // inbox would leave locally cancelled payments out of "processed"
+        // and time poll_until_drained out on a fully drained system.
+        var cancelled = await paymentsDb.OutboxMessages.CountAsync(m => m.Status == Status.Cancelled, ct);
 
         var isDrained = outboxPending == 0
             && inboxPending == 0
@@ -227,7 +249,8 @@ public sealed class LoadTestAssertionService(
             coreBankOutboxPending,
             paymentsInboxPending,
             completed,
-            failed);
+            failed,
+            cancelled);
     }
 
     /// <summary>
@@ -283,7 +306,8 @@ public sealed class LoadTestAssertionService(
                 message.CreatedAt,
                 message.ProcessedAt,
                 message.Id,
-                message.Priority))
+                message.Priority,
+                message.Status))
             .ToListAsync(ct));
         orderingObservations.AddRange(await coreBankDb.InboxMessages
             .Select(message => new OrderingObservation(
@@ -293,7 +317,8 @@ public sealed class LoadTestAssertionService(
                 message.ReceivedAt,
                 message.ProcessedAt,
                 message.Id,
-                message.Priority))
+                message.Priority,
+                message.Status))
             .ToListAsync(ct));
         orderingObservations.AddRange(await coreBankDb.MessagingOutboxMessages
             .Select(message => new OrderingObservation(
@@ -303,7 +328,8 @@ public sealed class LoadTestAssertionService(
                 message.CreatedAt,
                 message.ProcessedAt,
                 message.Id,
-                message.Priority))
+                message.Priority,
+                message.Status))
             .ToListAsync(ct));
         orderingObservations.AddRange(await paymentsDb.InboxMessages
             .Select(message => new OrderingObservation(
@@ -313,7 +339,8 @@ public sealed class LoadTestAssertionService(
                 message.ReceivedAt,
                 message.ProcessedAt,
                 message.Id,
-                message.Priority))
+                message.Priority,
+                message.Status))
             .ToListAsync(ct));
 
         var request = new ComputeAssertionRequest(
@@ -332,11 +359,16 @@ public sealed class LoadTestAssertionService(
         return LoadTestAssertionCalculator.ComputeAssertionResult(request);
     }
 
-    private static MessageStoreSummary Summarize(IReadOnlyCollection<string> statuses) => new(
+    /// <summary>
+    /// Terminal is <c>Completed</c>, <c>Failed</c> or <c>Cancelled</c>; everything
+    /// else (<c>Pending</c>/<c>Processing</c>) is non-terminal and blocks the gate.
+    /// </summary>
+    internal static MessageStoreSummary Summarize(IReadOnlyCollection<string> statuses) => new(
         statuses.Count,
         statuses.Count(status => status == Status.Completed),
         statuses.Count(status => status == Status.Failed),
-        statuses.Count(status => status != Status.Completed && status != Status.Failed));
+        statuses.Count(status => status != Status.Completed && status != Status.Failed && status != Status.Cancelled),
+        statuses.Count(status => status == Status.Cancelled));
 }
 
 /// <summary>
@@ -432,14 +464,27 @@ public static class LoadTestAssertionCalculator
                 ? "No duplicates"
                 : $"{duplicateKeys.Count} duplicate key(s): {string.Join(", ", duplicateKeys.Select(d => $"{d.Key}(x{d.Count})"))}",
             duplicateKeys);
+        // spec: instant-rail-timeout-cancel. A cancelled instant payment is a
+        // terminal, provably-not-executed outcome: it reaches a terminal state
+        // (zero message loss holds), but it is not "processed" in the ledger
+        // sense. So every submitted key is either completed or cancelled, and
+        // only the completed ones flow downstream as N completed inbox rows,
+        // 3N events, 3N received events.
+        // Detail strings stay byte-identical to the pre-cancellation contract
+        // whenever no row was cancelled; the extra counts appear only when
+        // they are non-zero.
+        var cancelledDetail = paymentsOutbox.Cancelled > 0 || coreBankInbox.Cancelled > 0
+            ? $", OutboxCancelled={paymentsOutbox.Cancelled}, InboxCancelled={coreBankInbox.Cancelled}"
+            : string.Empty;
         var expectedUniqueProcessed = new AssertionCheck(
-            !expectedUnique.HasValue || completedUniqueKeys == expectedUnique.Value,
-            expectedUnique.HasValue
+            !expectedUnique.HasValue || completedUniqueKeys + paymentsOutbox.Cancelled == expectedUnique.Value,
+            (expectedUnique.HasValue
                 ? $"ExpectedUnique={expectedUnique.Value}, CompletedUnique={completedUniqueKeys}"
-                : $"CompletedUnique={completedUniqueKeys}");
+                : $"CompletedUnique={completedUniqueKeys}") + cancelledDetail);
         var allSubmittedProcessed = new AssertionCheck(
-            coreBankInbox.Completed == paymentsOutbox.Total,
-            $"OutboxTotal={paymentsOutbox.Total}, InboxCompleted={coreBankInbox.Completed}");
+            coreBankInbox.Completed == paymentsOutbox.Completed
+            && paymentsOutbox.Total == paymentsOutbox.Completed + paymentsOutbox.Cancelled,
+            $"OutboxTotal={paymentsOutbox.Total}, OutboxCompleted={paymentsOutbox.Completed}, InboxCompleted={coreBankInbox.Completed}{cancelledDetail}");
         var balanceConservation = new AssertionCheck(
             balanceConserved,
             $"Total={totalBalance:F2}, Expected={expectedTotalBalance:F2}");
@@ -464,19 +509,33 @@ public static class LoadTestAssertionCalculator
             request.InlineInstantSettlementCount > 0,
             $"Fresh instant payments completed inline: {request.InlineInstantSettlementCount}");
 
+        // Stage cardinality with cancellations (spec matrix): the outbox holds
+        // exactly N rows, every one of them Completed or Cancelled; CoreBank's
+        // inbox holds one Completed row per completed outbox row plus, at
+        // most, one Cancelled row (tombstone or cancelled command) per
+        // cancelled outbox row -- never a Completed row for a cancelled
+        // payment, which would be a payment executed after being cancelled;
+        // and the event stores carry exactly three events per COMPLETED
+        // payment, since a cancel publishes nothing (AD-5/AD-11). With no
+        // cancellations this is the original N/N/3N/3N gate unchanged.
+        var completedCount = paymentsOutbox.Completed;
         var cardinalityPassed = !expectedUnique.HasValue ||
             (paymentsOutbox.Total == expectedUnique.Value
-             && paymentsOutbox.Completed == expectedUnique.Value
-             && coreBankInbox.Total == expectedUnique.Value
-             && coreBankInbox.Completed == expectedUnique.Value
-             && coreBankOutbox.Total == expectedUnique.Value * 3
-             && coreBankOutbox.Completed == expectedUnique.Value * 3
-             && paymentsInbox.Total == expectedUnique.Value * 3
-             && paymentsInbox.Completed == expectedUnique.Value * 3);
+             && paymentsOutbox.Completed + paymentsOutbox.Cancelled == expectedUnique.Value
+             && coreBankInbox.Completed == completedCount
+             && coreBankInbox.Cancelled <= paymentsOutbox.Cancelled
+             && coreBankInbox.Total == coreBankInbox.Completed + coreBankInbox.Cancelled
+             && coreBankOutbox.Total == completedCount * 3
+             && coreBankOutbox.Completed == completedCount * 3
+             && paymentsInbox.Total == completedCount * 3
+             && paymentsInbox.Completed == completedCount * 3);
         var stageCardinality = new StageCardinalityCheck(
             cardinalityPassed,
             expectedUnique.HasValue
                 ? $"Expected N/N/3N/3N={expectedUnique.Value}/{expectedUnique.Value}/{expectedUnique.Value * 3}/{expectedUnique.Value * 3}; Actual={paymentsOutbox.Total}/{coreBankInbox.Total}/{coreBankOutbox.Total}/{paymentsInbox.Total}"
+                  + (cancelledDetail.Length > 0
+                      ? $" (cancelled instant rows are terminal: Completed+Cancelled=N, downstream 3x{completedCount}{cancelledDetail})"
+                      : string.Empty)
                 : "ExpectedUnique was not supplied",
             expectedUnique,
             paymentsOutbox,
@@ -555,7 +614,20 @@ public static class LoadTestAssertionCalculator
         // instant rail is *meant* to overtake queued standard work in the
         // same partition (an SCT Inst never waits behind batch SCT work), so
         // rows are only ever compared against rows of their own priority.
-        foreach (var partition in observations.GroupBy(item => (item.Store, item.PartitionId, item.Priority)))
+        //
+        // A Cancelled row is left out entirely (spec: instant-rail-timeout-
+        // cancel): it never executed, so it is not a step in execution
+        // order. Its ProcessedAt is when it was withdrawn, which can legally
+        // precede the completion of an older row it was waiting behind --
+        // an older instant row that held the lock through its forward phase
+        // and cancel, was released on the residual unknown and completed
+        // later by the background rail, while the younger row behind it hit
+        // its own forward deadline first and was cancelled locally. A
+        // CoreBank tombstone (ReceivedAt == ProcessedAt) versus an older
+        // still-pending row is the same shape.
+        foreach (var partition in observations
+                     .Where(item => item.Status != Status.Cancelled)
+                     .GroupBy(item => (item.Store, item.PartitionId, item.Priority)))
         {
             OrderingObservation? latestPrior = null;
             // Grouping by EnqueuedAt alone collapsed every row sharing an

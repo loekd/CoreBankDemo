@@ -31,6 +31,7 @@ public class InstantPaymentRailRegistrationTests
         options.BudgetMilliseconds.Should().Be(9000);
         options.AttemptTimeoutMilliseconds.Should().Be(2500);
         options.MaxAttempts.Should().Be(2);
+        options.CancelTimeoutMilliseconds.Should().Be(1500);
         provider.GetRequiredService<IInstantPaymentForwardingHandler>().Should().BeOfType<InstantPaymentForwardingHandler>();
     }
 
@@ -71,16 +72,54 @@ public class InstantPaymentRailRegistrationTests
     [Fact]
     public void An_exactly_at_budget_attempt_configuration_passes_startup_validation()
     {
-        // AttemptTimeoutMilliseconds * MaxAttempts (4500 * 2 = 9000) exactly
-        // equals BudgetMilliseconds -- the boundary itself must be valid.
+        // AttemptTimeoutMilliseconds * MaxAttempts + CancelTimeoutMilliseconds
+        // (4000 * 2 + 1000 = 9000) exactly equals BudgetMilliseconds -- the
+        // boundary itself must be valid (spec: instant-rail-timeout-cancel
+        // reserves the cancel allowance inside the budget).
+        using var provider = BuildProvider(new Dictionary<string, string?>
+        {
+            ["Payments:InstantRail:BudgetMilliseconds"] = "9000",
+            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "4000",
+            ["Payments:InstantRail:MaxAttempts"] = "2",
+            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1000"
+        });
+
+        provider.GetRequiredService<IStartupValidator>().Validate();
+    }
+
+    [Fact]
+    public void A_cancel_allowance_that_pushes_the_attempts_over_budget_fails_startup_validation()
+    {
+        // 4500 * 2 = 9000 fits the budget on its own; the cancel allowance
+        // must fit inside it too, or a request thread could be held beyond
+        // the budget by the cancel call.
         using var provider = BuildProvider(new Dictionary<string, string?>
         {
             ["Payments:InstantRail:BudgetMilliseconds"] = "9000",
             ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "4500",
-            ["Payments:InstantRail:MaxAttempts"] = "2"
+            ["Payments:InstantRail:MaxAttempts"] = "2",
+            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1"
         });
 
-        provider.GetRequiredService<IStartupValidator>().Validate();
+        var act = provider.GetRequiredService<IStartupValidator>().Validate;
+
+        act.Should().Throw<OptionsValidationException>()
+            .WithMessage("*CancelTimeoutMilliseconds must not exceed BudgetMilliseconds*");
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    public void Non_positive_cancel_timeout_fails_startup_validation(string cancelTimeoutMilliseconds)
+    {
+        using var provider = BuildProvider(new Dictionary<string, string?>
+        {
+            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = cancelTimeoutMilliseconds
+        });
+
+        var act = provider.GetRequiredService<IStartupValidator>().Validate;
+
+        act.Should().Throw<OptionsValidationException>();
     }
 
     [Fact]

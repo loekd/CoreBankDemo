@@ -32,4 +32,20 @@ internal interface ICoreBankApiClient
 
     Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
         string idempotencyKey, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Withdraws <paramref name="request"/> before CoreBankAPI executes it
+    /// (<c>POST /api/transactions/cancel</c>, spec: instant-rail-timeout-cancel).
+    /// <see cref="CoreBankClientOutcome.Success"/> carries CoreBank's answer:
+    /// <c>Cancelled</c> when the command is provably dead, or the committed
+    /// <c>Completed</c>/<c>Failed</c> outcome when it already executed.
+    /// <see cref="CoreBankClientOutcome.Conflict"/> is CoreBank's <c>409</c>
+    /// (in flight or terminally failed -- not cancellable), with the reported
+    /// status in <see cref="CoreBankResult{T}.Value"/>. Everything else is a
+    /// <see cref="CoreBankClientOutcome.Retry"/> classification exactly as for
+    /// <see cref="ProcessTransactionAsync"/>. Carries <c>X-Payment-Priority</c>
+    /// under the same rule as the submission call.
+    /// </summary>
+    Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+        TransactionSubmissionRequest request, CancellationToken cancellationToken);
 }

@@ -192,7 +192,11 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         services.AddScoped<IOutboxMessageStore<OutboxMessage>>(
             sp => sp.GetRequiredService<OutboxRepository>());
         services.AddScoped<IOutboxDeliveryStrategy<OutboxMessage>>(
-            _ => new HttpForwardOutboxDeliveryStrategy(client, TestBusinessMetrics.Instance));
+            sp => new HttpForwardOutboxDeliveryStrategy(
+                client,
+                sp.GetRequiredService<IOutboxMessageStore<OutboxMessage>>(),
+                TestBusinessMetrics.Instance,
+                NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance));
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
@@ -268,6 +272,10 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
             string idempotencyKey, CancellationToken cancellationToken) =>
             throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
     }
 
     /// <summary>Fake <see cref="ICoreBankApiClient"/> whose destination account is always invalid.</summary>
@@ -294,6 +302,10 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
 
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
             string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken) =>
             throw new NotSupportedException("Not used by the forwarding processor.");
     }
 
@@ -330,6 +342,10 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
 
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
             string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken) =>
             throw new NotSupportedException("Not used by the forwarding processor.");
     }
 
@@ -399,6 +415,10 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
 
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
             string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken) =>
             throw new NotSupportedException("Not used by the forwarding processor.");
     }
 

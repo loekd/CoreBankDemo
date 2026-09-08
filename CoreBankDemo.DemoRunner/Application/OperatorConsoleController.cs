@@ -846,6 +846,7 @@ public sealed class OperatorConsoleController
         var accepted = 0;
         var completed = 0;
         var failed = 0;
+        var cancelled = 0;
         var sent = 0;
         var failures = new ConcurrentQueue<string>();
 
@@ -886,6 +887,14 @@ public sealed class OperatorConsoleController
                         // clamp would hide a genuine HTTP-versus-broadcast disagreement --
                         // exactly the finding this feature exists to surface. It is retired
                         // instead: labelled as the console's own, counted toward nothing.
+                        //
+                        // A 504 Cancelled is retired for the opposite reason: it is proven,
+                        // and what it proves is that nothing will ever be broadcast for it.
+                        // Retiring it also means a burst does not police a later,
+                        // contradictory broadcast for a cancelled id -- such an event is
+                        // labelled the console's own and counted toward nothing. That check is
+                        // single-payment tracking's job (TrackSubmittedPayment /
+                        // ResolveTrackedPayment), where both records can be kept side by side.
                         if (result.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed)
                         {
                             _burstTransactions[burstTransactionId] = new BurstTransaction(burstNumber);
@@ -905,6 +914,12 @@ public sealed class OperatorConsoleController
                         case PaymentOutcome.Completed:
                             Interlocked.Increment(ref completed);
                             break;
+                        case PaymentOutcome.Cancelled:
+                            // The rail's own answer, not a transport failure: nothing executed,
+                            // and the key is safe to retry. Tallied on the HTTP leg, never
+                            // added to `failures`, never counted toward the proven leg.
+                            Interlocked.Increment(ref cancelled);
+                            break;
                         default:
                             Interlocked.Increment(ref failed);
                             failures.Enqueue($"{key}: {result.ErrorSummary ?? result.ResponseStatus ?? result.Outcome.ToString()}");
@@ -923,6 +938,7 @@ public sealed class OperatorConsoleController
                                 Accepted = accepted,
                                 Completed = completed,
                                 Failed = failed,
+                                CancelledPayments = cancelled,
                             },
                         }
                         : state);
@@ -940,8 +956,8 @@ public sealed class OperatorConsoleController
             _burstCancellation = null;
             var final = State.Burst;
             var summary = (final.Cancelled
-                    ? $"Burst cancelled after {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}."
-                    : $"Burst finished {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, failed {final.Failed}.")
+                    ? $"Burst cancelled after {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, cancelled {final.CancelledPayments}, failed {final.Failed}."
+                    : $"Burst finished {final.Sent}/{count}; accepted {final.Accepted}, completed {final.Completed}, cancelled {final.CancelledPayments}, failed {final.Failed}.")
                 // The HTTP leg is what the API answered; the proven leg is what the broadcast
                 // confirmed, and it keeps moving after this record is written.
                 + $" Proven so far: settled {final.Settled}, rejected {final.Rejected}, awaiting {final.Awaiting}.";
@@ -1530,6 +1546,7 @@ public sealed class OperatorConsoleController
                 PaymentOutcome.Ambiguous => "Ambiguous — not yet reconciled; Resend is unsafe",
                 PaymentOutcome.Completed => $"{safeResult.StatusCode} Completed",
                 PaymentOutcome.Failed => $"{safeResult.StatusCode} Failed",
+                PaymentOutcome.Cancelled => $"{safeResult.StatusCode} Cancelled — the instant rail timed out and withdrew the payment; nothing executed, a retry with a new key is safe",
                 _ => safeResult.ErrorSummary ?? safeResult.Outcome.ToString(),
             };
             AddEvidence(
@@ -1542,7 +1559,7 @@ public sealed class OperatorConsoleController
                 safeResult.Duration == TimeSpan.Zero ? TimeSpanSince(mutation.StartedAt) : safeResult.Duration,
                 $"Idempotency {submission.IdempotencyMode}: {submission.IdempotencyKey ?? "(omitted)"}{Environment.NewLine}"
                 + (safeResult.Body ?? safeResult.ErrorSummary ?? string.Empty),
-                safeResult.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed or PaymentOutcome.Failed,
+                safeResult.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed or PaymentOutcome.Failed or PaymentOutcome.Cancelled,
                 transactionId: safeResult.TransactionId);
             return safeResult;
         }
@@ -1939,21 +1956,22 @@ public sealed class OperatorConsoleController
 
         if (outcomeEvent.Completed is { } completed)
         {
-            // HTTP already proved a rejection and the broadcast says otherwise. Both records
-            // stay, both stay labelled, and the console picks no winner.
-            var contradicts = payment.HttpOutcome == PaymentOutcome.Failed;
+            // HTTP already proved a rejection -- or a cancellation, which promises that nothing
+            // executed -- and the broadcast says otherwise. Both records stay, both stay
+            // labelled, and the console picks no winner.
+            var contradicts = payment.HttpOutcome is PaymentOutcome.Failed or PaymentOutcome.Cancelled;
             return payment with
             {
                 BroadcastOutcome = PaymentOutcome.Completed,
                 State = contradicts ? PaymentTrackingState.Contradiction : PaymentTrackingState.Settled,
                 ProcessedAt = completed.ProcessedAt,
                 ObservedAt = observedAt,
-                Note = contradicts ? "HTTP proved Failed, broadcast says Completed" : null,
+                Note = contradicts ? $"HTTP proved {payment.HttpOutcome}, broadcast says Completed" : null,
             };
         }
 
         var failed = outcomeEvent.Failed!;
-        var failureContradicts = payment.HttpOutcome == PaymentOutcome.Completed;
+        var failureContradicts = payment.HttpOutcome is PaymentOutcome.Completed or PaymentOutcome.Cancelled;
         return payment with
         {
             BroadcastOutcome = PaymentOutcome.Failed,
@@ -1961,7 +1979,7 @@ public sealed class OperatorConsoleController
             ProcessedAt = failed.ProcessedAt,
             ObservedAt = observedAt,
             ErrorReason = failed.ErrorReason,
-            Note = failureContradicts ? "HTTP proved Completed, broadcast says Failed" : null,
+            Note = failureContradicts ? $"HTTP proved {payment.HttpOutcome}, broadcast says Failed" : null,
         };
     }
 
@@ -2026,6 +2044,17 @@ public sealed class OperatorConsoleController
                     {
                         HttpOutcome = result.Outcome,
                         HttpStatusCode = result.StatusCode,
+                        // A replayed 504 Cancelled proves the row is withdrawn: a row that was
+                        // still awaiting, never observed, or lost to a feed gap moves to
+                        // Cancelled -- HTTP has now proved nothing will ever be broadcast for it.
+                        // A row a broadcast already resolved keeps that record (Settled stays
+                        // Settled; the contradiction is for the outcome query to surface).
+                        State = result.Outcome == PaymentOutcome.Cancelled
+                            && payments[index].State is PaymentTrackingState.Awaiting
+                                or PaymentTrackingState.NotObserved
+                                or PaymentTrackingState.OutcomeUnknown
+                            ? PaymentTrackingState.Cancelled
+                            : payments[index].State,
                     },
                     buffered,
                     submittedAt);
@@ -2038,8 +2067,13 @@ public sealed class OperatorConsoleController
             // words "Awaiting settlement": its own HTTP leg never proved it was accepted.
             var proven = result.Outcome is PaymentOutcome.Pending
                 or PaymentOutcome.Completed
-                or PaymentOutcome.Failed;
+                or PaymentOutcome.Failed
+                or PaymentOutcome.Cancelled;
             var listening = state.Feed.IsListening && proven;
+            // A 504 Cancelled is proven by HTTP alone (ADR-020: nothing executed, nothing will
+            // be broadcast), so it never reads "Awaiting settlement" -- listening or not. A
+            // broadcast that arrives for it anyway becomes a Contradiction, never a resolution.
+            var cancelled = result.Outcome == PaymentOutcome.Cancelled;
             var row = new TrackedPayment(
                 Interlocked.Increment(ref _paymentSequence),
                 transactionId,
@@ -2052,12 +2086,16 @@ public sealed class OperatorConsoleController
                 result.Outcome,
                 result.StatusCode,
                 // Never "Awaiting settlement" without a feed: nothing is awaiting anything.
-                listening ? PaymentTrackingState.Awaiting : PaymentTrackingState.NotObserved,
-                Note: listening
-                    ? null
-                    : proven
-                        ? NoFeedNote(state.Feed)
-                        : $"the submission's own outcome was {result.Outcome} — only an outcome query can move it forward");
+                cancelled
+                    ? PaymentTrackingState.Cancelled
+                    : listening ? PaymentTrackingState.Awaiting : PaymentTrackingState.NotObserved,
+                Note: cancelled
+                    ? "withdrawn by the instant rail before execution — safe to retry with a new key"
+                    : listening
+                        ? null
+                        : proven
+                            ? NoFeedNote(state.Feed)
+                            : $"the submission's own outcome was {result.Outcome} — only an outcome query can move it forward");
             row = ApplyBuffered(row, buffered, submittedAt);
             applied = buffered.Count > 0;
 
@@ -2363,14 +2401,18 @@ public sealed class OperatorConsoleController
             };
         }
 
+        // ADR-020: the instant rail may also answer 504, but only with the wire word Cancelled
+        // -- a 504 that says anything else is the gateway failure it looks like.
+        var cancelled = result.StatusCode == 504 && result.Outcome == PaymentOutcome.Cancelled;
         if (rail == PaymentRail.Instant
             && result.StatusCode != 202
-            && result.StatusCode != 200)
+            && result.StatusCode != 200
+            && !cancelled)
         {
             return result with
             {
                 Outcome = PaymentOutcome.TransportFailure,
-                ErrorSummary = $"Instant payments must return committed 200 or durable 202, not HTTP {result.StatusCode}.",
+                ErrorSummary = $"Instant payments must return committed 200, durable 202 or withdrawn 504 Cancelled, not HTTP {result.StatusCode}.",
             };
         }
 

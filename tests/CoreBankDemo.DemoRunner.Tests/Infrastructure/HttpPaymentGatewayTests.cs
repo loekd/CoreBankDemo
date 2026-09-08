@@ -279,6 +279,52 @@ public class HttpPaymentGatewayTests
     }
 
     [Fact]
+    public async Task Submit_504Cancelled_IsAWithdrawnPaymentNotAContractViolation()
+    {
+        // ADR-020: the instant rail's time-out rejection. 504 with Status: Cancelled says the
+        // payment was provably withdrawn before it executed -- a proven outcome the console
+        // must show in the rail's own words, never as "PaymentsAPI returned HTTP 504".
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.GatewayTimeout)
+            {
+                Content = new StringContent(
+                    """{"paymentId":"demo-key-001","transactionId":"demo-key-001","status":"Cancelled","processedAt":"2026-09-08T12:00:09Z"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "demo-key-001");
+
+        var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentOutcome.Cancelled);
+        result.StatusCode.Should().Be(504);
+        result.ErrorSummary.Should().BeNull();
+        result.TransactionId.Should().Be("demo-key-001");
+    }
+
+    [Theory]
+    [InlineData("""{"paymentId":"k","transactionId":"k","status":"Pending"}""")]
+    [InlineData("<html>upstream timed out</html>")]
+    [InlineData("")]
+    public async Task Submit_504WithoutACancelledBody_IsStillAGatewayFailure(string body)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.GatewayTimeout) { Content = new StringContent(body) })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "k");
+
+        var result = await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentOutcome.TransportFailure);
+        result.ErrorSummary.Should().Contain("504");
+    }
+
+    [Fact]
     public async Task Submit_ContractViolation_NamesTheOffendingValueNotJustTheVerdict()
     {
         var responses = new Queue<HttpResponseMessage>(

@@ -63,16 +63,24 @@ public sealed class BusinessMetrics : IDisposable
     /// (spec: add-instant-payment-rail's metric contract):
     /// <see cref="Settled"/> is a committed business success,
     /// <see cref="Rejected"/> is a committed business rejection (still a
-    /// successfully processed message per AD-11), and <see cref="Deferred"/>
-    /// covers everything that falls back to the background rail (budget
-    /// exhaustion, a transport failure, the row already being claimed, or the
-    /// instant rail being disabled).
+    /// successfully processed message per AD-11), <see cref="Cancelled"/> is a
+    /// provable withdrawal on budget exhaustion, and <see cref="Deferred"/>
+    /// covers everything that falls back to the background rail (a budget
+    /// exhaustion whose cancel could not be established, a transport failure,
+    /// the row already being claimed, or the instant rail being disabled).
     /// </summary>
     public enum InstantPaymentOutcome
     {
         Settled,
         Rejected,
-        Deferred
+        Deferred,
+
+        /// <summary>
+        /// The budget ran out and the command was provably withdrawn before
+        /// it executed (spec: instant-rail-timeout-cancel) -- answered
+        /// <c>504</c>/<c>Cancelled</c>, never a deferral.
+        /// </summary>
+        Cancelled
     }
 
     /// <summary>Outcome of CoreBank transaction intake (spec-6-5 metric contract).</summary>
@@ -327,6 +335,7 @@ public sealed class BusinessMetrics : IDisposable
         InstantPaymentOutcome.Settled => "settled",
         InstantPaymentOutcome.Rejected => "rejected",
         InstantPaymentOutcome.Deferred => "deferred",
+        InstantPaymentOutcome.Cancelled => "cancelled",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)
     };
 
