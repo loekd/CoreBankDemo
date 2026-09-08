@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Doctor;
 using CoreBankDemo.DemoRunner.Infrastructure;
@@ -56,6 +57,17 @@ public static class Program
         // from every banking service's and PaymentsAPI keeps receiving every event.
         await using var outcomeFeed = new DaprOutcomeFeed(repositoryRoot, new EnvironmentProbe(), TimeProvider.System);
 
+        // The `await using` above only runs on an orderly exit. A SIGTERM, a SIGHUP from a
+        // terminal window closing, or an outer `timeout` kills the console outright and leaves
+        // its daprd running -- and that orphan stays in this console's Redis consumer group,
+        // where it is handed a share of every transaction-events delivery that nothing then
+        // reads. The next run would report Listening while a portion of its payments never
+        // resolved. SIGINT is deliberately absent: Console.CancelKeyPress already turns Ctrl+C
+        // into an orderly shutdown, and tearing the feed down underneath that would break it.
+        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, _ => StopFeed(outcomeFeed));
+        using var sighup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, _ => StopFeed(outcomeFeed));
+        using var sigquit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, _ => StopFeed(outcomeFeed));
+
         var controller = new OperatorConsoleController(
             aspire,
             new AspireProcessAdapter(repositoryRoot),
@@ -68,11 +80,15 @@ public static class Program
             outcomeFeed,
             TimeProvider.System);
 
-        return RunConsole(controller);
+        var theme = CliOptions.ResolveTheme(
+            options.Theme,
+            Environment.GetEnvironmentVariable(CliOptions.ThemeEnvironmentVariable));
+
+        return RunConsole(controller, theme);
     }
 
 #pragma warning disable CS0618
-    private static int RunConsole(OperatorConsoleController controller)
+    private static int RunConsole(OperatorConsoleController controller, ThemeMode theme)
     {
         AppTerminal.Init();
 
@@ -92,7 +108,7 @@ public static class Program
         {
             await controller.ShutdownAsync(CancellationToken.None);
             AppTerminal.RequestStop();
-        });
+        }, theme);
         clipboard.Copied += window.ShowClipboardResult;
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {
@@ -124,6 +140,23 @@ public static class Program
         return 0;
     }
 #pragma warning restore CS0618
+
+    /// <summary>
+    /// Best-effort, bounded teardown from a signal handler. The process is on its way out, so
+    /// the only failure that matters is hanging: a sidecar that outlives this console poisons
+    /// the next run, but a console that will not die poisons the demo happening right now.
+    /// </summary>
+    private static void StopFeed(DaprOutcomeFeed feed)
+    {
+        try
+        {
+            feed.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception ex) when (ex is AggregateException or ObjectDisposedException or InvalidOperationException)
+        {
+            // Nothing useful can be reported from here; the terminal is already going away.
+        }
+    }
 
     private static string FindRepositoryRoot()
     {

@@ -4,6 +4,16 @@ using Terminal.Gui.ViewBase;
 
 namespace CoreBankDemo.DemoRunner.Terminal;
 
+/// <summary>
+/// Which surface the console paints itself on. Dark is the default cockpit identity;
+/// Light exists for projector work, where a near-black canvas washes out.
+/// </summary>
+public enum ThemeMode
+{
+    Dark,
+    Light,
+}
+
 internal static class OperatorTheme
 {
     internal const string BaseScheme = "CoreBankCockpit";
@@ -21,22 +31,105 @@ internal static class OperatorTheme
     /// </summary>
     internal const string LockExemptScheme = "CoreBankLockExempt";
 
-    private static bool _registered;
+    /// <summary>
+    /// The six values every scheme is derived from. Both modes fill the same shape, so the
+    /// scheme table below is written once and the palette is the only thing that swaps —
+    /// no view needs to know which mode is in force.
+    /// </summary>
+    private sealed record Palette(
+        string SurfaceBase,
+        string SurfaceRaised,
+        string SurfaceOverlay,
+        string TextPrimary,
+        string AccentTeal,
+        string StateFailedOnRaised);
 
-    internal static void Register()
+    /// <summary>
+    /// The original cockpit palette: a restrained teal-on-navy control room.
+    /// </summary>
+    private static readonly Palette DarkPalette = new(
+        SurfaceBase: "#0B1220",
+        SurfaceRaised: "#132036",
+        SurfaceOverlay: "#182A44",
+        TextPrimary: "#E8ECF1",
+        AccentTeal: "#2FB7A8",
+        StateFailedOnRaised: "#E06862");
+
+    /// <summary>
+    /// The projector palette, anchored to the Ghostty "GitHub Light Default" theme this is
+    /// presented in: its exact background (#FFFFFF) and foreground (#1F2328), so the console
+    /// does not read as a foreign rectangle inside the terminal that hosts it.
+    /// <para>
+    /// These are not the dark hexes on a light background. Every dark accent measured between
+    /// 2.17:1 and 3.96:1 on white — amber and green were effectively invisible — so the light
+    /// mode carries its own values, each darkened to clear 4.5:1 on every surface it is drawn
+    /// on and to reach roughly 6:1 or better on the canvas, which is the reading that matters
+    /// from the back of a room. See DESIGN.md Colors for the full measured table.
+    /// </para>
+    /// </summary>
+    private static readonly Palette LightPalette = new(
+        SurfaceBase: "#FFFFFF",
+        SurfaceRaised: "#EAEEF2",
+        SurfaceOverlay: "#D8DEE4",
+        TextPrimary: "#1F2328",
+        AccentTeal: "#136066",
+        StateFailedOnRaised: "#A40E26");
+
+    private static bool _registered;
+    private static ThemeMode _mode = ThemeMode.Dark;
+
+    internal static ThemeMode Mode => _mode;
+
+    /// <summary>
+    /// Installs the six schemes for <paramref name="mode"/>. Safe to call repeatedly: the
+    /// first call adds the schemes, later calls with a different mode remap them in place.
+    /// </summary>
+    internal static void Register(ThemeMode mode = ThemeMode.Dark)
     {
-        if (_registered)
+        var palette = mode == ThemeMode.Light ? LightPalette : DarkPalette;
+
+        // Scheme *names* are stable across modes and only their contents change, so a mode
+        // switch never has to walk the view tree re-assigning SchemeName. A view that was
+        // given only a SchemeName resolves it through SchemeManager at draw time rather than
+        // caching the Scheme (View.HasScheme stays false), so remapping the name is enough:
+        // every view keeps the scheme it was constructed with and simply redraws in the new
+        // palette.
+        var schemes = SchemeManager.Schemes;
+        foreach (var (name, scheme) in BuildSchemes(palette))
         {
-            return;
+            if (_registered && schemes is not null)
+            {
+                schemes[name] = scheme;
+            }
+            else
+            {
+                SchemeManager.AddScheme(name, scheme);
+            }
         }
 
-        SchemeManager.AddScheme(BaseScheme, Scheme("#E8ECF1", "#0B1220"));
-        SchemeManager.AddScheme(RailScheme, Scheme("#E8ECF1", "#132036"));
-        SchemeManager.AddScheme(ActionScheme, Scheme("#0B1220", "#2FB7A8"));
-        SchemeManager.AddScheme(DestructiveScheme, Scheme("#E06862", "#132036"));
-        SchemeManager.AddScheme(OverlayScheme, Scheme("#E8ECF1", "#182A44"));
-        SchemeManager.AddScheme(LockExemptScheme, Scheme("#2FB7A8", "#0B1220"));
         _registered = true;
+        _mode = mode;
+    }
+
+    /// <summary>
+    /// Flips to the other mode and returns the one now in force. The caller is responsible
+    /// for the redraw; nothing here touches focus, scroll position, or any view state, so a
+    /// toggle mid-demo cannot disturb what the operator was doing.
+    /// </summary>
+    internal static ThemeMode Toggle()
+    {
+        Register(_mode == ThemeMode.Light ? ThemeMode.Dark : ThemeMode.Light);
+        return _mode;
+    }
+
+    private static IEnumerable<(string Name, Scheme Scheme)> BuildSchemes(Palette p)
+    {
+        yield return (BaseScheme, Scheme(p.TextPrimary, p.SurfaceBase));
+        yield return (RailScheme, Scheme(p.TextPrimary, p.SurfaceRaised));
+        yield return (ActionScheme, Scheme(p.SurfaceBase, p.AccentTeal));
+        yield return (DestructiveScheme, Scheme(p.StateFailedOnRaised, p.SurfaceRaised));
+        yield return (OverlayScheme, Scheme(p.TextPrimary, p.SurfaceOverlay));
+        yield return (LockExemptScheme, Scheme(p.AccentTeal, p.SurfaceBase));
     }
 
     internal static void Apply(View view, string schemeName) => view.SchemeName = schemeName;

@@ -46,6 +46,8 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
     private readonly Func<IDaprSidecar> _sidecarFactory;
     private readonly TimeProvider _time;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly IStaleSidecarReaper? _reaper;
+    private int _disposed;
 
     private IDaprSidecar? _sidecar;
     private IAsyncDisposable? _subscription;
@@ -69,7 +71,12 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
     private OutcomeFeedStatus _status = OutcomeFeedStatus.NotStarted;
 
     public DaprOutcomeFeed(string repositoryRoot, IEnvironmentProbe probe, TimeProvider time)
-        : this(repositoryRoot, probe, time, () => new DaprSidecarProcess())
+        : this(
+            repositoryRoot,
+            probe,
+            time,
+            () => new DaprSidecarProcess(),
+            new StaleSidecarReaper(new CommandRunner(), new OwnedProcessTerminator()))
     {
     }
 
@@ -77,12 +84,14 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
         string repositoryRoot,
         IEnvironmentProbe probe,
         TimeProvider time,
-        Func<IDaprSidecar> sidecarFactory)
+        Func<IDaprSidecar> sidecarFactory,
+        IStaleSidecarReaper? reaper = null)
     {
         _repositoryRoot = repositoryRoot;
         _probe = probe;
         _time = time;
         _sidecarFactory = sidecarFactory;
+        _reaper = reaper;
     }
 
     public event Action<OutcomeEvent>? EventReceived;
@@ -115,6 +124,15 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
                     $"The Dapr components directory {componentsPath} does not exist.",
                     lostAt);
             }
+
+            // A sidecar orphaned by an earlier run still sits in this console's Redis consumer
+            // group and is handed a share of every delivery that nothing then reads, so a
+            // portion of this run's payments would never resolve while the feed truthfully
+            // reported Listening. Reaping precedes the port scan because an orphan also holds
+            // four ports this run would otherwise skip past.
+            var reaped = _reaper is null
+                ? []
+                : await _reaper.ReapAsync(AppId, ct);
 
             // B5: the probe frees a port and daprd binds it a moment later, so another process
             // can win that race. One retry with a fresh allocation is cheap and turns a
@@ -224,7 +242,7 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
                 // back-filled: events broadcast while nobody was listening are gone from view.
                 GapStart: lostAt,
                 GapEnd: lostAt is null ? null : now,
-                Detail: started.Detail);
+                Detail: WithReaped(started.Detail, reaped));
             _lastHandlerError = null;
             _handlerErrorCount = 0;
             StartSidecarWatchdog();
@@ -265,8 +283,18 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Idempotent, because a signal handler and <c>Main</c>'s <c>await using</c> can both reach
+    /// here: the handler tears the sidecar down while the process is dying, and the ordinary
+    /// path must not then fault on an already-disposed gate.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1)
+        {
+            return;
+        }
+
         // Taken before tearing down: a Start or Stop still in flight owns the same sidecar and
         // subscription fields, and disposing the gate under one of them is worse than waiting.
         await _gate.WaitAsync(CancellationToken.None);
@@ -340,6 +368,22 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
         // Always Success: the console is a read-only listener with its own consumer group, and
         // a Retry here would only make its own sidecar redeliver to itself.
         return Task.FromResult(TopicResponseAction.Success);
+    }
+
+    /// <summary>
+    /// States the orphans this start had to clear. A reaped sidecar means an earlier run ended
+    /// abruptly and has been silently eating this console's outcomes, which is worth saying
+    /// plainly rather than fixing invisibly.
+    /// </summary>
+    private static string WithReaped(string detail, IReadOnlyList<int> reaped)
+    {
+        if (reaped.Count == 0)
+        {
+            return detail;
+        }
+
+        return $"{detail} Cleared {reaped.Count} stale sidecar{(reaped.Count == 1 ? string.Empty : "s")} "
+            + $"from an earlier run (PID {string.Join(", ", reaped)}).";
     }
 
     /// <summary>

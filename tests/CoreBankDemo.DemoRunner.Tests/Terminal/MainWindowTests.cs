@@ -6,9 +6,11 @@ using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
 using Xunit;
+using CoreBankDemo.DemoRunner.Tests;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
+[Collection(OperatorThemeCollection.Name)]
 public class MainWindowTests
 {
     [Theory]
@@ -569,6 +571,151 @@ public class MainWindowTests
         window.RenderForTest();
 
         controller.State.SelectedEvidence!.Sequence.Should().Be(chosen);
+    }
+
+    /// <summary>
+    /// The palette toggle is reachable from every workspace, like panic-off, because a
+    /// projector that washes the dark canvas out is discovered mid-talk, not before it.
+    /// </summary>
+    [Fact]
+    public void ShortcutT_TogglesThePaletteFromAnyWorkspace()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        var started = OperatorTheme.Mode;
+
+        window.HandleKeyForTest(Key.T).Should().BeTrue();
+        OperatorTheme.Mode.Should().NotBe(started);
+
+        window.HandleKeyForTest(Key.T).Should().BeTrue();
+        OperatorTheme.Mode.Should().Be(started);
+    }
+
+    /// <summary>
+    /// Toggling is a redraw, not a navigation: it must not move the operator off the
+    /// workspace they were presenting from.
+    /// </summary>
+    [Fact]
+    public void ShortcutT_DoesNotChangeTheActiveWorkspace()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.HandleKeyForTest(Key.D4);
+
+        window.HandleKeyForTest(Key.T);
+
+        controller.State.ActiveWorkspace.Should().Be(WorkspaceKind.LoadTest);
+        window.IsWorkspaceVisible(WorkspaceKind.LoadTest).Should().BeTrue();
+        OperatorTheme.Register(ThemeMode.Dark);
+    }
+
+    /// <summary>
+    /// End-to-end wiring, not just the scheme table: a window constructed in light mode must
+    /// have its actual views resolve to the light canvas. Views hold only a scheme *name* and
+    /// resolve it through SchemeManager at draw time, which is what lets the T toggle repaint
+    /// without walking the view tree - so this also pins the mechanism the toggle depends on.
+    /// </summary>
+    [Theory]
+    [InlineData(ThemeMode.Dark, false)]
+    [InlineData(ThemeMode.Light, true)]
+    public void Window_ResolvesTheRequestedPalette(ThemeMode mode, bool expectLightCanvas)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = new MainWindow(
+            controller,
+            () => Task.CompletedTask,
+            new FakeConfirmationService(),
+            startPolling: false,
+            marshalUpdates: false,
+            theme: mode);
+
+        var canvas = window.GetScheme().Normal.Background;
+        var isLight = canvas.R > 200 && canvas.G > 200 && canvas.B > 200;
+
+        isLight.Should().Be(expectLightCanvas);
+        OperatorTheme.Register(ThemeMode.Dark);
+    }
+
+    /// <summary>
+    /// The payment list is where a submitted payment states its own outcome, so it must never be
+    /// squeezed out of existence. It previously rendered zero rows at the documented 80x24
+    /// minimum and a single row at the 100x30 preferred baseline, because the Operations row
+    /// ladder counted rows the workspace did not have: a submitted payment showed up in Evidence
+    /// and nowhere in Operations.
+    /// </summary>
+    [Theory]
+    [InlineData(80, 24, 1)]
+    [InlineData(100, 26, 2)]
+    [InlineData(100, 30, 4)]
+    [InlineData(120, 40, 8)]
+    public void PaymentList_KeepsUsableHeight_AtEverySupportedTerminalSize(int width, int height, int minimumRows)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.ResizeForTest(width, height);
+        window.RenderForTest();
+
+        window.PaymentList.Frame.Height.Should().BeGreaterThanOrEqualTo(
+            minimumRows,
+            "a submitted payment must be readable in Operations at {0}x{1}, not only in Evidence",
+            width,
+            height);
+    }
+
+    /// <summary>
+    /// The list may only take rows the form above it is not using: a list that overlapped the
+    /// outcome lookup would hide the one remedy an unresolved payment names.
+    /// </summary>
+    [Theory]
+    [InlineData(80, 24)]
+    [InlineData(100, 30)]
+    [InlineData(120, 40)]
+    public void PaymentList_NeverOverlapsTheFormAboveIt(int width, int height)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.ResizeForTest(width, height);
+        window.RenderForTest();
+
+        var list = window.PaymentList;
+        list.Frame.Y.Should().BeGreaterThan(
+            window.QueryButton.Frame.Y,
+            "the outcome lookup stays above the list at {0}x{1}",
+            width,
+            height);
+        (list.Frame.Y + list.Frame.Height).Should().BeLessThanOrEqualTo(
+            list.SuperView!.Viewport.Height,
+            "the list stays inside the workspace at {0}x{1}",
+            width,
+            height);
+    }
+
+    /// <summary>
+    /// The Omitted-mode warning is about Omitted mode alone, so it earns its row only there. It
+    /// is the first row handed to the payment list in every other mode.
+    /// </summary>
+    [Fact]
+    public void OmittedNote_TakesARowOnlyInOmittedMode()
+    {
+        static int ListHeightFor(IdempotencyMode mode, out bool noteVisible)
+        {
+            var controller = new OperatorHarness().CreateController();
+            using var window = CreateWindow(controller);
+            window.SetIdempotencyModeForTest(mode);
+            window.ResizeForTest(120, 40);
+            window.RenderForTest();
+            noteVisible = window.OmittedNoteVisible;
+            return window.PaymentList.Frame.Height;
+        }
+
+        var generated = ListHeightFor(IdempotencyMode.Generated, out var generatedNote);
+        var omitted = ListHeightFor(IdempotencyMode.Omitted, out var omittedNote);
+
+        generatedNote.Should().BeFalse("the warning does not apply outside Omitted mode");
+        omittedNote.Should().BeTrue("Omitted mode is not retry-safe and must say so");
+        omitted.Should().Be(generated - 1, "the note's row comes out of the payment list");
     }
 
     private static MainWindow CreateWindow(

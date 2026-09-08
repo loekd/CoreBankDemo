@@ -4,9 +4,11 @@ using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
 using Xunit;
+using CoreBankDemo.DemoRunner.Tests;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
+[Collection(OperatorThemeCollection.Name)]
 public class MainWindowFaultsTests
 {
     private static readonly PaymentRequest StandardPayment =
