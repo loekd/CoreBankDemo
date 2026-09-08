@@ -55,14 +55,16 @@ public class InstantPaymentForwardingHandlerTests
     };
 
     private InstantPaymentForwardingHandler CreateHandler(
-        InstantRailOptions? options = null, BusinessMetrics? businessMetrics = null) =>
+        InstantRailOptions? options = null,
+        BusinessMetrics? businessMetrics = null,
+        TimeProvider? timeProvider = null) =>
         new(
             _store.Object,
             _forwarder.Object,
             _lock,
             Options.Create(options ?? new InstantRailOptions()),
             Options.Create(new OutboxProcessingOptions()),
-            TimeProvider.System,
+            timeProvider ?? TimeProvider.System,
             NullLogger<InstantPaymentForwardingHandler>.Instance,
             businessMetrics ?? _businessMetrics);
 
@@ -154,15 +156,28 @@ public class InstantPaymentForwardingHandlerTests
         _lock.Acquired = false;
         _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageConstants.Status.Pending);
-        var handler = CreateHandler(new InstantRailOptions
-        {
-            BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1,
-        });
+
+        // The budget is spent on a clock this test owns, advanced 50 ms per lock attempt, so the
+        // number of retries is a property of the budget rather than of how busy the machine is.
+        // On the real clock this assertion was "more than one attempt" and still failed roughly
+        // one run in five under a full parallel suite: a single attempt plus scheduling delay can
+        // consume the whole 120 ms, leaving exactly one.
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(50));
+        var handler = CreateHandler(
+            new InstantRailOptions
+            {
+                BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1,
+            },
+            timeProvider: clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
-        _lock.LockNames.Count.Should().BeGreaterThan(1, "the lock is retried until the budget runs out");
+        // 120 ms of budget spent 50 ms at a time: attempts at +0, +50 and +100 all have budget
+        // left, and the fourth check finds the deadline passed at +150. Asserting the exact count
+        // is what makes this a test of the budget arithmetic rather than of the scheduler.
+        _lock.LockNames.Should().HaveCount(3, "the lock is retried until the budget runs out");
         _forwarder.VerifyNoOtherCalls();
     }
 
@@ -498,6 +513,54 @@ public class InstantPaymentForwardingHandlerTests
         }
     }
 
+    /// <summary>
+    /// A clock the test drives, for the budgeted lock-wait loop.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="TimeProvider.System"/> cannot express this test: the loop retries until wall
+    /// time passes the budget, so the number of attempts is decided by how fast the machine is
+    /// rather than by the arithmetic under test.
+    /// </para>
+    /// <para>
+    /// A stock fake clock cannot express it either, and would hang. The loop's backoff is
+    /// <c>Task.Delay(ClaimRetryDelay, timeProvider, ct)</c>, which builds its timer from this
+    /// provider -- so a clock that only moves when the test says so would leave that delay
+    /// pending for ever, with nothing left running to advance it. Timers here therefore fire as
+    /// soon as they are created: the backoff is real control flow the loop must survive, but its
+    /// duration is not what the test is about. Only <see cref="GetUtcNow"/> carries the passage
+    /// of time, and only <see cref="Advance"/> moves it.
+    /// </para>
+    /// </remarks>
+    private sealed class BudgetClock(DateTimeOffset start) : TimeProvider
+    {
+        private long _ticks = start.UtcTicks;
+
+        public override DateTimeOffset GetUtcNow() =>
+            new(Interlocked.Read(ref _ticks), TimeSpan.Zero);
+
+        public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
+            new ImmediateTimer(callback, state);
+
+        private sealed class ImmediateTimer : ITimer
+        {
+            public ImmediateTimer(TimerCallback callback, object? state) =>
+                // Queued rather than invoked inline: Task.Delay is still wiring up its own state
+                // when CreateTimer returns, and completing it underneath that is a race.
+                ThreadPool.QueueUserWorkItem(_ => callback(state));
+
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+
+            public void Dispose()
+            {
+            }
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
     private sealed class TestLockService : IDistributedLockService
     {
         public bool Acquired { get; set; } = true;
@@ -517,6 +580,12 @@ public class InstantPaymentForwardingHandlerTests
 
         public List<string> LockNames { get; } = [];
 
+        /// <summary>
+        /// Runs on every acquisition attempt. Budget tests hang the clock off this, so time only
+        /// moves when the handler actually retries, never on its own.
+        /// </summary>
+        public Action? OnAttempt { get; set; }
+
         public async Task<bool> ExecuteWithLockAsync(
             string lockName,
             int lockExpirySeconds,
@@ -524,6 +593,7 @@ public class InstantPaymentForwardingHandlerTests
             CancellationToken cancellationToken = default)
         {
             LockNames.Add(lockName);
+            OnAttempt?.Invoke();
             if (ThrowException is not null)
             {
                 throw ThrowException;
