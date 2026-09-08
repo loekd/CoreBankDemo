@@ -123,8 +123,26 @@ public class PresentationModelBuilderTests
             .And.Contain("HTTP 202")
             .And.Contain("Transaction: tx-8821")
             .And.Contain("  \"transactionId\": \"tx-8821\"");
-        // The row and the pane are one projection, so they cannot drift apart again.
-        model.Evidence.Single().Detail.Should().Be(model.SelectedEvidenceDetail);
+        // The row and the pane were once two projections that drifted apart. There is now only
+        // one: rows carry no detail of their own, so they cannot disagree with the pane by
+        // construction rather than by assertion.
+    }
+
+    /// <summary>
+    /// Evidence rows must stay cheap to project. Detail was once computed for every retained
+    /// record on every render -- UTF-8 encoding, JSON parsing and re-serializing all 500 of them
+    /// -- for text nothing read, which is half of why a post-burst console appeared to freeze.
+    /// Re-adding a per-row detail field would silently restore that cost, so its absence is
+    /// asserted rather than left to review.
+    /// </summary>
+    [Fact]
+    public void EvidenceRow_CarriesNoPerRowDetail()
+    {
+        typeof(EvidenceRowViewModel).GetProperties()
+            .Select(property => property.Name)
+            .Should().NotContain(
+                "Detail",
+                "the Details pane reads SelectedEvidenceDetail for the one record being read");
     }
 
     [Fact]

@@ -189,6 +189,8 @@ public sealed class MainWindow : Window
     private string _message = string.Empty;
     private long _messageMark = -1;
 
+    private readonly UiRepaintCoalescer _repaints = new(AppTerminal.Invoke);
+
     public MainWindow(OperatorConsoleController controller, Func<Task> onExitRequested, ThemeMode theme = ThemeMode.Dark)
         : this(controller, onExitRequested, null, true, theme: theme)
     {
@@ -1048,8 +1050,25 @@ public sealed class MainWindow : Window
 
     private void ActivateWorkspace(WorkspaceKind workspace) => _controller.SelectWorkspace(workspace);
 
-    private void OnStateChanged(OperatorConsoleState state) =>
-        RunOnUiThread(() => Render(PresentationModelBuilder.Build(state, _time.GetUtcNow())));
+    /// <summary>
+    /// Repaints for a state change, coalescing bursts of them into a single pending render.
+    /// </summary>
+    /// <remarks>
+    /// Measured before this: a workspace switch did not reach the screen within twenty-five
+    /// seconds under a post-burst event rate, which is what the freeze reports were.
+    /// See <see cref="UiRepaintCoalescer"/> for why the requests are folded together.
+    /// </remarks>
+    private void OnStateChanged(OperatorConsoleState state)
+    {
+        if (!_marshalUpdates)
+        {
+            Render(PresentationModelBuilder.Build(state, _time.GetUtcNow()));
+            return;
+        }
+
+        _repaints.Request(() =>
+            Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow())));
+    }
 
     private void RunOnUiThread(Action action)
     {
