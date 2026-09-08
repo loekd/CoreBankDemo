@@ -407,6 +407,53 @@ public class PaymentsControllerTests
         response.ProcessedAt.Should().Be(new DateTimeOffset(DateTime.SpecifyKind(winner.CreatedAt, DateTimeKind.Utc)));
     }
 
+    [Theory]
+    [InlineData("Pending")]
+    [InlineData("Processing")]
+    public async Task ProcessPayment_replays_504_when_a_not_yet_delivered_instant_duplicates_cached_outcome_is_cancelled(string rowStatus)
+    {
+        // spec: instant-rail-cancelled-event. A residual 202 whose row is still
+        // Pending (or under the background rail's claim) but whose cached
+        // outcome CoreBank's transaction.cancelled event upgraded to Cancelled:
+        // the duplicate replays 504/Cancelled with the event's cancellation
+        // time, before the background rail ever marks the row itself.
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 9, TimeSpan.Zero);
+        var payload = JsonSerializer.Serialize(new TransactionSubmission("txn-c5", "Cancelled", cancelledAt));
+        var winner = Snapshot(idempotencyKey: "key-c5", transactionId: "txn-c5", status: rowStatus, responsePayload: payload);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(InstantRequest(), TestContext.Current.CancellationToken);
+
+        var gatewayTimeout = result.Should().BeOfType<ObjectResult>().Subject;
+        gatewayTimeout.StatusCode.Should().Be(StatusCodes.Status504GatewayTimeout);
+        var response = gatewayTimeout.Value.Should().BeOfType<PaymentResponse>().Subject;
+        response.Status.Should().Be("Cancelled");
+        response.ProcessedAt.Should().Be(cancelledAt);
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ProcessPayment_standard_rail_duplicate_of_a_row_with_a_cancelled_cached_outcome_stays_202()
+    {
+        // Boundary: the standard rail is untouched, even by the cached payload.
+        var payload = JsonSerializer.Serialize(new TransactionSubmission("txn-c6", "Cancelled", new DateTimeOffset(2026, 9, 8, 12, 0, 9, TimeSpan.Zero)));
+        var winner = Snapshot(idempotencyKey: "key-c6", transactionId: "txn-c6", status: "Pending", responsePayload: payload);
+        _handler
+            .Setup(h => h.StoreAsync(It.IsAny<PaymentRequest>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.Duplicate, winner, []));
+
+        var controller = CreateController();
+
+        var result = await controller.ProcessPayment(ValidRequest(), TestContext.Current.CancellationToken);
+
+        var accepted = result.Should().BeOfType<AcceptedResult>().Subject;
+        accepted.Value.Should().BeOfType<PaymentResponse>().Subject.Status.Should().Be("Pending");
+    }
+
     [Fact]
     public async Task ProcessPayment_standard_rail_duplicate_of_a_cancelled_row_stays_byte_identical_202()
     {

@@ -191,6 +191,7 @@ public class DaprEventPublisherTests
     [Theory]
     [InlineData("com.corebank.transaction.failed", "transaction-failed")]
     [InlineData("com.corebank.account.balance.updated", "balance-updated")]
+    [InlineData("com.corebank.transaction.cancelled", "transaction-cancelled")]
     [InlineData("com.corebank.unrecognized", "unknown")]
     public async Task PublishAsync_maps_the_outgoing_cloud_event_type_to_the_closed_message_type_vocabulary(
         string cloudEventType, string expectedMessageType)

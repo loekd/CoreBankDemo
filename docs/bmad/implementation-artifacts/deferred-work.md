@@ -235,3 +235,15 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-instant-rail-timeout-cancel.md`
   summary: "`TransactionsController.CancelTransaction` records nothing on `BusinessMetrics` (tombstones, pending cancels and `409` refusals are visible only as `Activity` tags), while `ProcessTransaction` records an intake outcome for every path."
   evidence: Confirmed by reading the new action against `ProcessTransaction`'s `RecordTransactionIntake` calls. The spec named no metric for the cancel operation and the closed attribute set for `corebankdemo.transaction.intake` would need a new outcome value (a metric-contract change per the observability skill), so it was left out rather than invented.
+- source_spec: `docs/bmad/implementation-artifacts/spec-instant-rail-cancelled-event.md`
+  summary: DemoRunner burst tally subtracts a submission twice when a terminal broadcast (Settled, Rejected, or now Cancelled) arrives after a feed fault already moved it into `Unknown`; `Math.Max(0, …)` in `BurstProgress.Outstanding` hides the drift.
+  evidence: `OperatorConsoleController.cs` folds `Outstanding` into `Unknown` on feed fault and never reconciles `Unknown` when a late event for one of those ids increments `Settled`/`Rejected`/`CancelledByBroadcast`; the shape predates this story, the cancelled path only mirrors it.
+- source_spec: `docs/bmad/implementation-artifacts/spec-instant-rail-cancelled-event.md`
+  summary: With `Features:UseDevProxy=true` the LoadTests AppHost sets `NO_PROXY=localhost` while Aspire resolves CoreBank to `http://localhost:<port>`, so PaymentsAPI bypasses Dev Proxy and the latency preset cannot be exercised by the Tier-3 harness.
+  evidence: Six instant probes under the preset all settled inline in ~20 ms during this story's live verification; Dev Proxy configuration was Ask-First for this story, so the residual-202-then-event ordering is proven at Tier 1/2 only.
+- source_spec: `docs/bmad/implementation-artifacts/spec-instant-rail-cancelled-event.md`
+  summary: Two `balance.updated` legs of one transaction received tens of microseconds apart can be processed in reverse by the two PaymentsAPI replicas, tripping `perKeyOrdering` (stamp-before-commit race), unrelated to cancellation.
+  evidence: Observed once during this story's live verification (`cancel-evt-2`) with parallel out-of-harness submissions; not reproduced by the k6 harness run, which passed.
+- source_spec: `docs/bmad/implementation-artifacts/spec-instant-rail-cancelled-event.md`
+  summary: `TransactionCancellationHandler` records no `CoreBankOutbox` store-operation `added` metric for the `transaction.cancelled` row it enqueues, unlike `TransactionExecutionHandler` for its rows.
+  evidence: Metrics were out of scope for the cancel endpoint (earlier deferred entry); the event row is a new, uncounted `added` operation on that store.

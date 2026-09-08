@@ -79,6 +79,47 @@ public class DaprOutcomeFeedTests
     }
 
     [Fact]
+    public void TryParse_CancelledEvent_ReadsTheReasonAndIsTerminal()
+    {
+        // ADR-020 addendum: the fourth type, byte-identical to what CoreBank's
+        // TransactionCancelledEvent serializes to.
+        var payload = Payload(new
+        {
+            transactionId = "tx-8823",
+            status = "Cancelled",
+            processedAt = ProcessedAt,
+            reason = "Cancelled by the instant rail on budget exhaustion",
+        });
+
+        var parsed = DaprOutcomeFeed.TryParse(OutcomeEventTypes.TransactionCancelled, payload);
+
+        parsed.Should().NotBeNull();
+        parsed!.EventType.Should().Be("com.corebank.transaction.cancelled");
+        parsed.TransactionId.Should().Be("tx-8823");
+        parsed.Cancelled!.Status.Should().Be("Cancelled");
+        parsed.Cancelled.Reason.Should().Be("Cancelled by the instant rail on budget exhaustion");
+        parsed.ProcessedAt.Should().Be(ProcessedAt);
+        parsed.IsTerminal.Should().BeTrue("a withdrawal is CoreBank's final word, like a settlement");
+    }
+
+    [Fact]
+    public void TryParse_CancelledEvent_WithANullReason_IsStillAccepted()
+    {
+        var payload = Payload(new
+        {
+            transactionId = "tx-8824",
+            status = "Cancelled",
+            processedAt = ProcessedAt,
+            reason = (string?)null,
+        });
+
+        var parsed = DaprOutcomeFeed.TryParse(OutcomeEventTypes.TransactionCancelled, payload);
+
+        parsed.Should().NotBeNull();
+        parsed!.Cancelled!.Reason.Should().BeNull();
+    }
+
+    [Fact]
     public void TryParse_UnknownEventType_IsDroppedRatherThanGuessedAt()
     {
         var payload = Payload(new { transactionId = "tx-9000" });

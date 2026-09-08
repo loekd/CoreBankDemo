@@ -12,6 +12,8 @@ context:
   - '{project-root}/.claude/skills/conventions/SKILL.md'
 ---
 
+> Superseded in part by `spec-instant-rail-cancelled-event.md` (2026-09-08): a CoreBank-side cancellation now publishes a `transaction.cancelled` event, and the event-store gate is `3 × completed + inbox.Cancelled`.
+
 <frozen-after-approval reason="human-owned intent — do not modify unless human renegotiates">
 
 ## Intent

@@ -468,8 +468,9 @@ public static class LoadTestAssertionCalculator
         // terminal, provably-not-executed outcome: it reaches a terminal state
         // (zero message loss holds), but it is not "processed" in the ledger
         // sense. So every submitted key is either completed or cancelled, and
-        // only the completed ones flow downstream as N completed inbox rows,
-        // 3N events, 3N received events.
+        // only the completed ones flow downstream as N completed inbox rows
+        // and 3 events each -- plus one transaction.cancelled event per
+        // CoreBank-side cancellation (spec: instant-rail-cancelled-event).
         // Detail strings stay byte-identical to the pre-cancellation contract
         // whenever no row was cancelled; the extra counts appear only when
         // they are non-zero.
@@ -516,25 +517,36 @@ public static class LoadTestAssertionCalculator
         // cancelled outbox row -- never a Completed row for a cancelled
         // payment, which would be a payment executed after being cancelled;
         // and the event stores carry exactly three events per COMPLETED
-        // payment, since a cancel publishes nothing (AD-5/AD-11). With no
-        // cancellations this is the original N/N/3N/3N gate unchanged.
+        // payment plus one transaction.cancelled event per CoreBank-side
+        // cancellation (spec: instant-rail-cancelled-event -- the event is
+        // enqueued atomically with the cancel, so an inbox Cancelled row
+        // without its event, or an event without its row, is a defect). A
+        // local cancel (no inbox row) publishes nothing. With no cancellations
+        // this is the original N/N/3N/3N gate unchanged.
         var completedCount = paymentsOutbox.Completed;
+        var expectedEvents = completedCount * 3 + coreBankInbox.Cancelled;
         var cardinalityPassed = !expectedUnique.HasValue ||
             (paymentsOutbox.Total == expectedUnique.Value
              && paymentsOutbox.Completed + paymentsOutbox.Cancelled == expectedUnique.Value
              && coreBankInbox.Completed == completedCount
              && coreBankInbox.Cancelled <= paymentsOutbox.Cancelled
              && coreBankInbox.Total == coreBankInbox.Completed + coreBankInbox.Cancelled
-             && coreBankOutbox.Total == completedCount * 3
-             && coreBankOutbox.Completed == completedCount * 3
-             && paymentsInbox.Total == completedCount * 3
-             && paymentsInbox.Completed == completedCount * 3);
+             && coreBankOutbox.Total == expectedEvents
+             && coreBankOutbox.Completed == expectedEvents
+             && paymentsInbox.Total == expectedEvents
+             && paymentsInbox.Completed == expectedEvents);
         var stageCardinality = new StageCardinalityCheck(
             cardinalityPassed,
             expectedUnique.HasValue
-                ? $"Expected N/N/3N/3N={expectedUnique.Value}/{expectedUnique.Value}/{expectedUnique.Value * 3}/{expectedUnique.Value * 3}; Actual={paymentsOutbox.Total}/{coreBankInbox.Total}/{coreBankOutbox.Total}/{paymentsInbox.Total}"
+                // The headline keeps its pre-cancellation shape verbatim whenever
+                // no CoreBank-side cancellation exists; with one, the event figures
+                // print the number the decision actually uses.
+                ? (coreBankInbox.Cancelled == 0
+                      ? $"Expected N/N/3N/3N={expectedUnique.Value}/{expectedUnique.Value}/{expectedUnique.Value * 3}/{expectedUnique.Value * 3}"
+                      : $"Expected N/N/(3xCompleted+Cancelled)/(3xCompleted+Cancelled)={expectedUnique.Value}/{expectedUnique.Value}/{expectedEvents}/{expectedEvents}")
+                  + $"; Actual={paymentsOutbox.Total}/{coreBankInbox.Total}/{coreBankOutbox.Total}/{paymentsInbox.Total}"
                   + (cancelledDetail.Length > 0
-                      ? $" (cancelled instant rows are terminal: Completed+Cancelled=N, downstream 3x{completedCount}{cancelledDetail})"
+                      ? $" (cancelled instant rows are terminal: Completed+Cancelled=N, downstream 3x{completedCount}+{coreBankInbox.Cancelled} cancelled event(s)={expectedEvents}{cancelledDetail})"
                       : string.Empty)
                 : "ExpectedUnique was not supplied",
             expectedUnique,

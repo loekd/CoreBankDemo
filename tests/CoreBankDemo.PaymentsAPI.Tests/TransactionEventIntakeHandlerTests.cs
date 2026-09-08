@@ -96,6 +96,55 @@ public class TransactionEventIntakeHandlerTests
     }
 
     [Fact]
+    public async Task TransactionCancelled_stores_under_the_empty_account_sentinel_with_the_transaction_id_as_partition_key()
+    {
+        // spec: instant-rail-cancelled-event -- transaction-wide like
+        // completed/failed, so the inbox unique index dedupes a redelivery on
+        // (TransactionId, EventType, "").
+        InboxMessage? captured = null;
+        var repository = new Mock<IInboxMessageRepository>();
+        repository
+            .Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(true);
+        var handler = CreateHandler(repository.Object);
+        var e = new TransactionCancelledEvent("txn-3c", "Cancelled", Now, "Cancelled by the instant rail on budget exhaustion");
+
+        await handler.StoreAsync(e, TestContext.Current.CancellationToken);
+
+        captured.Should().NotBeNull();
+        captured!.IdempotencyKey.Should().Be("txn-3c");
+        captured.TransactionId.Should().Be("txn-3c");
+        captured.EventType.Should().Be(Constants.TransactionCancelled);
+        captured.AccountNumber.Should().Be("");
+        captured.PartitionId.Should().Be(PartitionHelper.GetPartitionId("txn-3c", 4));
+        captured.Status.Should().Be(MessageConstants.Status.Pending);
+        captured.ReceivedAt.Should().Be(Now.UtcDateTime);
+        JsonSerializer.Deserialize<TransactionCancelledEvent>(captured.Payload).Should().Be(e);
+    }
+
+    [Theory]
+    [InlineData(true, "succeeded")]
+    [InlineData(false, "duplicate")]
+    public async Task TransactionCancelled_records_the_dapr_receive_delivery_outcome_with_its_own_closed_message_type(
+        bool stored, string expectedOutcome)
+    {
+        var repository = new Mock<IInboxMessageRepository>();
+        repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(stored);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(new TransactionCancelledEvent("txn-102", "Cancelled", Now, null), TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries").Which;
+        measurement.Tags["messaging.message.type"].Should().Be("transaction-cancelled");
+        measurement.Tags["outcome"].Should().Be(expectedOutcome);
+    }
+
+    [Fact]
     public async Task BalanceUpdated_stores_under_its_own_account_number_with_the_transaction_id_as_partition_key()
     {
         InboxMessage? captured = null;

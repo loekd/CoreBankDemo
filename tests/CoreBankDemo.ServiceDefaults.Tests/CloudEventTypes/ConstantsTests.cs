@@ -29,4 +29,12 @@ public class ConstantsTests
     {
         Constants.BalanceUpdated.Should().Be("com.corebank.account.balance.updated");
     }
+
+    [Fact]
+    public void TransactionCancelled_matches_the_wire_literal()
+    {
+        // spec: instant-rail-cancelled-event. The fourth type, copied verbatim
+        // into the DemoRunner (ADR-015) and into both subscription manifests.
+        Constants.TransactionCancelled.Should().Be("com.corebank.transaction.cancelled");
+    }
 }

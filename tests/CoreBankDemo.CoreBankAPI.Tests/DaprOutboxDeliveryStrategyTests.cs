@@ -82,6 +82,34 @@ public class DaprOutboxDeliveryStrategyTests
     }
 
     [Fact]
+    public async Task Cancelled_row_publishes_the_stored_occurrence_time_status_and_reason()
+    {
+        // spec: instant-rail-cancelled-event. The fourth arm; the reason rides
+        // in ErrorReason exactly like a Failed row's, and the cached
+        // cancellation time is the event's ProcessedAt.
+        var publisher = new Mock<IEventPublisher>();
+        var message = NewMessage(Constants.TransactionCancelled);
+        message.TransactionStatus = MessageConstants.Status.Cancelled;
+        message.ErrorReason = "Cancelled by the instant rail on budget exhaustion";
+        var strategy = new DaprOutboxDeliveryStrategy(publisher.Object);
+
+        await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
+
+        publisher.Verify(p => p.PublishAsync(
+            Constants.TransactionCancelled,
+            message.EventSource,
+            message.TransactionId,
+            It.Is<TransactionCancelledEvent>(payload =>
+                payload.TransactionId == message.TransactionId
+                && payload.Status == MessageConstants.Status.Cancelled
+                && payload.ProcessedAt == new DateTimeOffset(OccurredAt)
+                && payload.Reason == "Cancelled by the instant rail on budget exhaustion"),
+            message.TraceParent,
+            message.TraceState,
+            TestContext.Current.CancellationToken), Times.Once);
+    }
+
+    [Fact]
     public async Task Balance_row_publishes_transaction_account_delta_balance_and_currency()
     {
         var publisher = new Mock<IEventPublisher>();

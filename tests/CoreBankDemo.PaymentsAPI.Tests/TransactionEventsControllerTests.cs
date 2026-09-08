@@ -77,6 +77,24 @@ public class TransactionEventsControllerTests
     }
 
     [Fact]
+    public async Task TransactionCancelled_awaits_storage_before_returning_ok()
+    {
+        // spec: instant-rail-cancelled-event -- the fourth known route.
+        var handler = new Mock<ITransactionEventIntakeHandler>(MockBehavior.Strict);
+        var storeSignal = new TaskCompletionSource();
+        var e = new TransactionCancelledEvent("txn-3c", "Cancelled", Now, "budget exhausted");
+        handler.Setup(h => h.StoreAsync(e, It.IsAny<CancellationToken>())).Returns(storeSignal.Task);
+        var controller = CreateController(handler.Object);
+
+        var resultTask = controller.TransactionCancelled(e, TestContext.Current.CancellationToken);
+        resultTask.IsCompleted.Should().BeFalse("the action must wait for storage before completing");
+
+        storeSignal.SetResult();
+        (await resultTask).Should().BeOfType<OkResult>();
+        handler.Verify(h => h.StoreAsync(e, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
     public void Unknown_returns_ok_without_calling_the_handler_and_logs_a_warning()
     {
         var handler = new Mock<ITransactionEventIntakeHandler>(MockBehavior.Strict);

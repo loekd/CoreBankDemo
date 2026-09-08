@@ -53,6 +53,20 @@ public class TransactionEventsController(
         return Ok();
     }
 
+    /// <summary>
+    /// spec: instant-rail-cancelled-event -- CoreBank's broadcast that it
+    /// committed a cancellation, the residual <c>202</c>'s only durable way to
+    /// learn its outcome.
+    /// </summary>
+    [HttpPost("events/transactions/cancelled")]
+    public async Task<IActionResult> TransactionCancelled(
+        [FromBody] TransactionCancelledEvent transactionCancelled,
+        CancellationToken cancellationToken)
+    {
+        await handler.StoreAsync(transactionCancelled, cancellationToken);
+        return Ok();
+    }
+
     [HttpPost("events/transactions/unknown")]
     public IActionResult Unknown(
         [FromHeader(Name = "Cloudevent.type")] string? eventType,

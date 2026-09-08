@@ -43,6 +43,57 @@ public class MarkAsCancelledAsyncTests(PostgresContainerFixture fixture) : Messa
     }
 
     [Fact]
+    public async Task Keeps_a_processed_at_the_caller_pre_stamped_instead_of_re_stamping_it()
+    {
+        // spec: instant-rail-cancelled-event -- the cancel handler stamps the
+        // cancellation instant before enqueuing its event, and the kernel must
+        // not move it by the microseconds between two clock reads.
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var message = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "pre-stamped", EventType = "Debited", CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        context.OutboxEventMessages.Add(message);
+        await context.SaveChangesAsync(ct);
+        var claimed = await repository.TryClaimByIdAsync(message.Id, ct);
+        var preStamped = TimeProvider.GetUtcNow().UtcDateTime;
+        claimed!.ProcessedAt = preStamped;
+        TimeProvider.Advance(TimeSpan.FromSeconds(3));
+
+        var outcome = await repository.MarkAsCancelledAsync(claimed, "pre-stamped by the caller", ct);
+
+        outcome.Should().Be(MessageTransitionOutcome.Applied);
+        var reloaded = await context.OutboxEventMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct);
+        reloaded.Status.Should().Be(MessageConstants.Status.Cancelled);
+        reloaded.ProcessedAt.Should().Be(preStamped, "a pre-stamped cancellation time is kept, not re-read from the clock");
+    }
+
+    [Fact]
+    public async Task Stamps_processed_at_from_the_clock_when_the_caller_left_it_unstamped()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using var context = CreateContext();
+        var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        var message = new TestOutboxEventMessage
+        {
+            IdempotencyKey = "unstamped", EventType = "Debited", CreatedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        };
+        context.OutboxEventMessages.Add(message);
+        await context.SaveChangesAsync(ct);
+        var claimed = await repository.TryClaimByIdAsync(message.Id, ct);
+        claimed!.ProcessedAt.Should().BeNull("a claimed row carries no processing time yet");
+        TimeProvider.Advance(TimeSpan.FromSeconds(7));
+
+        var outcome = await repository.MarkAsCancelledAsync(claimed, "unstamped by the caller", ct);
+
+        outcome.Should().Be(MessageTransitionOutcome.Applied);
+        var reloaded = await context.OutboxEventMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct);
+        reloaded.ProcessedAt.Should().Be(TimeProvider.GetUtcNow().UtcDateTime, "an unstamped row is stamped from the injected clock at cancel time");
+    }
+
+    [Fact]
     public async Task Cancels_a_pending_row_that_was_never_claimed()
     {
         // The tombstone/local-cancel shape: a row the caller stored moments

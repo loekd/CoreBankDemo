@@ -3,7 +3,7 @@ using CoreBankDemo.DemoRunner.Application;
 namespace CoreBankDemo.DemoRunner.Application.Ports;
 
 /// <summary>
-/// The three CloudEvent types the console listens for on <c>transaction-events</c>. Declared
+/// The four CloudEvent types the console listens for on <c>transaction-events</c>. Declared
 /// here as plain constants rather than taken from
 /// <c>CoreBankDemo.ServiceDefaults.CloudEventTypes.Constants</c>: ADR-015's project-graph
 /// invariant forbids a reference from this console to any banking project, and the wire
@@ -14,6 +14,13 @@ public static class OutcomeEventTypes
     public const string TransactionCompleted = "com.corebank.transaction.completed";
     public const string TransactionFailed = "com.corebank.transaction.failed";
     public const string BalanceUpdated = "com.corebank.account.balance.updated";
+
+    /// <summary>
+    /// CoreBank committed a cancellation — a tombstone, or a pending command withdrawn before
+    /// execution (ADR-020 addendum). The only way a residual <c>202</c> row ever learns it was
+    /// withdrawn.
+    /// </summary>
+    public const string TransactionCancelled = "com.corebank.transaction.cancelled";
 
     public const string Topic = "transaction-events";
     public const string PubSubComponent = "pubsub";
@@ -32,6 +39,13 @@ public sealed record TransactionFailedWireEvent(
     DateTimeOffset ProcessedAt,
     string? ErrorReason);
 
+/// <summary>Local wire record for <c>com.corebank.transaction.cancelled</c>.</summary>
+public sealed record TransactionCancelledWireEvent(
+    string TransactionId,
+    string? Status,
+    DateTimeOffset ProcessedAt,
+    string? Reason);
+
 /// <summary>Local wire record for <c>com.corebank.account.balance.updated</c>.</summary>
 public sealed record BalanceUpdatedWireEvent(
     string TransactionId,
@@ -41,9 +55,9 @@ public sealed record BalanceUpdatedWireEvent(
     string Currency);
 
 /// <summary>
-/// One event as it came off the topic. Exactly one of the three payload properties is set;
+/// One event as it came off the topic. Exactly one of the four payload properties is set;
 /// <see cref="EventType"/> always carries the CloudEvent type verbatim, because the console
-/// prints it rather than flattening the three into one generic "processed" signal.
+/// prints it rather than flattening the four into one generic "processed" signal.
 /// </summary>
 /// <remarks>
 /// Deliberately carries no observed-at stamp: the console's own clock belongs to the
@@ -55,12 +69,17 @@ public sealed record OutcomeEvent(
     string TransactionId,
     TransactionCompletedWireEvent? Completed = null,
     TransactionFailedWireEvent? Failed = null,
-    BalanceUpdatedWireEvent? BalanceUpdated = null)
+    BalanceUpdatedWireEvent? BalanceUpdated = null,
+    TransactionCancelledWireEvent? Cancelled = null)
 {
     /// <summary>The event's own clock, when it carries one. Balance events do not.</summary>
-    public DateTimeOffset? ProcessedAt => Completed?.ProcessedAt ?? Failed?.ProcessedAt;
+    public DateTimeOffset? ProcessedAt => Completed?.ProcessedAt ?? Failed?.ProcessedAt ?? Cancelled?.ProcessedAt;
 
-    public bool IsTerminal => Completed is not null || Failed is not null;
+    /// <summary>
+    /// Settled, rejected, or withdrawn: each is CoreBank's final word on the transaction, so
+    /// each resolves a waiting row and moves a burst's proven leg exactly once.
+    /// </summary>
+    public bool IsTerminal => Completed is not null || Failed is not null || Cancelled is not null;
 
     public static OutcomeEvent From(TransactionCompletedWireEvent completed) =>
         new(OutcomeEventTypes.TransactionCompleted, completed.TransactionId, Completed: completed);
@@ -70,6 +89,9 @@ public sealed record OutcomeEvent(
 
     public static OutcomeEvent From(BalanceUpdatedWireEvent balance) =>
         new(OutcomeEventTypes.BalanceUpdated, balance.TransactionId, BalanceUpdated: balance);
+
+    public static OutcomeEvent From(TransactionCancelledWireEvent cancelled) =>
+        new(OutcomeEventTypes.TransactionCancelled, cancelled.TransactionId, Cancelled: cancelled);
 }
 
 public enum OutcomeFeedState

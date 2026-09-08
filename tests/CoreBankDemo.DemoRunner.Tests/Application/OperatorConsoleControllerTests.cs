@@ -653,6 +653,206 @@ public class OperatorConsoleControllerTests
         row.Note.Should().Contain("HTTP proved Cancelled, broadcast says Failed");
     }
 
+    // ---- ADR-020 addendum: CoreBank broadcasts transaction.cancelled for every cancellation
+    // it commits, so a residual 202 row resolves without operator action. ----
+
+    [Fact]
+    public async Task CancelledBroadcast_OntoAnAwaitingRow_ResolvesItToCancelledWithoutOperatorAction()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Awaiting);
+
+        harness.Feed.PushCancelled("transaction-id", ProcessedAt, "budget exhausted");
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Cancelled);
+        row.IsOutstanding.Should().BeFalse();
+        row.HttpOutcome.Should().Be(PaymentOutcome.Pending, "the HTTP record is never overwritten");
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Cancelled);
+        row.ProcessedAt.Should().Be(ProcessedAt, "the cancellation time is the event's own clock");
+        row.ErrorReason.Should().Be("budget exhausted");
+        row.Note.Should().Contain("withdrawn").And.Contain("safe to retry with a new key");
+    }
+
+    [Fact]
+    public async Task CancelledBroadcast_OntoAnOutcomeUnknownRow_ResolvesItToCancelled()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.OutcomeUnknown);
+
+        harness.Feed.PushCancelled("transaction-id", ProcessedAt);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Cancelled, "the broadcast is the fact the feed gap was hiding");
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Cancelled);
+    }
+
+    [Fact]
+    public async Task CancelledBroadcast_OntoA504CancelledRow_ConfirmsItWithoutAContradiction()
+    {
+        // A 504 that CoreBank itself answered is followed by CoreBank's broadcast of the same
+        // cancellation: two records of one fact, never a disagreement.
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCancelled("transaction-id", ProcessedAt);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Cancelled);
+        row.HttpOutcome.Should().Be(PaymentOutcome.Cancelled);
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Cancelled);
+        row.Note.Should().NotContain("HTTP proved");
+    }
+
+    [Fact]
+    public async Task CancelledBroadcast_OntoACompletedRow_IsAContradiction()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Completed, 200, "Completed"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCancelled("transaction-id", ProcessedAt);
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Contradiction);
+        row.HttpOutcome.Should().Be(PaymentOutcome.Completed, "the HTTP record is never overwritten");
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Cancelled);
+        row.Note.Should().Contain("HTTP proved Completed, broadcast says Cancelled");
+    }
+
+    [Fact]
+    public async Task CancelledBroadcast_OntoASettledRow_NeverOverwritesTheFirstBroadcast()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        harness.Feed.PushCompleted("transaction-id", ProcessedAt);
+
+        harness.Feed.PushCancelled("transaction-id", ProcessedAt.AddSeconds(1));
+
+        var row = controller.State.TrackedPayments.Single();
+        row.State.Should().Be(PaymentTrackingState.Settled, "the first broadcast wins, as today");
+        row.BroadcastOutcome.Should().Be(PaymentOutcome.Completed);
+    }
+
+    [Fact]
+    public async Task CancelledBroadcast_IsPrintedAsWithdrawnWithItsReason_AndIsPositiveEvidence()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        harness.Feed.PushCancelled("transaction-id", ProcessedAt, "budget exhausted");
+
+        var record = controller.State.Evidence.Last();
+        record.Kind.Should().Be(EvidenceKind.OutcomeEvent);
+        record.Summary.Should().Contain("Withdrawn — transaction-id").And.Contain("Reason: budget exhausted");
+        record.Detail.Should().Contain("Status: Cancelled").And.Contain("Reason: budget exhausted");
+        record.Succeeded.Should().BeTrue("a cancellation is the rail's own proven answer, like a 504 Cancelled");
+    }
+
+    [Fact]
+    public async Task Burst_CancelledBroadcast_TalliesCancelledNeverRejected_AndDrainsAwaiting()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        await controller.RunBurstAsync(StandardPayment, 2, 1, CancellationToken.None);
+        var burstTransactions = harness.Payments.Submissions.Select(submission => submission.IdempotencyKey!).ToList();
+        controller.State.Burst.Awaiting.Should().Be(2);
+
+        harness.Feed.PushCancelled(burstTransactions[0], ProcessedAt);
+
+        controller.State.Burst.CancelledPayments.Should().Be(1);
+        controller.State.Burst.Rejected.Should().Be(0, "a withdrawal is never a rejection");
+        controller.State.Burst.Settled.Should().Be(0);
+        controller.State.Burst.Awaiting.Should().Be(1, "a broadcast withdrawal resolves an accepted submission like a settlement does");
+
+        harness.Feed.PushCancelled(burstTransactions[0], ProcessedAt);
+        controller.State.Burst.CancelledPayments.Should().Be(1, "a redelivered terminal event never double counts");
+
+        harness.Feed.PushCompleted(burstTransactions[1], ProcessedAt);
+        controller.State.Burst.Awaiting.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Burst_HttpCancelledAndBroadcastCancelled_AreSummed_AndA504RetiredIdIsIgnored()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-accepted" },
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled") with { TransactionId = "tx-withdrawn-by-http" });
+        await controller.RunBurstAsync(InstantPayment, 2, 1, CancellationToken.None);
+        controller.State.Burst.CancelledPayments.Should().Be(1, "the HTTP leg's 504");
+        controller.State.Burst.Awaiting.Should().Be(1, "only the accepted submission is outstanding");
+
+        harness.Feed.PushCancelled("tx-withdrawn-by-http", ProcessedAt);
+        controller.State.Burst.CancelledPayments.Should().Be(1, "a 504-retired id is ignored, as today");
+
+        harness.Feed.PushCancelled("tx-accepted", ProcessedAt);
+        controller.State.Burst.CancelledPayments.Should().Be(2, "the HTTP leg's count and the broadcast's are summed, not overwritten");
+        controller.State.Burst.Rejected.Should().Be(0);
+        controller.State.Burst.Awaiting.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Burst_CancelledBroadcastBufferedBeforeTheSubmission_SurvivesTheHttpLegsOwnWrite()
+    {
+        // The broadcast arrives before its submission is even registered: it is buffered,
+        // claimed inside the loop (before the HTTP leg writes its own counters), and the HTTP
+        // leg's write must add to it -- a rewrite from the local counter alone would reset it.
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Feed.PushCancelled("tx-known-ahead", ProcessedAt);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-known-ahead" });
+
+        await controller.RunBurstAsync(StandardPayment, 1, 1, CancellationToken.None);
+
+        controller.State.Burst.Accepted.Should().Be(1);
+        controller.State.Burst.CancelledPayments.Should().Be(1, "the buffered withdrawal was claimed inside the loop and not overwritten");
+        controller.State.Burst.Rejected.Should().Be(0);
+        controller.State.Burst.Awaiting.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Burst_CancelledBroadcastBetweenTwoSubmissions_IsNotResetByTheSecondSubmissionsWrite()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-first" },
+            Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-second" });
+        var firstStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.SubmissionStarted = firstStarted;
+        harness.Payments.ReleaseSubmission = releaseFirst;
+
+        var burst = controller.RunBurstAsync(StandardPayment, 2, 1, CancellationToken.None);
+        await firstStarted.Task;
+
+        // Re-arm the gates for the second submission before letting the first one through,
+        // so the second blocks after the first's HTTP-leg write has landed.
+        var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseSecond = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.SubmissionStarted = secondStarted;
+        harness.Payments.ReleaseSubmission = releaseSecond;
+        releaseFirst.SetResult();
+        await secondStarted.Task;
+        controller.State.Burst.Accepted.Should().Be(1, "the first submission's HTTP leg has been written");
+
+        harness.Feed.PushCancelled("tx-first", ProcessedAt);
+        controller.State.Burst.CancelledPayments.Should().Be(1);
+
+        releaseSecond.SetResult();
+        await burst;
+
+        controller.State.Burst.Accepted.Should().Be(2);
+        controller.State.Burst.CancelledPayments.Should().Be(1, "the second submission's write adds the HTTP leg's own count to the broadcast tally instead of overwriting it");
+        controller.State.Burst.Awaiting.Should().Be(1, "only the second submission is still outstanding");
+    }
+
     [Fact]
     public async Task Resend_504CancelledOntoAnAwaitingRow_MovesItToCancelled()
     {

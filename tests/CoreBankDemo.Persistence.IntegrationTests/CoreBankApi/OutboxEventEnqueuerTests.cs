@@ -64,6 +64,57 @@ public class OutboxEventEnqueuerTests(PostgresContainerFixture fixture) : CoreBa
     }
 
     [Fact]
+    public async Task EnqueueTransactionCancelledAsync_builds_the_cancelled_row_shape_and_returns_the_tracked_row()
+    {
+        // spec: instant-rail-cancelled-event -- columns as the Failed row with
+        // TransactionStatus = Cancelled and the reason in ErrorReason; the
+        // added row is returned so a caller can detach it when its cancel
+        // does not commit.
+        await using var context = CreateContext();
+        var enqueuer = new OutboxEventEnqueuer(context, Options.Create(new MessagingOutboxProcessingOptions { PartitionCount = 4, LockExpirySeconds = 30, PollingIntervalMs = 5000 }), TimeProvider);
+        var message = NewMessage();
+        message.Status = MessageConstants.Status.Cancelled;
+
+        var returned = await enqueuer.EnqueueTransactionCancelledAsync(message, "budget exhausted", TestContext.Current.CancellationToken);
+        context.Entry(returned).State.Should().Be(EntityState.Added);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        var row = await context.MessagingOutboxMessages.SingleAsync(TestContext.Current.CancellationToken);
+        row.Id.Should().Be(returned.Id);
+        row.PartitionId.Should().Be(PartitionHelper.GetPartitionId(message.TransactionId, 4));
+        row.IdempotencyKey.Should().Be(message.TransactionId);
+        row.TransactionId.Should().Be(message.TransactionId);
+        row.Status.Should().Be(MessageConstants.Status.Pending);
+        row.EventType.Should().Be(Constants.TransactionCancelled);
+        row.EventSource.Should().Be("https://corebank-api/transactions");
+        row.AccountNumber.Should().Be(message.FromAccount);
+        row.ToAccount.Should().Be(message.ToAccount);
+        row.Amount.Should().Be(message.Amount);
+        row.Currency.Should().Be(message.Currency);
+        row.TransactionStatus.Should().Be(MessageConstants.Status.Cancelled);
+        row.ErrorReason.Should().Be("budget exhausted");
+        row.NewBalance.Should().BeNull();
+        row.CreatedAt.Should().Be(TimeProvider.GetUtcNow().UtcDateTime);
+        row.EventOccurredAt.Should().Be(message.ProcessedAt);
+        row.TraceParent.Should().Be(message.TraceParent);
+        row.TraceState.Should().Be(message.TraceState);
+    }
+
+    [Fact]
+    public async Task EnqueueTransactionCancelledAsync_without_a_stamped_processed_time_fails_instead_of_inventing_one()
+    {
+        await using var context = CreateContext();
+        var enqueuer = new OutboxEventEnqueuer(context, Options.Create(new MessagingOutboxProcessingOptions { PartitionCount = 4, LockExpirySeconds = 30, PollingIntervalMs = 5000 }), TimeProvider);
+        var message = NewMessage();
+        message.ProcessedAt = null;
+
+        var act = async () => await enqueuer.EnqueueTransactionCancelledAsync(message, "reason", TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*must have ProcessedAt stamped*");
+        context.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task EnqueueBalanceUpdatedAsync_builds_the_balance_row_shape_and_allows_two_rows_for_one_transaction()
     {
         await using var context = CreateContext();

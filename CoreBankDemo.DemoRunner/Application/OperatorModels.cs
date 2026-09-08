@@ -85,8 +85,10 @@ public enum PaymentOutcome
 
     /// <summary>
     /// The instant rail timed out and provably withdrew the payment before it executed
-    /// (<c>504</c> with <c>Status: Cancelled</c>). Nothing moved, no event will follow, and a
-    /// retry with a new key is safe. A proven outcome, not a transport failure.
+    /// (<c>504</c> with <c>Status: Cancelled</c>). Nothing moved, no settlement or rejection
+    /// will ever follow -- a <c>transaction.cancelled</c> broadcast may, as confirmation
+    /// (ADR-020 addendum) -- and a retry with a new key is safe. A proven outcome, not a
+    /// transport failure.
     /// </summary>
     Cancelled,
 }
@@ -355,18 +357,24 @@ public sealed record BurstProgress(
     // Withdrawn, not resolved: the share of the proven leg the console stopped being able to
     // observe when the feed dropped. It is never moved by a timeout, only by feed loss.
     int Unknown = 0,
-    // HTTP leg: instant payments the rail timed out and provably withdrew (504 Cancelled).
-    // Neither accepted nor failed -- nothing executed and nothing will be broadcast, so they
-    // never join the proven leg. Distinct from <see cref="Cancelled"/>, which is the operator
+    // Withdrawn payments, both legs summed: instant payments the rail timed out and provably
+    // withdrew (504 Cancelled, the HTTP leg) plus accepted payments CoreBank later withdrew and
+    // said so by broadcast (the proven leg, ADR-020 addendum). Never a failure, and never
+    // counted as Rejected. Distinct from <see cref="Cancelled"/>, which is the operator
     // aborting the burst itself.
-    int CancelledPayments = 0)
+    int CancelledPayments = 0,
+    // Proven leg only: the share of <see cref="CancelledPayments"/> that arrived as a
+    // <c>transaction.cancelled</c> broadcast for an accepted submission. Kept apart from the
+    // HTTP leg's 504s -- which were never accepted, so must not drain <see cref="Outstanding"/>
+    // -- so a broadcast cancellation resolves a waiting payment exactly as a settlement would.
+    int CancelledByBroadcast = 0)
 {
     public static BurstProgress Empty => new(0, 0, 0, 0, 0, false);
 
     /// <summary>
     /// How many of this burst's submissions could still legitimately produce an outcome.
     /// </summary>
-    public int Outstanding => Math.Max(0, Accepted + Completed - Settled - Rejected - Unknown);
+    public int Outstanding => Math.Max(0, Accepted + Completed - Settled - Rejected - CancelledByBroadcast - Unknown);
 
     /// <summary>
     /// A count, never a countdown: it goes up as submissions are accepted and down only as

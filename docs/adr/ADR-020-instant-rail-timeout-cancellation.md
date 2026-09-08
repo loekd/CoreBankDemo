@@ -64,8 +64,10 @@ and "original before cancel" symmetric (AD-4). `TransactionCancellationHandler` 
 
 A late-arriving original `process` for a tombstoned or cancelled id replays the cached `Cancelled`
 payload through `TransactionIntakeHandler`'s existing "found an existing row" branch and never
-executes — including with `X-Execute-Mode: inline`. A cancel never touches the ledger and never
-publishes an event (AD-5/AD-11). The checked-in OpenAPI document owns the operation; the `409` body
+executes — including with `X-Execute-Mode: inline`. A cancel never touches the ledger. It publishes
+exactly one event, `com.corebank.transaction.cancelled`, for every cancellation CoreBank commits — see
+the addendum below; the original text here read "never publishes an event". The checked-in OpenAPI
+document owns the operation; the `409` body
 is declared as `TransactionConflictResponse` — byte-identical on the wire to `TransactionResponse`,
 but a separate schema so Kiota can generate it as the error type the client catches, without turning
 the success model into an `ApiException`.
@@ -123,17 +125,20 @@ carries the business meaning inside the frozen `PaymentResponse` shape. No field
   `MessageStoreSummary`/`DrainResult` gain an additive `Cancelled` count. The gate becomes:
   `outbox.Total == outbox.Completed + outbox.Cancelled == k6 unique submitted`;
   `inbox.Completed == outbox.Completed`; `inbox.Cancelled ≤ outbox.Cancelled`; event stores hold
-  `3 × outbox.Completed` (a cancel publishes nothing); balances conserved; FIFO within a priority
-  class unchanged. With no cancellations this is the original N/N/3N/3N gate verbatim.
+  `3 × outbox.Completed + inbox.Cancelled` (one `transaction.cancelled` per CoreBank-side
+  cancellation — addendum below; a local cancel publishes nothing); balances conserved; FIFO
+  within a priority class unchanged. With no cancellations this is the original N/N/3N/3N gate
+  verbatim.
 - `k6/script.js` admits `504` only with the wire word `Cancelled` on instant calls, sets
   `http.expectedStatuses(200, 202, 504)` per instant request so `http_req_failed` stays honest, and
   counts them in the informational `instant_cancelled` counter. The standard rail's checks are
   byte-identical. The setup probe still demands a `200 Completed`.
 - DemoRunner: `PaymentOutcome.Cancelled` and `PaymentTrackingState.Cancelled`. A `504` is admitted
   on the instant rail only when its body says `Cancelled`; the standard rail still requires `202`. A
-  cancelled row is proven by HTTP alone — never "Awaiting settlement", and a later broadcast for it
-  is a `Contradiction`. In a burst, cancelled payments are tallied on the HTTP leg (`cancelled n`),
-  never as failures and never counted toward the proven leg.
+  cancelled row is proven by HTTP alone — never "Awaiting settlement", and a later
+  `completed`/`failed` broadcast for it is a `Contradiction` (a `cancelled` broadcast confirms it —
+  addendum below). In a burst, cancelled payments are tallied as `cancelled n`, never as failures
+  and never as rejections; the HTTP leg's `504`s and the broadcast's withdrawals are summed there.
 
 ### Dev Proxy is not bypassed
 
@@ -162,3 +167,60 @@ partition-lock starvation.
   exposure (the same caller could submit the command itself) — but it is the reason a tombstone
   is terminal from birth and never executes, and it would need an owner check before any real
   deployment.
+
+## Addendum (2026-09-08): `transaction.cancelled` — the residual `202` learns its outcome
+
+**Supersedes in part** this record's own "a cancel never publishes an event" and the
+`3 × outbox.Completed` event cardinality above.
+
+**Problem observed live.** Under the Dev Proxy latency preset the cancel reached CoreBank, CoreBank
+stored the cancellation, and its `200 Cancelled` reply arrived after the cancel allowance. PaymentsAPI
+answered the residual `202 Pending`; the background rail later marked the row `Cancelled` from the
+tombstone replay — and nobody was told. No event existed for a cancellation, so the DemoRunner row
+waited forever and every `202` caller stayed blind.
+
+**Decision.** CoreBank publishes `com.corebank.transaction.cancelled` for every cancellation it
+commits — a tombstone stored before the original arrived, or a `Pending` row cancelled before
+execution. The outbox row is enqueued in the same `SaveChanges` as the cancel (`StoreIfNewAsync` /
+`MarkAsCancelledAsync`), and detached on any outcome other than a committed cancel, so an event exists
+if and only if the cancel committed (AD-5). A replayed cancellation (`Cancelled`/`Completed` row found
+by the cancel handler) publishes nothing — it was published once — and a local cancel that never left
+PaymentsAPI publishes nothing: the caller holds the `504`. Payload
+`TransactionCancelledEvent(TransactionId, Status: "Cancelled", ProcessedAt, Reason)` beside the three
+frozen types, which stay byte-identical.
+
+```
+local cancel (never left PaymentsAPI) → 504 to caller, no event
+CoreBank tombstone / pending cancel   → 200 Cancelled to PaymentsAPI AND transaction.cancelled event
+replayed cancellation                 → 200 Cancelled, no new event
+```
+
+**PaymentsAPI** subscribes to it at `/events/transactions/cancelled` (fourth rule in both subscription
+manifests) and records it through `RecordCommittedOutcomeAsync(id, Cancelled, processedAt)`: a
+`Pending` payload becomes `Cancelled`; a cached `Completed`/`Failed`/`Cancelled` is never overwritten,
+and a later `Completed`/`Failed` never overwrites a cached `Cancelled`. A duplicate submit then
+replays `504 Cancelled` from the cached payload even while the row's transport status is still
+`Pending` (or under the background rail's claim); the background delivery still ends with the row
+`Cancelled` exactly once, from the replay, as before.
+
+**DemoRunner** copies the wire string (ADR-015): a `transaction.cancelled` broadcast resolves an
+`Awaiting`/`NotObserved`/`OutcomeUnknown` row to `Cancelled` with the event's `ProcessedAt` and the
+note "withdrawn … safe to retry with a new key"; on a row already `Cancelled` by `504` it is a
+confirmation, never a `Contradiction`; on a row HTTP proved `Completed`/`Failed` it is a
+`Contradiction` ("HTTP proved X, broadcast says Cancelled"); the first broadcast still wins on a
+`Settled`/`Rejected` row. In a burst it is tallied as `cancelled n` (never `Rejected`), drains the
+proven leg, and is summed with the HTTP leg's `504`s rather than overwriting them; a `504`-retired id
+is still ignored. The event prints as `Withdrawn — {id} · Reason: …` and is positive evidence, like
+the `504` itself.
+
+**Acceptance gate.** Event stores hold `3 × outbox.Completed + inbox.Cancelled`, all `Completed`. Any
+other count fails: an inbox `Cancelled` row without its event means the event was lost or never
+enqueued; an event without its row means a cancel that never committed was announced.
+
+**Consequences.** `IOutboxEventEnqueuer` gains `EnqueueTransactionCancelledAsync` (returns the row so
+a caller can detach it); `ITransactionEventIntakeHandler` gains an overload; `BusinessMetrics.MessageType`
+gains `TransactionCancelled`; `TransactionCancellationHandler` now depends on the enqueuer and the
+`CoreBankDbContext` — all additive. The `MessagingOutboxMessage` and payments `InboxMessage` schemas
+are unchanged. The Dev Proxy configuration is untouched: the cancel still travels the faulted hop, so
+under the latency preset the demo now shows the residual `202` resolving to `Cancelled` a moment
+later instead of waiting forever.

@@ -83,6 +83,39 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
         row.ResponsePayload.Should().Contain("\"Status\":\"Cancelled\"").And.Contain("12:00:09");
     }
 
+    [Theory]
+    [InlineData(MessageConstants.Status.Pending)]
+    [InlineData(MessageConstants.Status.Processing)]
+    public async Task RecordCommittedOutcomeAsync_records_a_CoreBank_side_cancellation_on_a_not_yet_delivered_row_and_keeps_it(string rowStatus)
+    {
+        // spec: instant-rail-cancelled-event -- the residual 202: the row is
+        // still Pending (or under the background rail's claim) with a Pending
+        // cached answer when CoreBank's transaction.cancelled event arrives.
+        // The payload becomes Cancelled, transport state is untouched, and a
+        // later Completed never overwrites the cached cancellation.
+        await using var store = CreateStore();
+        await using var context = store.CreateContext();
+        var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
+        var key = $"residual-{rowStatus.ToLowerInvariant()}";
+        var message = PaymentsApiTestData.Outbox(key);
+        message.Status = rowStatus;
+        message.ResponsePayload = $$"""{"TransactionId":"{{key}}","Status":"Pending","ProcessedAt":"2026-09-08T12:00:00+00:00"}""";
+        (await repository.StoreIfNewAsync(message, TestContext.Current.CancellationToken)).Should().BeTrue();
+        var cancelledAt = new DateTimeOffset(2026, 9, 8, 12, 0, 9, TimeSpan.Zero);
+
+        var recorded = await repository.RecordCommittedOutcomeAsync(
+            key, MessageConstants.Status.Cancelled, cancelledAt, TestContext.Current.CancellationToken);
+        var overwritten = await repository.RecordCommittedOutcomeAsync(
+            key, MessageConstants.Status.Completed, cancelledAt.AddSeconds(30), TestContext.Current.CancellationToken);
+
+        recorded.Should().BeTrue();
+        overwritten.Should().BeFalse("a cached cancellation is immutable");
+        await using var verification = store.CreateContext();
+        var row = verification.OutboxMessages.Single(row => row.TransactionId == key);
+        row.Status.Should().Be(rowStatus, "transport state is never touched by an event");
+        row.ResponsePayload.Should().Contain("\"Status\":\"Cancelled\"").And.Contain("12:00:09").And.NotContain("12:00:39");
+    }
+
     [Fact]
     public async Task RecordCommittedOutcomeAsync_ignores_unknown_transactions()
     {

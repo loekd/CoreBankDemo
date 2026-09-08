@@ -2,8 +2,11 @@ using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
+using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
@@ -16,9 +19,16 @@ namespace CoreBankDemo.CoreBankAPI.Tests;
 /// <see cref="IInboxMessageStore{TMessage}"/>, no real database) -- covers
 /// every CoreBank-side row of spec instant-rail-timeout-cancel's matrix for
 /// <see cref="TransactionCancellationHandler.CancelAsync"/>: tombstone,
-/// pending-cancel, already-executed, in-flight 409, and the store races.
+/// pending-cancel, already-executed, in-flight 409, and the store races --
+/// plus spec instant-rail-cancelled-event's rule that a
+/// <c>transaction.cancelled</c> outbox row is enqueued before the cancel's
+/// single save and left tracked only when that save applied the cancel.
+/// The enqueuer is mocked to add its row to a connection-less
+/// <see cref="CoreBankDbContext"/> (<see cref="CoreBankApiUnitTestSupport.DetachedDbContext"/>),
+/// so the handler's detach discipline is asserted on a real change tracker;
+/// the atomicity of the save itself is proved on PostgreSQL in tier 2.
 /// </summary>
-public class TransactionCancellationHandlerTests
+public sealed class TransactionCancellationHandlerTests : IDisposable
 {
     private const string FromAccount = "NL91ABNA0417164300";
     private const string ToAccount = "NL20INGB0001234567";
@@ -27,13 +37,54 @@ public class TransactionCancellationHandlerTests
     private readonly FakeTimeProvider _timeProvider = new();
     private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
     private readonly Mock<IInboxMessageStore<InboxMessage>> _inboxStore = new(MockBehavior.Strict);
+    private readonly Mock<IOutboxEventEnqueuer> _enqueuer = new(MockBehavior.Strict);
+    private readonly CoreBankDbContext _dbContext = CoreBankApiUnitTestSupport.DetachedDbContext();
+
+    /// <summary>Every event row the mocked enqueuer added, with the inbox ProcessedAt it saw at call time.</summary>
+    private readonly List<(MessagingOutboxMessage Row, DateTime? InboxProcessedAt)> _enqueued = [];
+
+    public TransactionCancellationHandlerTests()
+    {
+        _enqueuer
+            .Setup(e => e.EnqueueTransactionCancelledAsync(It.IsAny<InboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns<InboxMessage, string, CancellationToken>((message, reason, _) =>
+            {
+                var row = new MessagingOutboxMessage
+                {
+                    Id = Guid.NewGuid(),
+                    PartitionId = 0,
+                    IdempotencyKey = message.TransactionId,
+                    TransactionId = message.TransactionId,
+                    Status = MessageConstants.Status.Pending,
+                    EventType = Constants.TransactionCancelled,
+                    EventSource = "https://corebank-api/transactions",
+                    AccountNumber = message.FromAccount,
+                    ToAccount = message.ToAccount,
+                    Amount = message.Amount,
+                    Currency = message.Currency,
+                    TransactionStatus = MessageConstants.Status.Cancelled,
+                    ErrorReason = reason,
+                    CreatedAt = _timeProvider.GetUtcNow().UtcDateTime,
+                    EventOccurredAt = message.ProcessedAt ?? DateTime.MinValue
+                };
+                _dbContext.MessagingOutboxMessages.Add(row);
+                _enqueued.Add((row, message.ProcessedAt));
+                return Task.FromResult(row);
+            });
+    }
+
+    public void Dispose() => _dbContext.Dispose();
 
     private TransactionCancellationHandler CreateHandler(int partitionCount = 4) =>
         new(_repository.Object,
             _inboxStore.Object,
+            _enqueuer.Object,
+            _dbContext,
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
             NullLogger<TransactionCancellationHandler>.Instance);
+
+    private EntityState TrackedState(MessagingOutboxMessage row) => _dbContext.Entry(row).State;
 
     private static TransactionRequest Request() => new(FromAccount, ToAccount, 50m, "EUR", TransactionId);
 
@@ -299,6 +350,7 @@ public class TransactionCancellationHandlerTests
         result.Response.Should().Be(committed);
         _inboxStore.VerifyNoOtherCalls();
         _repository.Verify(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _enqueuer.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -330,6 +382,8 @@ public class TransactionCancellationHandlerTests
         result.Outcome.Should().Be(TransactionCancellationOutcome.Cancelled);
         result.Response.Should().Be(cached);
         _inboxStore.VerifyNoOtherCalls();
+        // Never: a replayed cancellation was published once already.
+        _enqueuer.VerifyNoOtherCalls();
     }
 
     [Fact]
@@ -363,5 +417,180 @@ public class TransactionCancellationHandlerTests
         result.Outcome.Should().Be(TransactionCancellationOutcome.InFlight);
         result.Response.Should().Be(new TransactionResponse(TransactionId, status, new DateTimeOffset(existing.ReceivedAt, TimeSpan.Zero)));
         _inboxStore.VerifyNoOtherCalls();
+        _enqueuer.VerifyNoOtherCalls();
+    }
+
+    // ---- spec: instant-rail-cancelled-event -- the event is enqueued before
+    // the cancel's single save and survives only when that save applied it. ----
+
+    [Fact]
+    public async Task CancelAsync_enqueues_the_cancelled_event_before_the_tombstone_store_and_keeps_it_tracked_when_stored()
+    {
+        var enqueuedBeforeStore = false;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((_, _) => enqueuedBeforeStore = _enqueued.Count == 1)
+            .ReturnsAsync(true);
+        var handler = CreateHandler();
+
+        var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionCancellationOutcome.Cancelled);
+        enqueuedBeforeStore.Should().BeTrue("the event row must be part of StoreIfNewAsync's own SaveChanges");
+        var (row, inboxProcessedAt) = _enqueued.Should().ContainSingle().Subject;
+        _enqueuer.Verify(e => e.EnqueueTransactionCancelledAsync(
+            It.Is<InboxMessage>(m => m.TransactionId == TransactionId && m.Status == MessageConstants.Status.Cancelled),
+            TransactionCancellationHandler.CancellationReason,
+            It.IsAny<CancellationToken>()), Times.Once);
+        inboxProcessedAt.Should().Be(_timeProvider.GetUtcNow().UtcDateTime, "the tombstone is stamped before the enqueue so EventOccurredAt = ProcessedAt");
+        TrackedState(row).Should().Be(EntityState.Added, "a committed cancel keeps its event");
+    }
+
+    [Fact]
+    public async Task CancelAsync_detaches_the_cancelled_event_when_the_tombstone_loses_its_store_race()
+    {
+        // Unique-key loss: StoreIfNewAsync rolled the whole save back and
+        // detached the tombstone; the handler must detach the event row too,
+        // or the next save on this context would insert an event for a
+        // cancel that never committed.
+        var winner = ExistingMessage(MessageConstants.Status.Completed,
+            JsonSerializer.Serialize(new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow())));
+        var lookups = 0;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => ++lookups == 1 ? null : winner);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var handler = CreateHandler();
+
+        var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionCancellationOutcome.AlreadyCommitted);
+        var (row, _) = _enqueued.Should().ContainSingle().Subject;
+        TrackedState(row).Should().Be(EntityState.Detached);
+        _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CancelAsync_detaches_the_cancelled_event_and_rethrows_when_the_tombstone_store_throws()
+    {
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DbUpdateException("connection dropped"));
+        var handler = CreateHandler();
+
+        var act = () => handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<DbUpdateException>().WithMessage("connection dropped");
+        _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CancelAsync_enqueues_the_cancelled_event_before_cancelling_a_pending_row_and_keeps_it_when_applied()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Pending);
+        var enqueuedBeforeMark = false;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        _inboxStore.Setup(s => s.TryClaimByIdAsync(existing.Id, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        _inboxStore.Setup(s => s.MarkAsCancelledAsync(existing, TransactionCancellationHandler.CancellationReason, It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, string, CancellationToken>((_, _, _) => enqueuedBeforeMark = _enqueued.Count == 1)
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler();
+
+        var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionCancellationOutcome.Cancelled);
+        enqueuedBeforeMark.Should().BeTrue("the event row must be part of MarkAsCancelledAsync's own SaveChanges");
+        var (row, inboxProcessedAt) = _enqueued.Should().ContainSingle().Subject;
+        inboxProcessedAt.Should().Be(_timeProvider.GetUtcNow().UtcDateTime,
+            "a Pending row has no ProcessedAt yet, so the handler stamps the cancellation time before enqueuing");
+        inboxProcessedAt.Should().Be(result.Response!.ProcessedAt.UtcDateTime, "the event and the cached payload carry the same instant");
+        TrackedState(row).Should().Be(EntityState.Added);
+    }
+
+    [Theory]
+    [InlineData(MessageTransitionOutcome.AlreadyTerminal)]
+    [InlineData(MessageTransitionOutcome.Conflicted)]
+    public async Task CancelAsync_detaches_the_cancelled_event_when_the_pending_cancel_is_not_applied(MessageTransitionOutcome transition)
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Pending);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        _inboxStore.Setup(s => s.TryClaimByIdAsync(existing.Id, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        _inboxStore.Setup(s => s.MarkAsCancelledAsync(existing, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Processing)
+            .ReturnsAsync(transition);
+        var handler = CreateHandler();
+
+        var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionCancellationOutcome.InFlight);
+        var (row, _) = _enqueued.Should().ContainSingle().Subject;
+        TrackedState(row).Should().Be(EntityState.Detached, "no committed cancel, no event");
+        _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CancelAsync_detaches_the_cancelled_event_and_rethrows_when_the_pending_cancel_throws()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Pending);
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+        _inboxStore.Setup(s => s.TryClaimByIdAsync(existing.Id, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        _inboxStore.Setup(s => s.MarkAsCancelledAsync(existing, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new DbUpdateConcurrencyException("second conflict"));
+        var handler = CreateHandler();
+
+        var act = () => handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<DbUpdateConcurrencyException>();
+        _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task CancelAsync_enqueues_exactly_one_event_when_a_lost_tombstone_race_ends_in_a_pending_cancel()
+    {
+        // The first event row (for the tombstone) was detached on the lost
+        // race; the winner's Pending row is then cancelled with its own,
+        // single event row.
+        var winner = ExistingMessage(MessageConstants.Status.Pending);
+        var lookups = 0;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => ++lookups == 1 ? null : winner);
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        _inboxStore.Setup(s => s.TryClaimByIdAsync(winner.Id, It.IsAny<CancellationToken>())).ReturnsAsync(winner);
+        _inboxStore.Setup(s => s.MarkAsCancelledAsync(winner, TransactionCancellationHandler.CancellationReason, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler();
+
+        var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(TransactionCancellationOutcome.Cancelled);
+        _enqueued.Should().HaveCount(2);
+        TrackedState(_enqueued[0].Row).Should().Be(EntityState.Detached, "the tombstone's event never committed");
+        TrackedState(_enqueued[1].Row).Should().Be(EntityState.Added, "the pending cancel's event did");
+        _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task CancelAsync_publishes_nothing_after_losing_the_claim_race_to_an_execution()
+    {
+        var existing = ExistingMessage(MessageConstants.Status.Pending);
+        var committed = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow());
+        var afterRace = ExistingMessage(MessageConstants.Status.Completed, JsonSerializer.Serialize(committed));
+        var lookups = 0;
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => ++lookups == 1 ? existing : afterRace);
+        _inboxStore.Setup(s => s.TryClaimByIdAsync(existing.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        var handler = CreateHandler();
+
+        await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
+
+        _enqueuer.VerifyNoOtherCalls();
+        _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
     }
 }

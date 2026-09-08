@@ -279,6 +279,7 @@ public class BusinessMetricsTests
     [InlineData(BusinessMetrics.MessageType.TransactionCompleted, "transaction-completed")]
     [InlineData(BusinessMetrics.MessageType.TransactionFailed, "transaction-failed")]
     [InlineData(BusinessMetrics.MessageType.BalanceUpdated, "balance-updated")]
+    [InlineData(BusinessMetrics.MessageType.TransactionCancelled, "transaction-cancelled")]
     [InlineData(BusinessMetrics.MessageType.Unknown, "unknown")]
     public void RecordDelivery_maps_every_message_type_to_its_closed_wire_value(
         BusinessMetrics.MessageType messageType, string expectedTag)

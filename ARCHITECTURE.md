@@ -261,7 +261,7 @@ Defaults.PollingInterval     // 5 seconds
 
 **Flow:**
 ```
-1. CoreBankAPI publishes events via Dapr (TransactionCompleted, TransactionFailed, BalanceUpdated)
+1. CoreBankAPI publishes events via Dapr (TransactionCompleted, TransactionFailed, BalanceUpdated, TransactionCancelled)
 2. Dapr delivers to PaymentsAPI POST /events/transactions/*
 3. Store in InboxMessage table by idempotency key
 4. InboxProcessor background service:
@@ -676,7 +676,7 @@ The `CoreBankDemo.LoadTests` project is a complete Aspire-orchestrated load test
 | `no duplicate processing` | Each idempotency key processed exactly once | Idempotency guarantees hold |
 | `expected unique count processed` | Completed unique idempotency keys + cancelled outbox rows == configured transaction count | Intended workload actually ran; a withdrawn instant payment is accounted for, never lost |
 | `all submitted transactions processed` | Inbox completed count == outbox completed count, and outbox total == completed + cancelled | No message loss, and nothing executed after being cancelled |
-| `stage cardinality N/N/3N/3N` | Outbox N (completed + cancelled), Core Bank inbox one `Completed` per completed payment plus at most one `Cancelled` per cancelled one, event stores 3 × completed | A cancel publishes no events and moves no money |
+| `stage cardinality N/N/3N/3N` | Outbox N (completed + cancelled), Core Bank inbox one `Completed` per completed payment plus at most one `Cancelled` per cancelled one, event stores 3 × completed + one `transaction.cancelled` per Core Bank-side cancellation (ADR-020 addendum) | A cancel moves no money; every cancellation Core Bank commits is broadcast exactly once, a local cancel never is |
 
 ### Configuration
 

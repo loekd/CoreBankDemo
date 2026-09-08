@@ -333,6 +333,10 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
                     Deserialize<BalanceUpdatedWireEvent>(data) is { TransactionId.Length: > 0 } balance
                         ? OutcomeEvent.From(balance)
                         : null,
+                OutcomeEventTypes.TransactionCancelled =>
+                    Deserialize<TransactionCancelledWireEvent>(data) is { TransactionId.Length: > 0 } cancelled
+                        ? OutcomeEvent.From(cancelled)
+                        : null,
                 _ => null,
             };
         }

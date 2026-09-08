@@ -14,11 +14,11 @@ This document is the guardrail contract for every BMAD workflow invocation (PRD,
 
 - **PaymentsAPI** (ports 5294, load-test 5295)
   - `POST /api/payments` → validate → store in Outbox (idempotent on `Idempotency-Key` header, GUID generated if absent) → `202 Accepted`; duplicate key → `202` referencing the existing record.
-  - Consumes Dapr CloudEvents from topic `transaction-events` at `/events/transactions/{completed|failed|balance-updated|unknown}` into an Inbox.
+  - Consumes Dapr CloudEvents from topic `transaction-events` at `/events/transactions/{completed|failed|balance-updated|cancelled|unknown}` into an Inbox (`cancelled` per ADR-020's addendum).
 - **CoreBankAPI** (port 5032)
   - `POST /api/transactions/process` → validate → dedupe by `TransactionId` → Inbox row → `202`; duplicates replay cached `ResponsePayload`.
   - `GET /api/transactions/{idempotencyKey}`, `POST /api/accounts/validate`, `GET /api/accounts/{accountNumber}`.
-  - Publishes `TransactionCompleted`/`TransactionFailed` + 2× `BalanceUpdated` CloudEvents per transaction via Dapr pubsub `pubsub`, topic `transaction-events`.
+  - Publishes `TransactionCompleted`/`TransactionFailed` + 2× `BalanceUpdated` CloudEvents per transaction, and one `TransactionCancelled` per CoreBank-side cancellation (ADR-020 addendum), via Dapr pubsub `pubsub`, topic `transaction-events`.
 - **LoadTestSupport** (port 5181): reset/drain/assert API + MCP server (`reset_database`, `poll_until_drained`, `get_assertion_results`, inbox/outbox inspection).
 - Payments→CoreBank hop is **HTTP**; CoreBank→Payments hop is **Dapr pub/sub**. Trace context (`traceparent`/`tracestate`) propagates across both hops and through message-store rows.
 

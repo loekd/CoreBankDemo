@@ -106,6 +106,7 @@ public sealed class DaprEventPublisher(
         CloudEventTypes.Constants.TransactionCompleted => BusinessMetrics.MessageType.TransactionCompleted,
         CloudEventTypes.Constants.TransactionFailed => BusinessMetrics.MessageType.TransactionFailed,
         CloudEventTypes.Constants.BalanceUpdated => BusinessMetrics.MessageType.BalanceUpdated,
+        CloudEventTypes.Constants.TransactionCancelled => BusinessMetrics.MessageType.TransactionCancelled,
         _ => BusinessMetrics.MessageType.Unknown
     };
 }

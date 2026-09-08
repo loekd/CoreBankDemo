@@ -139,23 +139,35 @@ public class PaymentsController(
         // the wire word was still Pending -- and, because nothing ever
         // refreshes the cached payload, it did so on every resend forever.
         // Only a terminal cached status is a committed outcome; anything
-        // else falls through to the not-yet-committed 202 below.
-        if (snapshot.Status == MessageConstants.Status.Completed)
+        // else falls through to the not-yet-committed 202 below. Resolved
+        // once, reused for both the committed-200 and the cancelled-504
+        // decisions.
+        var (cachedStatus, cachedProcessedAt) = ResolveDeliveredResponse(snapshot);
+        if (snapshot.Status == MessageConstants.Status.Completed
+            && cachedStatus is MessageConstants.Status.Completed or MessageConstants.Status.Failed)
         {
-            var delivered = ToDeliveredResponse(snapshot);
-            if (delivered.Status is MessageConstants.Status.Completed or MessageConstants.Status.Failed)
-            {
-                return Ok(delivered);
-            }
+            return Ok(new PaymentResponse(
+                snapshot.IdempotencyKey,
+                snapshot.TransactionId,
+                cachedStatus,
+                snapshot.Amount,
+                snapshot.Currency,
+                cachedProcessedAt));
         }
 
         // A cancelled row replays the same 504/Cancelled its first request
         // received, with the persisted cancellation timestamp -- no new row,
-        // no delivery (spec: instant-rail-timeout-cancel).
-        if (snapshot.Status == MessageConstants.Status.Cancelled)
+        // no delivery (spec: instant-rail-timeout-cancel). So does a row
+        // whose cached outcome CoreBank's transaction.cancelled event has
+        // upgraded to Cancelled while the row itself is still Pending or
+        // under the background rail's claim (spec: instant-rail-cancelled-
+        // event): the cancellation is committed at CoreBank, the caller's
+        // residual 202 must not stay blind until the background rail
+        // replays it.
+        if (snapshot.Status == MessageConstants.Status.Cancelled
+            || cachedStatus == MessageConstants.Status.Cancelled)
         {
-            var (_, cancelledAt) = ResolveDeliveredResponse(snapshot);
-            return ToCancelledResult(snapshot, cancelledAt);
+            return ToCancelledResult(snapshot, cachedProcessedAt);
         }
 
         var wireStatus = snapshot.Status == MessageConstants.Status.Failed
@@ -204,27 +216,6 @@ public class PaymentsController(
         new DateTimeOffset(DateTime.SpecifyKind(snapshot.CreatedAt, DateTimeKind.Utc)));
 
     /// <summary>
-    /// Builds the wire response for a <c>Completed</c> instant-rail row,
-    /// deriving both <c>Status</c> and <c>ProcessedAt</c> from the same
-    /// single deserialization of the persisted delivery outcome
-    /// (<see cref="ResolveDeliveredResponse"/>) rather than the row's raw
-    /// kernel <c>Status</c> column/<c>CreatedAt</c> (review loop 1 and 2):
-    /// deserializing once and reusing the result for both fields keeps them
-    /// from ever disagreeing about which delivery attempt they describe.
-    /// </summary>
-    private static PaymentResponse ToDeliveredResponse(PaymentSnapshot snapshot)
-    {
-        var (status, processedAt) = ResolveDeliveredResponse(snapshot);
-        return new PaymentResponse(
-            snapshot.IdempotencyKey,
-            snapshot.TransactionId,
-            status,
-            snapshot.Amount,
-            snapshot.Currency,
-            processedAt);
-    }
-
-    /// <summary>
     /// Recovers the actual committed business outcome
     /// (<see cref="TransactionSubmission.Status"/>: <c>Completed</c> vs
     /// <c>Failed</c>) and its real settlement
@@ -232,7 +223,10 @@ public class PaymentsController(
     /// <see cref="PaymentSnapshot.ResponsePayload"/> -- the serialized
     /// <see cref="TransactionSubmission"/>
     /// <see cref="HttpForwardOutboxDeliveryStrategy.ForwardAsync"/> persists
-    /// on every completed delivery (inline and background alike). Falls back
+    /// on every completed delivery (inline and background alike), and that
+    /// <c>OutboxRepository.RecordCommittedOutcomeAsync</c> upgrades from a
+    /// transaction event. Resolved once per duplicate replay and reused for
+    /// both the committed-200 and the cancelled-504 decisions. Falls back
     /// to the row's raw <c>Completed</c> status and its <c>CreatedAt</c> if
     /// the payload is missing or corrupt -- should not happen going forward,
     /// but a duplicate replay must never crash over it (mirrors

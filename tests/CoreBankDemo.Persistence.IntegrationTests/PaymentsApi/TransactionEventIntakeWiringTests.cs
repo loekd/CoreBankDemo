@@ -149,6 +149,12 @@ public class TransactionEventIntakeWiringTests(PostgresContainerFixture fixture)
         """{"transactionId":"txn-wiring-balance","accountNumber":"NL91ABNA0417164300","delta":-10.00,"newBalance":90.00,"currency":"EUR"}""",
         "txn-wiring-balance",
         "NL91ABNA0417164300")]
+    [InlineData(
+        "/events/transactions/cancelled",
+        Constants.TransactionCancelled,
+        """{"transactionId":"txn-wiring-cancelled","status":"Cancelled","processedAt":"2026-08-29T12:00:00+00:00","reason":"budget exhausted"}""",
+        "txn-wiring-cancelled",
+        "")]
     public async Task Real_entry_point_binds_and_stores_each_remaining_supported_event(
         string route,
         string eventType,
@@ -228,6 +234,11 @@ public class TransactionEventIntakeWiringTests(PostgresContainerFixture fixture)
                 $"""
                       - match: event.type == "{Constants.BalanceUpdated}"
                         path: /events/transactions/balance-updated
+                """);
+            manifest.Should().Contain(
+                $"""
+                      - match: event.type == "{Constants.TransactionCancelled}"
+                        path: /events/transactions/cancelled
                 """);
             manifest.Should().Contain("default: /events/transactions/unknown");
         }

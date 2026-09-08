@@ -22,6 +22,11 @@ internal sealed class DaprOutboxDeliveryStrategy(IEventPublisher publisher)
                 message.TransactionStatus,
                 AsUtcOffset(message.EventOccurredAt),
                 message.ErrorReason),
+            Constants.TransactionCancelled => new TransactionCancelledEvent(
+                message.TransactionId,
+                message.TransactionStatus,
+                AsUtcOffset(message.EventOccurredAt),
+                message.ErrorReason),
             Constants.BalanceUpdated => new BalanceUpdatedEvent(
                 message.TransactionId,
                 message.AccountNumber,

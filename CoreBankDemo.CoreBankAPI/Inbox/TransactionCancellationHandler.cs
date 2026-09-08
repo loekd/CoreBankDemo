@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
+using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults.Configuration;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -54,8 +56,14 @@ public sealed record TransactionCancellationResult(
 /// tombstones a command CoreBank has not received yet, cancels a command it
 /// stored but has not executed, or reports the committed outcome when it
 /// already executed -- so PaymentsAPI can answer <c>504</c>/<c>Cancelled</c>
-/// only once nothing can execute any more. Never touches the ledger and
-/// never publishes an event (AD-5/AD-11). Public for the same reason as
+/// only once nothing can execute any more. Never touches the ledger. Every
+/// cancellation it commits -- tombstone or pending-row cancel -- is broadcast
+/// as a <c>transaction.cancelled</c> event enqueued in the same save as the
+/// cancel (spec: instant-rail-cancelled-event, AD-5): the reply to
+/// PaymentsAPI can be lost, the outbox row cannot, so a residual
+/// <c>202</c> still learns its outcome. A replayed cancellation publishes
+/// nothing (it was published once already), and a cancel that never
+/// reached CoreBank is PaymentsAPI's alone. Public for the same reason as
 /// <see cref="ITransactionIntakeHandler"/>: a public controller's
 /// constructor dependency cannot be less accessible than the controller.
 /// </summary>
@@ -77,6 +85,8 @@ public interface ITransactionCancellationHandler
 internal sealed class TransactionCancellationHandler(
     IInboxMessageRepository repository,
     IInboxMessageStore<InboxMessage> inboxStore,
+    IOutboxEventEnqueuer enqueuer,
+    CoreBankDbContext dbContext,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
     ILogger<TransactionCancellationHandler> logger) : ITransactionCancellationHandler
@@ -125,16 +135,41 @@ internal sealed class TransactionCancellationHandler(
             TraceState = Activity.Current?.TraceStateString
         };
 
-        var stored = await repository.StoreIfNewAsync(tombstone, cancellationToken).ConfigureAwait(false);
+        // Enqueued before the store so StoreIfNewAsync's single SaveChanges
+        // commits the tombstone and its event together: never an event
+        // without a committed cancel, never a committed cancel without its
+        // event. The tombstone's ProcessedAt is already stamped, so the
+        // event's EventOccurredAt is the cancellation time the cached
+        // payload carries.
+        var cancelledEvent = await enqueuer.EnqueueTransactionCancelledAsync(tombstone, CancellationReason, cancellationToken)
+            .ConfigureAwait(false);
+        bool stored;
+        try
+        {
+            stored = await repository.StoreIfNewAsync(tombstone, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // StoreIfNewAsync detached the tombstone; the event row is ours
+            // to detach, or the next save on this context would insert an
+            // event for a cancel that never committed.
+            Detach(cancelledEvent);
+            throw;
+        }
+
         if (stored)
         {
             logger.LogInformation(
-                "Stored a Cancelled tombstone for transaction {TransactionId} in partition {PartitionId}; the original command will replay it",
+                "Stored a Cancelled tombstone for transaction {TransactionId} in partition {PartitionId} with its transaction.cancelled event; the original command will replay it",
                 request.TransactionId,
                 tombstone.PartitionId);
             Activity.Current?.SetTag("outcome", "cancelled_tombstone");
             return new TransactionCancellationResult(TransactionCancellationOutcome.Cancelled, response, null);
         }
+
+        // Unique-key loss: the whole save rolled back, so the event row must
+        // go too (mirrors StoreIfNewAsync's own detach-on-failure discipline).
+        Detach(cancelledEvent);
 
         // The original arrived between the lookup and the insert: resolve
         // against the winner's row exactly as if it had been found first.
@@ -237,14 +272,39 @@ internal sealed class TransactionCancellationHandler(
         // cached payload commits together with the terminal status (mirrors
         // how ForwardAsync/MarkAsCompletedAsync share one SaveChanges).
         claimed.ResponsePayload = JsonSerializer.Serialize(response);
-        var transition = await inboxStore.MarkAsCancelledAsync(claimed, CancellationReason, cancellationToken)
+        // A Pending row carries no ProcessedAt yet, and the event's
+        // EventOccurredAt is taken from it: stamp the same instant the cached
+        // payload carries, so the event and the 200/504 answer agree.
+        // MarkAsCancelledAsync re-stamps the row from the same TimeProvider,
+        // and a reload on conflict discards this along with the payload.
+        claimed.ProcessedAt = now.UtcDateTime;
+        // Enqueued before the transition so MarkAsCancelledAsync's single
+        // SaveChanges commits the cancel and its event together; kept only
+        // when that save applied the cancel.
+        var cancelledEvent = await enqueuer.EnqueueTransactionCancelledAsync(claimed, CancellationReason, cancellationToken)
             .ConfigureAwait(false);
+        MessageTransitionOutcome transition;
+        try
+        {
+            transition = await inboxStore.MarkAsCancelledAsync(claimed, CancellationReason, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            Detach(cancelledEvent);
+            throw;
+        }
+
+        if (transition != MessageTransitionOutcome.Applied)
+        {
+            Detach(cancelledEvent);
+        }
 
         switch (transition)
         {
             case MessageTransitionOutcome.Applied:
                 logger.LogInformation(
-                    "Cancelled pending transaction {TransactionId} in partition {PartitionId} before execution",
+                    "Cancelled pending transaction {TransactionId} in partition {PartitionId} before execution and enqueued its transaction.cancelled event",
                     claimed.TransactionId,
                     claimed.PartitionId);
                 Activity.Current?.SetTag("outcome", "cancelled");
@@ -259,6 +319,14 @@ internal sealed class TransactionCancellationHandler(
                 return InFlight(claimed);
         }
     }
+
+    /// <summary>
+    /// Drops an event row whose cancel did not commit from the change tracker,
+    /// so the context stays usable for the caller's next save (the same
+    /// discipline <c>StoreIfNewAsync</c> applies to its own row on failure).
+    /// </summary>
+    private void Detach(MessagingOutboxMessage cancelledEvent) =>
+        dbContext.Entry(cancelledEvent).State = EntityState.Detached;
 
     private TransactionCancellationResult InFlight(InboxMessage existing)
     {

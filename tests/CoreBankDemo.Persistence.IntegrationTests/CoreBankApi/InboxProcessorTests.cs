@@ -269,5 +269,8 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
 
         public Task EnqueueBalanceUpdatedAsync(InboxMessage message, string accountNumber, decimal delta, decimal newBalance, CancellationToken ct) =>
             throw new NotSupportedException();
+
+        public Task<MessagingOutboxMessage> EnqueueTransactionCancelledAsync(InboxMessage message, string reason, CancellationToken ct) =>
+            throw new NotSupportedException();
     }
 }

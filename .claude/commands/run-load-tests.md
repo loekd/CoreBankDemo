@@ -18,7 +18,7 @@ Use the **load-test** skill to execute the full acceptance workflow.
 3. Wait for the automatic initializer and k6 resources to finish; require k6 exit code 0.
 4. Capture the exact run start/end timestamps.
 5. Call REST and MCP assertion endpoints for the same run and compare their JSON field-for-field.
-6. Require four-store cardinality: outbox `N` = completed + cancelled, inbox completed = outbox completed (plus at most one `Cancelled` per cancelled outbox row), event stores 3 × completed (`N/N/3N/3N` when nothing was cancelled); zero failed/non-terminal rows (`Cancelled` is terminal, ADR-020); exact canonical accounts, dedupe, and balances.
+6. Require four-store cardinality: outbox `N` = completed + cancelled, inbox completed = outbox completed (plus at most one `Cancelled` per cancelled outbox row), event stores 3 × completed + one `transaction.cancelled` per inbox `Cancelled` row (`N/N/3N/3N` when nothing was cancelled; ADR-020 addendum); zero failed/non-terminal rows (`Cancelled` is terminal, ADR-020); exact canonical accounts, dedupe, and balances.
 7. Run the replicated Inbox and Outbox Tier-2 ordering tests.
 8. Use the corebank-trace-analysis skill for the exact run window. Require complete `traceparent`/`tracestate`, both replica identities, and no same-store/partition span overlap.
 9. Record all evidence and classify every failure as a code defect or harness mismatch.

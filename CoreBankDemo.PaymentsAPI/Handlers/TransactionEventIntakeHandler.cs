@@ -10,8 +10,9 @@ using Microsoft.Extensions.Options;
 namespace CoreBankDemo.PaymentsAPI.Handlers;
 
 /// <summary>
-/// Typed intake for the three known <c>transaction-events</c> CloudEvent
-/// contracts (spec-5-5). Maps each event to the approved composite inbox
+/// Typed intake for the four known <c>transaction-events</c> CloudEvent
+/// contracts (spec-5-5; the fourth, <c>transaction.cancelled</c>, from spec
+/// instant-rail-cancelled-event). Maps each event to the approved composite inbox
 /// identity, serializes the typed payload, stamps injected time and ambient
 /// trace context, and stores it via <see cref="IInboxMessageRepository"/>'s
 /// insert-first dedupe (never check-then-insert -- AD-4). Public (unlike the
@@ -29,6 +30,8 @@ public interface ITransactionEventIntakeHandler
     Task StoreAsync(TransactionFailedEvent transactionFailed, CancellationToken cancellationToken);
 
     Task StoreAsync(BalanceUpdatedEvent balanceUpdated, CancellationToken cancellationToken);
+
+    Task StoreAsync(TransactionCancelledEvent transactionCancelled, CancellationToken cancellationToken);
 }
 
 internal sealed class TransactionEventIntakeHandler(
@@ -68,6 +71,16 @@ internal sealed class TransactionEventIntakeHandler(
             Constants.BalanceUpdated,
             balanceUpdated.AccountNumber,
             balanceUpdated,
+            cancellationToken);
+
+    // Transaction-wide like completed/failed: a transaction is cancelled at
+    // most once, so a redelivery dedupes on (TransactionId, EventType, "").
+    public Task StoreAsync(TransactionCancelledEvent transactionCancelled, CancellationToken cancellationToken) =>
+        StoreAsync(
+            transactionCancelled.TransactionId,
+            Constants.TransactionCancelled,
+            TransactionWideAccountSentinel,
+            transactionCancelled,
             cancellationToken);
 
     private async Task StoreAsync<TEvent>(
@@ -139,7 +152,7 @@ internal sealed class TransactionEventIntakeHandler(
         }
 
         // Story 6.5: the concrete Dapr-receive boundary for this event.
-        // eventType is always one of this class's own three known call
+        // eventType is always one of this class's own four known call
         // sites' Constants values above -- never copied from the incoming
         // CloudEvent's own type string -- so ToMessageType's closed mapping
         // never needs an "unknown" fallback here (the truly unknown route is
@@ -157,6 +170,7 @@ internal sealed class TransactionEventIntakeHandler(
         Constants.TransactionCompleted => BusinessMetrics.MessageType.TransactionCompleted,
         Constants.TransactionFailed => BusinessMetrics.MessageType.TransactionFailed,
         Constants.BalanceUpdated => BusinessMetrics.MessageType.BalanceUpdated,
+        Constants.TransactionCancelled => BusinessMetrics.MessageType.TransactionCancelled,
         _ => BusinessMetrics.MessageType.Unknown
     };
 }

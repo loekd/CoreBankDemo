@@ -13,6 +13,8 @@ spec:
         path: /events/transactions/failed
       - match: event.type == "com.corebank.account.balance.updated"
         path: /events/transactions/balance-updated
+      - match: event.type == "com.corebank.transaction.cancelled"
+        path: /events/transactions/cancelled
     default: /events/transactions/unknown
 scopes:
   - payments-api

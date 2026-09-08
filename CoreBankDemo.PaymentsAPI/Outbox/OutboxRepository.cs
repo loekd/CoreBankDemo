@@ -16,12 +16,15 @@ internal interface IOutboxRepository
     /// <summary>
     /// Records the business outcome CoreBankAPI committed for
     /// <paramref name="transactionId"/>, as learned from its
-    /// <c>transaction.completed</c>/<c>transaction.failed</c> event, on the
-    /// payment's <see cref="OutboxMessage.ResponsePayload"/> -- the same
-    /// serialized <see cref="TransactionSubmission"/> shape the delivery
-    /// path persists, so a later duplicate replay resolves it identically.
-    /// Only ever upgrades a missing or non-terminal cached outcome; a payload
-    /// that already carries <c>Completed</c>/<c>Failed</c> is left untouched.
+    /// <c>transaction.completed</c>/<c>transaction.failed</c>/
+    /// <c>transaction.cancelled</c> event, on the payment's
+    /// <see cref="OutboxMessage.ResponsePayload"/> -- the same serialized
+    /// <see cref="TransactionSubmission"/> shape the delivery path persists,
+    /// so a later duplicate replay resolves it identically. Only ever
+    /// upgrades a missing or non-terminal cached outcome; a payload that
+    /// already carries <c>Completed</c>/<c>Failed</c>/<c>Cancelled</c> is
+    /// left untouched (spec: instant-rail-cancelled-event keeps a cached
+    /// cancellation immutable in both directions).
     /// Never touches <see cref="OutboxMessage.Status"/> (AD-11: transport
     /// state only).
     /// </summary>

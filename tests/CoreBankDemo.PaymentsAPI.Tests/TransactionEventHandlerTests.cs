@@ -236,15 +236,21 @@ public class TransactionEventHandlerTests
     [Theory]
     [InlineData(Constants.TransactionCompleted, "Completed")]
     [InlineData(Constants.TransactionFailed, "Failed")]
+    [InlineData(Constants.TransactionCancelled, "Cancelled")]
     public async Task Committed_outcome_events_are_recorded_on_the_payment_row(string eventType, string status)
     {
         var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
         repository
             .Setup(r => r.RecordCommittedOutcomeAsync("txn-9", status, Now, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
-        var payload = eventType == Constants.TransactionCompleted
-            ? Serialize(new TransactionCompletedEvent("txn-9", status, Now))
-            : Serialize(new TransactionFailedEvent("txn-9", status, Now, "Insufficient funds"));
+        var payload = eventType switch
+        {
+            Constants.TransactionCompleted => Serialize(new TransactionCompletedEvent("txn-9", status, Now)),
+            Constants.TransactionFailed => Serialize(new TransactionFailedEvent("txn-9", status, Now, "Insufficient funds")),
+            // spec: instant-rail-cancelled-event -- a cancellation CoreBank
+            // committed is the residual 202's committed outcome.
+            _ => Serialize(new TransactionCancelledEvent("txn-9", status, Now, "budget exhausted")),
+        };
         var message = Inbox(eventType, "txn-9", payload: payload);
         var logger = new CapturingLogger();
         var handler = new TransactionEventHandler(logger, repository.Object);
@@ -253,6 +259,99 @@ public class TransactionEventHandlerTests
 
         repository.VerifyAll();
         logger.Entries.Should().Contain(entry => entry.Message.Contains("Recorded committed outcome"));
+    }
+
+    [Fact]
+    public async Task Cancelled_event_logs_information_and_tags_transaction_type_status_and_reason()
+    {
+        using var observedActivity = StartListenedActivity();
+        var activity = observedActivity.Activity;
+        var payload = new TransactionCancelledEvent("txn-2c", "Cancelled", Now, "Cancelled by the instant rail on budget exhaustion");
+        var message = Inbox(Constants.TransactionCancelled, "txn-2c", payload: Serialize(payload));
+        var logger = new CapturingLogger();
+        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        logger.Entries.Should().ContainSingle(entry => entry.Level == LogLevel.Information);
+        logger.Entries.Single().Properties.Should().Contain(
+            new KeyValuePair<string, object?>("TransactionId", "txn-2c"),
+            new KeyValuePair<string, object?>("Status", "Cancelled"),
+            new KeyValuePair<string, object?>("Reason", "Cancelled by the instant rail on budget exhaustion"),
+            new KeyValuePair<string, object?>("EventType", Constants.TransactionCancelled));
+        activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("transaction.id", "txn-2c"));
+        activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("event.type", Constants.TransactionCancelled));
+        activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("transaction.status", "Cancelled"));
+        activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("transaction.cancel_reason", "Cancelled by the instant rail on budget exhaustion"));
+    }
+
+    [Fact]
+    public async Task Cancelled_event_with_a_null_reason_remains_valid_and_tags_an_empty_reason()
+    {
+        using var observedActivity = StartListenedActivity();
+        var activity = observedActivity.Activity;
+        var payload = new TransactionCancelledEvent("txn-2d", "Cancelled", Now, null);
+        var message = Inbox(Constants.TransactionCancelled, "txn-2d", payload: Serialize(payload));
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("transaction.cancel_reason", string.Empty));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("Completed")]
+    [InlineData("cancelled")]
+    public async Task A_cancelled_event_whose_status_is_not_the_wire_word_Cancelled_throws_and_never_touches_the_payment_row(string status)
+    {
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        var message = Inbox(Constants.TransactionCancelled, "txn-2f", payload: Serialize(new TransactionCancelledEvent("txn-2f", status, Now, null)));
+        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        (await act.Should().ThrowAsync<InvalidOperationException>()).Which.Message.Should().Contain("txn-2f").And.Contain("Cancelled");
+        repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task A_cancelled_event_with_a_null_status_throws_so_the_kernel_retries_and_never_touches_the_payment_row()
+    {
+        // Status is a non-nullable contract field: strict deserialization
+        // rejects an explicit null before the handler's own check can run.
+        // Either way the kernel records the retry and the row is untouched.
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        var message = Inbox(
+            Constants.TransactionCancelled,
+            "txn-2g",
+            payload: """{"transactionId":"txn-2g","status":null,"processedAt":"2026-08-29T12:34:56+00:00","reason":null}""");
+        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<Exception>().Where(e => e is JsonException || e is InvalidOperationException);
+        repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task A_cancelled_event_after_the_rail_already_marked_the_row_cancelled_is_a_silent_no_op()
+    {
+        // Matrix: "Event after the rail already marked Cancelled" -- the
+        // repository refuses to overwrite a terminal cached outcome and reports
+        // false; the handler logs nothing about recording.
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        repository
+            .Setup(r => r.RecordCommittedOutcomeAsync("txn-2e", "Cancelled", Now, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+        var message = Inbox(Constants.TransactionCancelled, "txn-2e", payload: Serialize(new TransactionCancelledEvent("txn-2e", "Cancelled", Now, null)));
+        var logger = new CapturingLogger();
+        var handler = new TransactionEventHandler(logger, repository.Object);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        repository.VerifyAll();
+        logger.Entries.Should().NotContain(entry => entry.Message.Contains("Recorded committed outcome"));
     }
 
     [Fact]

@@ -588,6 +588,9 @@ public sealed class FakeOutcomeFeed : IOutcomeFeed
     public void PushBalance(string transactionId, string account, decimal delta, decimal newBalance, string currency = "EUR") =>
         Push(OutcomeEvent.From(new BalanceUpdatedWireEvent(transactionId, account, delta, newBalance, currency)));
 
+    public void PushCancelled(string transactionId, DateTimeOffset processedAt, string? reason = "Cancelled by the instant rail on budget exhaustion") =>
+        Push(OutcomeEvent.From(new TransactionCancelledWireEvent(transactionId, "Cancelled", processedAt, reason)));
+
     /// <summary>Drops a live subscription, the console's most dangerous condition.</summary>
     public void Fault(DateTimeOffset lostAt, string detail = "the stream faulted") =>
         Publish(new OutcomeFeedStatus(

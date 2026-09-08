@@ -166,6 +166,7 @@ public sealed class BusinessMetrics : IDisposable
         TransactionCompleted,
         TransactionFailed,
         BalanceUpdated,
+        TransactionCancelled,
         Unknown
     }
 
@@ -409,6 +410,7 @@ public sealed class BusinessMetrics : IDisposable
         MessageType.TransactionCompleted => "transaction-completed",
         MessageType.TransactionFailed => "transaction-failed",
         MessageType.BalanceUpdated => "balance-updated",
+        MessageType.TransactionCancelled => "transaction-cancelled",
         MessageType.Unknown => "unknown",
         _ => throw new ArgumentOutOfRangeException(nameof(messageType), messageType, null)
     };

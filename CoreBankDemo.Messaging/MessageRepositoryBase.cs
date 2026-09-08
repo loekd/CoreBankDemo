@@ -491,7 +491,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// Cancellation transition (spec: instant-rail-timeout-cancel): the ONLY
     /// path that writes terminal <see cref="MessageConstants.Status.Cancelled"/>.
     /// Sets <c>Status = Cancelled</c>, stamps <c>ProcessedAt</c> from
-    /// <see cref="TimeProvider"/> and records <paramref name="reason"/> as
+    /// <see cref="TimeProvider"/> unless the caller already stamped it, and records <paramref name="reason"/> as
     /// <c>LastError</c>, so the ordering gate, drain and duplicate replay all
     /// see a terminal row with a processing timestamp. Modelled on
     /// <see cref="MarkAsCompletedAsync"/> exactly: the same detach/attach
@@ -569,7 +569,13 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     private void ApplyCancellationTransition(TMessage message, string reason)
     {
         message.Status = MessageConstants.Status.Cancelled;
-        message.ProcessedAt = TimeProvider.GetUtcNow().UtcDateTime;
+        // A caller that has already stamped the cancellation time keeps it
+        // (spec: instant-rail-cancelled-event -- TransactionCancellationHandler
+        // stamps the same instant its cached payload and its
+        // transaction.cancelled event carry, so the three never diverge by the
+        // microseconds between two clock reads); only an unstamped row is
+        // stamped here.
+        message.ProcessedAt ??= TimeProvider.GetUtcNow().UtcDateTime;
         message.LastError = reason;
     }
 

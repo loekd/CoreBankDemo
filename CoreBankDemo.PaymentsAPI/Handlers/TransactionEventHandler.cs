@@ -20,7 +20,7 @@ namespace CoreBankDemo.PaymentsAPI.Handlers;
 /// Never mutates payment or account state, never calls an external service,
 /// and never creates a second <see cref="ActivitySource"/>: this handler
 /// only observes. A malformed payload (invalid JSON or a JSON <c>null</c>)
-/// or a stored event type outside the three shared constants throws, so the
+/// or a stored event type outside the four shared constants throws, so the
 /// kernel (<see cref="InboxProcessorBase{TMessage}"/>) records the normal
 /// retry/poison transition -- this handler itself decides nothing about
 /// <see cref="InboxMessage.Status"/>.
@@ -57,10 +57,19 @@ internal sealed class TransactionEventHandler(
             case Constants.BalanceUpdated:
                 HandleBalanceUpdated(message);
                 break;
+            case Constants.TransactionCancelled:
+                // spec: instant-rail-cancelled-event -- a cancellation CoreBank
+                // committed is the residual 202's committed outcome. The
+                // repository refuses to overwrite a terminal cached payload, so
+                // a row the rail already marked Cancelled is a no-op, and a
+                // cached Cancelled is never overwritten by a later
+                // Completed/Failed either.
+                await RecordCommittedOutcomeAsync(HandleTransactionCancelled(message), cancellationToken).ConfigureAwait(false);
+                break;
             default:
                 // Never acknowledge a stored type this handler doesn't
                 // recognize (edge-case matrix) -- Story 5.5 only ever stores
-                // one of the three shared constants above, so reaching here
+                // one of the four shared constants above, so reaching here
                 // means either the shared constants changed underneath this
                 // handler or the row was corrupted; either way this is a
                 // handler defect the kernel must retry/poison, never a
@@ -130,6 +139,37 @@ internal sealed class TransactionEventHandler(
             payload.TransactionId,
             payload.Status,
             payload.ErrorReason,
+            message.EventType);
+        return (payload.TransactionId, payload.Status, payload.ProcessedAt);
+    }
+
+    private (string TransactionId, string Status, DateTimeOffset ProcessedAt) HandleTransactionCancelled(InboxMessage message)
+    {
+        var payload = Deserialize<TransactionCancelledEvent>(message);
+        if (payload.Status != MessageConstants.Status.Cancelled)
+        {
+            // Only the wire word Cancelled may become a cached committed
+            // outcome: anything else on a transaction.cancelled event is a
+            // producer defect the kernel must retry/poison, never a status
+            // this handler forwards into the payment row (same philosophy as
+            // the unsupported-type arm).
+            throw new InvalidOperationException(
+                $"transaction.cancelled event for transaction '{payload.TransactionId}' (inbox message {message.Id}) carries status '{payload.Status}' instead of '{MessageConstants.Status.Cancelled}'.");
+        }
+
+        var activity = Activity.Current;
+        activity?.SetTag("transaction.id", payload.TransactionId);
+        activity?.SetTag("event.type", message.EventType);
+        activity?.SetTag("transaction.status", payload.Status);
+        // A null Reason is valid; represent it explicitly so the tag remains
+        // queryable rather than being removed by Activity.SetTag.
+        activity?.SetTag("transaction.cancel_reason", payload.Reason ?? string.Empty);
+
+        logger.LogInformation(
+            "Transaction {TransactionId} was cancelled by CoreBank with status {Status}: {Reason} for event {EventType}",
+            payload.TransactionId,
+            payload.Status,
+            payload.Reason,
             message.EventType);
         return (payload.TransactionId, payload.Status, payload.ProcessedAt);
     }

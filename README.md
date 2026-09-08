@@ -57,8 +57,9 @@ Everything runs locally with one command. Nothing here talks to a real bank.
 The Payments API forwards to the Core Bank API over a **single HTTP integration** generated at build
 time by Kiota from the checked-in OpenAPI contract (ADR-008, ADR-013). Dapr is used only for the
 event hop back — the Core Bank API publishes `transaction.completed` / `transaction.failed` /
-`balance.updated` CloudEvents, which the Payments API consumes into its own inbox so a deferred
-payment eventually learns its committed outcome.
+`transaction.cancelled` / `balance.updated` CloudEvents, which the Payments API consumes into its
+own inbox so a deferred payment eventually learns its committed outcome — including a cancellation
+the instant rail asked for but never heard back about (ADR-020).
 
 Both APIs run **two replicas** behind a stable Aspire endpoint (ADR-014), which is what makes the
 distributed locking and partition ownership more than theoretical.
@@ -302,7 +303,9 @@ key. After drain, `GET /assert/results?expectedUnique=<n>` checks:
 - no idempotency key processed more than once,
 - completed unique keys == the configured transaction count,
 - inbox completed count == outbox submitted count,
-- stage cardinality N/N/3N/3N across the four message stores,
+- stage cardinality N/N/3N/3N across the four message stores (with cancellations: outbox
+  completed + cancelled = N, event stores 3 × completed + one `transaction.cancelled` per Core
+  Bank-side cancellation),
 - exactly the ten seeded accounts exist, with balances conserved.
 
 Scale is set in `CoreBankDemo.LoadTests/appsettings.json` (`TransactionCount`, `VuCount`).

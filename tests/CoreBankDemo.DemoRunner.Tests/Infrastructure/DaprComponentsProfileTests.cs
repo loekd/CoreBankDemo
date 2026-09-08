@@ -55,7 +55,7 @@ public class DaprComponentsProfileTests
     }
 
     /// <summary>
-    /// The console declares the three CloudEvent types as local wire records rather than
+    /// The console declares the four CloudEvent types as local wire records rather than
     /// referencing <c>CoreBankDemo.ServiceDefaults</c>, which is what keeps ADR-015's
     /// project-graph invariant intact — but a copied constant pinned to nothing is a constant
     /// that can drift silently. These read the checked-in subscription manifest, the same
@@ -65,6 +65,7 @@ public class DaprComponentsProfileTests
     [InlineData("com.corebank.transaction.completed")]
     [InlineData("com.corebank.transaction.failed")]
     [InlineData("com.corebank.account.balance.updated")]
+    [InlineData("com.corebank.transaction.cancelled")]
     public void CopiedEventTypes_MatchTheCheckedInSubscriptionManifest(string eventType)
     {
         foreach (var directory in new[] { "components", "components-loadtest" })
@@ -82,11 +83,16 @@ public class DaprComponentsProfileTests
     }
 
     [Fact]
-    public void OutcomeEventTypeConstants_AreExactlyTheThreeTheManifestRoutes()
+    public void OutcomeEventTypeConstants_AreExactlyTheFourTheManifestRoutes()
     {
         OutcomeEventTypes.TransactionCompleted.Should().Be("com.corebank.transaction.completed");
         OutcomeEventTypes.TransactionFailed.Should().Be("com.corebank.transaction.failed");
         OutcomeEventTypes.BalanceUpdated.Should().Be("com.corebank.account.balance.updated");
+        OutcomeEventTypes.TransactionCancelled.Should().Be("com.corebank.transaction.cancelled");
+        typeof(OutcomeEventTypes).GetFields()
+            .Select(field => (string)field.GetRawConstantValue()!)
+            .Count(value => value.StartsWith("com.corebank.", StringComparison.Ordinal))
+            .Should().Be(4, "every routed type is copied here, and nothing that is not routed");
     }
 
     [Fact]

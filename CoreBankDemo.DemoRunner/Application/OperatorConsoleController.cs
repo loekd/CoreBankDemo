@@ -889,7 +889,9 @@ public sealed class OperatorConsoleController
                         // instead: labelled as the console's own, counted toward nothing.
                         //
                         // A 504 Cancelled is retired for the opposite reason: it is proven,
-                        // and what it proves is that nothing will ever be broadcast for it.
+                        // and what it proves is that no settlement or rejection will ever be
+                        // broadcast for it -- only, at most, a transaction.cancelled
+                        // confirmation (ADR-020 addendum), which counts toward nothing here.
                         // Retiring it also means a burst does not police a later,
                         // contradictory broadcast for a cancelled id -- such an event is
                         // labelled the console's own and counted toward nothing. That check is
@@ -938,7 +940,10 @@ public sealed class OperatorConsoleController
                                 Accepted = accepted,
                                 Completed = completed,
                                 Failed = failed,
-                                CancelledPayments = cancelled,
+                                // The HTTP leg's own 504s plus whatever the broadcast has
+                                // withdrawn meanwhile: a rewrite from the local counter alone
+                                // would silently erase a cancellation the feed just counted.
+                                CancelledPayments = cancelled + state.Burst.CancelledByBroadcast,
                             },
                         }
                         : state);
@@ -1890,6 +1895,8 @@ public sealed class OperatorConsoleController
             // (see CarriesAppliedFaults, which excludes this kind).
             DeliveryDelta(outcomeEvent, observedAt),
             EventDetail(outcomeEvent, observedAt),
+            // Only a rejection is negative evidence. A cancellation is the rail's own proven
+            // answer (ADR-020), positive here exactly as a 504 Cancelled HTTP leg is.
             outcomeEvent.Failed is null,
             outcomeEvent.TransactionId,
             // Never steals the Details pane from a record the operator is reading.
@@ -1954,6 +1961,40 @@ public sealed class OperatorConsoleController
             return payment;
         }
 
+        if (outcomeEvent.Cancelled is { } cancelled)
+        {
+            if (payment.HttpOutcome == PaymentOutcome.Cancelled)
+            {
+                // HTTP already proved the withdrawal with a 504; CoreBank's broadcast is the
+                // same fact from the other side, never a contradiction. The HTTP record stays
+                // as it was, the broadcast leg is filled in.
+                return payment with
+                {
+                    BroadcastOutcome = PaymentOutcome.Cancelled,
+                    ProcessedAt = payment.ProcessedAt ?? cancelled.ProcessedAt,
+                    ObservedAt = observedAt,
+                    ErrorReason = payment.ErrorReason ?? cancelled.Reason,
+                };
+            }
+
+            // A residual 202 -- awaiting, never observed, or lost to a feed gap -- resolves to
+            // Cancelled without operator action: nothing executed, the key is safe to retry.
+            // HTTP that proved a settlement or a rejection is contradicted, and the console
+            // picks no winner.
+            var cancelContradicts = payment.HttpOutcome is PaymentOutcome.Completed or PaymentOutcome.Failed;
+            return payment with
+            {
+                BroadcastOutcome = PaymentOutcome.Cancelled,
+                State = cancelContradicts ? PaymentTrackingState.Contradiction : PaymentTrackingState.Cancelled,
+                ProcessedAt = cancelled.ProcessedAt,
+                ObservedAt = observedAt,
+                ErrorReason = cancelled.Reason,
+                Note = cancelContradicts
+                    ? $"HTTP proved {payment.HttpOutcome}, broadcast says Cancelled"
+                    : "withdrawn by CoreBank before execution — safe to retry with a new key",
+            };
+        }
+
         if (outcomeEvent.Completed is { } completed)
         {
             // HTTP already proved a rejection -- or a cancellation, which promises that nothing
@@ -1996,13 +2037,21 @@ public sealed class OperatorConsoleController
             return;
         }
 
-        var settled = outcomeEvent.Completed is not null;
         Update(state => IsCurrent(context)
             ? state with
             {
-                Burst = settled
-                    ? state.Burst with { Settled = state.Burst.Settled + 1 }
-                    : state.Burst with { Rejected = state.Burst.Rejected + 1 },
+                Burst = outcomeEvent switch
+                {
+                    { Completed: not null } => state.Burst with { Settled = state.Burst.Settled + 1 },
+                    // Withdrawn by CoreBank after the HTTP leg accepted it: tallied as cancelled,
+                    // never as a rejection, and it drains the proven leg like any other outcome.
+                    { Cancelled: not null } => state.Burst with
+                    {
+                        CancelledPayments = state.Burst.CancelledPayments + 1,
+                        CancelledByBroadcast = state.Burst.CancelledByBroadcast + 1,
+                    },
+                    _ => state.Burst with { Rejected = state.Burst.Rejected + 1 },
+                },
             }
             : state);
     }
@@ -2267,6 +2316,8 @@ public sealed class OperatorConsoleController
                 $"Rejected — {outcomeEvent.TransactionId} · ErrorReason: {outcomeEvent.Failed?.ErrorReason ?? "(none supplied)"}",
             OutcomeEventTypes.BalanceUpdated =>
                 $"Balance updated — {outcomeEvent.TransactionId} · {LegText(outcomeEvent)}",
+            OutcomeEventTypes.TransactionCancelled =>
+                $"Withdrawn — {outcomeEvent.TransactionId} · Reason: {outcomeEvent.Cancelled?.Reason ?? "(none supplied)"}",
             // A type this console does not model is still printed verbatim rather than
             // flattened into one it happens to know.
             _ => $"{outcomeEvent.EventType} — {outcomeEvent.TransactionId}",
@@ -2315,6 +2366,12 @@ public sealed class OperatorConsoleController
         {
             lines.Add($"Status: {failed.Status ?? "(none supplied)"}");
             lines.Add($"ErrorReason: {failed.ErrorReason ?? "(none supplied)"}");
+        }
+
+        if (outcomeEvent.Cancelled is { } cancelled)
+        {
+            lines.Add($"Status: {cancelled.Status ?? "(none supplied)"}");
+            lines.Add($"Reason: {cancelled.Reason ?? "(none supplied)"}");
         }
 
         if (outcomeEvent.BalanceUpdated is not null)

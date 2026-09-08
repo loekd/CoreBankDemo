@@ -6,7 +6,8 @@ using Xunit;
 namespace CoreBankDemo.ServiceDefaults.Tests.CloudEventTypes;
 
 /// <summary>
-/// Story 3.3 (AD-12): proves the three CloudEvent records serialize
+/// Story 3.3 (AD-12): proves the CloudEvent records (three frozen legacy
+/// ones plus <c>transaction.cancelled</c>, ADR-020 addendum) serialize
 /// byte-for-byte to the frozen legacy JSON shape (property names, order, and
 /// casing) against fixed known-good JSON strings.
 /// <para>
@@ -89,5 +90,35 @@ public class CloudEventJsonSnapshotTests
 
         json.Should().Be(
             "{\"transactionId\":\"tx-1\",\"status\":\"Failed\",\"processedAt\":\"2026-08-24T12:00:00+00:00\",\"errorReason\":null}");
+    }
+
+    [Fact]
+    public void TransactionCancelledEvent_serializes_to_the_exact_wire_shape_when_Reason_is_present()
+    {
+        var evt = new TransactionCancelledEvent(
+            TransactionId: "tx-1",
+            Status: "Cancelled",
+            ProcessedAt: FixedProcessedAt,
+            Reason: "Cancelled by the instant rail on budget exhaustion");
+
+        var json = JsonSerializer.Serialize(evt, DaprDefaults);
+
+        json.Should().Be(
+            "{\"transactionId\":\"tx-1\",\"status\":\"Cancelled\",\"processedAt\":\"2026-08-24T12:00:00+00:00\",\"reason\":\"Cancelled by the instant rail on budget exhaustion\"}");
+    }
+
+    [Fact]
+    public void TransactionCancelledEvent_serializes_Reason_as_JSON_null_when_the_value_is_null_not_omitted()
+    {
+        var evt = new TransactionCancelledEvent(
+            TransactionId: "tx-1",
+            Status: "Cancelled",
+            ProcessedAt: FixedProcessedAt,
+            Reason: null);
+
+        var json = JsonSerializer.Serialize(evt, DaprDefaults);
+
+        json.Should().Be(
+            "{\"transactionId\":\"tx-1\",\"status\":\"Cancelled\",\"processedAt\":\"2026-08-24T12:00:00+00:00\",\"reason\":null}");
     }
 }

@@ -372,14 +372,16 @@ public class LoadTestAssertionServiceTests
     {
         // N=3 submitted: 2 completed, 1 cancelled. CoreBank holds 2 completed
         // rows and a Cancelled tombstone for the withdrawn one; exactly 3
-        // events per COMPLETED payment flowed downstream; no ledger movement
-        // for the cancelled one.
+        // events per COMPLETED payment flowed downstream plus the one
+        // transaction.cancelled event the tombstone was enqueued with (spec:
+        // instant-rail-cancelled-event); no ledger movement for the cancelled
+        // one.
         var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
             ExpectedUnique: 3,
             PaymentsOutbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
             CoreBankInbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
-            CoreBankOutbox: new MessageStoreSummary(6, 6, 0, 0),
-            PaymentsInbox: new MessageStoreSummary(6, 6, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(7, 7, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(7, 7, 0, 0),
             CompletedTransactions:
             [
                 new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "key-1"),
@@ -460,9 +462,81 @@ public class LoadTestAssertionServiceTests
     }
 
     [Fact]
+    public void A_CoreBank_side_cancellation_without_its_cancelled_event_fails_the_stage_gate()
+    {
+        // spec: instant-rail-cancelled-event -- the event is enqueued in the
+        // same save as the cancel, so an inbox Cancelled row with only 3 x
+        // completed events downstream means the event was lost (or never
+        // enqueued): a defect, not a tolerated variant.
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 3,
+            PaymentsOutbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
+            CoreBankInbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
+            CoreBankOutbox: new MessageStoreSummary(6, 6, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(6, 6, 0, 0),
+            CompletedTransactions:
+            [
+                new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "key-1"),
+                new CompletedTransaction(AccountNumber(2), AccountNumber(1), 1m, "key-2")
+            ],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 3,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.StageCardinality.Passed.Should().BeFalse();
+        result.Checks.StageCardinality.Detail.Should()
+            .StartWith("Expected N/N/(3xCompleted+Cancelled)/(3xCompleted+Cancelled)=3/3/7/7; Actual=3/3/6/6")
+            .And.Contain("3x2+1 cancelled event(s)=7");
+        result.AllPassed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void The_stage_headline_keeps_its_pre_cancellation_shape_when_no_CoreBank_side_cancellation_exists()
+    {
+        // A local cancel (outbox Cancelled, no inbox row) leaves the event
+        // figures at 3N: the headline string stays byte-identical to the
+        // pre-cancellation contract, only the parenthetical detail is added.
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 2,
+            PaymentsOutbox: new MessageStoreSummary(2, 1, 0, 0, Cancelled: 1),
+            CoreBankInbox: new MessageStoreSummary(1, 1, 0, 0),
+            CoreBankOutbox: new MessageStoreSummary(3, 3, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(3, 3, 0, 0),
+            CompletedTransactions: [new CompletedTransaction(AccountNumber(1), AccountNumber(2), 1m, "key-1")],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 2,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.StageCardinality.Detail.Should().StartWith("Expected N/N/3N/3N=2/2/6/6; Actual=2/1/3/3");
+    }
+
+    [Fact]
+    public void A_cancelled_event_that_reached_PaymentsAPI_but_is_not_yet_processed_fails_the_stage_gate()
+    {
+        // 7 events published, but PaymentsAPI's inbox still holds the
+        // cancelled one Pending: not drained.
+        var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
+            ExpectedUnique: 3,
+            PaymentsOutbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
+            CoreBankInbox: new MessageStoreSummary(3, 2, 0, 0, Cancelled: 1),
+            CoreBankOutbox: new MessageStoreSummary(7, 7, 0, 0),
+            PaymentsInbox: new MessageStoreSummary(7, 6, 0, 1),
+            CompletedTransactions: [],
+            DuplicateKeys: [],
+            OutboxUniqueKeys: 3,
+            LoadTestAccounts: UntouchedAccounts()));
+
+        result.Checks.StageCardinality.Passed.Should().BeFalse();
+        result.Checks.NoPendingMessages.Passed.Should().BeFalse();
+    }
+
+    [Fact]
     public void A_cancelled_row_without_a_tombstone_at_CoreBank_still_passes_the_stage_gate()
     {
-        // Locally cancelled (never reached CoreBank): no inbox row at all.
+        // Locally cancelled (never reached CoreBank): no inbox row at all, and
+        // therefore no transaction.cancelled event -- exactly 3 x completed
+        // downstream (spec: instant-rail-cancelled-event, "a local cancel
+        // emits nothing").
         var result = LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
             ExpectedUnique: 2,
             PaymentsOutbox: new MessageStoreSummary(2, 1, 0, 0, Cancelled: 1),
