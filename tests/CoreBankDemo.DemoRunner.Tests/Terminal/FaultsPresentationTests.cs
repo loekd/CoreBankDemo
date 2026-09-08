@@ -93,11 +93,15 @@ public class FaultsPresentationTests
 
         var renderedUnderFaults = model.Evidence.Single(row => row.Sequence == 2);
         renderedUnderFaults.Provenance.Should().Contain("faults error rate 40%").And.Contain("800–2000 ms");
-        renderedUnderFaults.Detail.Should().Contain("Faults: error rate 40%");
 
         var renderedQuiet = model.Evidence.Single(row => row.Sequence == 1);
         renderedQuiet.Provenance.Should().NotContain("faults");
-        renderedQuiet.Detail.Should().Contain("Faults: none in force");
+
+        // Detail is projected on demand for the record being read, not carried on every row, so
+        // the per-record stamping is asserted against that projection directly. Both records are
+        // checked, which the selected-record pane alone could not cover.
+        PresentationModelBuilder.EvidenceDetailText(underFaults).Should().Contain("Faults: error rate 40%");
+        PresentationModelBuilder.EvidenceDetailText(quiet).Should().Contain("Faults: none in force");
         model.SelectedEvidenceDetail.Should().Contain("Faults: error rate 40%");
     }
 

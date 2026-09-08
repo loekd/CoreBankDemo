@@ -60,11 +60,16 @@ public sealed record FaultsViewModel(
     FaultLevels Live,
     FaultLevels Staged);
 
+/// <summary>
+/// One row of the evidence list. Deliberately carries no expanded detail: the Details pane reads
+/// the separately computed <see cref="OperatorPresentationModel.SelectedEvidenceDetail"/> for the
+/// one record the operator actually selected. A per-row copy meant re-parsing and re-serializing
+/// every retained payload on every render, for text nothing ever read.
+/// </summary>
 public sealed record EvidenceRowViewModel(
     long Sequence,
     string Summary,
     string Provenance,
-    string Detail,
     bool Succeeded);
 
 /// <summary>
@@ -162,7 +167,6 @@ public static class PresentationModelBuilder
                     ? $"< {StatusGlyph(record.Succeeded)} {record.Summary}"
                     : $"  {StatusGlyph(record.Succeeded)} {record.Summary}",
                 $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}{FaultProvenance(record)}",
-                EvidenceDetailText(record),
                 record.Succeeded))
             .ToList();
 

@@ -30,6 +30,12 @@ public static class Program
         }
 
         var repositoryRoot = FindRepositoryRoot();
+
+        // Armed before anything else can fail. A Terminal.Gui console puts the terminal into the
+        // alternate screen and raw mode, and only Application.Shutdown undoes that -- so any exit
+        // that misses it leaves the operator looking at a dead full-screen view in a window that
+        // no longer echoes typing, with nothing on screen saying why.
+        TerminalCrashGuard.Install(Path.Combine(repositoryRoot, ".demo-runner-artifacts"));
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
         var aspire = new AspireCliAdapter(repositoryRoot, TimeProvider.System);
         var doctor = new DoctorRunner(
@@ -64,9 +70,9 @@ public static class Program
         // reads. The next run would report Listening while a portion of its payments never
         // resolved. SIGINT is deliberately absent: Console.CancelKeyPress already turns Ctrl+C
         // into an orderly shutdown, and tearing the feed down underneath that would break it.
-        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, _ => StopFeed(outcomeFeed));
-        using var sighup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, _ => StopFeed(outcomeFeed));
-        using var sigquit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, _ => StopFeed(outcomeFeed));
+        using var sigterm = PosixSignalRegistration.Create(PosixSignal.SIGTERM, _ => Terminate(outcomeFeed, "SIGTERM"));
+        using var sighup = PosixSignalRegistration.Create(PosixSignal.SIGHUP, _ => Terminate(outcomeFeed, "SIGHUP"));
+        using var sigquit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, _ => Terminate(outcomeFeed, "SIGQUIT"));
 
         var controller = new OperatorConsoleController(
             aspire,
@@ -90,6 +96,7 @@ public static class Program
 #pragma warning disable CS0618
     private static int RunConsole(OperatorConsoleController controller, ThemeMode theme)
     {
+        Exception? crash = null;
         AppTerminal.Init();
 
         // Terminal.Gui's own clipboard shells out to xclip, which exists in the sandbox
@@ -121,7 +128,21 @@ public static class Program
             // Preflight probes ports and the Aspire CLI; running it before the first paint
             // left the operator staring at an empty terminal for several seconds.
             window.BeginInitialRefresh();
-            AppTerminal.Run(window);
+            // Without an error handler, Run rethrows -- unwinding past the run loop and leaving
+            // the runtime to dump a stack trace over a terminal still in its alternate screen.
+            // Returning true keeps the loop's own teardown intact, and RequestStop then ends it
+            // at the next iteration, so the finally below performs an ordinary Shutdown. The
+            // report is deliberately deferred until after that: it restores the terminal itself,
+            // which must not happen underneath a live run loop.
+            AppTerminal.Run(window, errorHandler: exception =>
+            {
+                crash ??= exception;
+
+                // Stopped rather than resumed: a console that keeps running after an unhandled
+                // fault is a console that may now be showing something untrue.
+                AppTerminal.RequestStop();
+                return true;
+            });
         }
         finally
         {
@@ -137,7 +158,15 @@ public static class Program
             AppTerminal.Shutdown();
         }
 
-        return 0;
+        if (crash is null)
+        {
+            return 0;
+        }
+
+        TerminalCrashGuard.Report(crash, "The console's UI thread raised an unhandled exception");
+
+        // Non-zero so a wrapper script or an outer `aspire`/CI step can tell a crash from a quit.
+        return 70;
     }
 #pragma warning restore CS0618
 
@@ -146,6 +175,14 @@ public static class Program
     /// the only failure that matters is hanging: a sidecar that outlives this console poisons
     /// the next run, but a console that will not die poisons the demo happening right now.
     /// </summary>
+    private static void Terminate(DaprOutcomeFeed feed, string signal)
+    {
+        // Order matters: hand the terminal back first, because the sidecar teardown below can
+        // take seconds and the operator would spend them looking at a frozen full-screen view.
+        TerminalCrashGuard.Report(null, $"The console was stopped by {signal}");
+        StopFeed(feed);
+    }
+
     private static void StopFeed(DaprOutcomeFeed feed)
     {
         try
