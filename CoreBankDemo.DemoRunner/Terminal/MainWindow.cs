@@ -169,8 +169,23 @@ public sealed class MainWindow : Window
     // mid-sentence with a finger on a line.
     private readonly Label _stillOpenRule = new();
     private readonly ListView _stillOpenList = new();
-    private readonly Label _announcement = new();
     private readonly Label _feedStatus = new();
+
+    /// <summary>
+    /// The transient announcement's row, one per surface that can be the content area: all five
+    /// workspaces plus the burst takeover, which replaces Operations' own. They carry the same
+    /// line, because it is one announcement and not six -- a refusal appears at the foot of
+    /// whichever workspace is active, where the operator is already looking. None of them
+    /// reserves a row: each is hidden outright while there is nothing to say, and the row it
+    /// would take returns to the surface behind it.
+    /// </summary>
+    private readonly List<Label> _announcementRows = [];
+
+    /// <summary>
+    /// Rows an announcement borrows its slot from while it is showing. A workspace hint restates
+    /// what the controls already say; the announcement is what the operator needs right now.
+    /// </summary>
+    private readonly List<View> _announcementYields = [];
     private Label _modeLine = null!;
     private Label _burstSetupLabel = null!;
     private Label _burstConcurrencyLabel = null!;
@@ -182,6 +197,7 @@ public sealed class MainWindow : Window
     private readonly Label _burstClosing = new();
     private readonly Button _burstDismissButton = NewButton("Done");
 
+    private readonly Label _topologyStatus = new();
     private readonly ListView _resourceList = new();
     private readonly Button _startRegularButton = NewButton("Start Regular");
     private readonly Button _attachRegularButton = NewButton("Attach Regular");
@@ -257,6 +273,7 @@ public sealed class MainWindow : Window
     /// </summary>
     private bool _burstTakeoverActive;
     private string _message = string.Empty;
+    private bool _messageIsFailure = true;
     private long _messageMark = -1;
 
     private readonly UiRepaintCoalescer _repaints = new(AppTerminal.Invoke);
@@ -422,9 +439,10 @@ public sealed class MainWindow : Window
                 _ => IdempotencyMode.Generated,
             };
             _idempotencyButton.Text = $"Key ‹ {_idempotencyMode} ›";
-            // The mode line costs a row only in the mode that needs it, so the ladder is re-run
-            // here rather than only on resize.
-            ApplyOperationsRows();
+            // The mode line costs a row only in the mode that needs it, so the whole workspace is
+            // redrawn here rather than only the row ladder: the strip's rule and the feed
+            // statement move with it and must not be left stating the old layout.
+            Repaint();
         };
 
         // The one mode-specific third line: the supplied-key field in Supplied mode, the
@@ -457,7 +475,7 @@ public sealed class MainWindow : Window
         {
             e.Handled = true;
             _burstSetupVisible = !_burstSetupVisible;
-            ApplyOperationsRows();
+            Repaint();
         };
         _startBurstButton.Accepting += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
 
@@ -516,15 +534,12 @@ public sealed class MainWindow : Window
             _controller.SelectPayment(_stillOpenRows[index].TransactionId);
         };
 
-        _announcement.X = LabelX;
-        _announcement.Y = Pos.AnchorEnd(OperationsBottomRows);
-        _announcement.Height = 1;
-        _announcement.Width = Dim.Fill(1);
+        AddAnnouncementRow(view, Pos.AnchorEnd(OperationsBottomRows));
         _feedStatus.X = LabelX;
         _feedStatus.Y = Pos.AnchorEnd(1);
         _feedStatus.Height = 1;
         _feedStatus.Width = Dim.Fill(1);
-        view.Add(_stillOpenRule, _stillOpenList, _announcement, _feedStatus);
+        view.Add(_stillOpenRule, _stillOpenList, _feedStatus);
     }
 
     /// <summary>
@@ -570,7 +585,28 @@ public sealed class MainWindow : Window
             _burstTakeoverActive = false;
             Repaint();
         };
+        // The takeover replaces every Operations surface, this one included, so it carries its
+        // own row rather than letting a refusal vanish behind the counters.
+        AddAnnouncementRow(view, Pos.AnchorEnd(2));
         view.Add(_burstRule, _burstStatus, _burstProvenStatus, _burstClosing, _cancelBurstButton, _burstDismissButton);
+    }
+
+    /// <summary>
+    /// Adds one workspace's announcement row and registers it. <paramref name="yields"/> names a
+    /// view that shares the slot and steps aside while the announcement is showing, so no row is
+    /// ever held empty against its arrival.
+    /// </summary>
+    private Label AddAnnouncementRow(View view, Pos y, View? yields = null)
+    {
+        var row = new Label { X = LabelX, Y = y, Height = 1, Width = Dim.Fill(1), Visible = false };
+        view.Add(row);
+        _announcementRows.Add(row);
+        if (yields is not null)
+        {
+            _announcementYields.Add(yields);
+        }
+
+        return row;
     }
 
     /// <summary>
@@ -592,19 +628,19 @@ public sealed class MainWindow : Window
                 return;
 
             default:
-                if (card.TransactionId is not { Length: > 0 } id)
+                if (card.IsPlaceholder)
                 {
-                    // Never hidden and never an empty slot: the reason is already printed on the
-                    // card, and pressing it says the same thing rather than nothing.
-                    ShowMessage(card.IsPlaceholder
-                        ? "No payment is on the card yet — submit one first."
-                        : PresentationModelBuilder.OmittedNoCancelReason);
+                    // Nothing was attempted against a payment, so there is nothing to record.
+                    ShowNotice("No payment is on the card yet — submit one first.");
                     return;
                 }
 
                 // No confirmation modal: a cancellation destroys no state, and the bank's own
-                // answer is what the console will render either way.
-                Dispatch(() => SurfaceAsync(_controller.CancelPaymentAsync(id, _sessionCancellation.Token)));
+                // answer is what the console will render either way. An Omitted-mode payment with
+                // no id goes to the controller too rather than being turned away here, so its
+                // refusal is an Evidence record and not an announcement nobody kept.
+                Dispatch(() => SurfaceAsync(
+                    _controller.CancelPaymentAsync(card.TransactionId ?? string.Empty, _sessionCancellation.Token)));
                 return;
         }
     }
@@ -616,13 +652,16 @@ public sealed class MainWindow : Window
     /// </summary>
     private void LookUpCardOutcome()
     {
-        if (_focusCard.TransactionId is not { Length: > 0 } id)
+        if (_focusCard.IsPlaceholder)
         {
-            ShowMessage("No payment on the card has a transaction id to look up.");
+            ShowNotice("No payment is on the card yet — there is nothing to look up.");
             return;
         }
 
-        Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(id, _sessionCancellation.Token)));
+        // Every refusal beyond that one is the controller's to make and to record: a lookup the
+        // console turned away in its own hands would leave the announcement as the only copy.
+        Dispatch(() => SurfaceAsync(
+            _controller.QueryOutcomeAsync(_focusCard.TransactionId ?? string.Empty, _sessionCancellation.Token)));
     }
 
     private View BuildResourcesView()
@@ -711,8 +750,15 @@ public sealed class MainWindow : Window
             Surface(_controller.SetArming(!_controller.State.FaultArmingRequested));
         };
 
+        // The one place the console's own topology status line is read: Resources answers
+        // "is it running?", which is the question every sentence on that line is about.
+        _topologyStatus.X = 1;
+        _topologyStatus.Y = Pos.AnchorEnd(2);
+        _topologyStatus.Height = 1;
+        _topologyStatus.Width = Dim.Fill(1);
         LayoutHint(_resourcesHint);
-        view.Add(_resourceList, actions, _resourcesHint);
+        view.Add(_resourceList, actions, _topologyStatus, _resourcesHint);
+        AddAnnouncementRow(view, Pos.AnchorEnd(1), _resourcesHint);
         return view;
     }
 
@@ -782,6 +828,9 @@ public sealed class MainWindow : Window
         _inspectCoreBankInbox.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.CoreBankInbox, _sessionCancellation.Token))); };
 
         view.Add(_evidenceList, _evidenceDetail, _detailsButton, _wrapButton, _copyButton, _exportButton, _inspectPaymentsOutbox, _inspectCoreBankInbox);
+        // Above the two action rows rather than beside them, and the lists give up the row only
+        // while it is showing -- nothing is held empty against its arrival.
+        AddAnnouncementRow(view, Pos.AnchorEnd(3));
         return view;
     }
 
@@ -825,6 +874,7 @@ public sealed class MainWindow : Window
         };
         LayoutHint(_loadHint);
         view.Add(_loadPhase, _loadStatus, _loadResults, _runLoadButton, _loadHint);
+        AddAnnouncementRow(view, Pos.AnchorEnd(1), _loadHint);
         return view;
     }
 
@@ -906,6 +956,7 @@ public sealed class MainWindow : Window
 
         LayoutHint(_faultsHint);
         view.Add(_panicOffButton, _applyFaultsButton, _faultsHint);
+        AddAnnouncementRow(view, Pos.AnchorEnd(1), _faultsHint);
         return view;
     }
 
@@ -1377,6 +1428,7 @@ public sealed class MainWindow : Window
         _loadStatus.Text = model.LoadPhaseStatus;
         _loadResultBinding.Bind(model.LoadResults);
 
+        _topologyStatus.Text = model.TopologyStatus;
         _resourcesHint.Text = Hint(model.ResourcesHint);
         _loadHint.Text = Hint(model.LoadHint);
         RenderFaults(model.Faults);
@@ -1473,6 +1525,15 @@ public sealed class MainWindow : Window
         try
         {
             _stillOpenBinding.Bind([.. model.StillOpen.Select(row => row.Line)]);
+
+            // The list's own cursor follows the card, so the ▸ marker and the highlight can never
+            // disagree about which payment is selected -- an operator who arrows off a line the
+            // cursor was never on would jump somewhere they did not choose.
+            var selected = model.StillOpen.ToList().FindIndex(row => row.Selected);
+            if (selected >= 0 && _stillOpenList.SelectedItem != selected)
+            {
+                _stillOpenList.SelectedItem = selected;
+            }
         }
         finally
         {
@@ -1493,15 +1554,11 @@ public sealed class MainWindow : Window
         _feedStatus.Visible = !_showStillOpen;
         _composeRule.Text = new string('─', Math.Max(1, RuleWidth()));
 
-        _announcement.Text = AnnouncementText(model);
-        _announcement.SchemeName = _message.Length > 0 || model.AnnouncementIsFailure
-            ? OperatorTheme.DestructiveScheme
-            : OperatorTheme.BaseScheme;
-
         _burstRule.Text = RuleText(model.BurstCaption, model.FeedStatus, RuleWidth());
         _burstStatus.Text = model.BurstStatus;
         _burstProvenStatus.Text = model.BurstProvenStatus;
         _burstClosing.Text = model.BurstClosing;
+        RenderAnnouncement(model);
         _cancelBurstButton.Visible = model.CanCancelBurst;
         _burstDismissButton.Visible = !model.CanCancelBurst;
     }
@@ -1525,15 +1582,12 @@ public sealed class MainWindow : Window
         return fill > 0 ? head + new string('─', fill) + tail : $"{caption} · {qualifier}";
     }
 
-    /// <summary>Marks a strip line selected, as a real click or keypress would.</summary>
-    internal void SelectStillOpenRowForTest(int index)
-    {
-        _stillOpenList.SelectedItem = index;
-        if (index >= 0 && index < _stillOpenRows.Count)
-        {
-            _controller.SelectPayment(_stillOpenRows[index].TransactionId);
-        }
-    }
+    /// <summary>
+    /// Moves the strip's selection exactly as an arrow key or a click would, and no further: the
+    /// production <c>ValueChanged</c> handler is what re-points the card, so a seam that called
+    /// the controller itself would leave a read-only strip on stage and a green test suite.
+    /// </summary>
+    internal void SelectStillOpenRowForTest(int index) => _stillOpenList.SelectedItem = index;
 
     /// <summary>Scrolls the strip, as a real wheel or arrow key would.</summary>
     internal void ScrollStillOpenListForTest(int offsetY) =>
@@ -1545,27 +1599,66 @@ public sealed class MainWindow : Window
     private static string Hint(string hint) => hint.Length == 0 ? string.Empty : $"○ {hint}";
 
     /// <summary>
-    /// The transient announcement's text. It takes the tone of the thing it announces and never
-    /// a fixed one: a refused or failed command is a proven failure and renders as one, while a
-    /// notice that is no verdict at all — a lost feed — renders in the neutral tone the rows
-    /// behind it are taking at that instant. It carries no fact that is not already durable: the
-    /// same line is an Evidence record from the moment it appears, refusals the console produced
-    /// itself included. It reserves no row when there is nothing to say.
+    /// Draws the transient announcement on every surface that can be the content area. It takes
+    /// the tone of the thing it announces and never a fixed one: a refused or failed command is a
+    /// proven failure and renders as one (<c>✕</c>, the failure token), while a notice that is no
+    /// verdict at all — a lost feed, a palette switch, a copied link — renders as <c>○</c> in the
+    /// neutral tone the rows behind it are taking at that instant. An announcement must never
+    /// assert a failure the states beneath it are carefully declining to assert.
     /// <para>
-    /// The message survives until the operator's next action produces evidence. Without the mark
-    /// the 1.5 second poll erased every failure message before it could be read.
+    /// It carries no fact that is not already durable: the same line is an Evidence record from
+    /// the moment it appears, refusals the console produced itself included. It reserves no row
+    /// when there is nothing to say — the row returns to the surface behind it — and the message
+    /// survives until the operator's next action produces evidence, because without that mark the
+    /// 1.5 second poll erased every failure before it could be read.
     /// </para>
     /// </summary>
-    private string AnnouncementText(OperatorPresentationModel model)
+    private void RenderAnnouncement(OperatorPresentationModel model)
     {
         var newestSequence = model.Evidence.Count == 0 ? -1 : model.Evidence[0].Sequence;
+        string text;
+        bool failure;
         if (_message.Length > 0 && newestSequence <= _messageMark)
         {
-            return $"✕ {_message}";
+            failure = _messageIsFailure;
+            text = $"{(failure ? "✕" : "○")} {_message}";
+        }
+        else
+        {
+            _message = string.Empty;
+            failure = model.AnnouncementIsFailure;
+            text = model.Announcement.Length == 0
+                ? string.Empty
+                : $"{(failure ? "✕" : "○")} {model.Announcement}";
         }
 
-        _message = string.Empty;
-        return model.Announcement.Length == 0 ? string.Empty : $"○ {model.Announcement}";
+        ApplyAnnouncement(text, failure);
+    }
+
+    /// <summary>
+    /// Puts one announcement on every surface at once and takes its row straight back when it
+    /// clears. Shared by the render pass and by <see cref="Announce"/>, so a line raised between
+    /// renders lands on exactly the same rows the next render would have given it.
+    /// </summary>
+    private void ApplyAnnouncement(string text, bool failure)
+    {
+        var showing = text.Length > 0;
+        foreach (var row in _announcementRows)
+        {
+            row.Text = text;
+            row.SchemeName = failure ? OperatorTheme.DestructiveScheme : OperatorTheme.BaseScheme;
+            row.Visible = showing;
+        }
+
+        foreach (var yielded in _announcementYields)
+        {
+            yielded.Visible = !showing;
+        }
+
+        // Evidence has no spare row at its foot, so its two panes lend one for as long as the
+        // announcement is showing and take it straight back when it clears.
+        _evidenceList.Height = Dim.Fill(showing ? 4 : 3);
+        _evidenceDetail.Height = Dim.Fill(showing ? 4 : 3);
     }
 
     private void ApplyResponsiveLayout()
@@ -1586,7 +1679,7 @@ public sealed class MainWindow : Window
         UpdateNavigationText();
         if (layout == TerminalLayoutMode.BelowMinimum)
         {
-            ShowMessage("Terminal below 80×24 — use keyboard shortcuts; session state is preserved.");
+            ShowNotice("Terminal below 80×24 — use keyboard shortcuts; session state is preserved.");
         }
     }
 
@@ -1680,6 +1773,16 @@ public sealed class MainWindow : Window
         var closingRows = inner - OperationsBottomRows - (stripShowing ? rows + 1 : 0) - (cardTop + 6);
         _cardClosing.Visible = closingRows > 0;
         _cardClosing.Height = Math.Max(1, closingRows);
+
+        // The ladder just moved rows that Pos/Dim resolve against, and this runs outside the
+        // draw loop (a state change, a mode chip, a Burst… toggle). Without re-resolving here,
+        // every frame on this surface keeps whatever geometry the last resize gave it -- which is
+        // exactly how a payment area squeezed to zero rows once passed for correct.
+        _operationsMain.SetNeedsLayout();
+        if (_operationsMain.SuperView is { } surface && surface.Viewport.Height > 0)
+        {
+            _operationsMain.Layout(surface.Viewport.Size);
+        }
     }
 
     /// <summary>
@@ -1781,7 +1884,7 @@ public sealed class MainWindow : Window
             key.Handled = true;
             var mode = OperatorTheme.Toggle();
             SetNeedsDraw();
-            ShowMessage($"Theme: {(mode == ThemeMode.Light ? "light" : "dark")}");
+            ShowNotice($"Theme: {(mode == ThemeMode.Light ? "light" : "dark")}");
             return true;
         }
 
@@ -1836,9 +1939,14 @@ public sealed class MainWindow : Window
                 TerminalOut,
                 Environment.GetEnvironmentVariable("TERM"),
                 Environment.GetEnvironmentVariable("TMUX"));
-            ShowMessage(copy.Succeeded
-                ? $"{title} link copied to your terminal clipboard: {result.Url}"
-                : $"{title}: {result.Url} — {copy.Message}");
+            if (copy.Succeeded)
+            {
+                ShowNotice($"{title} link copied to your terminal clipboard: {result.Url}");
+            }
+            else
+            {
+                ShowMessage($"{title}: {result.Url} — {copy.Message}");
+            }
         });
     }
 
@@ -1952,31 +2060,48 @@ public sealed class MainWindow : Window
             return;
         }
 
-        ShowMessage(TerminalClipboard.Copy(
+        ShowClipboardResult(TerminalClipboard.Copy(
             detail,
             TerminalOut,
             Environment.GetEnvironmentVariable("TERM"),
-            Environment.GetEnvironmentVariable("TMUX")).Message);
+            Environment.GetEnvironmentVariable("TMUX")));
     }
 
     /// <summary>
     /// Surfaces the outcome of a Ctrl+C copy made through the Terminal.Gui
     /// clipboard (<see cref="Osc52Clipboard"/>), which is otherwise silent.
     /// </summary>
-    internal void ShowClipboardResult(ClipboardCopyResult result) => ShowMessage(result.Message);
+    internal void ShowClipboardResult(ClipboardCopyResult result)
+    {
+        if (result.Succeeded)
+        {
+            ShowNotice(result.Message);
+        }
+        else
+        {
+            ShowMessage(result.Message);
+        }
+    }
 
-    private void ShowMessage(string message)
+    /// <summary>A command that ran and was refused: a proven failure, and rendered as one.</summary>
+    private void ShowMessage(string message) => Announce(message, isFailure: true);
+
+    /// <summary>
+    /// A notice that is no verdict at all — a palette switch, a copied link, a size hint. It
+    /// takes the neutral tone rather than the failure token, because the largest single-line
+    /// statement on the screen must never assert a failure that nothing has proved.
+    /// </summary>
+    private void ShowNotice(string message) => Announce(message, isFailure: false);
+
+    private void Announce(string message, bool isFailure)
     {
         LastUiMessage = message;
         _message = message;
+        _messageIsFailure = isFailure;
         _messageMark = _controller.State.Evidence.Count == 0
             ? -1
             : _controller.State.Evidence[^1].Sequence;
-        RunOnUiThread(() =>
-        {
-            _announcement.Text = $"✕ {message}";
-            _announcement.SchemeName = OperatorTheme.DestructiveScheme;
-        });
+        RunOnUiThread(() => ApplyAnnouncement($"{(isFailure ? "✕" : "○")} {message}", isFailure));
     }
 
     private static string ExactCommands(IReadOnlyList<string> instances, string command) =>
@@ -2020,7 +2145,24 @@ public sealed class MainWindow : Window
     internal Task? LastDispatchedTask { get; private set; }
     internal WorkspaceKind VisibleWorkspace => _controller.State.ActiveWorkspace;
     internal int NavigationFrameWidth => _navigation.Frame.Width;
-    internal string AnnouncementLineText => _announcement.Text;
+    internal string AnnouncementLineText => _announcementRows[0].Text;
+    internal bool AnnouncementVisibleIn(WorkspaceKind workspace) =>
+        _announcementRows.Any(row => row.Visible && IsUnder(row, _workspaces[(int)workspace]));
+    internal bool AnnouncementIsFailureToned =>
+        _announcementRows[0].SchemeName == OperatorTheme.DestructiveScheme;
+
+    private static bool IsUnder(View view, View ancestor)
+    {
+        for (var parent = view.SuperView; parent is not null; parent = parent.SuperView)
+        {
+            if (ReferenceEquals(parent, ancestor))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
     internal string ResourcesHintText => _resourcesHint.Text;
     internal string LoadHintText => _loadHint.Text;
     internal bool IsWorkspaceVisible(WorkspaceKind workspace) => workspace switch
@@ -2041,15 +2183,20 @@ public sealed class MainWindow : Window
     internal TextField ExpectedUniqueField => _expectedUnique;
     internal Button SubmitButton => _submitButton;
     internal Button CardActionButton => _cardActionButton;
+    internal Button BurstDismissButton => _burstDismissButton;
+    internal Button CancelBurstButton => _cancelBurstButton;
     internal FocusCardViewModel FocusCard => _focusCard;
-    internal IReadOnlyList<StillOpenRowViewModel> StillOpenRows => _stillOpenRows;
     internal bool StillOpenVisible => _stillOpenList.Visible;
     internal int StillOpenVisibleRows => _stillOpenVisibleRows;
     internal string StillOpenRuleText => _stillOpenRule.Text;
     internal bool BurstTakeoverVisible => _burstTakeover.Visible;
     internal string BurstClosingText => _burstClosing.Text;
     internal View CardStateLabel => _cardState;
+    internal View CardMetaLabel => _cardMeta;
+    internal View CardClosingLabel => _cardClosing;
+    internal View StillOpenRuleLabel => _stillOpenRule;
     internal View ComposeRuleLabel => _composeRule;
+    internal string TopologyStatusText => _topologyStatus.Text;
 
     /// <summary>The rows the Operations payment area actually has, chrome removed.</summary>
     internal int OperationsPaymentAreaRows =>
@@ -2084,8 +2231,15 @@ public sealed class MainWindow : Window
     internal Task TriggerSubmitForTestAsync() => SubmitPaymentAsync();
     internal Task TriggerBurstForTestAsync() => RunBurstAsync();
     internal Task TriggerResendForTestAsync() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token));
-    internal Task TriggerQueryForTestAsync() => SurfaceAsync(
-        _controller.QueryOutcomeAsync(_focusCard.TransactionId ?? string.Empty, _sessionCancellation.Token));
+    /// <summary>
+    /// Goes through the production lookup rather than round the side of it, so the card's own
+    /// action and the <c>O</c> key are the paths under test.
+    /// </summary>
+    internal Task TriggerQueryForTestAsync()
+    {
+        LookUpCardOutcome();
+        return LastDispatchedTask ?? Task.CompletedTask;
+    }
     internal void TriggerCardActionForTest() => TriggerCardAction();
     internal Task TriggerLoadForTestAsync(int expectedUnique) => SurfaceAsync(
         _controller.RunLoadTestAsync(expectedUnique, _sessionCancellation.Token));

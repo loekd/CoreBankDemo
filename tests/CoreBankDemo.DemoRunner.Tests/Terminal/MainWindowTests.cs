@@ -112,17 +112,79 @@ public class MainWindowTests
         var controller = harness.CreateController();
         using var window = CreateWindow(controller);
 
+        // The lookup is anchored to the card, so with no payment on it the console says exactly
+        // that -- as a notice, because nothing was attempted and nothing failed.
         await window.TriggerQueryForTestAsync();
-        window.LastUiMessage.Should().Contain("Start or attach");
+        window.LastUiMessage.Should().Contain("nothing to look up");
+        window.AnnouncementIsFailureToned.Should().BeFalse("no verdict was reached, so none is announced");
+        controller.State.Evidence.Should().BeEmpty("nothing was attempted against a payment");
 
         await window.TriggerInspectForTestAsync(KnownEndpoints.PaymentsOutbox);
         window.LastUiMessage.Should().Contain("Start or attach");
+        window.AnnouncementIsFailureToned.Should().BeTrue("a command that ran and was refused is a proven failure");
+        // The refusal never became a request, so nothing else in the system will ever record it.
+        var inspect = controller.State.Evidence.Last();
+        inspect.Summary.Should().Contain("refused").And.Contain("Start or attach");
+        inspect.Succeeded.Should().BeFalse();
+        inspect.Method.Should().Be("(refused by the console)");
 
         await window.TriggerLoadForTestAsync(100);
         window.LastUiMessage.Should().Contain("Load Test requires");
 
         await window.TriggerExportForTestAsync();
         window.LastUiMessage.Should().Be("disk full");
+    }
+
+    /// <summary>
+    /// The lookup is the deliberate second opinion on the card's own payment: read-only, never
+    /// blocked by the single-action-in-flight rule, and reachable from the keyboard even while
+    /// the card's one slot is carrying Cancel payment.
+    /// </summary>
+    [Fact]
+    public async Task OutcomeLookup_ReachesTheCardsOwnPayment_FromTheSlotAndFromTheKeyboard()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.Zero));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "tx-8821",
+            CancellationToken.None);
+        window.RenderForTest();
+
+        // The slot is carrying Cancel payment, so the keyboard is the only path to the lookup.
+        window.FocusCard.ActionLabel.Should().Be(CardActions.Cancel);
+        window.HandleKeyForTest(Key.O).Should().BeTrue();
+        await window.LastDispatchedTask!;
+
+        harness.Payments.QueryProfiles.Should().ContainSingle();
+        controller.State.Evidence.Last().Summary.Should().Contain("Outcome query");
+
+        // A proven payment whose key is not safe to reuse carries the lookup in the slot itself,
+        // and firing it is the same call.
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Ambiguous, 0, null, "tx-8822", null, null, "reply lost", TimeSpan.Zero));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Omitted,
+            null,
+            CancellationToken.None);
+        harness.Feed.PushCompleted("tx-8822", new DateTimeOffset(2026, 8, 29, 12, 4, 31, TimeSpan.Zero));
+        window.RenderForTest();
+
+        controller.State.CanResendLastPayment.Should().BeFalse("an Omitted key is never safe to reuse");
+        window.FocusCard.ActionLabel.Should().Be(CardActions.LookUpOutcome);
+
+        window.TriggerCardActionForTest();
+        await window.LastDispatchedTask!;
+
+        harness.Payments.QueryProfiles.Should().HaveCount(2);
     }
 
     [Fact]
@@ -542,7 +604,9 @@ public class MainWindowTests
         await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
         using var window = CreateWindow(controller);
         window.ResizeForTest(100, 30);
-        for (var index = 0; index < 12; index++)
+        // Comfortably more open payments than the strip has rows, so the one that resolves
+        // cannot be mistaken for the clamp that keeps a shrinking list inside its own content.
+        for (var index = 0; index < 24; index++)
         {
             harness.Payments.Queue(new PaymentResult(
                 PaymentOutcome.Pending, 202, "payment-id", $"tx-{index}", "Pending", "{}", null, TimeSpan.Zero));
@@ -852,6 +916,10 @@ public class MainWindowTests
 
         window.BurstTakeoverVisible.Should().BeTrue(
             "on drain the takeover holds its final summary until the operator dismisses it");
+        // The two counter lines are never merged: a burst is exactly where "acknowledged" and
+        // "finished" diverge, and `still moving` draining to zero is the confirmation.
+        window.BurstStatusText.Should().StartWith("Sent").And.Contain("2 / 2");
+        window.BurstProvenStatusText.Should().StartWith("Settled").And.Contain("still moving 2");
         window.BurstClosingText.Should().BeEmpty(
             "two payments are still moving, so nothing may claim the burst proved itself");
 
@@ -862,6 +930,7 @@ public class MainWindowTests
 
         window.RenderForTest();
 
+        window.BurstProvenStatusText.Should().Contain("still moving 0");
         window.BurstClosingText.Should().Be("every payment proved itself · nothing left awaiting");
     }
 
@@ -984,6 +1053,188 @@ public class MainWindowTests
             window.BurstButton.Frame.Y,
             "the rule closes the bar beneath every line it grew");
         window.FocusCard.StateWord.Should().NotBeEmpty("the state word is never abbreviated to fit");
+    }
+
+    /// <summary>
+    /// The announcement inherited the removed band's job without inheriting its rows, and the
+    /// band was in every workspace. A refusal appears at the foot of whichever workspace is
+    /// active, where the operator is already looking — a refusal that could only be read in
+    /// Operations would leave the announcement carrying no copy at all of what it said.
+    /// </summary>
+    [Fact]
+    public async Task Announcement_IsReadableInEveryWorkspace_AndReservesNoRowWhenSilent()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.RenderForTest();
+
+        foreach (var workspace in Enum.GetValues<WorkspaceKind>())
+        {
+            window.AnnouncementVisibleIn(workspace).Should().BeFalse(
+                "an empty foot is the resting state in {0}",
+                workspace);
+        }
+
+        // A refusal the console produced itself, from the Resources workspace.
+        await window.TriggerResendForTestAsync();
+        window.RenderForTest();
+
+        foreach (var workspace in Enum.GetValues<WorkspaceKind>())
+        {
+            window.AnnouncementVisibleIn(workspace).Should().BeTrue(
+                "the same line is readable at the foot of {0}",
+                workspace);
+        }
+
+        window.AnnouncementLineText.Should().StartWith("✕").And.Contain("No retry-safe");
+        window.AnnouncementIsFailureToned.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A notice that is no verdict at all takes the neutral tone: the largest single-line
+    /// statement on the screen must never assert a failure that nothing has proved.
+    /// </summary>
+    [Fact]
+    public void Announcement_TakesTheToneOfTheThingItAnnounces()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+
+        window.HandleKeyForTest(Key.T);
+        window.RenderForTest();
+
+        window.AnnouncementLineText.Should().StartWith("○").And.Contain("Theme:");
+        window.AnnouncementIsFailureToned.Should().BeFalse("a palette switch proves nothing about anything");
+    }
+
+    /// <summary>
+    /// The takeover replaces every Operations surface, the announcement's row included, so it
+    /// carries its own rather than letting a refusal vanish behind the counters.
+    /// </summary>
+    [Fact]
+    public async Task Announcement_SurvivesTheBurstTakeover()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+        await window.TriggerBurstForTestAsync();
+        window.RenderForTest();
+        window.BurstTakeoverVisible.Should().BeTrue();
+
+        window.CancelBurstButton.InvokeCommand(Command.Accept);
+        window.RenderForTest();
+
+        window.AnnouncementVisibleIn(WorkspaceKind.Operations).Should().BeTrue(
+            "a refusal fired from the takeover has to be readable on it");
+        window.AnnouncementLineText.Should().Contain("No active burst");
+    }
+
+    /// <summary>
+    /// The takeover holds its result until dismissed, and Done is the only way back. If it were
+    /// ever unwired, Operations would be stuck on the summary with no route to the compose bar.
+    /// </summary>
+    [Fact]
+    public async Task BurstTakeover_Done_ReturnsTheWorkspaceToTheComposeBarAndCard()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+
+        await window.TriggerBurstForTestAsync();
+        window.RenderForTest();
+        window.BurstTakeoverVisible.Should().BeTrue("a drained burst holds its summary until dismissed");
+
+        window.BurstDismissButton.InvokeCommand(Command.Accept);
+
+        window.BurstTakeoverVisible.Should().BeFalse();
+        window.CardStateLabel.Visible.Should().BeTrue("the compose bar and the card come back");
+    }
+
+    /// <summary>
+    /// Resources answers "is it running?", which is the question every sentence on the console's
+    /// own topology status line is about. The removed bottom band used to carry it in all five
+    /// workspaces; losing it entirely would have cost the session a fact.
+    /// </summary>
+    [Fact]
+    public async Task TopologyStatusLine_IsReadableInResources()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        controller.SelectWorkspace(WorkspaceKind.Resources);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.RenderForTest();
+
+        window.TopologyStatusText.Should().Be(controller.State.StatusLine).And.NotBeEmpty();
+    }
+
+    /// <summary>
+    /// The card is budgeted first and everything else is compressed into what is left. This
+    /// asserts real laid-out frames rather than arithmetic on the constants that produced them:
+    /// the predecessor of this test caught a payment area squeezed to zero rows at two of the
+    /// three supported sizes, which constant arithmetic agreed with.
+    /// </summary>
+    [Theory]
+    [InlineData(80, 24)]
+    [InlineData(100, 30)]
+    [InlineData(120, 40)]
+    public async Task OperationsRegions_StayOnScreenAndNeverOverlap_AtEverySupportedTerminalSize(
+        int width,
+        int height)
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(width, height);
+        foreach (var id in new[] { "tx-1", "tx-2", "tx-3" })
+        {
+            harness.Payments.Queue(new PaymentResult(
+                PaymentOutcome.Pending, 202, "payment-id", id, "Pending", "{}", null, TimeSpan.Zero));
+            await controller.SubmitPaymentAsync(
+                new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+                IdempotencyMode.Supplied,
+                id,
+                CancellationToken.None);
+        }
+
+        window.RenderForTest();
+
+        var inner = window.CardStateLabel.SuperView!.Viewport.Height;
+        var meta = window.CardMetaLabel.Frame;
+        var closing = window.CardClosingLabel.Frame;
+        var rule = window.StillOpenRuleLabel.Frame;
+        var strip = window.StillOpenList.Frame;
+
+        window.StillOpenVisible.Should().BeTrue("three payments are open at {0}x{1}", width, height);
+        (meta.Y + meta.Height).Should().BeLessThanOrEqualTo(
+            inner, "the card's meta line is on screen at {0}x{1}", width, height);
+        strip.Height.Should().BeGreaterThanOrEqualTo(
+            2, "the strip never falls below two rows while more than one payment is open");
+        (strip.Y + strip.Height).Should().BeLessThanOrEqualTo(
+            inner, "the strip stays inside the workspace at {0}x{1}", width, height);
+        rule.Y.Should().Be(strip.Y - 1, "the captioned rule opens the strip");
+        meta.Y.Should().BeLessThan(rule.Y, "the card's grid never runs under the strip");
+        if (window.CardClosingLabel.Visible)
+        {
+            (closing.Y + closing.Height).Should().BeLessThanOrEqualTo(
+                rule.Y, "the closing block yields its rows to the strip rather than overlapping it");
+        }
     }
 
     private static MainWindow CreateWindow(

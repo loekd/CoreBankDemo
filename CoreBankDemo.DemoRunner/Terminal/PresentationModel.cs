@@ -169,11 +169,14 @@ public sealed record OperatorPresentationModel(
     bool CanStopOrSwitch,
     bool CanUseLoadTest,
     bool CanResend,
-    string OperationsHint,
     string ResourcesHint,
     string LoadHint,
     string ArmingCaption,
-    bool CanChangeArming);
+    bool CanChangeArming,
+    // What the console is doing or last did to the topology. Rendered in Resources, which is the
+    // workspace that owns the question it answers -- the removed bottom band showed it in all
+    // five, and Evidence/Results is where the durable record of it lives.
+    string TopologyStatus);
 
 public static class PresentationModelBuilder
 {
@@ -297,11 +300,13 @@ public static class PresentationModelBuilder
                 && state.ResourceAuthorityAvailable
                 && state.Topology?.IsReady == true,
             state.CanResendLastPayment && state.ActiveMutation is null,
-            OperationsHint(state),
             ResourcesHint(state),
             LoadHint(state),
             ArmingCaption(state),
-            state.Ownership == TopologyOwnership.None);
+            state.Ownership == TopologyOwnership.None,
+            state.ActiveMutation is null
+                ? state.StatusLine
+                : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running");
     }
 
     /// <summary>
@@ -399,7 +404,7 @@ public static class PresentationModelBuilder
             null,
             false);
 
-    internal const string OmittedNoCancelReason =
+    private const string OmittedNoCancelReason =
         "no transaction id yet — Omitted mode sends no key, so the bank names the payment "
         + "and the console cannot ask for it back";
 
@@ -414,38 +419,44 @@ public static class PresentationModelBuilder
         var http = $"HTTP {payment.HttpStatusCode} {payment.HttpOutcome}";
         switch (payment.State)
         {
+            // Two clocks, never one: the event's own ProcessedAt and the console's observed-at
+            // delta, above the legs that prove the money moved.
             case PaymentTrackingState.Settled:
-                return ("●", "SETTLED", Legs(payment));
+                return ("●", "SETTLED", Prefixed(ClockText(payment), Legs(payment)));
 
             case PaymentTrackingState.Rejected:
                 return ("✕", "REJECTED", Prefixed(
                     payment.Note,
-                    [$"ErrorReason: {payment.ErrorReason ?? "(none supplied)"}"]));
+                    Prefixed(ClockText(payment), [$"ErrorReason: {payment.ErrorReason ?? "(none supplied)"}"])));
 
             // The one payment state whose closing block holds two records instead of one,
             // because a contradiction *is* two records. Never resolved to either side.
             case PaymentTrackingState.Contradiction:
                 return ("✕", "CONTRADICTED",
                 [
-                    $"HTTP {payment.HttpOutcome} {OutcomeFeedNarrative.Clock(payment.SubmittedAt)}",
-                    $"broadcast {payment.BroadcastOutcome} {OutcomeFeedNarrative.Clock(payment.ProcessedAt)}",
+                    $"HTTP {payment.HttpOutcome} {OutcomeFeedNarrative.PreciseClock(payment.SubmittedAt)}",
+                    $"broadcast {payment.BroadcastOutcome} "
+                    + $"{OutcomeFeedNarrative.PreciseClock(payment.ProcessedAt)}, observed here "
+                    + $"+{ObservedDelta(payment)}",
                 ]);
 
             // The one place the console says *who* withdrew a payment, rather than only that it
             // was withdrawn. The outcome for the money is identical either way.
             case PaymentTrackingState.Cancelled when payment.HttpOutcome == PaymentOutcome.Cancelled:
-                return ("⊘", "CANCELLED BY THE RAIL",
-                [
-                    $"the instant rail ran out of time and withdrew it · {payment.HttpStatusCode} Cancelled",
-                    "no money moved · safe to retry with a new key",
-                ]);
+                return ("⊘", "CANCELLED BY THE RAIL", Prefixed(
+                    ClockText(payment),
+                    [
+                        $"the instant rail ran out of time and withdrew it · {payment.HttpStatusCode} Cancelled",
+                        "no money moved · safe to retry with a new key",
+                    ]));
 
             case PaymentTrackingState.Cancelled:
-                return ("⊘", "CANCELLED",
-                [
-                    "withdrawn before execution · no money moved",
-                    "safe to retry with a new key",
-                ]);
+                return ("⊘", "CANCELLED", Prefixed(
+                    ClockText(payment),
+                    [
+                        "withdrawn before execution · no money moved",
+                        "safe to retry with a new key",
+                    ]));
 
             case PaymentTrackingState.OutcomeUnknown:
                 return ("○", "OUTCOME UNKNOWN",
@@ -463,18 +474,26 @@ public static class PresentationModelBuilder
                     OutcomeQueryRemedy,
                 ]);
 
+            // Under injected faults a long wait is the expected result, so the card names the
+            // condition rather than letting the audience read the delay as a defect.
             default:
                 return ("~", "AWAITING SETTLEMENT",
                 [
-                    payment.AwaitingResponse
+                    (payment.AwaitingResponse
                         ? "waiting for the bank to answer"
-                        : $"submitted ──▶ {http} ──▶ waiting for the bank",
+                        : $"submitted ──▶ {http} ──▶ waiting for the bank")
+                    + AwaitingQualifier(state),
                 ]);
         }
     }
 
     private static IReadOnlyList<string> Prefixed(string? note, IReadOnlyList<string> lines) =>
         string.IsNullOrWhiteSpace(note) ? lines : [note, .. lines];
+
+    private static string ObservedDelta(TrackedPayment payment) =>
+        payment.ProcessedAt is { } processed && payment.ObservedAt is { } observed
+            ? $"{(observed - processed).TotalMilliseconds:F0} ms"
+            : "an unrecorded delay";
 
     /// <summary>
     /// Two legs per settlement and none per rejection, so the console must never label a payment
@@ -604,22 +623,25 @@ public static class PresentationModelBuilder
             : (string.Empty, false);
 
     /// <summary>
-    /// Under injected faults a long wait is the expected result, so the row names the condition
-    /// rather than letting the audience read the delay as a defect.
+    /// Under injected faults a long wait is the expected result, so the card names the condition
+    /// rather than letting the audience read the delay as a defect. Empty when nothing is being
+    /// injected: the region's own feed statement already says whether anyone is listening, so
+    /// repeating it here would be the duplication the Stage-focus layout exists to remove.
     /// </summary>
     private static string AwaitingQualifier(OperatorConsoleState state) =>
-        state.FaultsArmed && !state.Applied.IsAllZero ? "listening, faults in force" : "listening";
+        state.FaultsArmed && !state.Applied.IsAllZero ? " (faults in force)" : string.Empty;
 
     /// <summary>
     /// Two clocks, never one. Delivery latency belongs to the transport; presenting it as the
     /// bank's processing time would be the same class of lie as a written fault config reported
-    /// as a live one.
+    /// as a live one. Null where the outcome carried no clock of its own — a proven outcome the
+    /// console holds without an event stamp is a real case, not a gap to invent a figure for.
     /// </summary>
-    private static string ClockText(TrackedPayment payment)
+    private static string? ClockText(TrackedPayment payment)
     {
         if (payment.ProcessedAt is not { } processedAt || payment.ObservedAt is not { } observedAt)
         {
-            return "no event clocks recorded";
+            return null;
         }
 
         return $"ProcessedAt {OutcomeFeedNarrative.PreciseClock(processedAt)}, observed here "
@@ -637,8 +659,15 @@ public static class PresentationModelBuilder
     /// </summary>
     private static string StatusGlyph(bool succeeded) => succeeded ? "●" : "✕";
 
+    /// <summary>
+    /// A burst the operator stopped is captioned distinctly — never "drained in" — and states the
+    /// unsent remainder as its own figure, so a permanently partial run is never read as payments
+    /// that failed to prove themselves.
+    /// </summary>
     private static string BurstCaptionLine(BurstProgress burst) =>
-        $"BURST · {burst.Requested} payments{(burst.Cancelled ? " · stopped" : string.Empty)}";
+        burst.Cancelled
+            ? $"BURST · stopped · {burst.Sent} of {burst.Requested} sent"
+            : $"BURST · {burst.Requested} payments";
 
     /// <summary>
     /// What the API answered. Its denominator is always the run's <b>requested</b> count and
@@ -665,20 +694,25 @@ public static class PresentationModelBuilder
     /// </summary>
     private static string BurstClosingLine(BurstProgress burst)
     {
-        if (burst.Requested == 0)
+        if (burst.Requested == 0 || burst.Awaiting > 0)
         {
             return string.Empty;
         }
 
-        if (burst.Awaiting > 0)
+        // A drained burst is not the same thing as a proven burst. The unsent remainder of a
+        // stopped run counts against the claim exactly as a failed send and an unknown outcome
+        // do -- every payment the operator asked for and did not get an outcome for.
+        var unsent = Math.Max(0, burst.Requested - burst.Sent);
+        var shortfall = burst.Unknown + burst.Failed + unsent;
+        if (shortfall == 0)
         {
-            return string.Empty;
+            return "every payment proved itself · nothing left awaiting";
         }
 
-        var shortfall = burst.Unknown + burst.Failed;
-        return shortfall == 0
-            ? "every payment proved itself · nothing left awaiting"
-            : $"{shortfall} payments have unknown outcomes — see Evidence";
+        var noun = shortfall == 1 ? "payment has" : "payments have";
+        return unsent == shortfall
+            ? $"{shortfall} {noun} never been sent — see Evidence"
+            : $"{shortfall} {noun} unknown outcomes — see Evidence";
     }
 
     private static string FaultProvenance(EvidenceRecord record) =>

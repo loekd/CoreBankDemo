@@ -21,6 +21,7 @@ public class OperatorConsoleCancelTests
     {
         var (controller, harness) = await SubmittedAsync();
         harness.Payments.QueueCancellations(Answer(PaymentCancelOutcome.Cancelled, 200, "Cancelled"));
+        harness.Time.Advance(TimeSpan.FromSeconds(5));
 
         var result = await controller.CancelPaymentAsync("tx-8821", CancellationToken.None);
 
@@ -29,6 +30,14 @@ public class OperatorConsoleCancelTests
         row.State.Should().Be(PaymentTrackingState.Cancelled);
         row.IsOpen.Should().BeFalse("a proven withdrawal leaves the STILL OPEN strip");
         row.Note.Should().Be("withdrawn before execution · no money moved");
+        // Two clocks, never one -- and a final clock that is not zero. CoreBank publishes nothing
+        // at all for a replayed cancellation, so a card left waiting for an event to stamp it
+        // would read 0s for ever.
+        row.ProcessedAt.Should().Be(ProcessedAt);
+        row.ObservedAt.Should().NotBeNull();
+        (row.ObservedAt!.Value - row.SubmittedAt).Should().Be(
+            TimeSpan.FromSeconds(5),
+            "the card's final clock is a duration the room can read, not a permanent 0s");
         controller.State.Evidence.Last().Succeeded.Should().BeTrue();
         controller.State.Evidence.Last().Target.Should().Be(KnownEndpoints.TransactionCancel);
         harness.Payments.Cancellations.Single().Should().BeEquivalentTo(new PaymentCancellation(
@@ -272,8 +281,50 @@ public class OperatorConsoleCancelTests
         harness.Payments.Cancellations.Single().Currency.Should().Be("EUR");
     }
 
+    /// <summary>
+    /// A second press mid-sentence must not become a second cancellation, and the console-wide
+    /// lock is not what proves it here: this is the one path that bypasses <c>ActiveMutation</c>,
+    /// because a payment's own submission is not "some other action" its cancel waits behind.
+    /// </summary>
+    [Fact]
+    public async Task Cancel_ActivatedTwiceDuringItsOwnSubmission_StillDispatchesExactlyOne()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.Zero));
+        harness.Payments.QueueCancellations(Answer(PaymentCancelOutcome.Cancelled, 200, "Cancelled"));
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.CancelStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseCancel = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var submit = controller.SubmitPaymentAsync(
+            InstantPayment, IdempotencyMode.Supplied, "tx-8821", CancellationToken.None);
+        await harness.Payments.SubmissionStarted.Task;
+
+        // Both presses land while the submission holds the console-wide lock, so only the
+        // per-payment debounce can be what turns the second one away.
+        var first = controller.CancelPaymentAsync("tx-8821", CancellationToken.None);
+        await harness.Payments.CancelStarted.Task;
+        var second = await controller.CancelPaymentAsync("tx-8821", CancellationToken.None);
+
+        harness.Payments.ReleaseCancel.SetResult();
+        var firstResult = await first;
+        harness.Payments.ReleaseSubmission.SetResult();
+        await submit;
+
+        firstResult.Succeeded.Should().BeTrue();
+        second.Succeeded.Should().BeFalse();
+        harness.Payments.Cancellations.Should().ContainSingle();
+    }
+
+    private static readonly DateTimeOffset ProcessedAt = new(2026, 8, 29, 12, 4, 31, 882, TimeSpan.Zero);
+
     private static PaymentCancellationResult Answer(PaymentCancelOutcome outcome, int statusCode, string status) =>
-        new(outcome, statusCode, "tx-8821", status, "{}", null, TimeSpan.FromMilliseconds(6));
+        new(outcome, statusCode, "tx-8821", status, "{}", null, TimeSpan.FromMilliseconds(6), ProcessedAt);
 
     private static async Task<(OperatorConsoleController Controller, OperatorHarness Harness)> SubmittedAsync()
     {

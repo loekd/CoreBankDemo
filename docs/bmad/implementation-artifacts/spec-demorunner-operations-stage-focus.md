@@ -2,7 +2,7 @@
 title: 'DemoRunner Operations workspace: stage-focus layout and Cancel payment'
 type: 'feature'
 created: '2026-09-09'
-status: 'in-progress'
+status: 'in-review'
 baseline_commit: '66a81906f1abc8e4fed2fbeeac96fc80073642c1'
 review_loop_iteration: 0
 context:

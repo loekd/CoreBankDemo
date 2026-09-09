@@ -206,7 +206,6 @@ public class PresentationModelBuilderTests
     {
         var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty, Now);
 
-        model.OperationsHint.Should().Contain("No topology attached");
         // Operations has no workspace hint row any more, so the reason and its one-step remedy
         // live on the resting card's own disabled action instead.
         model.FocusCard.IsPlaceholder.Should().BeTrue();
@@ -228,7 +227,9 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.OperationsHint.Should().BeEmpty();
+        model.FocusCard.ActionReason.Should().Be(
+            "Fill the lines above and press Enter.",
+            "with a ready topology the resting card carries its ordinary invitation, not a reason");
         model.ResourcesHint.Should().BeEmpty();
         model.LoadHint.Should().BeEmpty();
     }
@@ -303,6 +304,31 @@ public class PresentationModelBuilderTests
         model.FeedStatus.Should().Be("Listening since 12:01:04 — events before this time were not observed");
     }
 
+    /// <summary>
+    /// Under injected faults a long wait is the <i>expected</i> result, so the card names the
+    /// condition rather than letting the audience read the delay as a defect. Ported from the
+    /// payment-row projection this layout replaced.
+    /// </summary>
+    [Fact]
+    public void Build_AwaitingCardUnderFaults_NamesTheConditionRatherThanImplyingADefect()
+    {
+        var quiet = PresentationModelBuilder.Build(Listening(Submitted()), Now).FocusCard;
+
+        var state = Listening(Submitted()) with
+        {
+            FaultsArmed = true,
+            AppliedFaults = FaultLevels.AllZero with { ErrorRatePercent = 40 },
+        };
+
+        var card = PresentationModelBuilder.Build(state, Now).FocusCard;
+
+        card.Closing.Should().ContainSingle().Which.Should().Contain("faults in force");
+        card.StateWord.Should().Be("AWAITING SETTLEMENT", "the condition is a qualifier, never a state");
+        quiet.Closing.Should().ContainSingle().Which.Should().NotContain(
+            "faults",
+            "a quiet session's card is not padded with a condition that is not in force");
+    }
+
     [Fact]
     public void Build_SecondOpenPayment_RendersTheStripWithTruncatedIdentifiers()
     {
@@ -337,7 +363,12 @@ public class PresentationModelBuilderTests
 
         card.Symbol.Should().Be("●");
         card.StateWord.Should().Be("SETTLED");
-        card.Closing.Should().Equal("1001  −250.00 → 4,750.00 EUR", "2002  +250.00 → 1,180.00 EUR");
+        // Two clocks, never one: the bank's own ProcessedAt and the console's delivery delta as
+        // two separate figures, above the legs that prove the money moved.
+        card.Closing.Should().Equal(
+            "ProcessedAt 12:04:31.882, observed here +222 ms",
+            "1001  −250.00 → 4,750.00 EUR",
+            "2002  +250.00 → 1,180.00 EUR");
         card.ActionLabel.Should().Be(CardActions.LookUpOutcome, "the payment is proven; there is nothing to cancel");
     }
 
@@ -549,11 +580,37 @@ public class PresentationModelBuilderTests
     {
         var drained = Listening() with { Burst = new BurstProgress(10, 10, 10, 0, 0, false, Settled: 10) };
         var shortfall = Listening() with { Burst = new BurstProgress(10, 10, 8, 0, 2, false, Settled: 8) };
+        var one = Listening() with { Burst = new BurstProgress(10, 10, 9, 0, 1, false, Settled: 9) };
 
         PresentationModelBuilder.Build(drained, Now).BurstClosing
             .Should().Be("every payment proved itself · nothing left awaiting");
         PresentationModelBuilder.Build(shortfall, Now).BurstClosing
             .Should().Be("2 payments have unknown outcomes — see Evidence");
+        PresentationModelBuilder.Build(one, Now).BurstClosing
+            .Should().Be("1 payment has unknown outcomes — see Evidence");
+    }
+
+    /// <summary>
+    /// A burst the operator stopped is captioned distinctly and never claims it proved itself:
+    /// the payments it never sent are payments the operator asked for and got no outcome for,
+    /// and the longest-lived sentence this console renders must not say otherwise.
+    /// </summary>
+    [Fact]
+    public void Build_StoppedBurst_NamesTheUnsentRemainderRatherThanClaimingItProvedItself()
+    {
+        var stopped = Listening() with
+        {
+            Burst = new BurstProgress(200, 120, 120, 0, 0, Cancelled: true, Settled: 120),
+        };
+
+        var model = PresentationModelBuilder.Build(stopped, Now);
+
+        model.BurstCaption.Should().Be("BURST · stopped · 120 of 200 sent");
+        model.BurstCaption.Should().NotContain("drained");
+        model.BurstStatus.Should().Contain("120 / 200", "the denominator never re-bases");
+        model.BurstClosing.Should().Be(
+            "80 payments have never been sent — see Evidence",
+            "a stopped burst is not a proven burst");
     }
 
     /// <summary>
@@ -596,10 +653,6 @@ public class PresentationModelBuilderTests
     }
 
     /// <summary>
-    /// Omitted mode sends no key, so the bank names the payment and there is no id to cancel
-    /// with. The action still renders — disabled, with the reason on the card.
-    /// </summary>
-    /// <summary>
     /// On dispatch the card's <i>action slot</i> — never its state — re-states itself, while the
     /// payment's own state and clock stay exactly as they were: asking is not an outcome.
     /// </summary>
@@ -620,6 +673,10 @@ public class PresentationModelBuilderTests
         card.Clock.Should().Be("14s", "the payment's own clock is untouched by the ask");
     }
 
+    /// <summary>
+    /// Omitted mode sends no key, so the bank names the payment and there is no id to cancel
+    /// with. The action still renders — disabled, with the reason on the card.
+    /// </summary>
     [Fact]
     public void Build_OmittedSubmissionWithNoId_RendersADisabledCancelWithItsReason()
     {

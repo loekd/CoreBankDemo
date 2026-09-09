@@ -850,7 +850,11 @@ public sealed class OperatorConsoleController
                     payment.TransactionId),
                 ct);
 
-            var (summary, message, succeeded) = ApplyCancellation(context, payment.TransactionId, result);
+            var (summary, message, succeeded) = ApplyCancellation(
+                context,
+                payment.TransactionId,
+                result,
+                _time.GetUtcNow());
             AddEvidence(
                 provenance,
                 EvidenceKind.Payment,
@@ -941,10 +945,17 @@ public sealed class OperatorConsoleController
     /// Turns the bank's answer into the row it justifies, and nothing more. Returns the evidence
     /// summary, the line the console announces, and whether the request itself succeeded.
     /// </summary>
+    /// <param name="observedAt">
+    /// The console's own clock when the bank's answer arrived. Stamped beside the bank's
+    /// <c>ProcessedAt</c> rather than instead of it -- two clocks, never one -- and it is what
+    /// stops a resolved cancellation's final clock reading <c>0s</c> for ever, since CoreBank
+    /// publishes nothing at all for a replayed cancellation.
+    /// </param>
     private (string Summary, string Message, bool Succeeded) ApplyCancellation(
         OperationContext context,
         string transactionId,
-        PaymentCancellationResult result)
+        PaymentCancellationResult result,
+        DateTimeOffset observedAt)
     {
         switch (result.Outcome)
         {
@@ -953,7 +964,7 @@ public sealed class OperatorConsoleController
                 // resolves the card on arrival; a transaction.cancelled broadcast, when one comes,
                 // confirms it rather than granting it -- and CoreBank publishes nothing at all for
                 // a replayed cancellation, so the card must never wait for one.
-                UpdateTrackedPayment(context, transactionId, row => row with
+                UpdateTrackedPayment(context, transactionId, row => Stamp(row, result, observedAt) with
                 {
                     State = PaymentTrackingState.Cancelled,
                     Note = "withdrawn before execution · no money moved",
@@ -966,7 +977,7 @@ public sealed class OperatorConsoleController
             case PaymentCancelOutcome.AlreadyCommitted:
             {
                 var committed = MapCommitted(result.Status);
-                UpdateTrackedPayment(context, transactionId, row => row with
+                UpdateTrackedPayment(context, transactionId, row => Stamp(row, result, observedAt) with
                 {
                     State = committed == PaymentOutcome.Failed
                         ? PaymentTrackingState.Rejected
@@ -982,7 +993,7 @@ public sealed class OperatorConsoleController
             case PaymentCancelOutcome.Refused when IsTerminalStatus(result.Status):
                 // A terminal status in a 409 body is an outcome the console has been *told*. A
                 // status the bank stated about its own row is proof; a refusal to act is not.
-                UpdateTrackedPayment(context, transactionId, row => row with
+                UpdateTrackedPayment(context, transactionId, row => Stamp(row, result, observedAt) with
                 {
                     State = PaymentTrackingState.Rejected,
                     Note = $"the bank reports status {result.Status}",
@@ -1016,6 +1027,20 @@ public sealed class OperatorConsoleController
         }
     }
 
+    /// <summary>
+    /// Attaches both clocks to a row the bank's own answer just resolved: the bank's
+    /// <c>ProcessedAt</c> where its body carried one, and the console's observed-at time always.
+    /// Neither overwrites a clock a broadcast already supplied.
+    /// </summary>
+    private static TrackedPayment Stamp(
+        TrackedPayment row,
+        PaymentCancellationResult result,
+        DateTimeOffset observedAt) => row with
+        {
+            ProcessedAt = row.ProcessedAt ?? result.ProcessedAt,
+            ObservedAt = row.ObservedAt ?? observedAt,
+        };
+
     private void UpdateTrackedPayment(
         OperationContext context,
         string transactionId,
@@ -1046,9 +1071,10 @@ public sealed class OperatorConsoleController
             : PaymentOutcome.Completed;
 
     /// <summary>
-    /// Whether a <c>409</c> body's status word is one the bank has finished with. Only these
-    /// move a payment off the strip; <c>Processing</c> and <c>Pending</c> say nothing about how
-    /// this payment ends.
+    /// Whether a <c>409</c> body's status word is one the bank has finished with. <c>Failed</c>
+    /// is the only one that reaches here: <c>Cancelled</c> is mapped to its own outcome by the
+    /// gateway, and <c>Processing</c> and <c>Pending</c> say nothing about how this payment ends,
+    /// so they leave it open.
     /// </summary>
     private static bool IsTerminalStatus(string? status) =>
         string.Equals(status?.Trim(), "Failed", StringComparison.OrdinalIgnoreCase);
@@ -1896,9 +1922,18 @@ public sealed class OperatorConsoleController
         }
         else
         {
+            // Omitted mode has no id, so the payment cannot be a tracked row and cannot be
+            // selected by one. The card still takes it -- a payment the console has sent and
+            // cannot yet describe is precisely the one it must not leave unrepresented -- which
+            // means the previous selection has to let go of the card the way any other new
+            // submission would take it.
             var startedAt = _time.GetUtcNow();
             Update(current => IsCurrent(context)
-                ? current with { UnidentifiedSubmission = new UnidentifiedSubmission(submission.Request, startedAt) }
+                ? current with
+                {
+                    UnidentifiedSubmission = new UnidentifiedSubmission(submission.Request, startedAt),
+                    SelectedPayment = null,
+                }
                 : current);
         }
 
@@ -1955,11 +1990,6 @@ public sealed class OperatorConsoleController
     }
 
     /// <summary>
-    /// Puts the payment on the focus card the moment it is sent, with its clock already running
-    /// and a live Cancel payment slot. Nothing is claimed about it: it carries no status code and
-    /// no outcome until the bank answers, and <see cref="TrackSubmittedPayment"/> fills both in.
-    /// </summary>
-    /// <summary>
     /// Points the card and the cancel path at the row a resend's key already names, without
     /// creating a second one for the same payment. Returns the id a cancel would have to use.
     /// </summary>
@@ -1978,6 +2008,11 @@ public sealed class OperatorConsoleController
         return id;
     }
 
+    /// <summary>
+    /// Puts the payment on the focus card the moment it is sent, with its clock already running
+    /// and a live Cancel payment slot. Nothing is claimed about it: it carries no status code and
+    /// no outcome until the bank answers, and <see cref="TrackSubmittedPayment"/> fills both in.
+    /// </summary>
     private string BeginTrackingSubmission(
         OperationContext context,
         PaymentSubmission submission,
@@ -2617,10 +2652,11 @@ public sealed class OperatorConsoleController
                     };
                 payments[index] = ApplyBuffered(answered, buffered, submittedAt);
                 applied = buffered.Count > 0;
-                // The card is what the compose bar's last act produced, so a submission takes the
-                // selection at the instant it is sent -- including a resend, which lands on the
-                // row it already has.
-                return state with { TrackedPayments = payments, SelectedPayment = transactionId };
+                return state with
+                {
+                    TrackedPayments = payments,
+                    SelectedPayment = SelectionAfterAnswer(state, pendingId, transactionId),
+                };
             }
 
             var row = new TrackedPayment(
@@ -2648,7 +2684,11 @@ public sealed class OperatorConsoleController
                 payments.RemoveRange(0, overflow);
             }
 
-            return state with { TrackedPayments = payments, SelectedPayment = transactionId };
+            return state with
+            {
+                TrackedPayments = payments,
+                SelectedPayment = SelectionAfterAnswer(state, pendingId, transactionId),
+            };
         });
 
         // A4: an evicted row's later broadcast is still this console's own payment.
@@ -2679,6 +2719,23 @@ public sealed class OperatorConsoleController
             transactionId,
             select: false);
     }
+
+    /// <summary>
+    /// Which payment the card holds once an answer lands. The submission took the selection at
+    /// the Submit keypress and the answer may re-key its row, so the card follows its own payment
+    /// through that rename — but only while that is still what the operator has selected. An
+    /// operator who moved to another open payment during the in-flight window keeps it: selection
+    /// is moved by the operator and by nothing else.
+    /// </summary>
+    private static string? SelectionAfterAnswer(
+        OperatorConsoleState state,
+        string? pendingId,
+        string transactionId) =>
+        state.SelectedPayment is null
+        || string.Equals(state.SelectedPayment, transactionId, StringComparison.Ordinal)
+        || (pendingId is not null && string.Equals(state.SelectedPayment, pendingId, StringComparison.Ordinal))
+            ? transactionId
+            : state.SelectedPayment;
 
     /// <summary>
     /// The state one submission's own answer justifies, and no more. A11: an Ambiguous or

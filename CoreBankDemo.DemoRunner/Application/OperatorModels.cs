@@ -309,6 +309,12 @@ public enum PaymentCancelOutcome
 }
 
 /// <param name="Status">The status word the bank's body carried, verbatim. Null when there was none.</param>
+/// <param name="ProcessedAt">
+/// The bank's own clock for the outcome it just stated, when its body carried one. Kept apart
+/// from the console's observed-at time, because delivery latency belongs to the transport and
+/// presenting it as the bank's processing time would be a lie of the same class as claiming a
+/// written fault config is a live fault.
+/// </param>
 public sealed record PaymentCancellationResult(
     PaymentCancelOutcome Outcome,
     int StatusCode,
@@ -316,7 +322,8 @@ public sealed record PaymentCancellationResult(
     string? Status,
     string? Body,
     string? ErrorSummary,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    DateTimeOffset? ProcessedAt = null);
 
 public sealed record InspectionResult(
     bool Succeeded,
