@@ -2,7 +2,7 @@
 title: 'DemoRunner Operations workspace: stage-focus layout and Cancel payment'
 type: 'feature'
 created: '2026-09-09'
-status: 'in-review'
+status: 'done'
 baseline_commit: '66a81906f1abc8e4fed2fbeeac96fc80073642c1'
 review_loop_iteration: 0
 context:
@@ -124,3 +124,55 @@ A console-fired cancel also comes back through the outcome feed as `com.corebank
 
 **Manual checks (if no CLI):**
 - Render Operations at 100×30 and at 80×24 through the existing `ResizeForTest`/`RenderForTest` seams and confirm the row budget and that nothing is hidden at either size.
+
+## Suggested Review Order
+
+**The screen the talk is given from**
+
+- Three regions on one surface; start here to see the shape the rest serves.
+  [`MainWindow.cs:378`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L378)
+
+- Which payment the card holds, and the seven state words it can wear.
+  [`PresentationModel.cs:339`](../../../CoreBankDemo.DemoRunner/Terminal/PresentationModel.cs#L339)
+
+- The row ladder: card budgeted first, strip yields before either neighbour.
+  [`MainWindow.cs:1700`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L1700)
+
+- Two captioned lines, a right-anchored action slot, and no currency field.
+  [`MainWindow.cs:397`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L397)
+
+- Renders only above one open payment; collapses to nothing, rule included.
+  [`MainWindow.cs:518`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L518)
+
+**Cancelling a payment**
+
+- Takes the lock, refuses with a record, never assumes the bank's answer.
+  [`OperatorConsoleController.cs:786`](../../../CoreBankDemo.DemoRunner/Application/OperatorConsoleController.cs#L786)
+
+- The four answers, and which of them may resolve a row. The heart of the story.
+  [`OperatorConsoleController.cs:954`](../../../CoreBankDemo.DemoRunner/Application/OperatorConsoleController.cs#L954)
+
+- The one lock concession: a cancel may run beside its own submission only.
+  [`OperatorConsoleController.cs:890`](../../../CoreBankDemo.DemoRunner/Application/OperatorConsoleController.cs#L890)
+
+- Maps on the body's status word; the HTTP code alone proves nothing.
+  [`HttpPaymentGateway.cs:94`](../../../CoreBankDemo.DemoRunner/Infrastructure/HttpPaymentGateway.cs#L94)
+
+- One allow-listed id reaches CoreBank; ADR-015 forbids operator-supplied URLs.
+  [`EndpointResolver.cs:47`](../../../CoreBankDemo.DemoRunner/Infrastructure/EndpointResolver.cs#L47)
+
+**What replaced the bottom band**
+
+- One announcement row per surface, reserving nothing while silent.
+  [`MainWindow.cs:599`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L599)
+
+- Every self-produced refusal becomes a record before it is ever announced.
+  [`OperatorConsoleController.cs:3247`](../../../CoreBankDemo.DemoRunner/Application/OperatorConsoleController.cs#L3247)
+
+**Tests worth reading**
+
+- One test per I/O-matrix row, including cancel beside its own submission.
+  [`OperatorConsoleCancelTests.cs:1`](../../../tests/CoreBankDemo.DemoRunner.Tests/Application/OperatorConsoleCancelTests.cs#L1)
+
+- Real laid-out frames at three terminal sizes, not arithmetic on constants.
+  [`MainWindowTests.cs:1`](../../../tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs#L1)
