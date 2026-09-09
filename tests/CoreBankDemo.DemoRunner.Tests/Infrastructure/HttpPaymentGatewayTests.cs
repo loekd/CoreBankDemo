@@ -349,6 +349,117 @@ public class HttpPaymentGatewayTests
         rejected.ErrorSummary.Should().Contain("400").And.Contain("Amount must be positive.");
     }
 
+    [Fact]
+    public async Task Cancel_PostsCoreBanksOwnTransactionRequestToItsOwnEndpoint()
+    {
+        Uri? capturedUri = null;
+        HttpMethod? capturedMethod = null;
+        string? capturedBody = null;
+        var handler = new StubHttpHandler(async request =>
+        {
+            capturedUri = request.RequestUri;
+            capturedMethod = request.Method;
+            capturedBody = await request.Content!.ReadAsStringAsync();
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"transactionId":"tx-1","status":"Cancelled","processedAt":"2026-09-09T12:00:00Z"}"""),
+            };
+        });
+        using var client = new HttpClient(handler);
+        var gateway = new HttpPaymentGateway(client);
+
+        var result = await gateway.CancelAsync(
+            TopologyProfile.LoadTests,
+            new PaymentCancellation("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", "tx-1"),
+            CancellationToken.None);
+
+        // Profile-independent, exactly like the outcome lookup: CoreBankAPI publishes the same
+        // port under both AppHosts.
+        capturedUri!.ToString().Should().Be("http://127.0.0.1:5032/api/transactions/cancel");
+        capturedMethod.Should().Be(HttpMethod.Post);
+        capturedBody.Should().Contain("\"FromAccount\"").And.Contain("\"TransactionId\":\"tx-1\"");
+        result.Outcome.Should().Be(PaymentCancelOutcome.Cancelled);
+        result.Status.Should().Be("Cancelled");
+        result.ErrorSummary.Should().BeNull();
+    }
+
+    /// <summary>
+    /// The body carries the business meaning, never the code alone: a <c>200</c> that answers
+    /// with a committed status is the bank saying it was too late, not a cancellation.
+    /// </summary>
+    [Theory]
+    [InlineData(HttpStatusCode.OK, "Cancelled", PaymentCancelOutcome.Cancelled)]
+    [InlineData(HttpStatusCode.OK, "Completed", PaymentCancelOutcome.AlreadyCommitted)]
+    [InlineData(HttpStatusCode.OK, "Failed", PaymentCancelOutcome.AlreadyCommitted)]
+    [InlineData(HttpStatusCode.Conflict, "Processing", PaymentCancelOutcome.Refused)]
+    [InlineData(HttpStatusCode.Conflict, "Pending", PaymentCancelOutcome.Refused)]
+    [InlineData(HttpStatusCode.Conflict, "Failed", PaymentCancelOutcome.Refused)]
+    public async Task Cancel_MapsTheBodysStatusWordRatherThanTheCodeAlone(
+        HttpStatusCode code,
+        string status,
+        PaymentCancelOutcome expected)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(code)
+            {
+                Content = new StringContent($$"""{"transactionId":"tx-1","status":"{{status}}"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+
+        var result = await gateway.CancelAsync(
+            TopologyProfile.Regular,
+            new PaymentCancellation("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", "tx-1"),
+            CancellationToken.None);
+
+        result.Outcome.Should().Be(expected);
+        result.Status.Should().Be(status);
+        result.StatusCode.Should().Be((int)code);
+    }
+
+    /// <summary>
+    /// Anything else asserts nothing about the payment: another status code, a status word the
+    /// console does not recognise, a body it cannot read, or a call that never came back.
+    /// </summary>
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest, """{"errors":["TransactionId is required"]}""")]
+    [InlineData(HttpStatusCode.OK, "<html>gateway</html>")]
+    [InlineData(HttpStatusCode.OK, """{"transactionId":"tx-1","status":"Elsewhere"}""")]
+    [InlineData(HttpStatusCode.Conflict, """{"transactionId":"tx-1","status":"Elsewhere"}""")]
+    public async Task Cancel_AnythingElse_IsATransportFailureThatLeavesThePaymentAlone(
+        HttpStatusCode code,
+        string body)
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(code) { Content = new StringContent(body) })));
+        var gateway = new HttpPaymentGateway(client);
+
+        var result = await gateway.CancelAsync(
+            TopologyProfile.Regular,
+            new PaymentCancellation("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", "tx-1"),
+            CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentCancelOutcome.TransportFailure);
+        result.ErrorSummary.Should().NotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public async Task Cancel_UnreachableCoreBank_ReportsTheExactTransportFailure()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            throw new HttpRequestException("connection refused")));
+        var gateway = new HttpPaymentGateway(client);
+
+        var result = await gateway.CancelAsync(
+            TopologyProfile.Regular,
+            new PaymentCancellation("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", "tx-1"),
+            CancellationToken.None);
+
+        result.Outcome.Should().Be(PaymentCancelOutcome.TransportFailure);
+        result.StatusCode.Should().Be(0);
+        result.ErrorSummary.Should().Contain("connection refused");
+    }
+
     private sealed class StubHttpHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

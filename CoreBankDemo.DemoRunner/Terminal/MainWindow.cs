@@ -15,39 +15,79 @@ namespace CoreBankDemo.DemoRunner.Terminal;
 #pragma warning disable CS0618
 public sealed class MainWindow : Window
 {
-    private const int RailWidthPreferred = 22;
+    /// <summary>
+    /// The navigation rail is the longest of the five labels plus its border and not one more:
+    /// <c>Load Test</c> with its active marker and one-key shortcut needs 14 cells, the divider
+    /// and margin 2. Padding in a persistent rail is paid for by every workspace at once, so the
+    /// six cells this gave back are six more for a payment's account identifiers
+    /// (DESIGN.md, Layout &amp; Spacing).
+    /// </summary>
+    private const int RailWidthPreferred = 16;
     private const int RailWidthCompact = 5;
     private const int ActionColumnWidth = 22;
 
     // Operations workspace column grid, sized so both columns still fit the
     // narrowest supported content area (80 columns minus the compact rail).
     private const int LabelX = 1;
-    private const int LabelWidth = 13;
-    private const int WideFieldWidth = 28;
-    private const int SecondLabelX = 45;
-    private const int SecondLabelWidth = 11;
     private const int NarrowFieldWidth = 10;
 
-    /// <summary>Rows 0-4 of the Operations form: the payment fields and the two mode buttons.</summary>
-    private const int FormFieldRows = 5;
-
-    /// <summary>Inner height at which the Operations form can afford its blank separator rows.</summary>
-    private const int SpaciousOperationsHeight = 22;
-
-    /// <summary>Rows the payment list keeps before the workspace hint is sacrificed for it.</summary>
-    private const int PaymentListMinimumRows = 2;
-
-    /// <summary>Rows reserved below the payment list for the feed status and the workspace hint.</summary>
-    private const int PaymentListBottomMargin = 2;
+    // The compose bar's own grid. Two eighteen-character IBANs and their captions consume most
+    // of the content line on their own, so the amount, the two chips and the second action
+    // cannot share their line -- and the captions are what stay, because an unlabelled IBAN read
+    // from the back of a room is a run of digits.
+    private const int AccountCaptionWidth = 5;
+    private const int AccountFieldWidth = 19;
+    private const int AmountCaptionWidth = 6;
+    private const int AmountFieldWidth = 8;
+    private const int ChipWidth = 19;
+    private const int RailChipX = 17;
+    private const int KeyChipX = 37;
 
     /// <summary>
-    /// Rows between the terminal's own height and the Operations workspace's inner area: the
-    /// window border (2), the topology bar (1), the three rows <c>_content</c>'s
-    /// <c>Dim.Fill(3)</c> reserves for the status/message/evidence band, the content frame's
-    /// border (2) and the workspace frame's border (2). Derived from <c>Frame.Height</c> rather
-    /// than read from <c>Viewport</c>, which is not yet recomputed when the responsive pass runs.
+    /// The narrowest content line on which the second compose line's chips and <c>Burst…</c>
+    /// still fit together. Below it the action wraps to a third line rather than shedding a
+    /// caption or hiding a control: no control in use is ever hidden at any width.
     /// </summary>
-    private const int OperationsChromeRows = 10;
+    private const int SecondComposeLineMinimumWidth = KeyChipX + ChipWidth + 1 + CardActionSlotWidth;
+
+    /// <summary>
+    /// Rows between the terminal's own height and a workspace's inner area: the window border
+    /// (2), the topology bar (1), the content frame's border (2) and the workspace frame's
+    /// border (2). The shell no longer carries a bottom band at all, which is where the three
+    /// rows it used to reserve went (DESIGN.md, Evidence strip — removed). Derived from
+    /// <c>Frame.Height</c> rather than read from <c>Viewport</c>, which is not yet recomputed
+    /// when the responsive pass runs.
+    /// </summary>
+    private const int OperationsChromeRows = 7;
+
+    /// <summary>The compose bar's two captioned lines, before any mode-specific third one.</summary>
+    private const int ComposeBarRows = 2;
+
+    /// <summary>
+    /// Sized to the longest label the slot will ever hold (<c>[ Look up outcome ]</c>), so
+    /// <c>[ Cancel payment ]</c> and <c>[ Resend same key ]</c> land where the eye already is.
+    /// </summary>
+    private const int CardActionSlotWidth = 20;
+
+    /// <summary>Right-aligned, fixed, so the clock does not shuffle sideways as the state resolves.</summary>
+    private const int ClockColumnWidth = 8;
+
+    /// <summary>
+    /// The rows the card never gives up: its state line, the blank beneath it, the request
+    /// detail, both accounts and the meta line. Everything else in the workspace is compressed
+    /// into what is left, because the card is where a payment states its own outcome.
+    /// </summary>
+    private const int CardMinimumRows = 5;
+
+    /// <summary>
+    /// The strip never falls below two rows while more than one payment is open: the outage
+    /// climax has a standard and an instant payment in flight at once, and a strip that could
+    /// not show both would make the operator choose which half of their own sentence to display.
+    /// </summary>
+    private const int StillOpenFloorRows = 2;
+
+    /// <summary>The transient announcement's row, and the feed status beneath it.</summary>
+    private const int OperationsBottomRows = 2;
 
     // Faults workspace grid. The value column is never sacrificed to preserve the track:
     // the number is authoritative and the bar is reinforcement, so degradation drops the
@@ -74,10 +114,10 @@ public sealed class MainWindow : Window
     private readonly Label _topologyBar = new() { X = 1, Y = 0, Height = 1, Width = Dim.Fill(22) };
     private readonly Button _aspireDashboardButton = NewButton("Aspire");
     private readonly Button _jaegerButton = NewButton("Jaeger");
-    private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = RailWidthPreferred, Height = Dim.Fill(3), Title = "WORKSPACES" };
-    private readonly FrameView _content = new() { X = RailWidthPreferred, Y = 1, Width = Dim.Fill(), Height = Dim.Fill(3) };
-    private readonly Label _statusLine = new() { X = 1, Y = Pos.AnchorEnd(3), Height = 1, Width = Dim.Fill(1) };
-    private readonly Label _messageLine = new() { X = 1, Y = Pos.AnchorEnd(2), Height = 1, Width = Dim.Fill(1) };
+    // Dim.Fill() rather than Dim.Fill(3): the removed bottom band is where those three rows of
+    // permanent chrome went, in all five workspaces (EXPERIENCE.md, Information Architecture).
+    private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = RailWidthPreferred, Height = Dim.Fill(), Title = "WORKSPACES" };
+    private readonly FrameView _content = new() { X = RailWidthPreferred, Y = 1, Width = Dim.Fill(), Height = Dim.Fill() };
 
     private readonly Button[] _navigationButtons;
     private readonly View _operationsView;
@@ -91,35 +131,56 @@ public sealed class MainWindow : Window
     private readonly TextField _fromAccount = new() { Text = "NL91ABNA0417164300" };
     private readonly TextField _toAccount = new() { Text = "NL20INGB0001234567" };
     private readonly TextField _amount = new() { Text = "1.00" };
-    private readonly TextField _currency = new() { Text = "EUR" };
     // Unique per console session on purpose. An idempotency key is a permanent
     // identity: a hard-coded default meant every "Supplied" submit in a new
     // session silently replayed whatever row a previous session had created
     // under that key, so the operator saw hours-old state and no fresh payment.
     // Typing a fixed key to demonstrate a replay is still one keystroke away.
     private readonly TextField _suppliedKey = new() { Text = NewSessionKey() };
-    private readonly TextField _outcomeKey = new();
     private readonly TextField _burstCount = new() { Text = "20" };
     private readonly TextField _burstConcurrency = new() { Text = "4" };
-    private readonly Button _railButton = NewButton("Rail: standard");
-    private readonly Button _idempotencyButton = NewButton("Idempotency: Generated");
-    private readonly Button _submitButton = NewButton("Submit payment", isDefault: true);
-    private readonly Button _resendButton = NewButton("Resend same key");
-    private readonly Button _burstButton = NewButton("Run bounded burst");
-    private readonly Button _cancelBurstButton = NewButton("Cancel active burst");
-    private readonly Button _queryButton = NewButton("Query outcome (blank = selected row)");
+    private readonly Button _railButton = NewButton("Rail ‹ standard ›");
+    private readonly Button _idempotencyButton = NewButton("Key ‹ Generated ›");
+    private readonly Button _submitButton = NewButton("Submit", isDefault: true);
+    private readonly Button _burstButton = NewButton("Burst…");
+    private readonly Button _startBurstButton = NewButton("Start burst");
+    private readonly Button _cancelBurstButton = NewButton("Stop sending");
+
+    // --- Operations: the two regions that replace each other -----------------------------
+    // A running burst *replaces* the compose bar, the focus card and the strip rather than
+    // rendering as one more object among them: during a burst the counters are the
+    // demonstration (EXPERIENCE.md, Burst takeover).
+    private View _operationsMain = null!;
+    private View _burstTakeover = null!;
+
+    // --- Operations: focus card ----------------------------------------------------------
+    private readonly Label _composeRule = new();
+    private readonly Label _cardState = new();
+    private readonly Label _cardClock = new();
+    private readonly Button _cardActionButton = NewButton(CardActions.Cancel);
+    private readonly Label _cardRequest = new();
+    private readonly Label _cardAccounts = new();
+    private readonly Label _cardMeta = new();
+    private readonly Label _cardClosing = new();
+
+    // --- Operations: STILL OPEN strip ----------------------------------------------------
+    // Bound through the shared ListBinding, which preserves both the selection and the scroll
+    // offset, so an arriving outcome never moves the strip under an operator who may be
+    // mid-sentence with a finger on a line.
+    private readonly Label _stillOpenRule = new();
+    private readonly ListView _stillOpenList = new();
+    private readonly Label _announcement = new();
+    private readonly Label _feedStatus = new();
+    private Label _modeLine = null!;
+    private Label _burstSetupLabel = null!;
+    private Label _burstConcurrencyLabel = null!;
+
+    // --- Operations: burst takeover ------------------------------------------------------
+    private readonly Label _burstRule = new();
     private readonly Label _burstStatus = new();
     private readonly Label _burstProvenStatus = new();
-    // Where a submitted payment resolves in place. Bound through the shared ListBinding, which
-    // preserves both the selection and the scroll offset, so an arriving outcome never moves
-    // the list under an operator who may be mid-sentence with a finger on a row.
-    private readonly ListView _paymentList = new();
-    private readonly Label _feedStatus = new();
-    private readonly Label _operationsHint = new();
-    private Label _omittedNote = null!;
-    private Label _burstCountLabel = null!;
-    private Label _concurrencyLabel = null!;
-    private Label _outcomeLabel = null!;
+    private readonly Label _burstClosing = new();
+    private readonly Button _burstDismissButton = NewButton("Done");
 
     private readonly ListView _resourceList = new();
     private readonly Button _startRegularButton = NewButton("Start Regular");
@@ -174,18 +235,27 @@ public sealed class MainWindow : Window
     private readonly ListBinding _resourceBinding;
     private readonly ListBinding _evidenceBinding;
     private readonly ListBinding _loadResultBinding;
-    private readonly ListBinding _paymentBinding;
+    private readonly ListBinding _stillOpenBinding;
 
     private PaymentRail _rail = PaymentRail.Standard;
     private IdempotencyMode _idempotencyMode = IdempotencyMode.Generated;
     private IReadOnlyList<ResourceRowViewModel> _resourceRows = [];
     private IReadOnlyList<EvidenceRowViewModel> _evidenceRows = [];
-    private IReadOnlyList<PaymentRowViewModel> _paymentRows = [];
-    private IReadOnlyList<long> _paymentLineOwners = [];
-    private bool _paymentSelectionIsDeliberate;
-    private bool _rebindingPaymentList;
+    private IReadOnlyList<StillOpenRowViewModel> _stillOpenRows = [];
+    private FocusCardViewModel _focusCard = FocusCardViewModel.Placeholder;
+    private bool _showStillOpen;
+    private int _stillOpenVisibleRows;
+    private bool _rebindingStillOpenList;
     private bool _rebindingEvidenceList;
     private bool _compactLayout;
+    private bool _burstSetupVisible;
+
+    /// <summary>
+    /// True while a burst is running or still holding its final summary. A result that clears
+    /// itself on completion is a result the room never got to read, so the takeover holds until
+    /// the operator dismisses it.
+    /// </summary>
+    private bool _burstTakeoverActive;
     private string _message = string.Empty;
     private long _messageMark = -1;
 
@@ -214,14 +284,15 @@ public sealed class MainWindow : Window
         _resourceBinding = new ListBinding(_resourceList);
         _evidenceBinding = new ListBinding(_evidenceList);
         _loadResultBinding = new ListBinding(_loadResults);
-        _paymentBinding = new ListBinding(_paymentList);
+        _stillOpenBinding = new ListBinding(_stillOpenList);
         Title = "CoreBankDemo — Operator Console";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
+        // Submit is Operations' single filled-teal control. Burst…, the card's own action and the
+        // takeover's dismiss take the object-anchored treatment instead -- and Cancel payment
+        // pointedly takes neither the destructive tokens (it destroys nothing) nor the
+        // lock-exempt outline (it is exempt from confirmation, never from the lock).
         OperatorTheme.Apply(_submitButton, OperatorTheme.ActionScheme);
-        OperatorTheme.Apply(_resendButton, OperatorTheme.ActionScheme);
-        OperatorTheme.Apply(_burstButton, OperatorTheme.ActionScheme);
-        OperatorTheme.Apply(_queryButton, OperatorTheme.ActionScheme);
         OperatorTheme.Apply(_resourceActionButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_restartResourceButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_stopButton, OperatorTheme.DestructiveScheme);
@@ -253,18 +324,6 @@ public sealed class MainWindow : Window
         _faultsView = BuildFaultsView();
         _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView, _faultsView];
 
-        var statusBar = new StatusBar(
-        [
-            new Shortcut("1", "Operations", () => ActivateWorkspace(WorkspaceKind.Operations)),
-            new Shortcut("2", "Resources", () => ActivateWorkspace(WorkspaceKind.Resources)),
-            new Shortcut("3", "Evidence", () => ActivateWorkspace(WorkspaceKind.Evidence)),
-            new Shortcut("4", "Load Test", () => ActivateWorkspace(WorkspaceKind.LoadTest)),
-            new Shortcut("5", "Faults", () => ActivateWorkspace(WorkspaceKind.Faults)),
-            new Shortcut("0", "Panic-off", () => Dispatch(() => SurfaceAsync(_controller.PanicOffAsync(_sessionCancellation.Token)))),
-            new Shortcut("R", "Refresh", () => Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token))),
-            new Shortcut("Q", "Quit", () => Dispatch(RequestExitAsync)),
-        ]);
-
         _aspireDashboardButton.X = Pos.AnchorEnd(21);
         _aspireDashboardButton.Y = 0;
         _jaegerButton.X = Pos.AnchorEnd(10);
@@ -280,7 +339,7 @@ public sealed class MainWindow : Window
             OpenKnownLink("Jaeger", KnownLinks.Jaeger);
         };
 
-        Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content, _statusLine, _messageLine, statusBar);
+        Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content);
         UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
@@ -291,24 +350,67 @@ public sealed class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// The Stage-focus Operations workspace: a two-line compose bar, one large focus card
+    /// carrying the selected payment's own action, and a STILL OPEN strip that renders only
+    /// while more than one payment is open. Its actions anchor to the object they operate on
+    /// rather than to a shared lower region, which this workspace no longer has: Submit and
+    /// Burst… belong to the compose bar whose contents they act on, and Cancel payment / Look up
+    /// outcome / Resend same key to the card, acting on the payment printed above them.
+    /// </summary>
     private View BuildOperationsView()
     {
         var view = NewWorkspace("OPERATIONS");
-        AddField(view, "From", _fromAccount, LabelX, 0, LabelWidth, WideFieldWidth);
-        AddField(view, "To", _toAccount, LabelX, 1, LabelWidth, WideFieldWidth);
-        AddField(view, "Amount", _amount, LabelX, 2, LabelWidth, NarrowFieldWidth);
-        AddField(view, "Currency", _currency, SecondLabelX, 2, SecondLabelWidth, NarrowFieldWidth);
-        AddField(view, "Supplied key", _suppliedKey, LabelX, 3, LabelWidth, WideFieldWidth);
+        _operationsMain = new View { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(), CanFocus = true };
+        _burstTakeover = new View { X = 0, Y = 0, Width = Dim.Fill(), Height = Dim.Fill(), CanFocus = true, Visible = false };
+        BuildComposeBar(_operationsMain);
+        BuildFocusCard(_operationsMain);
+        BuildStillOpenStrip(_operationsMain);
+        BuildBurstTakeover(_burstTakeover);
+        view.Add(_operationsMain, _burstTakeover);
+        return view;
+    }
 
-        _railButton.X = LabelX;
-        _railButton.Y = 4;
-        _idempotencyButton.X = Pos.Right(_railButton) + 2;
-        _idempotencyButton.Y = 4;
+    /// <summary>
+    /// Two captioned lines, each ending in a right-anchored action slot, plus a third line only
+    /// where a mode needs one. The captions are what stay at every width: an unlabelled IBAN read
+    /// from the back of a room is a run of digits. There is no currency field and no currency
+    /// validation — the console always sends EUR.
+    /// </summary>
+    private void BuildComposeBar(View view)
+    {
+        // Added in the workspace's literal Tab order: compose-bar first line (From, To, Submit),
+        // then the second (Amount, rail chip, idempotency chip, Burst…), then the third line
+        // where a mode renders one (EXPERIENCE.md, Accessibility Floor).
+        AddField(view, "From", _fromAccount, LabelX, 0, AccountCaptionWidth, AccountFieldWidth);
+        AddField(
+            view,
+            "→ To",
+            _toAccount,
+            LabelX + AccountCaptionWidth + AccountFieldWidth + 2,
+            0,
+            AccountCaptionWidth,
+            AccountFieldWidth);
+        view.Add(_submitButton);
+        AddField(view, "Amount", _amount, LabelX, 1, AmountCaptionWidth, AmountFieldWidth);
+        _railButton.X = RailChipX;
+        _railButton.Y = 1;
+        _railButton.Width = ChipWidth;
+        _idempotencyButton.X = KeyChipX;
+        _idempotencyButton.Y = 1;
+        _idempotencyButton.Width = ChipWidth;
+        _submitButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _submitButton.Y = 0;
+        _burstButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _burstButton.Y = 1;
+
+        view.Add(_railButton, _idempotencyButton, _burstButton);
+
         _railButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             _rail = _rail == PaymentRail.Standard ? PaymentRail.Instant : PaymentRail.Standard;
-            _railButton.Text = $"Rail: {_rail.ToString().ToLowerInvariant()}";
+            _railButton.Text = $"Rail ‹ {_rail.ToString().ToLowerInvariant()} ›";
         };
         _idempotencyButton.Accepting += (_, e) =>
         {
@@ -319,33 +421,139 @@ public sealed class MainWindow : Window
                 IdempotencyMode.Supplied => IdempotencyMode.Omitted,
                 _ => IdempotencyMode.Generated,
             };
-            _idempotencyButton.Text = $"Idempotency: {_idempotencyMode}";
-            // The note's row belongs to the payment list outside Omitted mode, so the ladder is
-            // re-run here rather than only on resize.
+            _idempotencyButton.Text = $"Key ‹ {_idempotencyMode} ›";
+            // The mode line costs a row only in the mode that needs it, so the ladder is re-run
+            // here rather than only on resize.
             ApplyOperationsRows();
         };
 
-        _omittedNote = new Label { X = LabelX, Y = 5, Height = 1, Width = Dim.Fill(1), Text = "Omitted mode: not retry-safe after an ambiguous outcome." };
-        view.Add(_omittedNote);
+        // The one mode-specific third line: the supplied-key field in Supplied mode, the
+        // not-retry-safe warning in Omitted mode. No control in use is ever hidden.
+        _modeLine = new Label { X = LabelX, Y = 2, Height = 1, Width = 14, Text = "Supplied key" };
+        _suppliedKey.X = LabelX + 15;
+        _suppliedKey.Y = 2;
+        _suppliedKey.Height = 1;
+        _suppliedKey.Width = AccountFieldWidth + 6;
+        view.Add(_modeLine, _suppliedKey);
 
-        _submitButton.X = LabelX;
-        _submitButton.Y = 7;
-        _resendButton.X = Pos.Right(_submitButton) + 2;
-        _resendButton.Y = 7;
+        // Burst… reveals the burst control rather than firing one: the count is bounded and the
+        // operator states it before two hundred payments leave.
+        _burstSetupLabel = new Label { X = LabelX, Y = 3, Height = 1, Width = 12, Text = "Burst count" };
+        _burstCount.X = LabelX + 13;
+        _burstCount.Y = 3;
+        _burstCount.Height = 1;
+        _burstCount.Width = NarrowFieldWidth;
+        _burstConcurrencyLabel = new Label { X = LabelX + 25, Y = 3, Height = 1, Width = 9, Text = "at once" };
+        _burstConcurrency.X = LabelX + 35;
+        _burstConcurrency.Y = 3;
+        _burstConcurrency.Height = 1;
+        _burstConcurrency.Width = NarrowFieldWidth;
+        _startBurstButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _startBurstButton.Y = 3;
+        view.Add(_burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency, _startBurstButton);
+
         _submitButton.Accepting += (_, e) => { e.Handled = true; Dispatch(SubmitPaymentAsync); };
-        _resendButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token))); };
+        _burstButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            _burstSetupVisible = !_burstSetupVisible;
+            ApplyOperationsRows();
+        };
+        _startBurstButton.Accepting += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
 
-        _burstCountLabel = AddField(view, "Burst count", _burstCount, LabelX, 9, LabelWidth, NarrowFieldWidth);
-        _concurrencyLabel = AddField(view, "Concurrency", _burstConcurrency, SecondLabelX, 9, SecondLabelWidth, NarrowFieldWidth);
-        _burstButton.X = LabelX;
-        _burstButton.Y = 10;
-        _cancelBurstButton.X = Pos.Right(_burstButton) + 2;
-        _cancelBurstButton.Y = 10;
-        _burstStatus.X = LabelX;
-        _burstStatus.Y = 11;
+        _composeRule.X = LabelX;
+        _composeRule.Y = ComposeBarRows;
+        _composeRule.Height = 1;
+        _composeRule.Width = Dim.Fill(1);
+        view.Add(_composeRule);
+    }
+
+    /// <summary>
+    /// The card's first line is a fixed grid — symbol, state word, right-aligned clock, action
+    /// slot at the right margin — so nothing on it moves as <c>AWAITING SETTLEMENT</c> resolves
+    /// to <c>SETTLED</c>. Beneath it the request detail, both accounts in full, the meta line
+    /// with the payment's own submit stamp, and exactly one closing block.
+    /// </summary>
+    private void BuildFocusCard(View view)
+    {
+        _cardState.X = LabelX + 2;
+        _cardState.Height = 1;
+        _cardState.Width = Dim.Fill(CardActionSlotWidth + ClockColumnWidth + 2);
+        _cardClock.X = Pos.AnchorEnd(CardActionSlotWidth + ClockColumnWidth + 1);
+        _cardClock.Height = 1;
+        _cardClock.Width = ClockColumnWidth;
+        _cardActionButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _cardActionButton.Accepting += (_, e) => { e.Handled = true; TriggerCardAction(); };
+
+        foreach (var label in new[] { _cardRequest, _cardAccounts, _cardMeta })
+        {
+            label.X = LabelX + 6;
+            label.Height = 1;
+            label.Width = Dim.Fill(1);
+        }
+
+        _cardClosing.X = LabelX + 6;
+        _cardClosing.Width = Dim.Fill(1);
+        view.Add(_cardState, _cardClock, _cardActionButton, _cardRequest, _cardAccounts, _cardMeta, _cardClosing);
+    }
+
+    private void BuildStillOpenStrip(View view)
+    {
+        _stillOpenRule.X = LabelX;
+        _stillOpenRule.Height = 1;
+        _stillOpenRule.Width = Dim.Fill(1);
+        _stillOpenList.X = LabelX;
+        _stillOpenList.Width = Dim.Fill(1);
+        // Moving selection through the strip re-points the card, and only the operator moves it.
+        _stillOpenList.ValueChanged += (_, _) =>
+        {
+            if (_rebindingStillOpenList || _stillOpenRows.Count == 0)
+            {
+                return;
+            }
+
+            var index = Math.Clamp(_stillOpenList.SelectedItem ?? 0, 0, _stillOpenRows.Count - 1);
+            _controller.SelectPayment(_stillOpenRows[index].TransactionId);
+        };
+
+        _announcement.X = LabelX;
+        _announcement.Y = Pos.AnchorEnd(OperationsBottomRows);
+        _announcement.Height = 1;
+        _announcement.Width = Dim.Fill(1);
+        _feedStatus.X = LabelX;
+        _feedStatus.Y = Pos.AnchorEnd(1);
+        _feedStatus.Height = 1;
+        _feedStatus.Width = Dim.Fill(1);
+        view.Add(_stillOpenRule, _stillOpenList, _announcement, _feedStatus);
+    }
+
+    /// <summary>
+    /// A running burst occupies the whole content area: its captioned rule names the run and
+    /// carries the region's feed statement beside the clock, its body is the two counter lines
+    /// and the bar, and its slot holds Stop sending while sending and Done once drained.
+    /// </summary>
+    private void BuildBurstTakeover(View view)
+    {
+        _burstRule.X = LabelX;
+        _burstRule.Y = 1;
+        _burstRule.Height = 1;
+        _burstRule.Width = Dim.Fill(1);
+        _burstStatus.X = LabelX + 5;
+        _burstStatus.Y = 4;
         _burstStatus.Height = 1;
         _burstStatus.Width = Dim.Fill(1);
-        _burstButton.Accepting += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
+        _burstProvenStatus.X = LabelX + 5;
+        _burstProvenStatus.Y = 6;
+        _burstProvenStatus.Height = 1;
+        _burstProvenStatus.Width = Dim.Fill(1);
+        _burstClosing.X = LabelX + 5;
+        _burstClosing.Y = 9;
+        _burstClosing.Height = 1;
+        _burstClosing.Width = Dim.Fill(1);
+        _cancelBurstButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _cancelBurstButton.Y = Pos.AnchorEnd(1);
+        _burstDismissButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _burstDismissButton.Y = Pos.AnchorEnd(1);
         _cancelBurstButton.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -354,55 +562,67 @@ public sealed class MainWindow : Window
                 ShowMessage("No active burst is available to cancel.");
             }
         };
-
-        _burstProvenStatus.X = LabelX;
-        _burstProvenStatus.Y = 12;
-        _burstProvenStatus.Height = 1;
-        _burstProvenStatus.Width = Dim.Fill(1);
-
-        _outcomeLabel = AddField(view, "Outcome key", _outcomeKey, LabelX, 14, LabelWidth, WideFieldWidth);
-        _queryButton.X = LabelX;
-        _queryButton.Y = 15;
-        _queryButton.Accepting += (_, e) =>
+        _burstDismissButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(OutcomeQueryTarget(), _sessionCancellation.Token)));
+            // The takeover holds its final summary until the operator dismisses it: a result
+            // that clears itself on completion is a result the room never got to read.
+            _burstTakeoverActive = false;
+            Repaint();
         };
+        view.Add(_burstRule, _burstStatus, _burstProvenStatus, _burstClosing, _cancelBurstButton, _burstDismissButton);
+    }
 
-        _paymentList.X = LabelX;
-        _paymentList.Y = 17;
-        _paymentList.Width = Dim.Fill(1);
-        _paymentList.Height = Dim.Fill(2);
-        // Only an operator's own selection may stand in for a blank outcome field. SelectedItem
-        // defaults to 0, so without this a blank field would quietly query the oldest payment.
-        _paymentList.ValueChanged += (_, _) =>
+    /// <summary>
+    /// Fires whichever of the three labels the card's one action slot is currently carrying. It
+    /// acts on the payment the card is showing, so it needs no target control and no
+    /// "which one?" step.
+    /// </summary>
+    private void TriggerCardAction()
+    {
+        var card = _focusCard;
+        switch (card.ActionLabel)
         {
-            if (!_rebindingPaymentList)
-            {
-                _paymentSelectionIsDeliberate = true;
-            }
-        };
+            case CardActions.ResendSameKey:
+                Dispatch(() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token)));
+                return;
 
-        _feedStatus.X = LabelX;
-        _feedStatus.Y = Pos.AnchorEnd(2);
-        _feedStatus.Height = 1;
-        _feedStatus.Width = Dim.Fill(1);
+            case CardActions.LookUpOutcome:
+                LookUpCardOutcome();
+                return;
 
-        LayoutHint(_operationsHint);
-        view.Add(
-            _railButton,
-            _idempotencyButton,
-            _submitButton,
-            _resendButton,
-            _burstButton,
-            _cancelBurstButton,
-            _burstStatus,
-            _burstProvenStatus,
-            _queryButton,
-            _paymentList,
-            _feedStatus,
-            _operationsHint);
-        return view;
+            default:
+                if (card.TransactionId is not { Length: > 0 } id)
+                {
+                    // Never hidden and never an empty slot: the reason is already printed on the
+                    // card, and pressing it says the same thing rather than nothing.
+                    ShowMessage(card.IsPlaceholder
+                        ? "No payment is on the card yet — submit one first."
+                        : PresentationModelBuilder.OmittedNoCancelReason);
+                    return;
+                }
+
+                // No confirmation modal: a cancellation destroys no state, and the bank's own
+                // answer is what the console will render either way.
+                Dispatch(() => SurfaceAsync(_controller.CancelPaymentAsync(id, _sessionCancellation.Token)));
+                return;
+        }
+    }
+
+    /// <summary>
+    /// The deliberate second opinion, on the payment the card already names. Read-only and never
+    /// blocked by the single-action-in-flight rule, so it stays reachable from the keyboard even
+    /// while the slot is carrying one of the other two labels.
+    /// </summary>
+    private void LookUpCardOutcome()
+    {
+        if (_focusCard.TransactionId is not { Length: > 0 } id)
+        {
+            ShowMessage("No payment on the card has a transaction id to look up.");
+            return;
+        }
+
+        Dispatch(() => SurfaceAsync(_controller.QueryOutcomeAsync(id, _sessionCancellation.Token)));
     }
 
     private View BuildResourcesView()
@@ -957,7 +1177,9 @@ public sealed class MainWindow : Window
             _fromAccount.Text.ToString() ?? string.Empty,
             _toAccount.Text.ToString() ?? string.Empty,
             amount,
-            _currency.Text.ToString() ?? string.Empty,
+            // Currency is not an operator input: there is no field and no validation rule, and
+            // the console always sends EUR (EXPERIENCE.md, Compose bar).
+            SettlementCurrency,
             _rail);
         await SurfaceAsync(_controller.SubmitPaymentAsync(
             request,
@@ -980,7 +1202,9 @@ public sealed class MainWindow : Window
             _fromAccount.Text.ToString() ?? string.Empty,
             _toAccount.Text.ToString() ?? string.Empty,
             amount,
-            _currency.Text.ToString() ?? string.Empty,
+            // Currency is not an operator input: there is no field and no validation rule, and
+            // the console always sends EUR (EXPERIENCE.md, Compose bar).
+            SettlementCurrency,
             _rail);
         await SurfaceAsync(_controller.RunBurstAsync(request, count, concurrency, _sessionCancellation.Token));
     }
@@ -1009,6 +1233,13 @@ public sealed class MainWindow : Window
     /// below and the column right of the button, which silently overwrote neighbouring
     /// fields and pushed bottom-anchored controls outside their frame.
     /// </summary>
+    /// <summary>
+    /// Every seeded demo account is denominated in EUR, which is the only thing that makes a
+    /// fixed currency safe to send. A caption beside a value the operator cannot change is chrome
+    /// that teaches the room nothing.
+    /// </summary>
+    private const string SettlementCurrency = "EUR";
+
     private static string NewSessionKey() => $"demo-key-{Guid.NewGuid():N}"[..17];
 
     private static Button NewButton(string text, bool isDefault = false) =>
@@ -1142,29 +1373,10 @@ public sealed class MainWindow : Window
             _evidenceDetail.Text = model.SelectedEvidenceDetail;
         }
 
-        _paymentRows = model.Payments;
-        _rebindingPaymentList = true;
-        try
-        {
-            _paymentBinding.Bind(model.Payments.Count == 0
-                ? ["○ No payments submitted this session"]
-                : [.. BuildPaymentLines(model.Payments)]);
-        }
-        finally
-        {
-            _rebindingPaymentList = false;
-        }
-
-        _feedStatus.Text = model.FeedStatus;
-
-        _statusLine.Text = model.MutationStatus;
-        RenderMessageLine(model);
-        _burstStatus.Text = model.BurstStatus;
-        _burstProvenStatus.Text = model.BurstProvenStatus;
+        RenderOperations(model);
         _loadStatus.Text = model.LoadPhaseStatus;
         _loadResultBinding.Bind(model.LoadResults);
 
-        _operationsHint.Text = Hint(model.OperationsHint);
         _resourcesHint.Text = Hint(model.ResourcesHint);
         _loadHint.Text = Hint(model.LoadHint);
         RenderFaults(model.Faults);
@@ -1172,8 +1384,8 @@ public sealed class MainWindow : Window
         _armingButton.Enabled = model.CanChangeArming;
 
         _submitButton.Enabled = !model.IsBusy;
-        _resendButton.Enabled = model.CanResend;
         _burstButton.Enabled = !model.IsBusy;
+        _startBurstButton.Enabled = !model.IsBusy;
         _cancelBurstButton.Enabled = model.CanCancelBurst;
         var state = _controller.State;
         _startRegularButton.Enabled = !model.IsBusy && state.Preflight?.CanStart(TopologyProfile.Regular) == true;
@@ -1193,7 +1405,6 @@ public sealed class MainWindow : Window
         _resourceActionButton.Enabled = !model.IsBusy && model.Resources.Any(row => row.CanMutate);
         _restartResourceButton.Enabled = !model.IsBusy && model.Resources.Any(row => row.CanRestart);
         _runLoadButton.Enabled = model.CanUseLoadTest && _controller.CanRunLoadTest;
-        _queryButton.Enabled = true;
         _aspireDashboardButton.Enabled = _controller.State.Topology?.DashboardUrl is not null;
         _jaegerButton.Enabled = _controller.State.Profile != TopologyProfile.None;
         _detailsButton.Enabled = true;
@@ -1229,101 +1440,132 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// Flattens the payment rows into Activity-row lines: a bold verb/object headline, its
-    /// muted detail beneath, and the balance legs in a fixed column. The order is submission
-    /// order and is never re-sorted, so a row that resolves stays exactly where it was.
+    /// Draws the three Operations regions, or the burst takeover that replaces all of them.
     /// </summary>
-    private IReadOnlyList<string> BuildPaymentLines(IReadOnlyList<PaymentRowViewModel> payments)
+    private void RenderOperations(OperatorPresentationModel model)
     {
-        var lines = new List<string>();
-        var owners = new List<long>();
-        foreach (var payment in payments)
+        _focusCard = model.FocusCard;
+        _stillOpenRows = model.StillOpen;
+        _showStillOpen = model.ShowStillOpen;
+
+        // A burst takes the workspace over while it runs, and holds its result until dismissed.
+        _burstTakeoverActive = _burstTakeoverActive || model.CanCancelBurst;
+        _operationsMain.Visible = !_burstTakeoverActive;
+        _burstTakeover.Visible = _burstTakeoverActive;
+
+        _cardState.Text = $"{model.FocusCard.Symbol}  {model.FocusCard.StateWord}";
+        _cardClock.Text = model.FocusCard.Clock;
+        _cardActionButton.Text = model.FocusCard.ActionLabel;
+        _cardActionButton.Enabled = model.FocusCard.ActionEnabled;
+        _cardRequest.Text = model.FocusCard.RequestDetail;
+        _cardAccounts.Text = model.FocusCard.Accounts;
+        _cardMeta.Text = model.FocusCard.Meta;
+        var closing = model.FocusCard.Closing.ToList();
+        if (!model.FocusCard.ActionEnabled && model.FocusCard.ActionReason.Length > 0)
         {
-            lines.Add($"{payment.Symbol} {payment.Headline}");
-            owners.Add(payment.Sequence);
-            lines.Add($"    {payment.Meta}");
-            owners.Add(payment.Sequence);
-            foreach (var leg in payment.Legs)
-            {
-                lines.Add($"    {leg}");
-                owners.Add(payment.Sequence);
-            }
-
-            if (payment.LegSummary.Length > 0)
-            {
-                lines.Add($"    {payment.LegSummary}");
-                owners.Add(payment.Sequence);
-            }
-
-            if (payment.Remedy.Length > 0)
-            {
-                lines.Add($"    {payment.Remedy}");
-                owners.Add(payment.Sequence);
-            }
+            // A disabled action always states its reason on the card rather than implying it.
+            closing.Add(model.FocusCard.ActionReason);
         }
 
-        _paymentLineOwners = owners;
-        return lines;
+        _cardClosing.Text = string.Join(Environment.NewLine, closing);
+
+        _rebindingStillOpenList = true;
+        try
+        {
+            _stillOpenBinding.Bind([.. model.StillOpen.Select(row => row.Line)]);
+        }
+        finally
+        {
+            _rebindingStillOpenList = false;
+        }
+
+        ApplyOperationsRows();
+
+        // The feed statement is made once for the region: on the strip's own captioned rule when
+        // the strip is showing, right-aligned at the foot of the card region when it is not, and
+        // on the takeover's rule while a burst holds the workspace. It is never blanked.
+        var surplus = model.StillOpen.Count - _stillOpenVisibleRows;
+        _stillOpenRule.Text = RuleText(
+            surplus > 0 ? $"STILL OPEN · +{surplus} more open" : "STILL OPEN",
+            model.FeedStatus,
+            RuleWidth());
+        _feedStatus.Text = model.FeedStatus;
+        _feedStatus.Visible = !_showStillOpen;
+        _composeRule.Text = new string('─', Math.Max(1, RuleWidth()));
+
+        _announcement.Text = AnnouncementText(model);
+        _announcement.SchemeName = _message.Length > 0 || model.AnnouncementIsFailure
+            ? OperatorTheme.DestructiveScheme
+            : OperatorTheme.BaseScheme;
+
+        _burstRule.Text = RuleText(model.BurstCaption, model.FeedStatus, RuleWidth());
+        _burstStatus.Text = model.BurstStatus;
+        _burstProvenStatus.Text = model.BurstProvenStatus;
+        _burstClosing.Text = model.BurstClosing;
+        _cancelBurstButton.Visible = model.CanCancelBurst;
+        _burstDismissButton.Visible = !model.CanCancelBurst;
     }
+
+    /// <summary>The workspace's usable inner line: 80 cells at 100 columns, 71 at the floor.</summary>
+    private int ContentWidth() =>
+        Math.Max(1, Frame.Width - (_compactLayout ? RailWidthCompact : RailWidthPreferred) - 4);
+
+    private int RuleWidth() => Math.Max(1, ContentWidth() - 2);
 
     /// <summary>
-    /// What the outcome query looks up: whatever the operator typed, or — when the field is
-    /// empty and a row was <i>deliberately</i> selected — that row's transaction id. The
-    /// one-step remedy a row with an unknown outcome names is therefore one step away, while a
-    /// blank field with no chosen row never quietly queries the oldest payment.
+    /// A captioned hairline: the caption interrupts its left end and a meta qualifier its right.
+    /// The qualifier is surrendered at no width — dropping it would leave a blank where the
+    /// console's most important sentence used to be, which reads as nothing being wrong.
     /// </summary>
-    internal string OutcomeQueryTarget()
+    private static string RuleText(string caption, string qualifier, int width)
     {
-        var typed = _outcomeKey.Text.ToString() ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(typed))
-        {
-            return typed;
-        }
-
-        if (!_paymentSelectionIsDeliberate || _paymentRows.Count == 0 || _paymentLineOwners.Count == 0)
-        {
-            return typed;
-        }
-
-        var index = Math.Clamp(_paymentList.SelectedItem ?? 0, 0, _paymentLineOwners.Count - 1);
-        var owner = _paymentLineOwners[index];
-        return _paymentRows.FirstOrDefault(payment => payment.Sequence == owner)?.TransactionId ?? typed;
+        var head = $"{caption} ";
+        var tail = $" {qualifier}";
+        var fill = width - head.Length - tail.Length;
+        return fill > 0 ? head + new string('─', fill) + tail : $"{caption} · {qualifier}";
     }
 
-    /// <summary>Marks the payment selection deliberate, as a real click or keypress would.</summary>
-    internal void SelectPaymentRowForTest(int index)
+    /// <summary>Marks a strip line selected, as a real click or keypress would.</summary>
+    internal void SelectStillOpenRowForTest(int index)
     {
-        _paymentList.SelectedItem = index;
-        _paymentSelectionIsDeliberate = true;
+        _stillOpenList.SelectedItem = index;
+        if (index >= 0 && index < _stillOpenRows.Count)
+        {
+            _controller.SelectPayment(_stillOpenRows[index].TransactionId);
+        }
     }
 
-    /// <summary>Scrolls the payment list, as a real wheel or arrow key would.</summary>
-    internal void ScrollPaymentListForTest(int offsetY) =>
-        _paymentList.Viewport = _paymentList.Viewport with
+    /// <summary>Scrolls the strip, as a real wheel or arrow key would.</summary>
+    internal void ScrollStillOpenListForTest(int offsetY) =>
+        _stillOpenList.Viewport = _stillOpenList.Viewport with
         {
-            Location = new Point(_paymentList.Viewport.Location.X, offsetY),
+            Location = new Point(_stillOpenList.Viewport.Location.X, offsetY),
         };
 
     private static string Hint(string hint) => hint.Length == 0 ? string.Empty : $"○ {hint}";
 
     /// <summary>
-    /// Keeps the most recent operator-facing message on screen until the operator's next
-    /// action produces evidence. Without the mark the 1.5 second poll erased every failure
-    /// message before it could be read.
+    /// The transient announcement's text. It takes the tone of the thing it announces and never
+    /// a fixed one: a refused or failed command is a proven failure and renders as one, while a
+    /// notice that is no verdict at all — a lost feed — renders in the neutral tone the rows
+    /// behind it are taking at that instant. It carries no fact that is not already durable: the
+    /// same line is an Evidence record from the moment it appears, refusals the console produced
+    /// itself included. It reserves no row when there is nothing to say.
+    /// <para>
+    /// The message survives until the operator's next action produces evidence. Without the mark
+    /// the 1.5 second poll erased every failure message before it could be read.
+    /// </para>
     /// </summary>
-    private void RenderMessageLine(OperatorPresentationModel model)
+    private string AnnouncementText(OperatorPresentationModel model)
     {
         var newestSequence = model.Evidence.Count == 0 ? -1 : model.Evidence[0].Sequence;
         if (_message.Length > 0 && newestSequence <= _messageMark)
         {
-            _messageLine.Text = $"✕ {_message}";
-            _messageLine.SchemeName = OperatorTheme.DestructiveScheme;
-            return;
+            return $"✕ {_message}";
         }
 
         _message = string.Empty;
-        _messageLine.Text = model.EvidenceStrip;
-        _messageLine.SchemeName = OperatorTheme.BaseScheme;
+        return model.Announcement.Length == 0 ? string.Empty : $"○ {model.Announcement}";
     }
 
     private void ApplyResponsiveLayout()
@@ -1349,62 +1591,95 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// Places the Operations form and, beneath it, the payment list.
+    /// Places the three Operations regions.
     /// <para>
-    /// The list is budgeted first and the form is compressed into what is left, because the list
-    /// is where a submitted payment states its own outcome. Row positions are derived from the
-    /// workspace's real inner height rather than from fixed constants: the constants counted rows
-    /// the workspace did not have, since they ignored both the FrameView's own border and the two
-    /// rows <see cref="Dim.Fill(int)"/> reserves at the bottom. The list was therefore squeezed to
-    /// zero rows on any terminal shorter than about 28 - including the documented 80x24 minimum
-    /// and the 100x30 preferred baseline, where it rendered a single row - so a submitted payment
-    /// appeared in Evidence but nowhere in Operations.
+    /// The focus card is budgeted <b>first</b> and everything else is compressed into what is
+    /// left, because the card is where a payment states its own outcome and the room reads it
+    /// from the back. Rows are surrendered in a fixed order: the blank rows separating the
+    /// regions first; then the STILL OPEN strip, which yields before either of the others and
+    /// never falls below two rows while more than one payment is open; then the card's closing
+    /// block, which is narration the operator can also simply say aloud. Beyond that the card
+    /// yields nothing: its state word, its clock and its action are the last things on this
+    /// screen, in that order. Nothing is ever hidden — a surplus the strip cannot show is stated
+    /// on its rule as an explicit count.
     /// </para>
     /// </summary>
     private void ApplyOperationsRows()
     {
         var inner = Math.Max(0, Frame.Height - OperationsChromeRows);
 
-        // The note speaks only about Omitted mode, so outside that mode it is a row of noise and
-        // the first one reclaimed.
-        _omittedNote.Visible = _idempotencyMode == IdempotencyMode.Omitted;
-        var note = _omittedNote.Visible ? 1 : 0;
+        // Where the chips and Burst… cannot share the second line they wrap to a third rather
+        // than shedding a caption: the wrap is the only legal answer, because nothing is ever
+        // hidden (EXPERIENCE.md, Operations compose bar at the 80x24 floor).
+        var wrapped = ContentWidth() < SecondComposeLineMinimumWidth;
+        _burstButton.Y = wrapped ? ComposeBarRows : 1;
+        var wrapRows = wrapped ? 1 : 0;
 
-        // The blank rows separating the three form groups are cosmetic, so they give way next.
-        var gap = inner >= SpaciousOperationsHeight ? 1 : 0;
+        // The mode line speaks only about Supplied and Omitted mode, so in Generated mode it is a
+        // row of noise and the first one reclaimed.
+        var supplied = _idempotencyMode == IdempotencyMode.Supplied;
+        var omitted = _idempotencyMode == IdempotencyMode.Omitted;
+        _modeLine.Visible = supplied || omitted;
+        _suppliedKey.Visible = supplied;
+        _modeLine.Text = supplied
+            ? "Supplied key"
+            : "Omitted mode: not retry-safe after an ambiguous outcome";
+        _modeLine.Width = supplied ? 14 : Dim.Fill(1);
 
-        var submit = FormFieldRows + note + gap;
-        var burst = submit + 1 + gap;
-        // Burst occupies four rows: the count/concurrency fields, the buttons, the HTTP leg and
-        // the proven leg.
-        var outcome = burst + 4 + gap;
-        var query = outcome + 1;
-        var list = query + 1 + gap;
+        _burstSetupLabel.Visible = _burstSetupVisible;
+        _burstCount.Visible = _burstSetupVisible;
+        _burstConcurrencyLabel.Visible = _burstSetupVisible;
+        _burstConcurrency.Visible = _burstSetupVisible;
+        _startBurstButton.Visible = _burstSetupVisible;
 
-        _submitButton.Y = submit;
-        _resendButton.Y = submit;
-        _burstCountLabel.Y = burst;
-        _burstCount.Y = burst;
-        _concurrencyLabel.Y = burst;
-        _burstConcurrency.Y = burst;
-        _burstButton.Y = burst + 1;
-        _cancelBurstButton.Y = burst + 1;
-        _burstStatus.Y = burst + 2;
-        _burstProvenStatus.Y = burst + 3;
-        _outcomeLabel.Y = outcome;
-        _outcomeKey.Y = outcome;
-        _queryButton.Y = query;
+        var modeRow = ComposeBarRows + wrapRows;
+        var burstRow = modeRow + (_modeLine.Visible ? 1 : 0);
+        var ruleRow = burstRow + (_burstSetupVisible ? 1 : 0);
+        _modeLine.Y = modeRow;
+        _suppliedKey.Y = modeRow;
+        foreach (var view in new View[] { _burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency, _startBurstButton })
+        {
+            view.Y = burstRow;
+        }
 
-        // The list never gives up its last rows. When even the compressed ladder cannot leave it
-        // PaymentListMinimumRows, the workspace hint surrenders its row and the feed status moves
-        // down into it -- the hint restates what the controls already say, while the feed status
-        // is load-bearing (an unresolved payment must never look awaited while nothing is
-        // listening) and so is kept.
-        var tight = inner - list - PaymentListBottomMargin < PaymentListMinimumRows;
-        _operationsHint.Visible = !tight;
-        _feedStatus.Y = Pos.AnchorEnd(tight ? 1 : 2);
-        _paymentList.Y = list;
-        _paymentList.Height = Dim.Fill(tight ? 1 : PaymentListBottomMargin);
+        _composeRule.Y = ruleRow;
+
+        // A blank row above the card's first line, so the card looks finished standing alone
+        // rather than like the top half of a layout that expects a list beneath it.
+        var cardTop = ruleRow + 2;
+        _cardState.Y = cardTop;
+        _cardClock.Y = cardTop;
+        _cardActionButton.Y = cardTop;
+        _cardRequest.Y = cardTop + 2;
+        _cardAccounts.Y = cardTop + 3;
+        _cardMeta.Y = cardTop + 4;
+        _cardClosing.Y = cardTop + 6;
+
+        var available = inner - OperationsBottomRows - cardTop - CardMinimumRows;
+        var rows = 0;
+        if (_showStillOpen && _stillOpenRows.Count > 0)
+        {
+            // One row per open payment, and the rule above them.
+            rows = Math.Clamp(_stillOpenRows.Count, 0, Math.Max(0, available - 1));
+            if (rows < StillOpenFloorRows)
+            {
+                rows = Math.Min(StillOpenFloorRows, Math.Max(0, available - 1));
+            }
+        }
+
+        _stillOpenVisibleRows = rows;
+        var stripShowing = rows > 0;
+        _showStillOpen = stripShowing;
+        _stillOpenRule.Visible = stripShowing;
+        _stillOpenList.Visible = stripShowing;
+        _stillOpenRule.Y = Pos.AnchorEnd(OperationsBottomRows + rows + 1);
+        _stillOpenList.Y = Pos.AnchorEnd(OperationsBottomRows + rows);
+        _stillOpenList.Height = Math.Max(1, rows);
+
+        // The closing block is narration and gives up its rows before the card's own grid does.
+        var closingRows = inner - OperationsBottomRows - (stripShowing ? rows + 1 : 0) - (cardTop + 6);
+        _cardClosing.Visible = closingRows > 0;
+        _cardClosing.Height = Math.Max(1, closingRows);
     }
 
     /// <summary>
@@ -1467,6 +1742,32 @@ public sealed class MainWindow : Window
         {
             key.Handled = true;
             PanicOff();
+            return true;
+        }
+
+        // R and Q were the removed StatusBar's only home. They survive as window-wide keys, so
+        // no capability left with the band -- keyboard parity is a floor, not a nicety.
+        if (key == Key.R || key == Key.R.WithShift)
+        {
+            key.Handled = true;
+            Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token));
+            return true;
+        }
+
+        if (key == Key.Q || key == Key.Q.WithShift)
+        {
+            key.Handled = true;
+            Dispatch(RequestExitAsync);
+            return true;
+        }
+
+        // The card's outcome lookup: read-only, never blocked by the single-action-in-flight
+        // rule, and reachable even while the card's one action slot is carrying Cancel payment
+        // or Resend same key.
+        if (key == Key.O || key == Key.O.WithShift)
+        {
+            key.Handled = true;
+            LookUpCardOutcome();
             return true;
         }
 
@@ -1673,8 +1974,8 @@ public sealed class MainWindow : Window
             : _controller.State.Evidence[^1].Sequence;
         RunOnUiThread(() =>
         {
-            _messageLine.Text = $"✕ {message}";
-            _messageLine.SchemeName = OperatorTheme.DestructiveScheme;
+            _announcement.Text = $"✕ {message}";
+            _announcement.SchemeName = OperatorTheme.DestructiveScheme;
         });
     }
 
@@ -1719,8 +2020,7 @@ public sealed class MainWindow : Window
     internal Task? LastDispatchedTask { get; private set; }
     internal WorkspaceKind VisibleWorkspace => _controller.State.ActiveWorkspace;
     internal int NavigationFrameWidth => _navigation.Frame.Width;
-    internal string StatusLineText => _statusLine.Text;
-    internal string MessageLineText => _messageLine.Text;
+    internal string AnnouncementLineText => _announcement.Text;
     internal string ResourcesHintText => _resourcesHint.Text;
     internal string LoadHintText => _loadHint.Text;
     internal bool IsWorkspaceVisible(WorkspaceKind workspace) => workspace switch
@@ -1736,11 +2036,26 @@ public sealed class MainWindow : Window
     internal TextField AmountField => _amount;
     internal TextField FromAccountField => _fromAccount;
     internal TextField ToAccountField => _toAccount;
-    internal TextField CurrencyField => _currency;
     internal TextField BurstCountField => _burstCount;
     internal TextField BurstConcurrencyField => _burstConcurrency;
     internal TextField ExpectedUniqueField => _expectedUnique;
     internal Button SubmitButton => _submitButton;
+    internal Button CardActionButton => _cardActionButton;
+    internal FocusCardViewModel FocusCard => _focusCard;
+    internal IReadOnlyList<StillOpenRowViewModel> StillOpenRows => _stillOpenRows;
+    internal bool StillOpenVisible => _stillOpenList.Visible;
+    internal int StillOpenVisibleRows => _stillOpenVisibleRows;
+    internal string StillOpenRuleText => _stillOpenRule.Text;
+    internal bool BurstTakeoverVisible => _burstTakeover.Visible;
+    internal string BurstClosingText => _burstClosing.Text;
+    internal View CardStateLabel => _cardState;
+    internal View ComposeRuleLabel => _composeRule;
+
+    /// <summary>The rows the Operations payment area actually has, chrome removed.</summary>
+    internal int OperationsPaymentAreaRows =>
+        Math.Max(0, Frame.Height - OperationsChromeRows - ComposeBarRows - 1);
+
+    internal int OperationsChromeRowCount => OperationsChromeRows;
     internal Button RailButton => _railButton;
     internal Button IdempotencyButton => _idempotencyButton;
     internal Button WrapButton => _wrapButton;
@@ -1770,20 +2085,23 @@ public sealed class MainWindow : Window
     internal Task TriggerBurstForTestAsync() => RunBurstAsync();
     internal Task TriggerResendForTestAsync() => SurfaceAsync(_controller.ResendLastPaymentAsync(_sessionCancellation.Token));
     internal Task TriggerQueryForTestAsync() => SurfaceAsync(
-        _controller.QueryOutcomeAsync(OutcomeQueryTarget(), _sessionCancellation.Token));
+        _controller.QueryOutcomeAsync(_focusCard.TransactionId ?? string.Empty, _sessionCancellation.Token));
+    internal void TriggerCardActionForTest() => TriggerCardAction();
     internal Task TriggerLoadForTestAsync(int expectedUnique) => SurfaceAsync(
         _controller.RunLoadTestAsync(expectedUnique, _sessionCancellation.Token));
     internal Task TriggerExportForTestAsync() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token));
     internal Task TriggerInspectForTestAsync(string endpoint) => SurfaceAsync(
         _controller.InspectAsync(endpoint, _sessionCancellation.Token));
     internal void TriggerResourceActionForTest() => TriggerSelectedResourceAction();
-    internal void RenderForTest() => Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
-    internal ListView PaymentList => _paymentList;
+    private void Repaint() => Render(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
+
+    internal void RenderForTest() => Repaint();
+    internal ListView StillOpenList => _stillOpenList;
     internal ListView EvidenceList => _evidenceList;
     internal int EvidenceRowCount => _evidenceList.Source?.Count ?? 0;
     internal string EvidenceDetailText => _evidenceDetail.Text;
-    internal IReadOnlyList<string> PaymentRowTexts =>
-        [.. _paymentList.Source?.ToList().Cast<string>() ?? []];
+    internal IReadOnlyList<string> StillOpenRowTexts =>
+        [.. _stillOpenList.Source?.ToList().Cast<string>() ?? []];
     internal string FeedStatusText => _feedStatus.Text;
     internal string BurstStatusText => _burstStatus.Text;
     internal string BurstProvenStatusText => _burstProvenStatus.Text;
@@ -1808,9 +2126,8 @@ public sealed class MainWindow : Window
     internal Task TriggerApplyFaultsForTestAsync() => SurfaceAsync(_controller.ApplyFaultsAsync(_sessionCancellation.Token));
     internal void TriggerArmingToggleForTest() => Surface(_controller.SetArming(!_controller.State.FaultArmingRequested));
     internal bool HandleKeyForTest(Key key) => OnKeyDown(key);
-    internal Button QueryButton => _queryButton;
-
-    internal bool OmittedNoteVisible => _omittedNote.Visible;
+    internal bool ModeLineVisible => _modeLine.Visible;
+    internal string ModeLineText => _modeLine.Text;
 
     internal void SetIdempotencyModeForTest(IdempotencyMode mode)
     {

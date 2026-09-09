@@ -28,6 +28,21 @@ public class EndpointResolverTests
         missingPath.Should().Throw<ArgumentException>();
     }
 
+    /// <summary>
+    /// The console reaches CoreBank's cancellation endpoint only through this allow-listed id:
+    /// ADR-015 forbids operator-supplied URLs, and Cancel adds no endpoint to any banking service.
+    /// </summary>
+    [Fact]
+    public void EndpointFor_TransactionCancel_IsAPostToCoreBanksOwnEndpointOnBothProfiles()
+    {
+        foreach (var profile in new[] { TopologyProfile.Regular, TopologyProfile.LoadTests })
+        {
+            var (url, method) = EndpointResolver.EndpointFor(profile, KnownEndpoints.TransactionCancel);
+            url.Should().Be("http://127.0.0.1:5032/api/transactions/cancel");
+            method.Should().Be(HttpMethod.Post);
+        }
+    }
+
     [Fact]
     public void LinkFor_AllowsOnlyAspireAndJaeger()
     {
@@ -47,6 +62,7 @@ public class EndpointResolverTests
     [InlineData(KnownEndpoints.PaymentsInbox, null, "5181/payments/inbox")]
     [InlineData(KnownEndpoints.CoreBankInbox, null, "5181/corebank/inbox")]
     [InlineData(KnownEndpoints.CoreBankOutbox, null, "5181/corebank/outbox")]
+    [InlineData(KnownEndpoints.TransactionCancel, null, "5032/api/transactions/cancel")]
     public void EndpointFor_AllCompiledEndpointsResolve(
         string endpoint,
         string? path,

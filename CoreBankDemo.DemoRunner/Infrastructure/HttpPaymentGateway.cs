@@ -82,6 +82,116 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
         }
     }
 
+    /// <summary>
+    /// Withdraws a payment through CoreBank's own cancellation endpoint. The mapping is driven by
+    /// the body's status word rather than by the HTTP code alone, exactly as
+    /// <see cref="MapOutcome"/> is: <c>200 Cancelled</c> is a withdrawal, a <c>200</c> carrying a
+    /// committed status is the bank saying it was too late, a <c>409</c> carries the row's current
+    /// status, and everything else — any other code, an unreadable body, a timeout, a dead
+    /// connection — asserts nothing about the payment.
+    /// </summary>
+    public async Task<PaymentCancellationResult> CancelAsync(
+        TopologyProfile profile,
+        PaymentCancellation cancellation,
+        CancellationToken ct)
+    {
+        var (url, method) = EndpointResolver.EndpointFor(profile, KnownEndpoints.TransactionCancel);
+        var payload = JsonSerializer.Serialize(new
+        {
+            cancellation.FromAccount,
+            cancellation.ToAccount,
+            cancellation.Amount,
+            cancellation.Currency,
+            cancellation.TransactionId,
+        });
+        using var request = new HttpRequestMessage(method, url)
+        {
+            Content = new StringContent(payload, Encoding.UTF8, "application/json"),
+        };
+
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            using var response = await httpClient.SendAsync(request, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            stopwatch.Stop();
+            var status = ReadStatusWord(body);
+            var code = (int)response.StatusCode;
+
+            if (string.IsNullOrWhiteSpace(status))
+            {
+                return new PaymentCancellationResult(
+                    PaymentCancelOutcome.TransportFailure,
+                    code,
+                    cancellation.TransactionId,
+                    null,
+                    body,
+                    $"CoreBankAPI answered the cancel with HTTP {code} and no readable status{Excerpt(body)}",
+                    stopwatch.Elapsed);
+            }
+
+            var outcome = MapOutcome(status);
+            return (code, outcome) switch
+            {
+                (200, PaymentOutcome.Cancelled) => Result(PaymentCancelOutcome.Cancelled, null),
+                // 200 carrying a committed status: the bank had already executed it, and says so
+                // with the response it committed. Never re-labelled as a cancellation.
+                (200, PaymentOutcome.Completed or PaymentOutcome.Failed) =>
+                    Result(PaymentCancelOutcome.AlreadyCommitted, null),
+                (409, not PaymentOutcome.TransportFailure) => Result(PaymentCancelOutcome.Refused, null),
+                _ => Result(
+                    PaymentCancelOutcome.TransportFailure,
+                    $"CoreBankAPI answered the cancel with HTTP {code} and status '{status}'{Excerpt(body)}"),
+            };
+
+            PaymentCancellationResult Result(PaymentCancelOutcome mapped, string? error) =>
+                new(mapped, code, cancellation.TransactionId, status, body, error, stopwatch.Elapsed);
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            stopwatch.Stop();
+            return new PaymentCancellationResult(
+                PaymentCancelOutcome.TransportFailure,
+                0,
+                cancellation.TransactionId,
+                null,
+                null,
+                "The cancel request timed out; the payment is left exactly as it was.",
+                stopwatch.Elapsed);
+        }
+        catch (HttpRequestException ex)
+        {
+            stopwatch.Stop();
+            return new PaymentCancellationResult(
+                PaymentCancelOutcome.TransportFailure,
+                0,
+                cancellation.TransactionId,
+                null,
+                null,
+                $"Could not reach CoreBankAPI to cancel: {ex.Message}",
+                stopwatch.Elapsed);
+        }
+    }
+
+    /// <summary>
+    /// The cancel response is a bare <c>TransactionResponse</c> — no <c>paymentId</c> — so the
+    /// submission parser's malformed rule does not apply to it. Only the status word is read.
+    /// </summary>
+    private static string? ReadStatusWord(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            return document.RootElement.ValueKind == JsonValueKind.Object
+                ? ReadString(document.RootElement, "status")
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     public Task<InspectionResult> QueryOutcomeAsync(
         TopologyProfile profile,
         string transactionIdOrKey,

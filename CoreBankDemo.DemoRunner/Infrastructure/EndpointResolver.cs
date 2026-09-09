@@ -42,6 +42,9 @@ public static class EndpointResolver
         KnownEndpoints.TransactionOutcome => (
             $"{CoreBankApiBaseUrl}/api/transactions/{Uri.EscapeDataString(RequirePathParameter(endpointId, pathParameter))}",
             HttpMethod.Get),
+        // Profile-independent, exactly like the outcome lookup above: CoreBankAPI publishes the
+        // same port under both AppHosts.
+        KnownEndpoints.TransactionCancel => ($"{CoreBankApiBaseUrl}/api/transactions/cancel", HttpMethod.Post),
         KnownEndpoints.LoadReset when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/reset", HttpMethod.Post),
         KnownEndpoints.LoadDrain when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/assert/drain", HttpMethod.Get),
         KnownEndpoints.LoadAssert when profile == TopologyProfile.LoadTests => ($"{LoadTestSupportBaseUrl}/assert/results", HttpMethod.Get),

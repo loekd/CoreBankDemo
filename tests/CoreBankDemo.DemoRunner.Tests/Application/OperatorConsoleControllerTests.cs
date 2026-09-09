@@ -978,7 +978,12 @@ public class OperatorConsoleControllerTests
         harness.Payments.Submissions.Single().IdempotencyKey.Should().BeNull();
         controller.State.CanResendLastPayment.Should().BeFalse();
         resend.Outcome.Should().Be(PaymentOutcome.Rejected);
-        controller.State.Evidence.Last().Summary.Should().Contain("Ambiguous");
+        controller.State.Evidence.Should().Contain(record => record.Summary.Contains("Ambiguous"));
+        // The refusal the console produced itself is a record too, written before its
+        // announcement is drawn -- the condition the removed bottom band's removal depends on.
+        controller.State.Evidence.Last().Summary.Should()
+            .Contain("Resend same key refused").And.Contain("No retry-safe");
+        controller.State.Evidence.Last().Succeeded.Should().BeFalse();
     }
 
     [Fact]

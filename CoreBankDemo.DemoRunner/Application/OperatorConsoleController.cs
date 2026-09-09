@@ -56,6 +56,16 @@ public sealed class OperatorConsoleController
     /// </summary>
     private OperationContext? _feedContext;
 
+    /// <summary>
+    /// The transaction id of the submission currently awaiting the bank's answer, if any. Read
+    /// only by <see cref="TryBeginPaymentCancel"/>, which is the one place a cancel is allowed
+    /// beside an in-flight action.
+    /// </summary>
+    private string? _inFlightSubmissionId;
+
+    /// <summary>Cancellations already dispatched, so a second press cannot become a second one.</summary>
+    private readonly HashSet<string> _cancelsInFlight = new(StringComparer.Ordinal);
+
     public OperatorConsoleController(
         IAspireAdapter aspire,
         IProcessAdapter processes,
@@ -199,6 +209,23 @@ public sealed class OperatorConsoleController
         Update(state => state with
         {
             SelectedEvidence = state.Evidence.FirstOrDefault(record => record.Sequence == sequence),
+        });
+    }
+
+    /// <summary>
+    /// Points the Operations focus card at one payment. Selection is moved by the operator and
+    /// by nothing else; an arriving event never calls this. An id that names no tracked payment
+    /// clears the selection rather than pinning the card to a row that is not there, exactly as
+    /// <see cref="SelectEvidence"/> does.
+    /// </summary>
+    public void SelectPayment(string transactionId)
+    {
+        Update(state => state with
+        {
+            SelectedPayment = state.TrackedPayments.Any(payment =>
+                string.Equals(payment.TransactionId, transactionId, StringComparison.Ordinal))
+                ? transactionId
+                : null,
         });
     }
 
@@ -735,23 +762,316 @@ public sealed class OperatorConsoleController
         var state = State;
         if (!state.CanResendLastPayment || state.LastPayment is null)
         {
-            return RejectedPayment("No retry-safe generated or supplied key is available.");
+            return RefusedPayment(
+                EvidenceKind.Payment,
+                "Resend same key",
+                KnownEndpoints.PaymentsSubmit,
+                "No retry-safe generated or supplied key is available.");
         }
 
         return await SubmitPaymentInternalAsync(state.LastPayment, isResend: true, ct);
     }
+
+    /// <summary>
+    /// Withdraws a payment that has no proven outcome yet, through CoreBank's own
+    /// <c>POST /api/transactions/cancel</c>. Fires immediately — no confirmation, because a
+    /// cancellation destroys nothing — but is <b>not</b> lock-exempt: it takes the
+    /// single-action-in-flight lock like every other mutating control, which also debounces a
+    /// second activation to exactly one dispatch.
+    /// <para>
+    /// The console never synthesises the outcome. Only the bank's own answer resolves the row;
+    /// a refusal, a timeout or an unreadable answer leaves the payment exactly where it was.
+    /// </para>
+    /// </summary>
+    public async Task<CommandResult> CancelPaymentAsync(string transactionId, CancellationToken ct)
+    {
+        const string action = "Cancel payment";
+        var state = State;
+        if (string.IsNullOrWhiteSpace(transactionId))
+        {
+            return RefusedCommand(
+                EvidenceKind.Payment,
+                action,
+                KnownEndpoints.TransactionCancel,
+                "This payment has no transaction id yet — Omitted mode sends no key, so the bank "
+                + "names the payment and the console cannot ask for it back.");
+        }
+
+        if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
+        {
+            return RefusedCommand(
+                EvidenceKind.Payment,
+                action,
+                KnownEndpoints.TransactionCancel,
+                "Start or attach a topology before cancelling a payment.");
+        }
+
+        var payment = state.TrackedPayments.FirstOrDefault(candidate =>
+            string.Equals(candidate.TransactionId, transactionId, StringComparison.Ordinal));
+        if (payment is null)
+        {
+            return RefusedCommand(
+                EvidenceKind.Payment,
+                action,
+                transactionId,
+                "No payment with that transaction id is tracked in this session.");
+        }
+
+        if (!payment.IsOpen)
+        {
+            return RefusedCommand(
+                EvidenceKind.Payment,
+                action,
+                transactionId,
+                $"This payment already has a proven outcome ({payment.State}); there is nothing to withdraw.");
+        }
+
+        if (!TryBeginPaymentCancel(payment.TransactionId, out var mutation, out var ownsLock))
+        {
+            return RefusedCommand(EvidenceKind.Payment, action, transactionId, BusyResult().Message);
+        }
+
+        var context = CaptureContext(state);
+        var provenance = Provenance(context);
+        Update(current => current with
+        {
+            CancellingPayment = payment.TransactionId,
+            CancellingSince = mutation.StartedAt,
+        });
+        try
+        {
+            var result = await _payments.CancelAsync(
+                context.Profile,
+                new PaymentCancellation(
+                    payment.FromAccount,
+                    payment.ToAccount,
+                    payment.Amount,
+                    payment.Currency,
+                    payment.TransactionId),
+                ct);
+
+            var (summary, message, succeeded) = ApplyCancellation(context, payment.TransactionId, result);
+            AddEvidence(
+                provenance,
+                EvidenceKind.Payment,
+                summary,
+                "POST",
+                KnownEndpoints.TransactionCancel,
+                result.StatusCode == 0 ? null : result.StatusCode,
+                result.Duration == TimeSpan.Zero ? TimeSpanSince(mutation.StartedAt) : result.Duration,
+                result.Body ?? result.ErrorSummary ?? string.Empty,
+                succeeded,
+                transactionId: payment.TransactionId);
+            return succeeded ? CommandResult.Ok(message) : CommandResult.Rejected(message);
+        }
+        finally
+        {
+            EndPaymentCancel(payment.TransactionId, ownsLock);
+        }
+    }
+
+    /// <summary>
+    /// Takes the single-action-in-flight lock for a cancellation, with exactly one narrow
+    /// concession: the submission of <i>this same payment</i> is not "some other action" the
+    /// cancel has to wait behind. An outstanding answer is that payment's own state, and that is
+    /// precisely what makes an instant payment's whole budget window cancellable
+    /// (EXPERIENCE.md, Cancel payment action). Any other mutation in flight refuses the cancel
+    /// exactly as it refuses every other mutating control, and a second activation for the same
+    /// payment is debounced to one dispatch.
+    /// </summary>
+    /// <param name="ownsLock">
+    /// True when this cancel took the console-wide lock and must release it; false when it is
+    /// running beside the submission that already holds it.
+    /// </param>
+    private bool TryBeginPaymentCancel(string transactionId, out ActiveMutation mutation, out bool ownsLock)
+    {
+        ownsLock = false;
+        mutation = new ActiveMutation(MutationKind.CancelPayment, $"Cancel {transactionId}", _time.GetUtcNow());
+        lock (_sync)
+        {
+            if (_shutdownRequested || !_cancelsInFlight.Add(transactionId))
+            {
+                return false;
+            }
+
+            if (_state.ActiveMutation is null)
+            {
+                ownsLock = true;
+                _activeMutationCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _state = _state with
+                {
+                    ActiveMutation = mutation,
+                    StatusLine = $"{MutationKind.CancelPayment}: {mutation.Target} — Running",
+                };
+            }
+            else if (_state.ActiveMutation.Kind != MutationKind.SubmitPayment
+                     || !string.Equals(_inFlightSubmissionId, transactionId, StringComparison.Ordinal))
+            {
+                _cancelsInFlight.Remove(transactionId);
+                return false;
+            }
+        }
+
+        if (ownsLock)
+        {
+            NotifyStateChanged();
+        }
+
+        return true;
+    }
+
+    private void EndPaymentCancel(string transactionId, bool ownsLock)
+    {
+        lock (_sync)
+        {
+            _cancelsInFlight.Remove(transactionId);
+        }
+
+        Update(state => string.Equals(state.CancellingPayment, transactionId, StringComparison.Ordinal)
+            ? state with { CancellingPayment = null, CancellingSince = null }
+            : state);
+
+        if (ownsLock)
+        {
+            EndMutation();
+        }
+    }
+
+    /// <summary>
+    /// Turns the bank's answer into the row it justifies, and nothing more. Returns the evidence
+    /// summary, the line the console announces, and whether the request itself succeeded.
+    /// </summary>
+    private (string Summary, string Message, bool Succeeded) ApplyCancellation(
+        OperationContext context,
+        string transactionId,
+        PaymentCancellationResult result)
+    {
+        switch (result.Outcome)
+        {
+            case PaymentCancelOutcome.Cancelled:
+                // CoreBank's own committed statement about its own row. It is the proof, and it
+                // resolves the card on arrival; a transaction.cancelled broadcast, when one comes,
+                // confirms it rather than granting it -- and CoreBank publishes nothing at all for
+                // a replayed cancellation, so the card must never wait for one.
+                UpdateTrackedPayment(context, transactionId, row => row with
+                {
+                    State = PaymentTrackingState.Cancelled,
+                    Note = "withdrawn before execution · no money moved",
+                });
+                return (
+                    $"{result.StatusCode} Cancelled — withdrawn before execution; no money moved, safe to retry with a new key",
+                    "200 Cancelled — withdrawn before execution · no money moved · safe to retry with a new key",
+                    true);
+
+            case PaymentCancelOutcome.AlreadyCommitted:
+            {
+                var committed = MapCommitted(result.Status);
+                UpdateTrackedPayment(context, transactionId, row => row with
+                {
+                    State = committed == PaymentOutcome.Failed
+                        ? PaymentTrackingState.Rejected
+                        : PaymentTrackingState.Settled,
+                    Note = "too late to cancel — the bank had already executed it",
+                });
+                return (
+                    $"{result.StatusCode} {result.Status} — too late to cancel; the bank had already executed it",
+                    $"too late to cancel — the bank had already executed it ({result.Status})",
+                    true);
+            }
+
+            case PaymentCancelOutcome.Refused when IsTerminalStatus(result.Status):
+                // A terminal status in a 409 body is an outcome the console has been *told*. A
+                // status the bank stated about its own row is proof; a refusal to act is not.
+                UpdateTrackedPayment(context, transactionId, row => row with
+                {
+                    State = PaymentTrackingState.Rejected,
+                    Note = $"the bank reports status {result.Status}",
+                });
+                return (
+                    $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
+                    $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
+                    false);
+
+            case PaymentCancelOutcome.Refused:
+                // The refusal was about this instant, not about the payment: it is left exactly
+                // where it was and the action slot returns to Cancel payment.
+                return (
+                    $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
+                    $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
+                    false);
+
+            default:
+            {
+                // Asking is not an outcome, and a cancel whose reply never arrived asserts
+                // neither success nor failure.
+                var detail = result.ErrorSummary
+                    ?? (result.StatusCode == 0
+                        ? "the cancel request did not complete"
+                        : $"CoreBankAPI answered HTTP {result.StatusCode}");
+                return (
+                    $"cancel failed — {detail}",
+                    $"cancel failed — {detail}. The payment is left exactly as it was.",
+                    false);
+            }
+        }
+    }
+
+    private void UpdateTrackedPayment(
+        OperationContext context,
+        string transactionId,
+        Func<TrackedPayment, TrackedPayment> update)
+    {
+        Update(state =>
+        {
+            if (!IsCurrent(context))
+            {
+                return state;
+            }
+
+            var index = IndexOfTrackedPayment(state, transactionId);
+            if (index < 0)
+            {
+                return state;
+            }
+
+            var payments = state.TrackedPayments.ToList();
+            payments[index] = update(payments[index]);
+            return state with { TrackedPayments = payments };
+        });
+    }
+
+    private static PaymentOutcome MapCommitted(string? status) =>
+        string.Equals(status?.Trim(), "Failed", StringComparison.OrdinalIgnoreCase)
+            ? PaymentOutcome.Failed
+            : PaymentOutcome.Completed;
+
+    /// <summary>
+    /// Whether a <c>409</c> body's status word is one the bank has finished with. Only these
+    /// move a payment off the strip; <c>Processing</c> and <c>Pending</c> say nothing about how
+    /// this payment ends.
+    /// </summary>
+    private static bool IsTerminalStatus(string? status) =>
+        string.Equals(status?.Trim(), "Failed", StringComparison.OrdinalIgnoreCase);
 
     public async Task<InspectionResult> QueryOutcomeAsync(string transactionIdOrKey, CancellationToken ct)
     {
         var state = State;
         if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
         {
-            return new InspectionResult(false, 0, "outcome", null, "Start or attach a topology before querying an outcome.", TimeSpan.Zero);
+            return RefusedInspection(
+                EvidenceKind.OutcomeQuery,
+                "Outcome query",
+                "outcome",
+                "Start or attach a topology before querying an outcome.");
         }
 
         if (string.IsNullOrWhiteSpace(transactionIdOrKey))
         {
-            return new InspectionResult(false, 0, "outcome", null, "Enter a transaction id or idempotency key.", TimeSpan.Zero);
+            return RefusedInspection(
+                EvidenceKind.OutcomeQuery,
+                "Outcome query",
+                "outcome",
+                "Enter a transaction id or idempotency key.");
         }
 
         var startedAt = _time.GetUtcNow();
@@ -776,7 +1096,11 @@ public sealed class OperatorConsoleController
         var state = State;
         if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
         {
-            return new InspectionResult(false, 0, endpointId, null, "Start or attach a topology before inspecting evidence.", TimeSpan.Zero);
+            return RefusedInspection(
+                EvidenceKind.Inspection,
+                $"Inspect {endpointId}",
+                endpointId,
+                "Start or attach a topology before inspecting evidence.");
         }
 
         var context = CaptureContext(state);
@@ -802,23 +1126,39 @@ public sealed class OperatorConsoleController
     {
         if (count < _options.MinimumBurstCount || count > _options.MaximumBurstCount)
         {
-            return CommandResult.Rejected($"Burst count must be between {_options.MinimumBurstCount} and {_options.MaximumBurstCount}.");
+            return RefusedCommand(
+                EvidenceKind.Burst,
+                "Burst",
+                $"{count} payments",
+                $"Burst count must be between {_options.MinimumBurstCount} and {_options.MaximumBurstCount}.");
         }
 
         if (concurrency < _options.MinimumBurstConcurrency || concurrency > _options.MaximumBurstConcurrency)
         {
-            return CommandResult.Rejected($"Burst concurrency must be between {_options.MinimumBurstConcurrency} and {_options.MaximumBurstConcurrency}.");
+            return RefusedCommand(
+                EvidenceKind.Burst,
+                "Burst",
+                $"{count} payments",
+                $"Burst concurrency must be between {_options.MinimumBurstConcurrency} and {_options.MaximumBurstConcurrency}.");
         }
 
         if (State.Profile == TopologyProfile.None || State.Ownership == TopologyOwnership.None)
         {
-            return CommandResult.Rejected("Start or attach a topology before running a burst.");
+            return RefusedCommand(
+                EvidenceKind.Burst,
+                "Burst",
+                $"{count} payments",
+                "Start or attach a topology before running a burst.");
         }
 
         var validation = PaymentInputValidator.Validate(new PaymentSubmission(template, IdempotencyMode.Generated, "burst-validation"));
         if (validation.Count > 0)
         {
-            return CommandResult.Rejected(string.Join(" ", validation));
+            return RefusedCommand(
+                EvidenceKind.Burst,
+                "Burst",
+                $"{count} payments",
+                string.Join(" ", validation));
         }
 
         if (!TryBeginMutation(MutationKind.PaymentBurst, $"{count} payments", out var mutation))
@@ -1509,25 +1849,59 @@ public sealed class OperatorConsoleController
         bool isResend,
         CancellationToken ct)
     {
+        var label = isResend ? "Resend same key" : "Submit payment";
         var validation = PaymentInputValidator.Validate(submission);
         if (validation.Count > 0)
         {
-            return RejectedPayment(string.Join(" ", validation));
+            return RefusedPayment(
+                EvidenceKind.Payment,
+                label,
+                KnownEndpoints.PaymentsSubmit,
+                string.Join(" ", validation));
         }
 
         var state = State;
         if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
         {
-            return RejectedPayment("Start or attach a topology before submitting a payment.");
+            return RefusedPayment(
+                EvidenceKind.Payment,
+                label,
+                KnownEndpoints.PaymentsSubmit,
+                "Start or attach a topology before submitting a payment.");
         }
 
         if (!TryBeginMutation(MutationKind.SubmitPayment, isResend ? "Resend payment" : "Submit payment", out var mutation))
         {
-            return RejectedPayment(BusyResult().Message);
+            return RefusedPayment(
+                EvidenceKind.Payment,
+                label,
+                KnownEndpoints.PaymentsSubmit,
+                BusyResult().Message);
         }
 
         var context = CaptureContext(State);
         var provenance = Provenance(context);
+        // The card takes the payment at the Submit keypress, before any answer exists. In
+        // Generated and Supplied modes the id *is* the idempotency key, so the console already
+        // holds it; Omitted mode has none, which is the one case the card says so and renders
+        // Cancel payment disabled with the reason.
+        var pendingId = submission.IdempotencyKey;
+        if (pendingId is { Length: > 0 })
+        {
+            // A resend's payment is already on the card: it lands on the row it already has and
+            // never gets a second one.
+            pendingId = isResend
+                ? AdoptExistingRow(context, pendingId)
+                : BeginTrackingSubmission(context, submission, pendingId);
+        }
+        else
+        {
+            var startedAt = _time.GetUtcNow();
+            Update(current => IsCurrent(context)
+                ? current with { UnidentifiedSubmission = new UnidentifiedSubmission(submission.Request, startedAt) }
+                : current);
+        }
+
         try
         {
             var result = await _payments.SubmitAsync(context.Profile, submission, ct);
@@ -1543,7 +1917,7 @@ public sealed class OperatorConsoleController
                 LastPayment = submission,
                 CanResendLastPayment = canResend,
             } : state);
-            TrackSubmittedPayment(context, submission, safeResult);
+            TrackSubmittedPayment(context, submission, safeResult, pendingId);
 
             var summary = safeResult.Outcome switch
             {
@@ -1570,7 +1944,110 @@ public sealed class OperatorConsoleController
         }
         finally
         {
+            ClearInFlightSubmission(pendingId);
+            if (pendingId is not { Length: > 0 })
+            {
+                Update(current => current with { UnidentifiedSubmission = null });
+            }
+
             EndMutation();
+        }
+    }
+
+    /// <summary>
+    /// Puts the payment on the focus card the moment it is sent, with its clock already running
+    /// and a live Cancel payment slot. Nothing is claimed about it: it carries no status code and
+    /// no outcome until the bank answers, and <see cref="TrackSubmittedPayment"/> fills both in.
+    /// </summary>
+    /// <summary>
+    /// Points the card and the cancel path at the row a resend's key already names, without
+    /// creating a second one for the same payment. Returns the id a cancel would have to use.
+    /// </summary>
+    private string AdoptExistingRow(OperationContext context, string idempotencyKey)
+    {
+        var existing = State.TrackedPayments.FirstOrDefault(payment =>
+            string.Equals(payment.TransactionId, idempotencyKey, StringComparison.Ordinal)
+            || string.Equals(payment.IdempotencyKey, idempotencyKey, StringComparison.Ordinal));
+        var id = existing?.TransactionId ?? idempotencyKey;
+        lock (_sync)
+        {
+            _inFlightSubmissionId = id;
+        }
+
+        Update(state => IsCurrent(context) ? state with { SelectedPayment = id } : state);
+        return id;
+    }
+
+    private string BeginTrackingSubmission(
+        OperationContext context,
+        PaymentSubmission submission,
+        string transactionId)
+    {
+        lock (_sync)
+        {
+            _inFlightSubmissionId = transactionId;
+        }
+
+        var submittedAt = _time.GetUtcNow();
+        var evicted = new List<string>();
+        Update(state =>
+        {
+            // Only a row that has not been answered yet can be this same submission; a row the
+            // bank has already named is a payment of its own, whatever key it went out under.
+            var existing = state.TrackedPayments.FirstOrDefault(payment =>
+                payment.AwaitingResponse
+                && string.Equals(payment.IdempotencyKey, transactionId, StringComparison.Ordinal));
+            if (!IsCurrent(context) || existing is not null)
+            {
+                return state with { SelectedPayment = existing?.TransactionId ?? transactionId };
+            }
+
+            var payments = state.TrackedPayments.ToList();
+            payments.Add(new TrackedPayment(
+                Interlocked.Increment(ref _paymentSequence),
+                transactionId,
+                submission.Request.Rail,
+                submission.Request.Amount,
+                submission.Request.Currency,
+                submission.Request.FromAccount,
+                submission.Request.ToAccount,
+                submittedAt,
+                PaymentOutcome.Pending,
+                // Never a status code the console did not receive.
+                0,
+                // Never "Awaiting settlement" without a feed: nothing is awaiting anything.
+                state.Feed.IsListening ? PaymentTrackingState.Awaiting : PaymentTrackingState.NotObserved,
+                Note: state.Feed.IsListening ? null : NoFeedNote(state.Feed),
+                AwaitingResponse: true,
+                IdempotencyKey: transactionId));
+            if (payments.Count > _options.MaximumTrackedPayments)
+            {
+                var overflow = payments.Count - _options.MaximumTrackedPayments;
+                evicted.AddRange(payments.Take(overflow).Select(payment => payment.TransactionId));
+                payments.RemoveRange(0, overflow);
+            }
+
+            return state with { TrackedPayments = payments, SelectedPayment = transactionId };
+        });
+
+        // An evicted row's later broadcast is still this console's own payment.
+        foreach (var id in evicted)
+        {
+            _retiredTransactions.Add(id);
+        }
+
+        return transactionId;
+    }
+
+    private void ClearInFlightSubmission(string? transactionId)
+    {
+        lock (_sync)
+        {
+            if (transactionId is not null
+                && string.Equals(_inFlightSubmissionId, transactionId, StringComparison.Ordinal))
+            {
+                _inFlightSubmissionId = null;
+            }
         }
     }
 
@@ -2056,10 +2533,17 @@ public sealed class OperatorConsoleController
             : state);
     }
 
+    /// <param name="pendingId">
+    /// The id the row was provisionally created under at the Submit keypress, when there was one.
+    /// The bank normally answers with that same id -- it <i>is</i> the idempotency key -- but a
+    /// service that answered with a different one must still resolve the row the console already
+    /// put on the card rather than leaving it beside a second row for the same payment.
+    /// </param>
     private void TrackSubmittedPayment(
         OperationContext context,
         PaymentSubmission submission,
-        PaymentResult result)
+        PaymentResult result,
+        string? pendingId = null)
     {
         if (result.TransactionId is not { Length: > 0 } transactionId)
         {
@@ -2083,46 +2567,62 @@ public sealed class OperatorConsoleController
             var payments = state.TrackedPayments.ToList();
             var index = payments.FindIndex(payment =>
                 string.Equals(payment.TransactionId, transactionId, StringComparison.Ordinal));
+            if (index < 0 && pendingId is { Length: > 0 })
+            {
+                index = payments.FindIndex(payment =>
+                    string.Equals(payment.TransactionId, pendingId, StringComparison.Ordinal)
+                    || (payment.AwaitingResponse
+                        && string.Equals(payment.IdempotencyKey, pendingId, StringComparison.Ordinal)));
+            }
+
             if (index >= 0)
             {
                 // A resend of the same key returns the same transaction; it updates the row it
                 // already has rather than adding a second one for the same payment -- a
                 // duplicate row could never resolve and would read "Awaiting settlement" for ever.
-                payments[index] = ApplyBuffered(
-                    payments[index] with
+                // The row this submission itself put on the card at the Submit keypress lands
+                // here too, and this is where its answer finally names its state.
+                var existing = payments[index];
+                var answered = existing with
+                {
+                    TransactionId = transactionId,
+                    IdempotencyKey = existing.IdempotencyKey ?? submission.IdempotencyKey,
+                    HttpOutcome = result.Outcome,
+                    HttpStatusCode = result.StatusCode,
+                    AwaitingResponse = false,
+                };
+                // Only a row that carried no answer at all and that nothing has resolved in the
+                // meantime takes its state from this response. Anything a broadcast already
+                // proved keeps that record.
+                answered = existing is { AwaitingResponse: true, BroadcastOutcome: null }
+                    && existing.IsOpen
+                    ? answered with
                     {
-                        HttpOutcome = result.Outcome,
-                        HttpStatusCode = result.StatusCode,
-                        // A replayed 504 Cancelled proves the row is withdrawn: a row that was
-                        // still awaiting, never observed, or lost to a feed gap moves to
-                        // Cancelled -- HTTP has now proved nothing will ever be broadcast for it.
-                        // A row a broadcast already resolved keeps that record (Settled stays
-                        // Settled; the contradiction is for the outcome query to surface).
+                        State = StateForAnswer(state.Feed, result),
+                        Note = NoteForAnswer(state.Feed, result),
+                    }
+                    // A replayed 504 Cancelled proves the row is withdrawn: a row that was
+                    // still awaiting, never observed, or lost to a feed gap moves to
+                    // Cancelled -- HTTP has now proved nothing will ever be broadcast for it.
+                    // A row a broadcast already resolved keeps that record (Settled stays
+                    // Settled; the contradiction is for the outcome query to surface).
+                    : answered with
+                    {
                         State = result.Outcome == PaymentOutcome.Cancelled
-                            && payments[index].State is PaymentTrackingState.Awaiting
+                            && existing.State is PaymentTrackingState.Awaiting
                                 or PaymentTrackingState.NotObserved
                                 or PaymentTrackingState.OutcomeUnknown
                             ? PaymentTrackingState.Cancelled
-                            : payments[index].State,
-                    },
-                    buffered,
-                    submittedAt);
+                            : existing.State,
+                    };
+                payments[index] = ApplyBuffered(answered, buffered, submittedAt);
                 applied = buffered.Count > 0;
-                return state with { TrackedPayments = payments };
+                // The card is what the compose bar's last act produced, so a submission takes the
+                // selection at the instant it is sent -- including a resend, which lands on the
+                // row it already has.
+                return state with { TrackedPayments = payments, SelectedPayment = transactionId };
             }
 
-            // A11: an Ambiguous or transport-failed submission that still returned a
-            // TransactionId is the case that needs the feed most. It gets a row, but never the
-            // words "Awaiting settlement": its own HTTP leg never proved it was accepted.
-            var proven = result.Outcome is PaymentOutcome.Pending
-                or PaymentOutcome.Completed
-                or PaymentOutcome.Failed
-                or PaymentOutcome.Cancelled;
-            var listening = state.Feed.IsListening && proven;
-            // A 504 Cancelled is proven by HTTP alone (ADR-020: nothing executed, nothing will
-            // be broadcast), so it never reads "Awaiting settlement" -- listening or not. A
-            // broadcast that arrives for it anyway becomes a Contradiction, never a resolution.
-            var cancelled = result.Outcome == PaymentOutcome.Cancelled;
             var row = new TrackedPayment(
                 Interlocked.Increment(ref _paymentSequence),
                 transactionId,
@@ -2134,17 +2634,9 @@ public sealed class OperatorConsoleController
                 submittedAt,
                 result.Outcome,
                 result.StatusCode,
-                // Never "Awaiting settlement" without a feed: nothing is awaiting anything.
-                cancelled
-                    ? PaymentTrackingState.Cancelled
-                    : listening ? PaymentTrackingState.Awaiting : PaymentTrackingState.NotObserved,
-                Note: cancelled
-                    ? "withdrawn by the instant rail before execution — safe to retry with a new key"
-                    : listening
-                        ? null
-                        : proven
-                            ? NoFeedNote(state.Feed)
-                            : $"the submission's own outcome was {result.Outcome} — only an outcome query can move it forward");
+                StateForAnswer(state.Feed, result),
+                Note: NoteForAnswer(state.Feed, result),
+                IdempotencyKey: submission.IdempotencyKey);
             row = ApplyBuffered(row, buffered, submittedAt);
             applied = buffered.Count > 0;
 
@@ -2156,7 +2648,7 @@ public sealed class OperatorConsoleController
                 payments.RemoveRange(0, overflow);
             }
 
-            return state with { TrackedPayments = payments };
+            return state with { TrackedPayments = payments, SelectedPayment = transactionId };
         });
 
         // A4: an evicted row's later broadcast is still this console's own payment.
@@ -2187,6 +2679,50 @@ public sealed class OperatorConsoleController
             transactionId,
             select: false);
     }
+
+    /// <summary>
+    /// The state one submission's own answer justifies, and no more. A11: an Ambiguous or
+    /// transport-failed submission that still returned a TransactionId is the case that needs the
+    /// feed most, so it gets a row -- but never the words "Awaiting settlement", because its own
+    /// HTTP leg never proved it was accepted. A 504 Cancelled is proven by HTTP alone (ADR-020:
+    /// nothing executed, nothing will be broadcast), so it never reads "Awaiting settlement"
+    /// either, listening or not; a broadcast that arrives for it anyway is a Contradiction.
+    /// </summary>
+    private static PaymentTrackingState StateForAnswer(OutcomeFeedStatus feed, PaymentResult result)
+    {
+        if (result.Outcome == PaymentOutcome.Cancelled)
+        {
+            return PaymentTrackingState.Cancelled;
+        }
+
+        // Never "Awaiting settlement" without a feed: nothing is awaiting anything.
+        return feed.IsListening && IsProvenAnswer(result)
+            ? PaymentTrackingState.Awaiting
+            : PaymentTrackingState.NotObserved;
+    }
+
+    private static string? NoteForAnswer(OutcomeFeedStatus feed, PaymentResult result)
+    {
+        if (result.Outcome == PaymentOutcome.Cancelled)
+        {
+            return "withdrawn by the instant rail before execution — safe to retry with a new key";
+        }
+
+        var proven = IsProvenAnswer(result);
+        if (feed.IsListening && proven)
+        {
+            return null;
+        }
+
+        return proven
+            ? NoFeedNote(feed)
+            : $"the submission's own outcome was {result.Outcome} — only an outcome query can move it forward";
+    }
+
+    private static bool IsProvenAnswer(PaymentResult result) => result.Outcome is PaymentOutcome.Pending
+        or PaymentOutcome.Completed
+        or PaymentOutcome.Failed
+        or PaymentOutcome.Cancelled;
 
     private static TrackedPayment ApplyBuffered(
         TrackedPayment row,
@@ -2697,6 +3233,40 @@ public sealed class OperatorConsoleController
 
     private static PaymentResult RejectedPayment(string error) =>
         new(PaymentOutcome.Rejected, 0, null, null, null, null, error, TimeSpan.Zero);
+
+    // --- Refusals the console produced itself ---------------------------------------------
+    //
+    // The removal of the shell's bottom band is conditional on these existing. A validation
+    // refusal, a precondition or lock refusal, or a call that died in the console's own hands
+    // never became a request, so nothing else in the system will ever record it. Each is
+    // written to Evidence *here*, before the caller can draw its announcement -- if it were
+    // not, the announcement would be the only copy and the removed band would have cost the
+    // session a fact (EXPERIENCE.md, Information Architecture).
+
+    /// <summary>Records a refusal and returns the reason for the caller to announce.</summary>
+    private string RecordRefusal(EvidenceKind kind, string action, string target, string reason)
+    {
+        AddEvidence(
+            kind,
+            $"{action} refused — {reason}",
+            "(refused by the console)",
+            target,
+            null,
+            TimeSpan.Zero,
+            "The console refused this before it became a request, so no service recorded it. "
+            + $"Reason: {reason}",
+            false);
+        return reason;
+    }
+
+    private PaymentResult RefusedPayment(EvidenceKind kind, string action, string target, string reason) =>
+        RejectedPayment(RecordRefusal(kind, action, target, reason));
+
+    private CommandResult RefusedCommand(EvidenceKind kind, string action, string target, string reason) =>
+        CommandResult.Rejected(RecordRefusal(kind, action, target, reason));
+
+    private InspectionResult RefusedInspection(EvidenceKind kind, string action, string target, string reason) =>
+        new(false, 0, target, null, RecordRefusal(kind, action, target, reason), TimeSpan.Zero);
 
     private void AddEvidence(
         EvidenceKind kind,

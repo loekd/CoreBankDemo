@@ -19,7 +19,10 @@ public class PresentationModelBuilderTests
         model.Navigation.Should().HaveCount(5);
         model.Navigation.Should().Contain(item => item.Shortcut == "1" && item.Label == "Operations");
         model.Navigation.Should().Contain(item => item.Shortcut == "5" && item.Label == "Faults");
-        model.EvidenceStrip.Should().Be("No actions yet this session.");
+        model.FocusCard.IsPlaceholder.Should().BeTrue();
+        model.FocusCard.StateWord.Should().Be("No payment yet this session.");
+        model.FocusCard.ActionLabel.Should().Be(CardActions.Cancel, "the slot is never empty");
+        model.FocusCard.ActionEnabled.Should().BeFalse();
         model.LoadResults.Should().HaveCount(6);
         model.LoadResults.Should().OnlyContain(value => value.Contains("not yet observed"));
     }
@@ -204,6 +207,10 @@ public class PresentationModelBuilderTests
         var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty, Now);
 
         model.OperationsHint.Should().Contain("No topology attached");
+        // Operations has no workspace hint row any more, so the reason and its one-step remedy
+        // live on the resting card's own disabled action instead.
+        model.FocusCard.IsPlaceholder.Should().BeTrue();
+        model.FocusCard.ActionReason.Should().Contain("No topology attached");
         model.ResourcesHint.Should().Contain("Preflight");
         model.LoadHint.Should().Contain("LoadTests topology");
     }
@@ -241,7 +248,7 @@ public class PresentationModelBuilderTests
         model.IsBusy.Should().BeTrue();
         model.CanCancelBurst.Should().BeTrue();
         model.CanResend.Should().BeFalse();
-        model.BurstStatus.Should().Contain("3/10");
+        model.BurstStatus.Should().Contain("3 / 10");
     }
 
     // --- Outcome feedback loop projections -------------------------------------------------
@@ -280,33 +287,39 @@ public class PresentationModelBuilderTests
             state);
 
     [Fact]
-    public void Build_AwaitingRow_StatesTheFeedInlineAndTheElapsedTime()
+    public void Build_AwaitingCard_StatesTheRegionsFeedOnceAndTheElapsedTime()
     {
         var model = PresentationModelBuilder.Build(Listening(Submitted()), Now);
 
-        var row = model.Payments.Single();
-        row.Symbol.Should().Be("~");
-        row.Headline.Should().Be("Awaiting settlement — tx-8821");
-        row.Meta.Should().Contain("14s").And.Contain("(listening)");
+        model.FocusCard.Symbol.Should().Be("~");
+        model.FocusCard.StateWord.Should().Be("AWAITING SETTLEMENT");
+        model.FocusCard.Clock.Should().Be("14s");
+        model.FocusCard.Accounts.Should().Be("1001 → 2002", "the card prints both accounts in full");
+        model.FocusCard.Meta.Should().Contain("tx-8821").And.Contain("submitted 11:59:46");
+        model.FocusCard.ActionLabel.Should().Be(CardActions.Cancel);
+        model.FocusCard.ActionEnabled.Should().BeTrue();
+        model.ShowStillOpen.Should().BeFalse("with one payment open the card is already showing it");
+        model.StillOpen.Should().HaveCount(1);
         model.FeedStatus.Should().Be("Listening since 12:01:04 — events before this time were not observed");
     }
 
     [Fact]
-    public void Build_AwaitingRowUnderFaults_NamesTheConditionRatherThanImplyingADefect()
+    public void Build_SecondOpenPayment_RendersTheStripWithTruncatedIdentifiers()
     {
-        var state = Listening(Submitted()) with
-        {
-            FaultsArmed = true,
-            AppliedFaults = FaultLevels.AllZero with { ErrorRatePercent = 40 },
-        };
+        var second = Submitted("tx-8822") with { Sequence = 2, Rail = PaymentRail.Instant };
+        var state = Listening(Submitted(), second) with { SelectedPayment = "tx-8822" };
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.Payments.Single().Meta.Should().Contain("faults in force");
+        model.ShowStillOpen.Should().BeTrue();
+        model.StillOpen.Should().HaveCount(2);
+        model.FocusCard.TransactionId.Should().Be("tx-8822", "selection drives the card and nothing else does");
+        model.StillOpen.Single(row => row.TransactionId == "tx-8822").Selected.Should().BeTrue();
+        model.StillOpen[0].Line.Should().Contain("Awaiting").And.Contain("250.00").And.Contain("standard");
     }
 
     [Fact]
-    public void Build_SettledRow_PrintsBothClocksSeparatelyAndTheAlignedLegs()
+    public void Build_SettledCard_PrintsTheAlignedLegsAsItsClosingBlock()
     {
         var settled = Submitted(state: PaymentTrackingState.Settled) with
         {
@@ -320,17 +333,16 @@ public class PresentationModelBuilderTests
             ],
         };
 
-        var row = PresentationModelBuilder.Build(Listening(settled), Now).Payments.Single();
+        var card = PresentationModelBuilder.Build(Listening(settled), Now).FocusCard;
 
-        row.Symbol.Should().Be("●");
-        row.Headline.Should().Be("Settled — tx-8821");
-        row.Meta.Should().Contain("ProcessedAt 12:04:31.882").And.Contain("observed here +222 ms");
-        row.Legs.Should().Equal("1001  −250.00 → 4,750.00 EUR", "2002  +250.00 → 1,180.00 EUR");
-        row.LegSummary.Should().BeEmpty();
+        card.Symbol.Should().Be("●");
+        card.StateWord.Should().Be("SETTLED");
+        card.Closing.Should().Equal("1001  −250.00 → 4,750.00 EUR", "2002  +250.00 → 1,180.00 EUR");
+        card.ActionLabel.Should().Be(CardActions.LookUpOutcome, "the payment is proven; there is nothing to cancel");
     }
 
     [Fact]
-    public void Build_HalfSettledRow_SaysSoRatherThanPaperingOverTheGap()
+    public void Build_HalfSettledCard_SaysSoRatherThanPaperingOverTheGap()
     {
         var halfSettled = Submitted(state: PaymentTrackingState.Settled) with
         {
@@ -341,11 +353,11 @@ public class PresentationModelBuilderTests
         };
 
         PresentationModelBuilder.Build(Listening(halfSettled), Now)
-            .Payments.Single().LegSummary.Should().Be("1 of 2 legs observed");
+            .FocusCard.Closing.Should().Contain("1 of 2 legs observed");
     }
 
     [Fact]
-    public void Build_RejectedRow_CarriesTheFullErrorReasonAndExplainsTheEmptyLegColumn()
+    public void Build_RejectedCard_CarriesTheFullErrorReason()
     {
         var rejected = Submitted(state: PaymentTrackingState.Rejected) with
         {
@@ -355,41 +367,51 @@ public class PresentationModelBuilderTests
             ErrorReason = "insufficient funds",
         };
 
-        var row = PresentationModelBuilder.Build(Listening(rejected), Now).Payments.Single();
+        var card = PresentationModelBuilder.Build(Listening(rejected), Now).FocusCard;
 
-        row.Symbol.Should().Be("✕");
-        row.Headline.Should().Be("Rejected — tx-8821");
-        row.Meta.Should().Contain("ErrorReason: insufficient funds");
-        row.Legs.Should().BeEmpty();
-        row.LegSummary.Should().Contain("a rejection emits none");
+        card.Symbol.Should().Be("✕");
+        card.StateWord.Should().Be("REJECTED");
+        card.Closing.Should().Contain("ErrorReason: insufficient funds");
     }
 
+    /// <summary>
+    /// The one place the console says <i>who</i> withdrew a payment rather than only that it was
+    /// withdrawn, and the reason the state column is sized to the longer of the two words.
+    /// </summary>
     [Fact]
-    public void Build_CancelledRow_SaysItWasWithdrawnAndExplainsTheEmptyLegColumn()
+    public void Build_RailCancelledCard_NamesTheRailRatherThanOnlyTheWithdrawal()
     {
-        // ADR-020: proven by HTTP alone -- no settlement to await, no broadcast clock.
         var cancelled = Submitted(
             state: PaymentTrackingState.Cancelled,
             httpOutcome: PaymentOutcome.Cancelled,
             statusCode: 504) with
         {
             Rail = PaymentRail.Instant,
-            Note = "withdrawn by the instant rail before execution — safe to retry with a new key",
         };
 
-        var row = PresentationModelBuilder.Build(Listening(cancelled), Now).Payments.Single();
+        var card = PresentationModelBuilder.Build(Listening(cancelled), Now).FocusCard;
 
-        row.Symbol.Should().Be("✕");
-        row.Headline.Should().Be("Cancelled — withdrawn before execution — tx-8821");
-        row.Meta.Should().Contain("safe to retry with a new key").And.Contain("504");
-        row.Meta.Should().NotContain("Awaiting");
-        row.Legs.Should().BeEmpty();
-        row.LegSummary.Should().Contain("a cancellation emits none");
-        row.Remedy.Should().BeEmpty("nothing is unresolved: the rail gave a binary answer");
+        card.Symbol.Should().Be("⊘");
+        card.StateWord.Should().Be("CANCELLED BY THE RAIL");
+        card.Closing.Should().Contain("no money moved · safe to retry with a new key");
     }
 
     [Fact]
-    public void Build_Burst_CountsCancelledPaymentsOnTheHttpLegOnly()
+    public void Build_OperatorCancelledCard_StatesItsOwnSafeNextStep()
+    {
+        var cancelled = Submitted(state: PaymentTrackingState.Cancelled, httpOutcome: PaymentOutcome.Pending);
+
+        var card = PresentationModelBuilder.Build(Listening(cancelled), Now).FocusCard;
+
+        card.Symbol.Should().Be("⊘");
+        card.StateWord.Should().Be("CANCELLED");
+        card.Closing.Should().Equal(
+            "withdrawn before execution · no money moved",
+            "safe to retry with a new key");
+    }
+
+    [Fact]
+    public void Build_Burst_CountsCancelledPaymentsOnItsOwnFigure()
     {
         var state = Listening() with
         {
@@ -398,13 +420,14 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.BurstStatus.Should().Contain("cancelled 1").And.Contain("failed 0");
-        model.BurstProvenStatus.Should().Be("Proven leg · settled 2 · rejected 0 · awaiting 7",
-            "a cancelled payment is never part of the proven leg's outstanding count");
+        model.BurstStatus.Should().Contain("Sent  10 / 10").And.Contain("failed 0");
+        model.BurstProvenStatus.Should().Be(
+            "Settled  2   rejected 0 · cancelled 1 · still moving 7 · unknown 0",
+            "a cancelled payment is never counted as a rejection");
     }
 
     [Fact]
-    public void Build_ContradictionRow_ShowsBothSourcesAndOffersTheOutcomeQuery()
+    public void Build_ContradictionCard_ShowsBothRecordsAndPicksNoWinner()
     {
         var contradicted = Submitted(state: PaymentTrackingState.Contradiction, httpOutcome: PaymentOutcome.Completed, statusCode: 200) with
         {
@@ -414,15 +437,16 @@ public class PresentationModelBuilderTests
             Note = "HTTP proved Completed, broadcast says Failed",
         };
 
-        var row = PresentationModelBuilder.Build(Listening(contradicted), Now).Payments.Single();
+        var card = PresentationModelBuilder.Build(Listening(contradicted), Now).FocusCard;
 
-        row.Headline.Should().Contain("Contradiction — HTTP proved Completed, broadcast says Failed");
-        row.Meta.Should().Contain("HTTP said Completed").And.Contain("broadcast said Failed");
-        row.Remedy.Should().Contain("Query outcome");
+        card.StateWord.Should().Be("CONTRADICTED");
+        card.Closing.Should().HaveCount(2, "a contradiction *is* two records");
+        card.Closing[0].Should().Contain("HTTP Completed");
+        card.Closing[1].Should().Contain("broadcast Failed");
     }
 
     [Fact]
-    public void Build_FeedLost_WithdrawsTheAwaitingWordingAndHeadlinesTheCount()
+    public void Build_FeedLost_WithdrawsTheAwaitingWordingAndAnnouncesItAsANotice()
     {
         var unknown = Submitted(state: PaymentTrackingState.OutcomeUnknown) with
         {
@@ -437,12 +461,13 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.Payments.Single().Symbol.Should().Be("○");
-        model.Payments.Single().Headline.Should()
-            .Contain("Outcome unknown").And.Contain("stopped listening at 12:06:02");
-        model.Payments.Single().Headline.Should().NotContain("Awaiting settlement");
+        model.FocusCard.Symbol.Should().Be("○");
+        model.FocusCard.StateWord.Should().Be("OUTCOME UNKNOWN");
+        model.FocusCard.StateWord.Should().NotContain("AWAITING");
         model.FeedStatus.Should().Contain("Feed lost 12:06:02")
             .And.Contain("1 payment has unknown outcomes", "the header and the evidence record share one formatter");
+        model.Announcement.Should().Contain("Feed lost 12:06:02");
+        model.AnnouncementIsFailure.Should().BeFalse("a lost feed proves nothing about any payment");
     }
 
     [Fact]
@@ -459,8 +484,8 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.Payments.Single().Headline.Should().Contain("Outcome not observed — no feed");
-        model.Payments.Single().Remedy.Should().Contain("Query outcome");
+        model.FocusCard.StateWord.Should().Be("OUTCOME NOT OBSERVED");
+        model.FocusCard.Closing.Should().Contain(line => line.Contains("Look up outcome"));
         model.FeedStatus.Should().Contain("Outcome not observed — no feed").And.Contain("daprd is not on PATH");
     }
 
@@ -481,7 +506,7 @@ public class PresentationModelBuilderTests
     }
 
     [Fact]
-    public void Build_Burst_RendersTheHttpLegAndTheProvenLegAsTwoLabelledLines()
+    public void Build_Burst_RendersSentAndSettledAsTwoLabelledLinesThatNeverMerge()
     {
         var state = Listening() with
         {
@@ -490,8 +515,105 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.BurstStatus.Should().StartWith("HTTP leg").And.Contain("10/10").And.Contain("accepted 10");
-        model.BurstProvenStatus.Should().Be("Proven leg · settled 4 · rejected 1 · awaiting 5");
+        model.BurstCaption.Should().Contain("BURST · 10 payments");
+        model.BurstStatus.Should().StartWith("Sent").And.Contain("10 / 10").And.Contain("accepted 10");
+        model.BurstProvenStatus.Should().Be("Settled  4   rejected 1 · cancelled 0 · still moving 5 · unknown 0");
+        model.BurstClosing.Should().BeEmpty("five payments are still moving; nothing may claim the burst proved itself");
+    }
+
+    [Fact]
+    public void Build_DrainedBurst_OnlyClaimsItProvedItselfWhenEveryFigureIsZero()
+    {
+        var drained = Listening() with { Burst = new BurstProgress(10, 10, 10, 0, 0, false, Settled: 10) };
+        var shortfall = Listening() with { Burst = new BurstProgress(10, 10, 8, 0, 2, false, Settled: 8) };
+
+        PresentationModelBuilder.Build(drained, Now).BurstClosing
+            .Should().Be("every payment proved itself · nothing left awaiting");
+        PresentationModelBuilder.Build(shortfall, Now).BurstClosing
+            .Should().Be("2 payments have unknown outcomes — see Evidence");
+    }
+
+    /// <summary>
+    /// Cancel is exempt from confirmation, never from the lock: it dims like every other mutating
+    /// control while some other action is in flight, and the reason is stated on the card.
+    /// </summary>
+    [Fact]
+    public void Build_AnotherMutationInFlight_DimsCancelAndSaysWhy()
+    {
+        var state = Listening(Submitted()) with
+        {
+            ActiveMutation = new ActiveMutation(MutationKind.ResourceCommand, "Stop corebank-api", Now),
+        };
+
+        var card = PresentationModelBuilder.Build(state, Now).FocusCard;
+
+        card.ActionLabel.Should().Be(CardActions.Cancel, "the slot is never empty and never hidden");
+        card.ActionEnabled.Should().BeFalse();
+        card.ActionReason.Should().Contain("another action is in flight");
+    }
+
+    /// <summary>
+    /// The one narrow concession: an outstanding answer is that payment's own state rather than a
+    /// console action awaiting a result, which is what makes the budget window cancellable.
+    /// </summary>
+    [Fact]
+    public void Build_ItsOwnSubmissionInFlight_KeepsCancelLive()
+    {
+        var inFlight = Submitted() with { AwaitingResponse = true, HttpStatusCode = 0 };
+        var state = Listening(inFlight) with
+        {
+            ActiveMutation = new ActiveMutation(MutationKind.SubmitPayment, "Submit payment", Now),
+        };
+
+        var card = PresentationModelBuilder.Build(state, Now).FocusCard;
+
+        card.ActionLabel.Should().Be(CardActions.Cancel);
+        card.ActionEnabled.Should().BeTrue();
+        card.Closing.Should().Contain("waiting for the bank to answer");
+    }
+
+    /// <summary>
+    /// Omitted mode sends no key, so the bank names the payment and there is no id to cancel
+    /// with. The action still renders — disabled, with the reason on the card.
+    /// </summary>
+    /// <summary>
+    /// On dispatch the card's <i>action slot</i> — never its state — re-states itself, while the
+    /// payment's own state and clock stay exactly as they were: asking is not an outcome.
+    /// </summary>
+    [Fact]
+    public void Build_CancelInFlight_RestatesTheSlotAndLeavesTheStateAndClockAlone()
+    {
+        var state = Listening(Submitted()) with
+        {
+            CancellingPayment = "tx-8821",
+            CancellingSince = Now.AddSeconds(-3),
+        };
+
+        var card = PresentationModelBuilder.Build(state, Now).FocusCard;
+
+        card.ActionLabel.Should().Be("Cancelling — 3s");
+        card.ActionEnabled.Should().BeFalse("a second press mid-sentence cannot become a second cancellation");
+        card.StateWord.Should().Be("AWAITING SETTLEMENT");
+        card.Clock.Should().Be("14s", "the payment's own clock is untouched by the ask");
+    }
+
+    [Fact]
+    public void Build_OmittedSubmissionWithNoId_RendersADisabledCancelWithItsReason()
+    {
+        var state = Listening() with
+        {
+            UnidentifiedSubmission = new UnidentifiedSubmission(
+                new PaymentRequest("1001", "2002", 250m, "EUR", PaymentRail.Instant),
+                Now.AddSeconds(-3)),
+        };
+
+        var card = PresentationModelBuilder.Build(state, Now).FocusCard;
+
+        card.StateWord.Should().Be("NO ANSWER YET");
+        card.ActionLabel.Should().Be(CardActions.Cancel);
+        card.ActionEnabled.Should().BeFalse();
+        card.ActionReason.Should().Contain("no transaction id yet");
+        card.TransactionId.Should().BeNull();
     }
 
     [Fact]
@@ -524,8 +646,9 @@ public class PresentationModelBuilderTests
     {
         var model = PresentationModelBuilder.Build(OperatorConsoleState.Empty, Now);
 
-        model.Payments.Should().BeEmpty();
+        model.StillOpen.Should().BeEmpty();
+        model.ShowStillOpen.Should().BeFalse();
         model.FeedStatus.Should().Contain("No outcome feed");
-        model.BurstProvenStatus.Should().Contain("awaiting 0");
+        model.BurstProvenStatus.Should().Contain("still moving 0");
     }
 }
