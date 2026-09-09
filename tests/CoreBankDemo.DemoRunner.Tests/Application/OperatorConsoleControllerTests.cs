@@ -999,6 +999,43 @@ public class OperatorConsoleControllerTests
         harness.Payments.Submissions.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A refusal the console produced itself never became a request, so nothing else in the
+    /// system will ever record it. The record is written before the caller can announce it --
+    /// the condition the removed bottom band's removal depends on (EXPERIENCE.md, Information
+    /// Architecture, "Override -- the bottom band is removed from every workspace"). Both
+    /// submit guards are covered here: the precondition and the validator.
+    /// </summary>
+    [Fact]
+    public async Task RefusedSubmission_IsAnEvidenceRecordBeforeItIsEverAnnounced()
+    {
+        var harness = new OperatorHarness();
+        var controller = harness.CreateController();
+        await controller.InitializeAsync(CancellationToken.None);
+
+        var noTopology = await controller.SubmitPaymentAsync(
+            StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        noTopology.Outcome.Should().Be(PaymentOutcome.Rejected);
+        harness.Payments.Submissions.Should().BeEmpty("the refusal never became a request");
+        var precondition = controller.State.Evidence.Last();
+        precondition.Summary.Should().Contain("refused").And.Contain("topology");
+        precondition.Succeeded.Should().BeFalse();
+        precondition.Detail.Should().Contain(noTopology.ErrorSummary!);
+
+        var (attached, attachedHarness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        var invalid = StandardPayment with { ToAccount = StandardPayment.FromAccount };
+
+        var validation = await attached.SubmitPaymentAsync(
+            invalid, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        validation.Outcome.Should().Be(PaymentOutcome.Rejected);
+        attachedHarness.Payments.Submissions.Should().BeEmpty();
+        var refused = attached.State.Evidence.Last();
+        refused.Summary.Should().Contain("refused").And.Contain("differ");
+        refused.Succeeded.Should().BeFalse();
+    }
+
     [Fact]
     public async Task MutationLock_SuppressesDuplicateMutationButAllowsReadOnlyQuery()
     {
@@ -1523,6 +1560,32 @@ public class OperatorConsoleControllerTests
         controller.State.Evidence.Count(record => record.Summary.StartsWith("Feed lost")).Should().Be(1);
         controller.State.Evidence.Should().Contain(record =>
             record.Summary.Contains("Feed lost") && record.Summary.Contains("2 payments"));
+    }
+
+    /// <summary>
+    /// The burst's proven leg is a claim about the same feed, so it is withdrawn in the same
+    /// breath. A counter frozen at a number whose meaning had silently changed from "waiting to
+    /// hear" to "nobody is listening" is the failure the takeover exists to prevent, held on the
+    /// most-watched screen the console has.
+    /// </summary>
+    [Fact]
+    public async Task FeedLostDuringABurst_MovesStillMovingIntoUnknownRatherThanFreezingIt()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Enumerable
+            .Range(0, 4)
+            .Select(i => Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = $"burst-{i}" })
+            .ToArray());
+
+        await controller.RunBurstAsync(StandardPayment, 4, 1, CancellationToken.None);
+        harness.Feed.PushCompleted("burst-0", harness.Time.GetUtcNow());
+        controller.State.Burst.Awaiting.Should().Be(3, "three are still being listened for");
+
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+
+        controller.State.Burst.Awaiting.Should().Be(0, "nobody is listening, so nothing is still moving");
+        controller.State.Burst.Unknown.Should().Be(3);
+        controller.State.Burst.Settled.Should().Be(1, "what was already proven stays proven");
     }
 
     [Fact]

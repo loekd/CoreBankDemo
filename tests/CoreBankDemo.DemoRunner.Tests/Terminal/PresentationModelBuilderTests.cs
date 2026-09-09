@@ -521,6 +521,29 @@ public class PresentationModelBuilderTests
         model.BurstClosing.Should().BeEmpty("five payments are still moving; nothing may claim the burst proved itself");
     }
 
+    /// <summary>
+    /// A count of payments nobody is listening for is not a wait. The moment the feed drops the
+    /// Settled line itself changes rather than the screen gaining a badge, so the takeover is
+    /// structurally incapable of displaying a wait nobody is performing (EXPERIENCE.md,
+    /// Component Patterns, "Burst takeover").
+    /// </summary>
+    [Fact]
+    public void Build_RunningBurstWhoseFeedDropped_RestatesStillMovingAsUnknown()
+    {
+        var burst = new BurstProgress(10, 10, 10, 0, 0, false, Settled: 4, Rejected: 1);
+        burst.Awaiting.Should().Be(5, "the five the console is still listening for");
+
+        var lost = burst with { Unknown = burst.Unknown + burst.Outstanding };
+        var model = PresentationModelBuilder.Build(Listening() with { Burst = lost }, Now);
+
+        model.BurstProvenStatus.Should()
+            .Be("Settled  4   rejected 1 · cancelled 0 · still moving 0 · unknown 5");
+        model.BurstClosing.Should()
+            .Be(
+                "5 payments have unknown outcomes — see Evidence",
+                "the closing line states the shortfall rather than claiming the burst proved itself");
+    }
+
     [Fact]
     public void Build_DrainedBurst_OnlyClaimsItProvedItselfWhenEveryFigureIsZero()
     {
