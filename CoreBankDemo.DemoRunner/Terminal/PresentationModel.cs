@@ -1205,7 +1205,7 @@ public static class PresentationModelBuilder
                     + (state.Preflight.Profiles.TryGetValue(profile, out var candidate) ? candidate.Detail : "no preflight result"))
                 .ToList();
             return blocked.Count == 0
-                ? "Start or Attach a topology to enable Stop, Switch and per-resource commands."
+                ? "Start or Attach a topology to enable Stop AppHost and per-resource commands."
                 : string.Join(" | ", blocked);
         }
 
@@ -1217,7 +1217,11 @@ public static class PresentationModelBuilder
         return state.Topology switch
         {
             null or { IsReachable: false } => "Aspire snapshot is unreachable — use Refresh state.",
-            { IsFingerprintMatch: false } => "The running graph no longer matches the known profile — Stop and Start it again.",
+            { IsReadable: false } => "Aspire's last answer could not be read — use Refresh state.",
+            // Reports the state; prescribes nothing. A graph that differs from the profile is
+            // usually the operator's own Stop, and telling them to restart the topology to undo
+            // it is the advice this change exists to delete.
+            { IsFingerprintMatch: false } => "Running graph differs from the profile — resource commands still apply.",
             _ => string.Empty,
         };
     }
@@ -1258,11 +1262,15 @@ public static class PresentationModelBuilder
             : "The LoadTests graph is not ready yet — waiting for every required resource to report healthy.";
     }
 
+    /// <summary>
+    /// Whether this row may be commanded. Readable and confirmed, never shape-matched: the row
+    /// for a resource the operator stopped is exactly the row that has to stay live.
+    /// </summary>
     private static bool CanMutateResource(OperatorConsoleState state, ResourceSnapshot resource) =>
         state.ActiveMutation is null
         && state.Ownership != TopologyOwnership.None
         && state.ResourceAuthorityAvailable
-        && state.Topology is { IsReachable: true, IsFingerprintMatch: true }
+        && state.Topology is { IsReadable: true, IsAwaitingConfirmation: false }
         && resource.Condition is not ResourceCondition.Unknown and not ResourceCondition.Unreachable;
 
     private static string BuildResourceDetail(ResourceSnapshot resource)
@@ -1288,7 +1296,11 @@ public static class PresentationModelBuilder
 
     private static string NextAction(ResourceCondition condition) => condition switch
     {
-        ResourceCondition.Stopped => "Start",
+        // Completed sits beside Stopped because Aspire reports a stopped project or executable
+        // as "Finished", which MapCondition reads as Completed. Without it the console offers
+        // no next action for the resource the operator just stopped -- the button that starts
+        // it again would read "Unavailable" for ever.
+        ResourceCondition.Stopped or ResourceCondition.Completed => "Start",
         ResourceCondition.Healthy or ResourceCondition.Running => "Stop",
         ResourceCondition.Failed or ResourceCondition.Degraded => "Restart",
         _ => "Unavailable",

@@ -247,6 +247,92 @@ public class PresentationModelBuilderTests
     }
 
     [Fact]
+    public void Build_ShapeMismatchedGraph_KeepsRowsCommandableAndPrescribesNoTopologyRestart()
+    {
+        var state = MismatchedRegularState();
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        var row = model.Resources.Single(resource => resource.Name == KnownResources.CoreBankApi);
+        row.NextAction.Should().Be("Start");
+        row.CanMutate.Should().BeTrue("the operator's own stop leaves an expected graph, not a corrupt one");
+        model.ResourcesHint.Should().NotContain("Stop and Start it again");
+        model.ResourcesHint.Length.Should().BeLessThanOrEqualTo(78, "the hint has to render at 80 columns");
+    }
+
+    [Fact]
+    public void Build_UnreadableSnapshot_RefusesEveryRowAndNamesRefresh()
+    {
+        var state = OperatorConsoleState.Empty with
+        {
+            Profile = TopologyProfile.Regular,
+            Ownership = TopologyOwnership.Attached,
+            Topology = OperatorHarness.UnreadableSnapshot(TopologyProfile.Regular),
+            ResourceAuthorityAvailable = true,
+        };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        model.Resources.Should().OnlyContain(row => !row.CanMutate && !row.CanRestart);
+        model.ResourcesHint.Should().Contain("Refresh state");
+    }
+
+    [Fact]
+    public void Build_ColdState_NoLongerNamesTheRemovedSwitchControl()
+    {
+        var state = OperatorConsoleState.Empty with
+        {
+            Preflight = FakePreflightRunner.ReadyReport(),
+        };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        model.ResourcesHint.Should().NotContain("Switch");
+    }
+
+    /// <summary>
+    /// <c>Unavailable</c> is the sentinel a row wears when nothing applies. It must never be
+    /// dispatched and never be printed as a verb beside a resource name.
+    /// </summary>
+    [Fact]
+    public void Build_StartingResource_OffersTheUnavailableSentinelAndNoCommand()
+    {
+        var state = MismatchedRegularState(ResourceCondition.Starting);
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        var row = model.Resources.Single(resource => resource.Name == KnownResources.CoreBankApi);
+        row.NextAction.Should().Be("Unavailable");
+        Enum.TryParse<ResourceCommand>(row.NextAction, out _).Should().BeFalse();
+    }
+
+    private static OperatorConsoleState MismatchedRegularState(
+        ResourceCondition coreBankCondition = ResourceCondition.Stopped) =>
+        OperatorConsoleState.Empty with
+        {
+            Profile = TopologyProfile.Regular,
+            Ownership = TopologyOwnership.Attached,
+            ResourceAuthorityAvailable = true,
+            Topology = OperatorHarness.Snapshot(
+                TopologyProfile.Regular,
+                Now,
+                fingerprint: false,
+                resources:
+                [
+                    new ResourceSnapshot(
+                        KnownResources.CoreBankApi,
+                        coreBankCondition,
+                        coreBankCondition.ToString(),
+                        [],
+                        0,
+                        InstanceNames: ["corebank-api-1", "corebank-api-2"],
+                        AllowedCommands: Enum.GetValues<ResourceCommand>().ToHashSet()),
+                    .. OperatorHarness.DefaultResources(TopologyProfile.Regular)
+                        .Where(resource => resource.Name != KnownResources.CoreBankApi),
+                ]),
+        };
+
+    [Fact]
     public void Build_ActiveBurst_LeavesOnlyBurstCancelFlagEnabled()
     {
         var state = OperatorConsoleState.Empty with
@@ -984,4 +1070,38 @@ public class PresentationModelBuilderTests
             "/outcome",
             [new EvidenceHeader("route", "/outcome")],
             """{"transactionId":"tx-8821","status":"Completed"}"""));
+
+    /// <summary>
+    /// The console must offer Start for the resource the operator just stopped. Aspire reports
+    /// that resource as Completed (its "Finished" state), so a next action defined only for
+    /// Stopped left the button reading "Unavailable" and the demo with no way to resume.
+    /// </summary>
+    [Fact]
+    public void Build_CompletedResource_OffersStartRatherThanNoActionAtAll()
+    {
+        var stopped = new ResourceSnapshot(
+            KnownResources.CoreBankApi,
+            ResourceCondition.Completed,
+            "Finished",
+            [],
+            ReplicaCount: 2,
+            InstanceNames: ["corebank-api-a", "corebank-api-b"],
+            AllowedCommands: new HashSet<ResourceCommand> { ResourceCommand.Start });
+
+        var snapshot = OperatorHarness.Snapshot(TopologyProfile.Regular, fingerprint: false, resources: stopped);
+        var state = OperatorConsoleState.Empty with
+        {
+            Profile = TopologyProfile.Regular,
+            Ownership = TopologyOwnership.Owned,
+            RunGeneration = 1,
+            Topology = snapshot,
+            ResourceAuthorityAvailable = true,
+        };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+        var row = model.Resources.Single(candidate => candidate.Name == KnownResources.CoreBankApi);
+
+        row.NextAction.Should().Be("Start");
+        row.CanMutate.Should().BeTrue();
+    }
 }

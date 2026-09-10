@@ -11,7 +11,12 @@ public sealed record CommandResult(bool Succeeded, string Message)
 }
 
 internal sealed record EvidenceProvenance(TopologyProfile Profile, int RunGeneration, FaultLevels? Faults);
-internal sealed record OperationContext(TopologyProfile Profile, int RunGeneration, string Fingerprint, FaultLevels? Faults);
+/// <summary>
+/// Who the console was acting for when a piece of work started. Identity is profile plus run
+/// generation -- the topology's shape is deliberately absent; see
+/// <c>OperatorConsoleController.IsCurrent</c>.
+/// </summary>
+internal sealed record OperationContext(TopologyProfile Profile, int RunGeneration, FaultLevels? Faults);
 
 public sealed class OperatorConsoleController
 {
@@ -345,10 +350,12 @@ public sealed class OperatorConsoleController
         Update(current => current with
         {
             Topology = snapshot,
+            // Authority follows a reachable, readable, fresh, confirmed snapshot -- not a
+            // matching shape (ADR-015, amended). A resource the operator stopped moves the
+            // shape and must not cost the console the button that starts it again.
             ResourceAuthorityAvailable = current.Ownership != TopologyOwnership.None
-                && snapshot.IsReachable
-                && snapshot.IsFingerprintMatch
-                && snapshot.ErrorSummary is null
+                && snapshot.IsReadable
+                && !snapshot.IsAwaitingConfirmation
                 && _time.GetUtcNow() - snapshot.CapturedAt <= _options.SnapshotFreshness,
             StatusLine = snapshot.IsReachable
                 ? $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {current.Ownership} · generation {current.RunGeneration}"
@@ -666,7 +673,8 @@ public sealed class OperatorConsoleController
 
         if (!HasFreshResourceAuthority(state))
         {
-            return CommandResult.Rejected("Resource commands require a fresh fingerprint-matching Aspire snapshot.");
+            return CommandResult.Rejected(
+                "Resource commands require a fresh Aspire snapshot the console could read — use Refresh state.");
         }
 
         if (!TryBeginMutation(MutationKind.ResourceCommand, $"{command} {resourceName}", out var mutation))
@@ -3175,12 +3183,16 @@ public sealed class OperatorConsoleController
         return result;
     }
 
+    /// <summary>
+    /// Whether the console may command a resource right now. Reachable, readable, not held for
+    /// confirmation, and fresh. The topology's shape is not consulted: stopping a resource is
+    /// the operator's own doing and leaves an expected graph, not a corrupt one.
+    /// </summary>
     private bool HasFreshResourceAuthority(OperatorConsoleState state) =>
         state.Profile != TopologyProfile.None
         && state.Ownership != TopologyOwnership.None
         && state.ResourceAuthorityAvailable
-        && state.Topology is { IsReachable: true, IsFingerprintMatch: true } snapshot
-        && snapshot.ErrorSummary is null
+        && state.Topology is { IsReadable: true, IsAwaitingConfirmation: false } snapshot
         && _time.GetUtcNow() - snapshot.CapturedAt <= _options.SnapshotFreshness;
 
     private async Task<TopologySnapshot?> WaitForTopologyAsync(
@@ -3227,7 +3239,11 @@ public sealed class OperatorConsoleController
             var snapshot = await _aspire.GetSnapshotAsync(profile, ct);
             lastSnapshot = snapshot;
             var resource = snapshot.FindResource(resourceName);
-            if (snapshot.IsReachable && snapshot.IsFingerprintMatch && ResourceReachedTarget(resource, command))
+            // Confirmation asks one question: did the resource reach the state we asked for? A
+            // successful Stop moves the topology's shape by definition, so requiring a matching
+            // fingerprint here made the console time out on its own successful command, file
+            // ambiguous evidence for it, and revoke the authority needed to undo it.
+            if (snapshot.IsReachable && ResourceReachedTarget(resource, command))
             {
                 return new ResourceWaitResult(true, false, snapshot, "Aspire confirmed the requested state.");
             }
@@ -3273,7 +3289,11 @@ public sealed class OperatorConsoleController
         resource is not null
         && command switch
         {
-            ResourceCommand.Stop => resource.Condition == ResourceCondition.Stopped,
+            // Aspire reports a stopped project or executable as "Finished", which maps to
+            // Completed, not Stopped. Accepting only Stopped is why a Stop never confirmed:
+            // it burned the transition timeout, filed itself ambiguous and revoked the
+            // authority needed to start the resource again.
+            ResourceCommand.Stop => resource.Condition is ResourceCondition.Stopped or ResourceCondition.Completed,
             ResourceCommand.Start or ResourceCommand.Restart =>
                 resource.Condition is ResourceCondition.Healthy or ResourceCondition.Running or ResourceCondition.Completed,
             _ => false,
@@ -3555,7 +3575,7 @@ public sealed class OperatorConsoleController
     private TimeSpan TimeSpanSince(DateTimeOffset startedAt) => _time.GetUtcNow() - startedAt;
 
     private OperationContext CaptureContext(OperatorConsoleState state) =>
-        new(state.Profile, state.RunGeneration, state.Topology?.Fingerprint ?? string.Empty, FaultsInForce(state));
+        new(state.Profile, state.RunGeneration, FaultsInForce(state));
 
     /// <summary>
     /// The levels actually being injected right now, or <c>null</c> when nothing is. An
@@ -3570,12 +3590,24 @@ public sealed class OperatorConsoleController
     private static EvidenceProvenance Provenance(OperatorConsoleState state) =>
         new(state.Profile, state.RunGeneration, FaultsInForce(state));
 
+    /// <summary>
+    /// Whether the work this context was captured for still belongs to the run the console is
+    /// looking at. Identity is <b>profile plus run generation</b> and nothing else.
+    /// <para>
+    /// The topology's <i>shape</i> is deliberately not part of it. A resource the operator
+    /// stopped from this console changes the shape without changing the run: keying identity on
+    /// the fingerprint made the console answer its own Stop button by discarding the bank's
+    /// settlement broadcasts and refusing to act on the very resource it had just stopped. What
+    /// isolates one run from the next is the generation, which only a topology start moves
+    /// (<see cref="ActivateTopology"/>); a stop additionally nulls the feed context, so nothing
+    /// from a previous run can be read as current.
+    /// </para>
+    /// </summary>
     private bool IsCurrent(OperationContext context)
     {
         var state = State;
         return state.Profile == context.Profile
-            && state.RunGeneration == context.RunGeneration
-            && string.Equals(state.Topology?.Fingerprint ?? string.Empty, context.Fingerprint, StringComparison.Ordinal);
+            && state.RunGeneration == context.RunGeneration;
     }
 
     private static string ExactResourceCommands(

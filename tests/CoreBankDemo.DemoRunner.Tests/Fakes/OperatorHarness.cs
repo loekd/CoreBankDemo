@@ -45,6 +45,13 @@ public sealed class OperatorHarness
             },
             keyFactory ?? (() => "generated-key"));
 
+    /// <summary>
+    /// A snapshot the console read. <paramref name="fingerprint"/> false means the shape is not
+    /// the profile's — the operator stopped something, or a replica is missing — which is a
+    /// graph the console can still see and still command. It is deliberately <b>not</b> the same
+    /// thing as a graph it could not read: that is <see cref="UnreadableSnapshot"/>, and the
+    /// empty fingerprint is what tells the two apart.
+    /// </summary>
     public static TopologySnapshot Snapshot(
         TopologyProfile profile,
         DateTimeOffset? capturedAt = null,
@@ -56,10 +63,33 @@ public sealed class OperatorHarness
             capturedAt ?? new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero),
             reachable,
             fingerprint,
-            fingerprint ? $"{profile}-fingerprint" : string.Empty,
+            reachable ? $"{profile}-fingerprint{(fingerprint ? string.Empty : "-shifted")}" : string.Empty,
             resources.Length == 0 ? DefaultResources(profile) : resources,
             reachable && fingerprint ? null : "not verified",
             "https://localhost:17253");
+
+    /// <summary>
+    /// What <c>AspireJsonParser</c> returns for malformed JSON: reachable, no fingerprint, and
+    /// fabricated <c>Unknown</c> resources that answer <c>Supports()</c> true for everything.
+    /// Nothing may be dispatched against it.
+    /// </summary>
+    public static TopologySnapshot UnreadableSnapshot(
+        TopologyProfile profile,
+        DateTimeOffset? capturedAt = null,
+        string error = "Aspire returned unparseable JSON: '<' is an invalid start of a value.") =>
+        new(
+            profile,
+            capturedAt ?? new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero),
+            true,
+            false,
+            string.Empty,
+            [.. KnownResources.RequiredFor(profile).Select(name => new ResourceSnapshot(
+                name,
+                ResourceCondition.Unknown,
+                "Unknown",
+                [],
+                Detail: "Aspire JSON was malformed."))],
+            error);
 
     /// <summary>
     /// A snapshot that also carries a live <c>devproxy</c> resource. The fault chip refuses to

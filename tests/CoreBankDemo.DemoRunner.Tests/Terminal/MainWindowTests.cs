@@ -305,6 +305,202 @@ public class MainWindowTests
         window.RestartResourceButton.Enabled.Should().BeTrue();
     }
 
+    /// <summary>
+    /// The headline control. After the operator stops the bank, the same control in the same
+    /// place must read <c>Start corebank-api</c> and be pressable.
+    /// </summary>
+    [Fact]
+    public async Task StoppedResource_ActionControlNamesStartAndIsEnabled()
+    {
+        var (controller, window) = await ResourcesWindowAsync(StoppedCoreBank());
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+
+        window.ResourceActionButton.Text.Should().Be("Start corebank-api");
+        window.ResourceActionButton.Enabled.Should().BeTrue();
+        window.ResourceActionButton.Text.Length.Should().BeLessThanOrEqualTo(MainWindow.ActionCaptionBudget);
+        controller.State.Topology!.IsFingerprintMatch.Should().BeFalse("the stop moved the shape");
+    }
+
+    /// <summary>PRD FR20: Start destroys nothing, so it fires without the modal.</summary>
+    [Fact]
+    public async Task Start_DispatchesWithoutConfirmation_WhileStopStillAsks()
+    {
+        var confirmation = new FakeConfirmationService { Result = false };
+        var (_, window) = await ResourcesWindowAsync(StoppedCoreBank(), confirmation);
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+
+        window.TriggerResourceActionForTest();
+
+        confirmation.Requests.Should().BeEmpty("Start is the demo beat that has to land cleanly");
+        window.LastDispatchedTask.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task Stop_StillAsksForConfirmationAndNamesItsExactCommands()
+    {
+        var confirmation = new FakeConfirmationService { Result = false };
+        var (_, window) = await ResourcesWindowAsync(healthy: true, confirmation: confirmation);
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+
+        window.ResourceActionButton.Text.Should().Be("Stop corebank-api");
+        window.TriggerResourceActionForTest();
+
+        confirmation.Requests.Should().ContainSingle();
+        confirmation.Requests[0].Command.Should().Contain("aspire resource corebank-api-1 stop");
+    }
+
+    /// <summary>
+    /// FR16: the caption follows the selection, not the press. Nothing observed selection
+    /// changes on this list before.
+    /// </summary>
+    [Fact]
+    public async Task MovingTheSelection_RecaptionsTheActionControl()
+    {
+        var (_, window) = await ResourcesWindowAsync(StoppedCoreBank());
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+        var stopped = window.ResourceActionButton.Text;
+
+        window.SelectResourceForTest(KnownResources.PaymentsApi);
+
+        stopped.Should().Be("Start corebank-api");
+        window.ResourceActionButton.Text.Should().Be("Stop payments-api");
+    }
+
+    /// <summary>
+    /// FR17: a row with no legal action disables the control on that basis and says why —
+    /// and the caption never prints the <c>Unavailable</c> sentinel as if it were a verb.
+    /// </summary>
+    [Fact]
+    public async Task RowWithNoLegalAction_DisablesTheControlAndExplainsItself()
+    {
+        var (_, window) = await ResourcesWindowAsync(CoreBankIn(ResourceCondition.Starting));
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+
+        window.ResourceActionButton.Enabled.Should().BeFalse();
+        window.ResourceActionButton.Text.Should().Be("Resource action");
+        window.ResourceActionButton.Text.Should().NotContain("Unavailable");
+        window.ResourcesHintText.Should().Contain("corebank-api").And.Contain("no lifecycle action");
+    }
+
+    /// <summary>FR19: the two controls never read the same words.</summary>
+    [Fact]
+    public async Task FailedResource_LeavesTheRestartControlStoodDown()
+    {
+        var (_, window) = await ResourcesWindowAsync(CoreBankIn(ResourceCondition.Failed));
+        window.SelectResourceForTest(KnownResources.CoreBankApi);
+
+        window.ResourceActionButton.Text.Should().Be("Restart corebank-api");
+        window.RestartResourceButton.Text.Should().Be("Restart selected");
+        window.RestartResourceButton.Enabled.Should().BeFalse();
+        window.ResourceActionButton.Text.Should().NotBe(window.RestartResourceButton.Text);
+    }
+
+    /// <summary>
+    /// The longest name a row can carry. <c>Start loadtest-initializer</c> does not fit the
+    /// column, so the caption falls back to the verb rather than being truncated into a name
+    /// no resource has.
+    /// </summary>
+    [Fact]
+    public async Task CaptionTooLongForTheColumn_FallsBackToTheVerbAlone()
+    {
+        var (_, window) = await ResourcesWindowAsync(
+            OperatorHarness.Snapshot(
+                TopologyProfile.LoadTests,
+                fingerprint: false,
+                resources:
+                [
+                    new ResourceSnapshot(
+                        KnownResources.LoadTestInitializer,
+                        ResourceCondition.Stopped,
+                        "Stopped",
+                        [],
+                        1,
+                        InstanceNames: [KnownResources.LoadTestInitializer],
+                        AllowedCommands: Enum.GetValues<ResourceCommand>().ToHashSet()),
+                    .. OperatorHarness.DefaultResources(TopologyProfile.LoadTests)
+                        .Where(resource => resource.Name != KnownResources.LoadTestInitializer),
+                ]),
+            profile: TopologyProfile.LoadTests);
+        window.SelectResourceForTest(KnownResources.LoadTestInitializer);
+
+        $"Start {KnownResources.LoadTestInitializer}".Length.Should()
+            .BeGreaterThan(MainWindow.ActionCaptionBudget, "this is the case the fallback exists for");
+        window.ResourceActionButton.Text.Should().Be("Start");
+        window.ResourceActionButton.Enabled.Should().BeTrue();
+    }
+
+    /// <summary>FR22: Switch topology is gone; changing profile is Stop AppHost then Start.</summary>
+    [Fact]
+    public async Task ResourcesActionColumn_NoLongerCarriesASwitchControl()
+    {
+        var (_, window) = await ResourcesWindowAsync(healthy: true);
+
+        window.ResourceActionCaptions.Should().NotContain(caption => caption.Contains("Switch"));
+        window.ResourceActionCaptions.Should().Contain("Stop AppHost")
+            .And.Contain("Start Regular")
+            .And.Contain("Start LoadTests");
+        // The arming button carries its own long read-only explanation and is not one of the
+        // lifecycle controls; every control the operator drives the topology with fits.
+        window.ResourceActionCaptions
+            .Where(caption => caption.StartsWith("Start", StringComparison.Ordinal)
+                || caption.StartsWith("Stop", StringComparison.Ordinal)
+                || caption.StartsWith("Attach", StringComparison.Ordinal)
+                || caption.StartsWith("Restart", StringComparison.Ordinal)
+                || caption.StartsWith("Refresh", StringComparison.Ordinal)
+                || caption.StartsWith("Resource", StringComparison.Ordinal))
+            .Should().OnlyContain(
+                caption => caption.Length <= MainWindow.ActionCaptionBudget,
+                "every lifecycle caption has to fit the action column");
+    }
+
+    private static ResourceSnapshot[] StoppedCoreBank() => CoreBankIn(ResourceCondition.Stopped);
+
+    private static ResourceSnapshot[] CoreBankIn(ResourceCondition condition) =>
+    [
+        new ResourceSnapshot(
+            KnownResources.CoreBankApi,
+            condition,
+            condition.ToString(),
+            [],
+            condition == ResourceCondition.Stopped ? 0 : 2,
+            InstanceNames: ["corebank-api-1", "corebank-api-2"],
+            AllowedCommands: Enum.GetValues<ResourceCommand>().ToHashSet()),
+        .. OperatorHarness.DefaultResources(TopologyProfile.Regular)
+            .Where(resource => resource.Name != KnownResources.CoreBankApi),
+    ];
+
+    private static Task<(OperatorConsoleController Controller, MainWindow Window)> ResourcesWindowAsync(
+        ResourceSnapshot[] resources,
+        IConfirmationService? confirmation = null) =>
+        ResourcesWindowAsync(
+            OperatorHarness.Snapshot(TopologyProfile.Regular, fingerprint: false, resources: resources),
+            confirmation);
+
+    private static async Task<(OperatorConsoleController Controller, MainWindow Window)> ResourcesWindowAsync(
+        TopologySnapshot? snapshot = null,
+        IConfirmationService? confirmation = null,
+        bool healthy = false,
+        TopologyProfile profile = TopologyProfile.Regular)
+    {
+        var harness = new OperatorHarness();
+        var attached = healthy || snapshot is null
+            ? OperatorHarness.Snapshot(profile)
+            : snapshot;
+        harness.Aspire.Queue(OperatorHarness.Snapshot(profile));
+        var controller = harness.CreateController();
+        (await controller.AttachAsync(profile, CancellationToken.None)).Succeeded.Should().BeTrue();
+        if (!healthy && snapshot is not null)
+        {
+            harness.Aspire.Queue(attached);
+            await controller.RefreshAsync(CancellationToken.None);
+        }
+
+        controller.SelectWorkspace(WorkspaceKind.Resources);
+        var window = CreateWindow(controller, confirmation);
+        window.RenderForTest();
+        return (controller, window);
+    }
+
     [Fact]
     public void DestructiveDialog_OnlyUppercaseYConfirmsExactlyOnce()
     {

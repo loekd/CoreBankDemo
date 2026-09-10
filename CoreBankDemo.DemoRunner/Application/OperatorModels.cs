@@ -200,6 +200,25 @@ public sealed record TopologySnapshot(
     string? ErrorSummary = null,
     string? DashboardUrl = null)
 {
+    /// <summary>
+    /// Whether the console actually read this graph. The parser's malformed-JSON branch answers
+    /// <see cref="IsReachable"/> <c>true</c> and fabricates <c>Unknown</c> resources that accept
+    /// every command, so an empty <see cref="Fingerprint"/> is the marker that separates "I read
+    /// the graph and its shape is not the one I expected" from "I could not read the graph at
+    /// all". Only the first of those is safe to dispatch a resource command against.
+    /// </summary>
+    public bool IsReadable => IsReachable && !string.IsNullOrEmpty(Fingerprint);
+
+    /// <summary>
+    /// Whether <see cref="TopologyObservationDebouncer"/> is holding this snapshot back until a
+    /// second, confirming observation arrives. That is uncertainty about what is being looked
+    /// at, and it still blocks resource commands — unlike a shape that merely changed.
+    /// </summary>
+    public bool IsAwaitingConfirmation => string.Equals(
+        ErrorSummary,
+        TopologyObservationDebouncer.AwaitingConfirmationSummary,
+        StringComparison.Ordinal);
+
     public bool IsReady =>
         IsReachable
         && IsFingerprintMatch
