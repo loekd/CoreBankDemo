@@ -1834,10 +1834,17 @@ public sealed class MainWindow : Window
         var active = _controller.State.ActiveWorkspace;
         for (var index = 0; index < _navigationButtons.Length; index++)
         {
-            var marker = (WorkspaceKind)index == active ? "▸" : " ";
+            var isActive = (WorkspaceKind)index == active;
+            var marker = isActive ? "▸" : " ";
             _navigationButtons[index].Text = _compactLayout
-                ? (index + 1).ToString(CultureInfo.InvariantCulture)
+                ? $"{marker}{index + 1}"
                 : $"{marker}{index + 1} {NavigationLabels[index]}";
+            // The marker carries the active state so the rail survives a monochrome terminal;
+            // the navy fill is reinforcement, and it is what makes a rail row read as a control
+            // rather than a line of text now that the bracket glyphs are gone.
+            OperatorTheme.Apply(
+                _navigationButtons[index],
+                isActive ? OperatorTheme.NavigationActiveScheme : OperatorTheme.RailScheme);
         }
     }
 

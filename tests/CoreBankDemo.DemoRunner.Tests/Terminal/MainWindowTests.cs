@@ -825,6 +825,41 @@ public class MainWindowTests
     }
 
     /// <summary>
+    /// A rail row is a control, and it has to look like one. The bracket glyphs a Terminal.Gui
+    /// Button draws by default cannot fit the 16-column rail, so the active row carries an
+    /// accent-navy fill instead and the inactive rows carry the rail tone. The marker is what
+    /// actually encodes the active state — the fill is reinforcement that survives neither being
+    /// read in monochrome nor being the only signal — so both are asserted here: without the
+    /// scheme the whole rail renders as one flat block of text with nothing to press.
+    /// </summary>
+    [Fact]
+    public void NavigationRail_MarksTheActiveWorkspaceByBothMarkerAndFill()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+
+        window.HandleKeyForTest(Key.D4);
+        window.RenderForTest();
+
+        var buttons = window.NavigationButtons;
+        buttons[3].SchemeName.Should().Be(
+            OperatorTheme.NavigationActiveScheme, "the active workspace's row is filled");
+        buttons[3].Text.Should().StartWith("▸", "the marker, not the fill, carries the active state");
+        buttons.Where((_, index) => index != 3).Should().AllSatisfy(button =>
+        {
+            button.SchemeName.Should().Be(OperatorTheme.RailScheme);
+            button.Text.Should().NotStartWith("▸");
+        });
+
+        window.HandleKeyForTest(Key.D1);
+        window.RenderForTest();
+
+        buttons[0].SchemeName.Should().Be(OperatorTheme.NavigationActiveScheme, "the fill moves with the selection");
+        buttons[3].SchemeName.Should().Be(OperatorTheme.RailScheme);
+    }
+
+    /// <summary>
     /// The card is budgeted first and everything else is compressed into what is left. At every
     /// supported size its state word, its clock and its action are on screen, and so is the feed
     /// statement in one of its two forms.

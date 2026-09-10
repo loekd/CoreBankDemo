@@ -27,6 +27,7 @@ public class OperatorThemeTests
         OperatorTheme.DestructiveScheme,
         OperatorTheme.OverlayScheme,
         OperatorTheme.LockExemptScheme,
+        OperatorTheme.NavigationActiveScheme,
     ];
 
     [Theory]

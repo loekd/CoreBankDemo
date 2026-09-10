@@ -32,7 +32,18 @@ internal static class OperatorTheme
     internal const string LockExemptScheme = "CoreBankLockExempt";
 
     /// <summary>
-    /// The six values every scheme is derived from. Both modes fill the same shape, so the
+    /// The active workspace's rail row: <c>text-on-accent</c> on <c>accent-navy</c>
+    /// (DESIGN.md, Nav rail item). The <c>▸</c> marker is what actually carries the active
+    /// state — this fill is reinforcement, so the rail still reads correctly in a monochrome
+    /// terminal. The foreground is <c>text-on-accent</c> rather than <c>text-primary</c> on
+    /// purpose: <c>text-primary</c> inverts between modes while <c>accent-navy</c> deliberately
+    /// does not, so a straight token swap would put dark text on mid-navy at 2.37:1 in light
+    /// mode. As written it measures 5.62:1 dark and 6.66:1 light.
+    /// </summary>
+    internal const string NavigationActiveScheme = "CoreBankNavActive";
+
+    /// <summary>
+    /// The eight values every scheme is derived from. Both modes fill the same shape, so the
     /// scheme table below is written once and the palette is the only thing that swaps —
     /// no view needs to know which mode is in force.
     /// </summary>
@@ -42,6 +53,8 @@ internal static class OperatorTheme
         string SurfaceOverlay,
         string TextPrimary,
         string AccentTeal,
+        string AccentNavy,
+        string TextOnAccent,
         string StateFailedOnRaised);
 
     /// <summary>
@@ -53,6 +66,8 @@ internal static class OperatorTheme
         SurfaceOverlay: "#182A44",
         TextPrimary: "#E8ECF1",
         AccentTeal: "#2FB7A8",
+        AccentNavy: "#325F8C",
+        TextOnAccent: "#E8ECF1",
         StateFailedOnRaised: "#E06862");
 
     /// <summary>
@@ -73,6 +88,9 @@ internal static class OperatorTheme
         SurfaceOverlay: "#D8DEE4",
         TextPrimary: "#1F2328",
         AccentTeal: "#136066",
+        // accent-navy is the one accent that deliberately does not invert between modes.
+        AccentNavy: "#325F8C",
+        TextOnAccent: "#FFFFFF",
         StateFailedOnRaised: "#A40E26");
 
     private static bool _registered;
@@ -81,7 +99,7 @@ internal static class OperatorTheme
     internal static ThemeMode Mode => _mode;
 
     /// <summary>
-    /// Installs the six schemes for <paramref name="mode"/>. Safe to call repeatedly: the
+    /// Installs the seven schemes for <paramref name="mode"/>. Safe to call repeatedly: the
     /// first call adds the schemes, later calls with a different mode remap them in place.
     /// </summary>
     internal static void Register(ThemeMode mode = ThemeMode.Dark)
@@ -130,6 +148,7 @@ internal static class OperatorTheme
         yield return (DestructiveScheme, Scheme(p.StateFailedOnRaised, p.SurfaceRaised));
         yield return (OverlayScheme, Scheme(p.TextPrimary, p.SurfaceOverlay));
         yield return (LockExemptScheme, Scheme(p.AccentTeal, p.SurfaceBase));
+        yield return (NavigationActiveScheme, Scheme(p.TextOnAccent, p.AccentNavy));
     }
 
     internal static void Apply(View view, string schemeName) => view.SchemeName = schemeName;
