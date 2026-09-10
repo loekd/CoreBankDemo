@@ -31,7 +31,6 @@ Development follows the [superpowers](https://github.com/obra/superpowers) plugi
 - **Test bar:** xUnit + AwesomeAssertions + Moq; ≥90% line coverage (coverlet-enforced) on logic projects; hosting boilerplate excluded. Three tiers (ADR-016): `dotnet test CoreBankDemo.UnitTests.slnf` (Docker-free), `dotnet test CoreBankDemo.IntegrationTests.slnf` (persistence on a pinned `postgres:18.3` Testcontainer), and the k6/Aspire acceptance harness. The build/test gate runs `CoreBankDemo.Rebuild.slnf` (both .NET tiers); story 6.1 in `docs/backlog.md` tracks making the full `.sln` the gate. Never use SQLite or EF Core InMemory as a PostgreSQL substitute.
 - **Acceptance harness:** the k6 load test + LoadTestSupport assertions (exactly-once, no message loss, balance conservation, drain, per-key ordering). If code and load tests conflict, the load tests adapt — unless a real invariant is violated.
 
-
 ## Design Patterns
 
 Uses Inbox/Outbox with partitioned ordering, distributed locking, exactly-once processing, and end-to-end distributed tracing.
