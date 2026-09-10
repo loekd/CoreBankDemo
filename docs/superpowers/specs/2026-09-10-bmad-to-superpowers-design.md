@@ -143,10 +143,12 @@ commit; the orchestrating session reviews every result and commits.
 Acceptance, all verified before the PR opens:
 
 - `git grep -il bmad` on the branch lists only files under `docs/superpowers/specs/`
-  and `docs/superpowers/plans/`, and in each spec the word appears only on the
-  `**Migrated from:**` line.
+  and `docs/superpowers/plans/`, and in each migrated spec the word appears only on the
+  `**Migrated from:**` line or as the literal git ref `feature/bmad`. This design spec
+  itself is exempt because it documents the migration.
 - Every relative link in `docs/**/*.md`, `AGENTS.md`, `README.md`, and
-  `ARCHITECTURE.md` resolves to an existing file.
+  `ARCHITECTURE.md` resolves to an existing file (links quoted inside fenced code
+  blocks are not counted).
 - `.claude/hooks/branch-gate.test.sh` passes.
 - `dotnet build CoreBankDemo.Rebuild.slnf` succeeds (proves no tracked build input was
   removed by accident).

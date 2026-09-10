@@ -607,10 +607,10 @@ Expected: the commit touches 1,113 tracked files (41 + 970 + 102) plus `.gitigno
 
 - [ ] **Step 1: bmad residue**
 
-Run: `git grep -il bmad -- . ':!docs/superpowers/plans' | sort`
-Expected: only files under `docs/superpowers/specs/`. Then:
-`for f in docs/superpowers/specs/*.md; do n=$(grep -ci bmad "$f"); [ "$n" -le 1 ] || echo "$f: $n"; done`
-Expected: no output (each spec has at most the Migrated-from line).
+Run: `git grep -il bmad -- . ':!docs/superpowers/plans' ':!docs/superpowers/specs/2026-09-10-bmad-to-superpowers-design.md' | sort`
+Expected: only files under `docs/superpowers/specs/` (the migration's own design spec is excluded because it documents the migration). Then:
+`for f in docs/superpowers/specs/*.md; do n=$(grep -i bmad "$f" | grep -v 'Migrated from' | grep -vc 'feature/bmad'); [ "$n" -eq 0 ] || echo "$f: $n"; done`
+Expected: no output (each spec mentions the word only on its Migrated-from line, or as the literal git ref `feature/bmad`, which is a historical fact rather than process vocabulary).
 
 - [ ] **Step 2: link check**
 
@@ -625,7 +625,12 @@ targets = [*Path("docs").rglob("*.md"), Path("AGENTS.md"), Path("README.md"), Pa
 link = re.compile(r"\]\(([^)\s]+)\)")
 bad = 0
 for md in targets:
-    for raw in link.findall(md.read_text(errors="replace")):
+    text, fenced, kept = md.read_text(errors="replace"), False, []
+    for line in text.splitlines():  # links quoted inside fenced code blocks are not navigable
+        if line.strip().startswith("```"):
+            fenced = not fenced; continue
+        if not fenced: kept.append(line)
+    for raw in link.findall("\n".join(kept)):
         if re.match(r"^[a-z]+:", raw) or raw.startswith("#"):
             continue
         path = raw.split("#", 1)[0]
