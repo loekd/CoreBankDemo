@@ -1286,11 +1286,27 @@ public sealed class MainWindow : Window
     private Button CreateNavigationButton(WorkspaceKind workspace, int y)
     {
         var button = NewButton(string.Empty);
+
+        // The bracket glyphs and their padding cost four cells -- "⟦ ▸1 Operations ⟧" needs 17
+        // in a rail row that has 13 to give -- and the DESIGN.md treatment for a rail item was
+        // never brackets anyway: it is the ▸ marker plus an accent-navy fill on the active row.
+        // Without them the longest label fits one line and stops breaking mid-phrase.
         button.NoDecorations = true;
         button.NoPadding = true;
+
+        // A Button centres its caption. Undecorated and centred, the five rows sat at five
+        // different indents and the shortcut digits no longer formed a column to aim at.
+        button.TextAlignment = Alignment.Start;
+
+        // Height is deliberately left to auto-size. Terminal.Gui reserves a one-cell
+        // right/bottom Margin on a Button for its drop shadow and re-applies it while
+        // initializing, so clearing ShadowStyle in an object initializer never gives those
+        // cells back. Pinning Height to a single row therefore leaves Frame at 1 row and
+        // Viewport at 0, and the row draws *nothing at all* -- an entirely empty rail, which
+        // is exactly what a pinned height shipped. The rows are spaced two apart, so the auto
+        // height absorbs the shadow row without ever reaching its neighbour.
         button.X = 0;
         button.Y = y;
-        button.Height = 1;
         button.Width = Dim.Fill();
         button.Accepting += (_, e) =>
         {

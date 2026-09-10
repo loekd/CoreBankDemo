@@ -805,17 +805,17 @@ public class MainWindowTests
 
         foreach (var button in window.NavigationButtons)
         {
-            // TextFormatter.Text is what actually reaches the screen, decorations included --
-            // Button.UpdateTextFormatterText wraps Text in "[ ... ]" unless NoDecorations is set.
-            // Asserting against Button.Text instead would measure the string we handed in and
-            // miss the four cells that caused the wrap in the first place.
+            // Two things here are easy to get wrong and both shipped once. TextFormatter.Text is
+            // what actually reaches the screen, decorations included, so asserting Button.Text
+            // would measure the string we handed in and miss the four cells that caused the wrap.
+            // And the row's usable width is its *Viewport*, not its Frame: a Button reserves a
+            // one-cell margin for its drop shadow, so Frame overstates the room by one.
             var drawn = button.TextFormatter.Text;
-            button.Frame.Height.Should().Be(1, "a rail row that grows a second line breaks mid-phrase");
             drawn.GetColumns().Should().BeLessThanOrEqualTo(
-                button.Frame.Width,
-                "'{0}' as drawn must fit the {1} cells the rail leaves it",
+                button.Viewport.Width,
+                "'{0}' as drawn must fit the {1} cells the rail actually leaves it",
                 drawn,
-                button.Frame.Width);
+                button.Viewport.Width);
         }
 
         window.NavigationButtons.Select(button => button.Text.Trim().Split(' ')).Should().AllSatisfy(
