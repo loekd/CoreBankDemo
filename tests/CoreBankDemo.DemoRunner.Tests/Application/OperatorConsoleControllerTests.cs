@@ -978,7 +978,12 @@ public class OperatorConsoleControllerTests
         harness.Payments.Submissions.Single().IdempotencyKey.Should().BeNull();
         controller.State.CanResendLastPayment.Should().BeFalse();
         resend.Outcome.Should().Be(PaymentOutcome.Rejected);
-        controller.State.Evidence.Last().Summary.Should().Contain("Ambiguous");
+        controller.State.Evidence.Should().Contain(record => record.Summary.Contains("Ambiguous"));
+        // The refusal the console produced itself is a record too, written before its
+        // announcement is drawn -- the condition the removed bottom band's removal depends on.
+        controller.State.Evidence.Last().Summary.Should()
+            .Contain("Resend same key refused").And.Contain("No retry-safe");
+        controller.State.Evidence.Last().Succeeded.Should().BeFalse();
     }
 
     [Fact]
@@ -992,6 +997,43 @@ public class OperatorConsoleControllerTests
         result.Outcome.Should().Be(PaymentOutcome.Rejected);
         result.ErrorSummary.Should().Contain("Amount").And.Contain("Currency").And.Contain("differ").And.Contain("key");
         harness.Payments.Submissions.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// A refusal the console produced itself never became a request, so nothing else in the
+    /// system will ever record it. The record is written before the caller can announce it --
+    /// the condition the removed bottom band's removal depends on (EXPERIENCE.md, Information
+    /// Architecture, "Override -- the bottom band is removed from every workspace"). Both
+    /// submit guards are covered here: the precondition and the validator.
+    /// </summary>
+    [Fact]
+    public async Task RefusedSubmission_IsAnEvidenceRecordBeforeItIsEverAnnounced()
+    {
+        var harness = new OperatorHarness();
+        var controller = harness.CreateController();
+        await controller.InitializeAsync(CancellationToken.None);
+
+        var noTopology = await controller.SubmitPaymentAsync(
+            StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        noTopology.Outcome.Should().Be(PaymentOutcome.Rejected);
+        harness.Payments.Submissions.Should().BeEmpty("the refusal never became a request");
+        var precondition = controller.State.Evidence.Last();
+        precondition.Summary.Should().Contain("refused").And.Contain("topology");
+        precondition.Succeeded.Should().BeFalse();
+        precondition.Detail.Should().Contain(noTopology.ErrorSummary!);
+
+        var (attached, attachedHarness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        var invalid = StandardPayment with { ToAccount = StandardPayment.FromAccount };
+
+        var validation = await attached.SubmitPaymentAsync(
+            invalid, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        validation.Outcome.Should().Be(PaymentOutcome.Rejected);
+        attachedHarness.Payments.Submissions.Should().BeEmpty();
+        var refused = attached.State.Evidence.Last();
+        refused.Summary.Should().Contain("refused").And.Contain("differ");
+        refused.Succeeded.Should().BeFalse();
     }
 
     [Fact]
@@ -1053,7 +1095,116 @@ public class OperatorConsoleControllerTests
         var result = await controller.RunBurstAsync(StandardPayment, count, concurrency, CancellationToken.None);
 
         result.Succeeded.Should().BeFalse();
-        harness.Payments.Submissions.Should().BeEmpty();
+        harness.Payments.Submissions.Should().BeEmpty("the refusal never became a request");
+        // Nothing else in the system will ever record it, so Evidence has to -- before the caller
+        // can announce it (EXPERIENCE.md, Information Architecture).
+        var refused = controller.State.Evidence.Last();
+        refused.Summary.Should().Contain("Burst refused").And.Contain("must be between");
+        refused.Succeeded.Should().BeFalse();
+        refused.Method.Should().Be("(refused by the console)");
+        refused.Detail.Should().Contain(result.Message);
+    }
+
+    /// <summary>
+    /// The other two burst guards, and the outcome-query guard beside them: a precondition
+    /// refusal and a validation refusal are records for the same reason a bounds refusal is.
+    /// </summary>
+    [Fact]
+    public async Task EveryBurstAndQueryRefusal_IsAnEvidenceRecordBeforeItIsEverAnnounced()
+    {
+        var harness = new OperatorHarness();
+        var controller = harness.CreateController();
+        await controller.InitializeAsync(CancellationToken.None);
+
+        var noTopology = await controller.RunBurstAsync(StandardPayment, 5, 1, CancellationToken.None);
+        noTopology.Succeeded.Should().BeFalse();
+        controller.State.Evidence.Last().Summary.Should().Contain("Burst refused").And.Contain("Start or attach");
+
+        var query = await controller.QueryOutcomeAsync("tx-1", CancellationToken.None);
+        query.Succeeded.Should().BeFalse();
+        controller.State.Evidence.Last().Summary.Should().Contain("Outcome query refused");
+
+        var inspect = await controller.InspectAsync(KnownEndpoints.PaymentsOutbox, CancellationToken.None);
+        inspect.Succeeded.Should().BeFalse();
+        controller.State.Evidence.Last().Summary.Should().Contain("Inspect").And.Contain("refused");
+
+        var (attached, attachedHarness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        var invalid = StandardPayment with { ToAccount = StandardPayment.FromAccount };
+
+        var validation = await attached.RunBurstAsync(invalid, 5, 1, CancellationToken.None);
+
+        validation.Succeeded.Should().BeFalse();
+        attachedHarness.Payments.Submissions.Should().BeEmpty();
+        attached.State.Evidence.Last().Summary.Should().Contain("Burst refused").And.Contain("differ");
+
+        var blankKey = await attached.QueryOutcomeAsync("   ", CancellationToken.None);
+
+        blankKey.Succeeded.Should().BeFalse();
+        attached.State.Evidence.Last().Summary.Should()
+            .Contain("Outcome query refused").And.Contain("transaction id");
+        attached.State.Evidence.Last().Succeeded.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Omitted mode sends no key, so the bank names the payment and the console has no id until
+    /// it answers. The payment is still one the console sent, and the card must hold it rather
+    /// than falling back to "No payment yet this session" while it is genuinely in flight.
+    /// </summary>
+    [Fact]
+    public async Task OmittedSubmissionInFlight_IsHeldByTheConsoleUntilTheBankNamesIt()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var submit = controller.SubmitPaymentAsync(
+            StandardPayment, IdempotencyMode.Omitted, null, CancellationToken.None);
+        await harness.Payments.SubmissionStarted.Task;
+
+        var inFlight = controller.State.UnidentifiedSubmission;
+        inFlight.Should().NotBeNull("the console sent it and cannot yet name it");
+        inFlight!.Request.Should().Be(StandardPayment);
+        controller.State.TrackedPayments.Should().BeEmpty("there is no id to track it by");
+        controller.State.SelectedPayment.Should().BeNull("nothing else may hold the card while it is in flight");
+
+        harness.Payments.ReleaseSubmission.SetResult();
+        await submit;
+
+        controller.State.UnidentifiedSubmission.Should().BeNull("the bank named it");
+        controller.State.TrackedPayments.Should().ContainSingle()
+            .Which.TransactionId.Should().Be("transaction-id");
+        controller.State.SelectedPayment.Should().Be("transaction-id", "a new submission takes the selection");
+    }
+
+    /// <summary>
+    /// Selection is moved by the operator and by nothing else. An answer that lands while the
+    /// operator has moved to another open payment must not steal the card back.
+    /// </summary>
+    [Fact]
+    public async Task AnswerArrivingAfterTheOperatorMovedSelection_LeavesTheCardWhereTheyPutIt()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-first" });
+        await controller.SubmitPaymentAsync(
+            StandardPayment, IdempotencyMode.Supplied, "tx-first", CancellationToken.None);
+
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-second" });
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var submit = controller.SubmitPaymentAsync(
+            StandardPayment, IdempotencyMode.Supplied, "tx-second", CancellationToken.None);
+        await harness.Payments.SubmissionStarted.Task;
+
+        // The operator moves back to the payment they are narrating while the second is in flight.
+        controller.SelectPayment("tx-first");
+
+        harness.Payments.ReleaseSubmission.SetResult();
+        await submit;
+
+        controller.State.SelectedPayment.Should().Be(
+            "tx-first",
+            "an arriving answer never re-points the screen the operator moved");
     }
 
     [Fact]
@@ -1518,6 +1669,32 @@ public class OperatorConsoleControllerTests
         controller.State.Evidence.Count(record => record.Summary.StartsWith("Feed lost")).Should().Be(1);
         controller.State.Evidence.Should().Contain(record =>
             record.Summary.Contains("Feed lost") && record.Summary.Contains("2 payments"));
+    }
+
+    /// <summary>
+    /// The burst's proven leg is a claim about the same feed, so it is withdrawn in the same
+    /// breath. A counter frozen at a number whose meaning had silently changed from "waiting to
+    /// hear" to "nobody is listening" is the failure the takeover exists to prevent, held on the
+    /// most-watched screen the console has.
+    /// </summary>
+    [Fact]
+    public async Task FeedLostDuringABurst_MovesStillMovingIntoUnknownRatherThanFreezingIt()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Enumerable
+            .Range(0, 4)
+            .Select(i => Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = $"burst-{i}" })
+            .ToArray());
+
+        await controller.RunBurstAsync(StandardPayment, 4, 1, CancellationToken.None);
+        harness.Feed.PushCompleted("burst-0", harness.Time.GetUtcNow());
+        controller.State.Burst.Awaiting.Should().Be(3, "three are still being listened for");
+
+        harness.Feed.Fault(harness.Time.GetUtcNow());
+
+        controller.State.Burst.Awaiting.Should().Be(0, "nobody is listening, so nothing is still moving");
+        controller.State.Burst.Unknown.Should().Be(3);
+        controller.State.Burst.Settled.Should().Be(1, "what was already proven stays proven");
     }
 
     [Fact]

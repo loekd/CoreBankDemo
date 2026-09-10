@@ -5,6 +5,8 @@ using CoreBankDemo.DemoRunner.Infrastructure;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
+using Terminal.Gui.Text;
+using Terminal.Gui.Views;
 using Xunit;
 using CoreBankDemo.DemoRunner.Tests;
 
@@ -92,7 +94,6 @@ public class MainWindowTests
         using var window = CreateWindow(controller);
         window.FromAccountField.Text = "short";
         window.ToAccountField.Text = "short";
-        window.CurrencyField.Text = "eur";
         window.AmountField.Text = "0";
         window.SetIdempotencyModeForTest(IdempotencyMode.Supplied);
 
@@ -100,8 +101,9 @@ public class MainWindowTests
 
         window.LastUiMessage.Should().Contain("From account")
             .And.Contain("To account")
-            .And.Contain("Amount")
-            .And.Contain("Currency");
+            .And.Contain("Amount");
+        window.LastUiMessage.Should().NotContain("Currency",
+            "there is no currency input on screen and the console always sends EUR");
     }
 
     [Fact]
@@ -112,17 +114,79 @@ public class MainWindowTests
         var controller = harness.CreateController();
         using var window = CreateWindow(controller);
 
+        // The lookup is anchored to the card, so with no payment on it the console says exactly
+        // that -- as a notice, because nothing was attempted and nothing failed.
         await window.TriggerQueryForTestAsync();
-        window.LastUiMessage.Should().Contain("Start or attach");
+        window.LastUiMessage.Should().Contain("nothing to look up");
+        window.AnnouncementIsFailureToned.Should().BeFalse("no verdict was reached, so none is announced");
+        controller.State.Evidence.Should().BeEmpty("nothing was attempted against a payment");
 
         await window.TriggerInspectForTestAsync(KnownEndpoints.PaymentsOutbox);
         window.LastUiMessage.Should().Contain("Start or attach");
+        window.AnnouncementIsFailureToned.Should().BeTrue("a command that ran and was refused is a proven failure");
+        // The refusal never became a request, so nothing else in the system will ever record it.
+        var inspect = controller.State.Evidence.Last();
+        inspect.Summary.Should().Contain("refused").And.Contain("Start or attach");
+        inspect.Succeeded.Should().BeFalse();
+        inspect.Method.Should().Be("(refused by the console)");
 
         await window.TriggerLoadForTestAsync(100);
         window.LastUiMessage.Should().Contain("Load Test requires");
 
         await window.TriggerExportForTestAsync();
         window.LastUiMessage.Should().Be("disk full");
+    }
+
+    /// <summary>
+    /// The lookup is the deliberate second opinion on the card's own payment: read-only, never
+    /// blocked by the single-action-in-flight rule, and reachable from the keyboard even while
+    /// the card's one slot is carrying Cancel payment.
+    /// </summary>
+    [Fact]
+    public async Task OutcomeLookup_ReachesTheCardsOwnPayment_FromTheSlotAndFromTheKeyboard()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.Zero));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "tx-8821",
+            CancellationToken.None);
+        window.RenderForTest();
+
+        // The slot is carrying Cancel payment, so the keyboard is the only path to the lookup.
+        window.FocusCard.ActionLabel.Should().Be(CardActions.Cancel);
+        window.HandleKeyForTest(Key.O).Should().BeTrue();
+        await window.LastDispatchedTask!;
+
+        harness.Payments.QueryProfiles.Should().ContainSingle();
+        controller.State.Evidence.Last().Summary.Should().Contain("Outcome query");
+
+        // A proven payment whose key is not safe to reuse carries the lookup in the slot itself,
+        // and firing it is the same call.
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Ambiguous, 0, null, "tx-8822", null, null, "reply lost", TimeSpan.Zero));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Omitted,
+            null,
+            CancellationToken.None);
+        harness.Feed.PushCompleted("tx-8822", new DateTimeOffset(2026, 8, 29, 12, 4, 31, TimeSpan.Zero));
+        window.RenderForTest();
+
+        controller.State.CanResendLastPayment.Should().BeFalse("an Omitted key is never safe to reuse");
+        window.FocusCard.ActionLabel.Should().Be(CardActions.LookUpOutcome);
+
+        window.TriggerCardActionForTest();
+        await window.LastDispatchedTask!;
+
+        harness.Payments.QueryProfiles.Should().HaveCount(2);
     }
 
     [Fact]
@@ -133,6 +197,7 @@ public class MainWindowTests
         var controller = harness.CreateController();
         await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
         using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
         window.BurstCountField.Text = "2";
         window.BurstConcurrencyField.Text = "1";
 
@@ -281,8 +346,8 @@ public class MainWindowTests
         window.WrapButton.InvokeCommand(Command.Accept);
         window.DetailsButton.InvokeCommand(Command.Accept);
 
-        window.RailButton.Text.Should().Be("Rail: instant");
-        window.IdempotencyButton.Text.Should().Be("Idempotency: Supplied");
+        window.RailButton.Text.Should().Be("Rail ‹ instant ›");
+        window.IdempotencyButton.Text.Should().Be("Key ‹ Supplied ›");
         window.WrapButton.Text.Should().Be("Wrap: on");
         window.LastUiMessage.Should().Contain("No action has been recorded");
     }
@@ -384,8 +449,11 @@ public class MainWindowTests
         window.RenderForTest();
         window.RenderForTest();
 
-        window.MessageLineText.Should().Contain("No retry-safe");
-        window.StatusLineText.Should().Be(controller.State.StatusLine);
+        window.AnnouncementLineText.Should().Contain("No retry-safe");
+        controller.State.Evidence.Should().Contain(
+            record => record.Summary.Contains("No retry-safe") && !record.Succeeded,
+            "the removal of the bottom band is conditional on every refusal being an Evidence "
+            + "record before its announcement is drawn");
     }
 
     [Fact]
@@ -441,28 +509,29 @@ public class MainWindowTests
             null,
             CancellationToken.None);
         window.RenderForTest();
-        var selectedBefore = window.PaymentList.SelectedItem;
+        window.FocusCard.StateWord.Should().Be("AWAITING SETTLEMENT");
 
         harness.Feed.PushCompleted("tx-8821", new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
         harness.Feed.PushBalance("tx-8821", "1001", -250m, 4750m);
         window.RenderForTest();
 
         controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Settled);
-        window.PaymentList.SelectedItem.Should().Be(selectedBefore, "an arriving event never moves the operator's selection");
-        window.PaymentRowTexts.Should().Contain(line => line.Contains("Settled — tx-8821"));
-        window.PaymentRowTexts.Should().Contain(line => line.Contains("−250.00 → 4,750.00 EUR"));
+        window.FocusCard.TransactionId.Should().Be("tx-8821", "the card updates in place");
+        window.FocusCard.StateWord.Should().Be("SETTLED");
+        window.FocusCard.Closing.Should().Contain(line => line.Contains("−250.00 → 4,750.00 EUR"));
+        window.StillOpenVisible.Should().BeFalse("the payment left the strip the moment it was proven");
         window.FeedStatusText.Should().Contain("Listening since");
-        window.BurstProvenStatusText.Should().StartWith("Proven leg");
     }
 
     [Fact]
-    public async Task OutcomeQuery_FallsBackToTheSelectedPaymentRowsTransactionId()
+    public async Task StripSelection_RePointsTheFocusCardAndNothingElseDoes()
     {
         var harness = new OperatorHarness();
         harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
         var controller = harness.CreateController();
         await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
         using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
         harness.Payments.Queue(new PaymentResult(
             PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
         await controller.SubmitPaymentAsync(
@@ -470,14 +539,61 @@ public class MainWindowTests
             IdempotencyMode.Generated,
             null,
             CancellationToken.None);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8822", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 80m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "tx-8822",
+            CancellationToken.None);
         window.RenderForTest();
 
-        window.OutcomeQueryTarget().Should().BeEmpty(
-            "no typed key and no deliberate selection must never quietly query the oldest payment");
+        window.StillOpenVisible.Should().BeTrue("two payments are open");
+        window.FocusCard.TransactionId.Should().Be("tx-8822", "a new submission takes the selection");
 
-        window.SelectPaymentRowForTest(0);
+        window.SelectStillOpenRowForTest(0);
+        window.RenderForTest();
 
-        window.OutcomeQueryTarget().Should().Be("tx-8821");
+        window.FocusCard.TransactionId.Should().Be("tx-8821");
+        window.StillOpenRowTexts.Should().Contain(line => line.Contains("…4567"),
+            "the strip truncates identifiers to their last four digits, and only the strip does");
+    }
+
+    /// <summary>
+    /// An arriving outcome updates the row in place and never re-points the card: the operator
+    /// may be mid-sentence with a finger on the line they chose.
+    /// </summary>
+    [Fact]
+    public async Task ArrivingOutcome_LeavesTheCardOnTheOperatorsOwnSelection()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        foreach (var id in new[] { "tx-8821", "tx-8822", "tx-8823" })
+        {
+            harness.Payments.Queue(new PaymentResult(
+                PaymentOutcome.Pending, 202, "payment-id", id, "Pending", "{}", null, TimeSpan.Zero));
+            await controller.SubmitPaymentAsync(
+                new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+                IdempotencyMode.Supplied,
+                id,
+                CancellationToken.None);
+        }
+
+        window.RenderForTest();
+        window.SelectStillOpenRowForTest(0);
+        window.RenderForTest();
+        var linesBefore = window.StillOpenRowTexts.Count;
+
+        harness.Feed.PushCompleted("tx-8823", new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
+        window.RenderForTest();
+
+        window.FocusCard.TransactionId.Should().Be("tx-8821", "the card still holds the operator's selection");
+        window.StillOpenRowTexts.Should().HaveCount(linesBefore - 1, "a proven payment leaves the strip");
+        window.StillOpenRowTexts[0].Should().Contain("…4567");
     }
 
 
@@ -490,7 +606,9 @@ public class MainWindowTests
         await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
         using var window = CreateWindow(controller);
         window.ResizeForTest(100, 30);
-        for (var index = 0; index < 12; index++)
+        // Comfortably more open payments than the strip has rows, so the one that resolves
+        // cannot be mistaken for the clamp that keeps a shrinking list inside its own content.
+        for (var index = 0; index < 24; index++)
         {
             harness.Payments.Queue(new PaymentResult(
                 PaymentOutcome.Pending, 202, "payment-id", $"tx-{index}", "Pending", "{}", null, TimeSpan.Zero));
@@ -503,14 +621,14 @@ public class MainWindowTests
 
         window.RenderForTest();
         // The operator scrolled down to watch a specific row.
-        window.ScrollPaymentListForTest(6);
-        var offsetBefore = window.PaymentList.Viewport.Location.Y;
+        window.ScrollStillOpenListForTest(6);
+        var offsetBefore = window.StillOpenList.Viewport.Location.Y;
         offsetBefore.Should().BeGreaterThan(0, "the list must actually be scrolled for this to prove anything");
 
         harness.Feed.PushCompleted("tx-0", new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
         window.RenderForTest();
 
-        window.PaymentList.Viewport.Location.Y.Should().Be(
+        window.StillOpenList.Viewport.Location.Y.Should().Be(
             offsetBefore,
             "a list that scrolled itself under a live demonstration is a stage failure");
     }
@@ -637,41 +755,120 @@ public class MainWindowTests
     }
 
     /// <summary>
-    /// The payment list is where a submitted payment states its own outcome, so it must never be
-    /// squeezed out of existence. It previously rendered zero rows at the documented 80x24
-    /// minimum and a single row at the 100x30 preferred baseline, because the Operations row
-    /// ladder counted rows the workspace did not have: a submitted payment showed up in Evidence
-    /// and nowhere in Operations.
+    /// Removing the three-row bottom band and collapsing the sixteen-row form re-cuts the rows at
+    /// 100x30 from 10 of shell chrome and 4 of payment area to 7 and 20.
     /// </summary>
-    [Theory]
-    [InlineData(80, 24, 1)]
-    [InlineData(100, 26, 2)]
-    [InlineData(100, 30, 4)]
-    [InlineData(120, 40, 8)]
-    public void PaymentList_KeepsUsableHeight_AtEverySupportedTerminalSize(int width, int height, int minimumRows)
+    [Fact]
+    public void OperationsRowBudget_At100x30_Spends7RowsOnChromeAnd20OnThePaymentArea()
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
 
-        window.ResizeForTest(width, height);
+        window.ResizeForTest(100, 30);
         window.RenderForTest();
 
-        window.PaymentList.Frame.Height.Should().BeGreaterThanOrEqualTo(
-            minimumRows,
-            "a submitted payment must be readable in Operations at {0}x{1}, not only in Evidence",
-            width,
-            height);
+        window.OperationsChromeRowCount.Should().Be(7);
+        window.OperationsPaymentAreaRows.Should().Be(20);
     }
 
     /// <summary>
-    /// The list may only take rows the form above it is not using: a list that overlapped the
-    /// outcome lookup would hide the one remedy an unresolved payment names.
+    /// The rail is the longest of the five labels plus its border and not one more, so every
+    /// workspace gets six more columns back.
+    /// </summary>
+    [Fact]
+    public void NavigationRail_AtThePreferredWidth_Is16Columns()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.ResizeForTest(100, 30);
+
+        window.NavigationFrameWidth.Should().Be(16);
+    }
+
+    /// <summary>
+    /// Every rail row is one line: marker, shortcut digit and label together, inside the width
+    /// the rail actually has. It shipped wrapping — Terminal.Gui brackets and pads a Button's
+    /// title by default, four cells the 16-column derivation never budgeted for, so "▸4 Load
+    /// Test" reflowed into "4 Load" / "Test" and read as two workspaces. Asserting the label
+    /// fits its own laid-out frame is what catches that, and it catches the next label that
+    /// outgrows the rail too — a rail row is where a long name is least survivable.
+    /// </summary>
+    [Fact]
+    public void NavigationLabels_EachFitOneRowAtThePreferredWidth()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.ResizeForTest(100, 30);
+        window.RenderForTest();
+
+        foreach (var button in window.NavigationButtons)
+        {
+            // Two things here are easy to get wrong and both shipped once. TextFormatter.Text is
+            // what actually reaches the screen, decorations included, so asserting Button.Text
+            // would measure the string we handed in and miss the four cells that caused the wrap.
+            // And the row's usable width is its *Viewport*, not its Frame: a Button reserves a
+            // one-cell margin for its drop shadow, so Frame overstates the room by one.
+            var drawn = button.TextFormatter.Text;
+            drawn.GetColumns().Should().BeLessThanOrEqualTo(
+                button.Viewport.Width,
+                "'{0}' as drawn must fit the {1} cells the rail actually leaves it",
+                drawn,
+                button.Viewport.Width);
+        }
+
+        window.NavigationButtons.Select(button => button.Text.Trim().Split(' ')).Should().AllSatisfy(
+            tokens => tokens.Should().HaveCount(
+                2,
+                "a rail row carries exactly two tokens — the marked shortcut and a one-word label"));
+    }
+
+    /// <summary>
+    /// A rail row is a control, and it has to look like one. The bracket glyphs a Terminal.Gui
+    /// Button draws by default cannot fit the 16-column rail, so the active row carries an
+    /// accent-navy fill instead and the inactive rows carry the rail tone. The marker is what
+    /// actually encodes the active state — the fill is reinforcement that survives neither being
+    /// read in monochrome nor being the only signal — so both are asserted here: without the
+    /// scheme the whole rail renders as one flat block of text with nothing to press.
+    /// </summary>
+    [Fact]
+    public void NavigationRail_MarksTheActiveWorkspaceByBothMarkerAndFill()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+
+        window.HandleKeyForTest(Key.D4);
+        window.RenderForTest();
+
+        var buttons = window.NavigationButtons;
+        buttons[3].SchemeName.Should().Be(
+            OperatorTheme.NavigationActiveScheme, "the active workspace's row is filled");
+        buttons[3].Text.Should().StartWith("▸", "the marker, not the fill, carries the active state");
+        buttons.Where((_, index) => index != 3).Should().AllSatisfy(button =>
+        {
+            button.SchemeName.Should().Be(OperatorTheme.RailScheme);
+            button.Text.Should().NotStartWith("▸");
+        });
+
+        window.HandleKeyForTest(Key.D1);
+        window.RenderForTest();
+
+        buttons[0].SchemeName.Should().Be(OperatorTheme.NavigationActiveScheme, "the fill moves with the selection");
+        buttons[3].SchemeName.Should().Be(OperatorTheme.RailScheme);
+    }
+
+    /// <summary>
+    /// The card is budgeted first and everything else is compressed into what is left. At every
+    /// supported size its state word, its clock and its action are on screen, and so is the feed
+    /// statement in one of its two forms.
     /// </summary>
     [Theory]
     [InlineData(80, 24)]
     [InlineData(100, 30)]
     [InlineData(120, 40)]
-    public void PaymentList_NeverOverlapsTheFormAboveIt(int width, int height)
+    public void FocusCard_KeepsItsStateWordClockAndAction_AtEverySupportedTerminalSize(int width, int height)
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
@@ -679,43 +876,440 @@ public class MainWindowTests
         window.ResizeForTest(width, height);
         window.RenderForTest();
 
-        var list = window.PaymentList;
-        list.Frame.Y.Should().BeGreaterThan(
-            window.QueryButton.Frame.Y,
-            "the outcome lookup stays above the list at {0}x{1}",
+        var workspaceHeight = window.CardStateLabel.SuperView!.Viewport.Height;
+        window.CardStateLabel.Frame.Y.Should().BeGreaterThan(
+            window.ComposeRuleLabel.Frame.Y,
+            "the card sits below the compose bar's rule at {0}x{1}",
             width,
             height);
-        (list.Frame.Y + list.Frame.Height).Should().BeLessThanOrEqualTo(
-            list.SuperView!.Viewport.Height,
-            "the list stays inside the workspace at {0}x{1}",
+        window.CardStateLabel.Frame.Y.Should().BeLessThan(
+            workspaceHeight,
+            "the card's state line is on screen at {0}x{1}",
             width,
             height);
+        window.CardActionButton.Frame.Y.Should().Be(window.CardStateLabel.Frame.Y);
+        window.FeedStatusText.Should().NotBeEmpty("the feed statement is surrendered at no width");
     }
 
     /// <summary>
-    /// The Omitted-mode warning is about Omitted mode alone, so it earns its row only there. It
-    /// is the first row handed to the payment list in every other mode.
+    /// The compose bar's third line belongs to the mode that needs it, and to no other: the
+    /// supplied-key field in Supplied mode, the not-retry-safe warning in Omitted mode.
     /// </summary>
     [Fact]
-    public void OmittedNote_TakesARowOnlyInOmittedMode()
+    public void ComposeBarThirdLine_AppearsOnlyInTheModeThatNeedsIt()
     {
-        static int ListHeightFor(IdempotencyMode mode, out bool noteVisible)
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(120, 40);
+
+        window.SetIdempotencyModeForTest(IdempotencyMode.Generated);
+        window.ModeLineVisible.Should().BeFalse();
+
+        window.SetIdempotencyModeForTest(IdempotencyMode.Supplied);
+        window.ModeLineVisible.Should().BeTrue();
+        window.ModeLineText.Should().Be("Supplied key");
+
+        window.SetIdempotencyModeForTest(IdempotencyMode.Omitted);
+        window.ModeLineVisible.Should().BeTrue();
+        window.ModeLineText.Should().Contain("not retry-safe");
+    }
+
+    /// <summary>
+    /// R and Q were the removed StatusBar's only home. Keyboard parity is a floor: every action
+    /// reachable by mouse has a keyboard path, so both had to survive the band's removal.
+    /// </summary>
+    [Fact]
+    public void RefreshAndQuit_SurviveTheRemovedStatusBarAsWindowWideKeys()
+    {
+        var harness = new OperatorHarness();
+        var controller = harness.CreateController();
+        var exited = false;
+        using var window = new MainWindow(
+            controller,
+            () => { exited = true; return Task.CompletedTask; },
+            null,
+            startPolling: false,
+            marshalUpdates: false);
+
+        window.HandleKeyForTest(Key.R).Should().BeTrue();
+        window.HandleKeyForTest(Key.Q).Should().BeTrue();
+
+        exited.Should().BeTrue("Q is the only way out and it left with the status bar");
+    }
+
+    /// <summary>
+    /// The card's own action, fired with no confirmation modal: a cancellation destroys no state.
+    /// </summary>
+    [Fact]
+    public async Task CardAction_OnAnOpenPayment_DispatchesACancelWithNoConfirmation()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        var confirmation = new FakeConfirmationService { Result = false };
+        using var window = CreateWindow(controller, confirmation);
+        window.ResizeForTest(100, 30);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.Zero));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Supplied,
+            "tx-8821",
+            CancellationToken.None);
+        window.RenderForTest();
+        window.FocusCard.ActionLabel.Should().Be(CardActions.Cancel);
+
+        window.TriggerCardActionForTest();
+        await window.LastDispatchedTask!;
+        window.RenderForTest();
+
+        confirmation.Requests.Should().BeEmpty("Cancel payment fires immediately — no modal, no Y");
+        harness.Payments.Cancellations.Should().ContainSingle(request => request.TransactionId == "tx-8821");
+        window.FocusCard.StateWord.Should().Be("CANCELLED");
+        window.StillOpenVisible.Should().BeFalse("a proven cancellation leaves the strip");
+    }
+
+    /// <summary>
+    /// A running burst replaces the compose bar, the focus card and the strip rather than
+    /// rendering as one more object among them.
+    /// </summary>
+    [Fact]
+    public async Task RunningBurst_TakesTheWholeWorkspaceOverAndHoldsItsResult()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+
+        await window.TriggerBurstForTestAsync();
+        window.RenderForTest();
+
+        window.BurstTakeoverVisible.Should().BeTrue(
+            "on drain the takeover holds its final summary until the operator dismisses it");
+        // The two counter lines are never merged: a burst is exactly where "acknowledged" and
+        // "finished" diverge, and `still moving` draining to zero is the confirmation.
+        window.BurstStatusText.Should().StartWith("Sent").And.Contain("2 / 2");
+        window.BurstProvenStatusText.Should().StartWith("Settled").And.Contain("still moving 2");
+        window.BurstClosingText.Should().BeEmpty(
+            "two payments are still moving, so nothing may claim the burst proved itself");
+
+        foreach (var submission in harness.Payments.Submissions)
         {
-            var controller = new OperatorHarness().CreateController();
-            using var window = CreateWindow(controller);
-            window.SetIdempotencyModeForTest(mode);
-            window.ResizeForTest(120, 40);
-            window.RenderForTest();
-            noteVisible = window.OmittedNoteVisible;
-            return window.PaymentList.Frame.Height;
+            harness.Feed.PushCompleted(submission.IdempotencyKey!, new DateTimeOffset(2026, 8, 29, 12, 0, 0, TimeSpan.Zero));
         }
 
-        var generated = ListHeightFor(IdempotencyMode.Generated, out var generatedNote);
-        var omitted = ListHeightFor(IdempotencyMode.Omitted, out var omittedNote);
+        window.RenderForTest();
 
-        generatedNote.Should().BeFalse("the warning does not apply outside Omitted mode");
-        omittedNote.Should().BeTrue("Omitted mode is not retry-safe and must say so");
-        omitted.Should().Be(generated - 1, "the note's row comes out of the payment list");
+        window.BurstProvenStatusText.Should().Contain("still moving 0");
+        window.BurstClosingText.Should().Be("every payment proved itself · nothing left awaiting");
+    }
+
+    /// <summary>
+    /// Currency is not an operator input: there is no field on screen and no currency validation
+    /// rule, and the console always sends EUR (brief §6).
+    /// </summary>
+    [Fact]
+    public async Task ComposeBarSubmit_AlwaysSendsEurAndOffersNoCurrencyInput()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.AmountField.Text = "250.00";
+
+        await window.TriggerSubmitForTestAsync();
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+        await window.TriggerBurstForTestAsync();
+
+        harness.Payments.Submissions.Should().OnlyContain(submission => submission.Request.Currency == "EUR");
+    }
+
+    /// <summary>
+    /// The burst Cancel and the Faults controls remain the only lock exemptions. Cancel payment
+    /// is exempt from confirmation, never from the lock, so it must not borrow the outline that
+    /// means "still live while everything else is dimmed" — nor the destructive red, which is
+    /// this console's one data-loss warning and a cancellation loses no data.
+    /// </summary>
+    [Fact]
+    public void CardAction_WearsNeitherTheLockExemptOutlineNorTheDestructiveTreatment()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+
+        window.CardActionButton.SchemeName.Should().NotBe(OperatorTheme.LockExemptScheme);
+        window.CardActionButton.SchemeName.Should().NotBe(OperatorTheme.DestructiveScheme);
+        window.CardActionButton.SchemeName.Should().NotBe(
+            OperatorTheme.ActionScheme,
+            "Submit is Operations' single filled-teal control");
+    }
+
+    /// <summary>
+    /// Nothing is ever hidden: a surplus the strip has no rows for is stated on its rule as an
+    /// explicit count, exactly as the Evidence feed states its elided rows.
+    /// </summary>
+    [Fact]
+    public async Task StillOpenStrip_WithMoreOpenPaymentsThanRows_StatesTheSurplusRatherThanDroppingIt()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(80, 24);
+        for (var index = 0; index < 12; index++)
+        {
+            harness.Payments.Queue(new PaymentResult(
+                PaymentOutcome.Pending, 202, "payment-id", $"tx-{index}", "Pending", "{}", null, TimeSpan.Zero));
+            await controller.SubmitPaymentAsync(
+                new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+                IdempotencyMode.Supplied,
+                $"tx-{index}",
+                CancellationToken.None);
+        }
+
+        window.RenderForTest();
+
+        window.StillOpenVisible.Should().BeTrue();
+        window.StillOpenVisibleRows.Should().BeLessThan(12, "the 80x24 floor cannot show every open payment");
+        window.StillOpenVisibleRows.Should().BeGreaterThanOrEqualTo(
+            2,
+            "the strip never falls below two rows while more than one payment is open");
+        window.StillOpenRuleText.Should().Contain("more open").And.Contain("STILL OPEN");
+        window.StillOpenRuleText.Should().Contain(
+            "Listening since",
+            "the region's feed statement is surrendered at no width");
+    }
+
+    /// <summary>
+    /// At the floor the compose bar keeps both captions and every control: where the chips and
+    /// Burst… cannot share the second line, the action wraps to a third rather than shedding a
+    /// caption. An unlabelled IBAN read from the back of a room is a run of digits, so a caption
+    /// is worth more than the row it costs, and no control in use is ever hidden.
+    /// </summary>
+    [Theory]
+    [InlineData(80, 24, 2)]
+    [InlineData(100, 30, 1)]
+    public void ComposeBar_KeepsBothCaptionsAndEveryControl_WrappingBurstRatherThanHidingIt(
+        int width,
+        int height,
+        int expectedBurstRow)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.ResizeForTest(width, height);
+        window.RenderForTest();
+
+        window.FromAccountField.Visible.Should().BeTrue();
+        window.ToAccountField.Visible.Should().BeTrue();
+        window.AmountField.Visible.Should().BeTrue();
+        window.RailButton.Visible.Should().BeTrue();
+        window.IdempotencyButton.Visible.Should().BeTrue();
+        window.SubmitButton.Frame.Y.Should().Be(0);
+        window.BurstButton.Frame.Y.Should().Be(expectedBurstRow);
+        if (expectedBurstRow == window.IdempotencyButton.Frame.Y)
+        {
+            window.BurstButton.Frame.X.Should().BeGreaterThan(
+                window.IdempotencyButton.Frame.X + window.IdempotencyButton.Frame.Width - 1,
+                "Burst… never overlaps the chip beside it at {0}x{1}",
+                width,
+                height);
+        }
+        window.ComposeRuleLabel.Frame.Y.Should().BeGreaterThan(
+            window.BurstButton.Frame.Y,
+            "the rule closes the bar beneath every line it grew");
+        window.FocusCard.StateWord.Should().NotBeEmpty("the state word is never abbreviated to fit");
+    }
+
+    /// <summary>
+    /// The announcement inherited the removed band's job without inheriting its rows, and the
+    /// band was in every workspace. A refusal appears at the foot of whichever workspace is
+    /// active, where the operator is already looking — a refusal that could only be read in
+    /// Operations would leave the announcement carrying no copy at all of what it said.
+    /// </summary>
+    [Fact]
+    public async Task Announcement_IsReadableInEveryWorkspace_AndReservesNoRowWhenSilent()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.RenderForTest();
+
+        foreach (var workspace in Enum.GetValues<WorkspaceKind>())
+        {
+            window.AnnouncementVisibleIn(workspace).Should().BeFalse(
+                "an empty foot is the resting state in {0}",
+                workspace);
+        }
+
+        // A refusal the console produced itself, from the Resources workspace.
+        await window.TriggerResendForTestAsync();
+        window.RenderForTest();
+
+        foreach (var workspace in Enum.GetValues<WorkspaceKind>())
+        {
+            window.AnnouncementVisibleIn(workspace).Should().BeTrue(
+                "the same line is readable at the foot of {0}",
+                workspace);
+        }
+
+        window.AnnouncementLineText.Should().StartWith("✕").And.Contain("No retry-safe");
+        window.AnnouncementIsFailureToned.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A notice that is no verdict at all takes the neutral tone: the largest single-line
+    /// statement on the screen must never assert a failure that nothing has proved.
+    /// </summary>
+    [Fact]
+    public void Announcement_TakesTheToneOfTheThingItAnnounces()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+
+        window.HandleKeyForTest(Key.T);
+        window.RenderForTest();
+
+        window.AnnouncementLineText.Should().StartWith("○").And.Contain("Theme:");
+        window.AnnouncementIsFailureToned.Should().BeFalse("a palette switch proves nothing about anything");
+    }
+
+    /// <summary>
+    /// The takeover replaces every Operations surface, the announcement's row included, so it
+    /// carries its own rather than letting a refusal vanish behind the counters.
+    /// </summary>
+    [Fact]
+    public async Task Announcement_SurvivesTheBurstTakeover()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+        await window.TriggerBurstForTestAsync();
+        window.RenderForTest();
+        window.BurstTakeoverVisible.Should().BeTrue();
+
+        window.CancelBurstButton.InvokeCommand(Command.Accept);
+        window.RenderForTest();
+
+        window.AnnouncementVisibleIn(WorkspaceKind.Operations).Should().BeTrue(
+            "a refusal fired from the takeover has to be readable on it");
+        window.AnnouncementLineText.Should().Contain("No active burst");
+    }
+
+    /// <summary>
+    /// The takeover holds its result until dismissed, and Done is the only way back. If it were
+    /// ever unwired, Operations would be stuck on the summary with no route to the compose bar.
+    /// </summary>
+    [Fact]
+    public async Task BurstTakeover_Done_ReturnsTheWorkspaceToTheComposeBarAndCard()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+
+        await window.TriggerBurstForTestAsync();
+        window.RenderForTest();
+        window.BurstTakeoverVisible.Should().BeTrue("a drained burst holds its summary until dismissed");
+
+        window.BurstDismissButton.InvokeCommand(Command.Accept);
+
+        window.BurstTakeoverVisible.Should().BeFalse();
+        window.CardStateLabel.Visible.Should().BeTrue("the compose bar and the card come back");
+    }
+
+    /// <summary>
+    /// Resources answers "is it running?", which is the question every sentence on the console's
+    /// own topology status line is about. The removed bottom band used to carry it in all five
+    /// workspaces; losing it entirely would have cost the session a fact.
+    /// </summary>
+    [Fact]
+    public async Task TopologyStatusLine_IsReadableInResources()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        controller.SelectWorkspace(WorkspaceKind.Resources);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.RenderForTest();
+
+        window.TopologyStatusText.Should().Be(controller.State.StatusLine).And.NotBeEmpty();
+    }
+
+    /// <summary>
+    /// The card is budgeted first and everything else is compressed into what is left. This
+    /// asserts real laid-out frames rather than arithmetic on the constants that produced them:
+    /// the predecessor of this test caught a payment area squeezed to zero rows at two of the
+    /// three supported sizes, which constant arithmetic agreed with.
+    /// </summary>
+    [Theory]
+    [InlineData(80, 24)]
+    [InlineData(100, 30)]
+    [InlineData(120, 40)]
+    public async Task OperationsRegions_StayOnScreenAndNeverOverlap_AtEverySupportedTerminalSize(
+        int width,
+        int height)
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(width, height);
+        foreach (var id in new[] { "tx-1", "tx-2", "tx-3" })
+        {
+            harness.Payments.Queue(new PaymentResult(
+                PaymentOutcome.Pending, 202, "payment-id", id, "Pending", "{}", null, TimeSpan.Zero));
+            await controller.SubmitPaymentAsync(
+                new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+                IdempotencyMode.Supplied,
+                id,
+                CancellationToken.None);
+        }
+
+        window.RenderForTest();
+
+        var inner = window.CardStateLabel.SuperView!.Viewport.Height;
+        var meta = window.CardMetaLabel.Frame;
+        var closing = window.CardClosingLabel.Frame;
+        var rule = window.StillOpenRuleLabel.Frame;
+        var strip = window.StillOpenList.Frame;
+
+        window.StillOpenVisible.Should().BeTrue("three payments are open at {0}x{1}", width, height);
+        (meta.Y + meta.Height).Should().BeLessThanOrEqualTo(
+            inner, "the card's meta line is on screen at {0}x{1}", width, height);
+        strip.Height.Should().BeGreaterThanOrEqualTo(
+            2, "the strip never falls below two rows while more than one payment is open");
+        (strip.Y + strip.Height).Should().BeLessThanOrEqualTo(
+            inner, "the strip stays inside the workspace at {0}x{1}", width, height);
+        rule.Y.Should().Be(strip.Y - 1, "the captioned rule opens the strip");
+        meta.Y.Should().BeLessThan(rule.Y, "the card's grid never runs under the strip");
+        if (window.CardClosingLabel.Visible)
+        {
+            (closing.Y + closing.Height).Should().BeLessThanOrEqualTo(
+                rule.Y, "the closing block yields its rows to the strip rather than overlapping it");
+        }
     }
 
     private static MainWindow CreateWindow(

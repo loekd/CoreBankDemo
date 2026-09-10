@@ -225,14 +225,18 @@ public sealed class FakePaymentGateway : IPaymentGateway
 {
     private readonly Queue<PaymentResult> _results = new();
     private readonly Queue<InspectionResult> _inspections = new();
+    private readonly Queue<PaymentCancellationResult> _cancellations = new();
 
     public List<PaymentSubmission> Submissions { get; } = [];
     public List<TopologyProfile> SubmissionProfiles { get; } = [];
     public List<TopologyProfile> QueryProfiles { get; } = [];
+    public List<PaymentCancellation> Cancellations { get; } = [];
     public TaskCompletionSource? SubmissionStarted { get; set; }
     public TaskCompletionSource? ReleaseSubmission { get; set; }
     public TaskCompletionSource? QueryStarted { get; set; }
     public TaskCompletionSource? ReleaseQuery { get; set; }
+    public TaskCompletionSource? CancelStarted { get; set; }
+    public TaskCompletionSource? ReleaseCancel { get; set; }
 
     public void Queue(params PaymentResult[] results)
     {
@@ -240,6 +244,38 @@ public sealed class FakePaymentGateway : IPaymentGateway
         {
             _results.Enqueue(result);
         }
+    }
+
+    public void QueueCancellations(params PaymentCancellationResult[] results)
+    {
+        foreach (var result in results)
+        {
+            _cancellations.Enqueue(result);
+        }
+    }
+
+    public async Task<PaymentCancellationResult> CancelAsync(
+        TopologyProfile profile,
+        PaymentCancellation cancellation,
+        CancellationToken ct)
+    {
+        Cancellations.Add(cancellation);
+        CancelStarted?.TrySetResult();
+        if (ReleaseCancel is not null)
+        {
+            await ReleaseCancel.Task.WaitAsync(ct);
+        }
+
+        return _cancellations.Count > 0
+            ? _cancellations.Dequeue()
+            : new PaymentCancellationResult(
+                PaymentCancelOutcome.Cancelled,
+                200,
+                cancellation.TransactionId,
+                "Cancelled",
+                "{}",
+                null,
+                TimeSpan.FromMilliseconds(4));
     }
 
     public void QueueInspections(params InspectionResult[] results)

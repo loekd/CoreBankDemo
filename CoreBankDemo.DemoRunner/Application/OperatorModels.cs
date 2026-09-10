@@ -56,6 +56,13 @@ public enum MutationKind
     SwitchTopology,
     ResourceCommand,
     SubmitPayment,
+
+    /// <summary>
+    /// The operator withdrawing a payment that has no proven outcome yet. Not lock-exempt: the
+    /// brief exempts Cancel from <i>confirmation</i>, never from the single-action-in-flight
+    /// lock, so it takes the lock exactly as a submission does.
+    /// </summary>
+    CancelPayment,
     PaymentBurst,
     LoadTest,
 }
@@ -237,6 +244,14 @@ public sealed record PaymentSubmission(
     IdempotencyMode IdempotencyMode,
     string? IdempotencyKey);
 
+/// <summary>
+/// A submission the console has sent but cannot yet name: Omitted mode sends no key, so the bank
+/// names the payment and the console has no id until it answers. It is still a payment the
+/// console must not leave unrepresented, so the focus card holds it with its clock running and
+/// <b>Cancel payment</b> disabled with that reason stated -- never a hidden or empty action slot.
+/// </summary>
+public sealed record UnidentifiedSubmission(PaymentRequest Request, DateTimeOffset SubmittedAt);
+
 public sealed record PaymentResult(
     PaymentOutcome Outcome,
     int StatusCode,
@@ -249,6 +264,66 @@ public sealed record PaymentResult(
 {
     public bool IsAmbiguous => Outcome == PaymentOutcome.Ambiguous;
 }
+
+/// <summary>
+/// The body CoreBank's <c>POST /api/transactions/cancel</c> takes — its own
+/// <c>TransactionRequest</c>, all five fields of which this console already holds on the
+/// <see cref="TrackedPayment"/> it is cancelling. Nothing new is asked of the operator, and no
+/// endpoint is added to any banking service.
+/// </summary>
+public sealed record PaymentCancellation(
+    string FromAccount,
+    string ToAccount,
+    decimal Amount,
+    string Currency,
+    string TransactionId);
+
+/// <summary>
+/// What the bank answered a cancellation with. The console never synthesises one of these: a
+/// cancel that fails, times out, or answers something unrecognised is a
+/// <see cref="PaymentCancelOutcome.TransportFailure"/> and leaves the payment exactly where it was.
+/// </summary>
+public enum PaymentCancelOutcome
+{
+    /// <summary><c>200</c> with <c>Status: Cancelled</c> — the bank withdrew it before it executed.</summary>
+    Cancelled,
+
+    /// <summary>
+    /// <c>200</c> carrying the committed response instead: the bank had already executed the
+    /// payment, and its own answer wins over the operator's having asked.
+    /// </summary>
+    AlreadyCommitted,
+
+    /// <summary>
+    /// <c>409</c> — the bank refuses to withdraw the row now and its body carries that row's
+    /// current status. The console prints that status and never a sentence about what the bank
+    /// is doing.
+    /// </summary>
+    Refused,
+
+    /// <summary>
+    /// Timeout, connection failure, any other status code, or a body the console cannot read.
+    /// Asserts nothing about the payment.
+    /// </summary>
+    TransportFailure,
+}
+
+/// <param name="Status">The status word the bank's body carried, verbatim. Null when there was none.</param>
+/// <param name="ProcessedAt">
+/// The bank's own clock for the outcome it just stated, when its body carried one. Kept apart
+/// from the console's observed-at time, because delivery latency belongs to the transport and
+/// presenting it as the bank's processing time would be a lie of the same class as claiming a
+/// written fault config is a live fault.
+/// </param>
+public sealed record PaymentCancellationResult(
+    PaymentCancelOutcome Outcome,
+    int StatusCode,
+    string? TransactionId,
+    string? Status,
+    string? Body,
+    string? ErrorSummary,
+    TimeSpan Duration,
+    DateTimeOffset? ProcessedAt = null);
 
 public sealed record InspectionResult(
     bool Succeeded,
@@ -328,7 +403,18 @@ public sealed record TrackedPayment(
     DateTimeOffset? ObservedAt = null,
     string? ErrorReason = null,
     IReadOnlyList<SettlementLeg>? Legs = null,
-    string? Note = null)
+    string? Note = null,
+    // True between the Submit keypress and the bank's own answer. The card is occupied from the
+    // instant Submit is pressed, not from the instant an answer arrives: a payment the console
+    // has sent and cannot yet describe is precisely the payment it must not leave unrepresented,
+    // and its id is already known (the id *is* the idempotency key), so Cancel payment is live
+    // for the whole of an instant payment's budget rather than only after it resolves.
+    bool AwaitingResponse = false,
+    // The key this payment was submitted under, where there was one. Normally identical to
+    // TransactionId -- the id *is* the idempotency key -- and kept separately only so a row the
+    // console created at the Submit keypress can still be found after a service answered with a
+    // different id, and so a resend lands on the row it already has.
+    string? IdempotencyKey = null)
 {
     public IReadOnlyList<SettlementLeg> ObservedLegs => Legs ?? [];
 
@@ -337,6 +423,17 @@ public sealed record TrackedPayment(
     /// these rows are re-labelled when the feed drops.
     /// </summary>
     public bool IsOutstanding => State == PaymentTrackingState.Awaiting;
+
+    /// <summary>
+    /// True while this payment has no proven outcome — the STILL OPEN strip's membership rule,
+    /// and the rule that decides whether <b>Cancel payment</b> is the card's action. Wider than
+    /// <see cref="IsOutstanding"/> on purpose: <c>Outcome unknown</c> and <c>Outcome not
+    /// observed</c> are not proof of anything, and they are the payments the operator most needs
+    /// listed. A payment leaves only when something proved it finished.
+    /// </summary>
+    public bool IsOpen => State is PaymentTrackingState.Awaiting
+        or PaymentTrackingState.OutcomeUnknown
+        or PaymentTrackingState.NotObserved;
 }
 
 /// <summary>
@@ -475,6 +572,32 @@ public sealed record OperatorConsoleState(
     /// a burst's outcomes are counted in <see cref="Burst"/> rather than followed one by one.
     /// </summary>
     public IReadOnlyList<TrackedPayment> TrackedPayments { get; init; } = [];
+
+    /// <summary>
+    /// The transaction id of the payment the operator selected, or null while they have selected
+    /// none. Selection drives the focus card and nothing else does; an arriving event never
+    /// changes it. Held as an id rather than as a copy of the row — the precedent
+    /// <see cref="SelectedEvidence"/> sets does not apply, because an evidence record is immutable
+    /// while a payment resolves <i>in place</i> and a captured copy would go stale on the largest
+    /// object on the screen.
+    /// </summary>
+    public string? SelectedPayment { get; init; }
+
+    /// <summary>
+    /// The Omitted-mode submission currently in flight, if any. It has no transaction id to be
+    /// tracked by, and the card says so rather than dropping it.
+    /// </summary>
+    public UnidentifiedSubmission? UnidentifiedSubmission { get; init; }
+
+    /// <summary>
+    /// The payment a cancel is currently in flight for, and when it was dispatched. On dispatch
+    /// the card's <i>action slot</i> — never its state — re-states itself as
+    /// <c>Cancelling — 3s</c>, while the payment's own state, clock and strip line stay exactly
+    /// as they were: asking is not an outcome.
+    /// </summary>
+    public string? CancellingPayment { get; init; }
+
+    public DateTimeOffset? CancellingSince { get; init; }
 
     /// <summary>
     /// Whether this console can currently hear the broadcast. Carried on the rows that depend

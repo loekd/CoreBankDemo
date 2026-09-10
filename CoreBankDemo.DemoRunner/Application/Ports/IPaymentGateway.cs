@@ -9,6 +9,16 @@ public interface IPaymentGateway
         PaymentSubmission submission,
         CancellationToken ct);
 
+    /// <summary>
+    /// Asks CoreBank to withdraw a payment before it executes, through its own
+    /// <c>POST /api/transactions/cancel</c>. The body carries the business meaning, never the
+    /// status code alone.
+    /// </summary>
+    Task<PaymentCancellationResult> CancelAsync(
+        TopologyProfile profile,
+        PaymentCancellation cancellation,
+        CancellationToken ct);
+
     Task<InspectionResult> QueryOutcomeAsync(
         TopologyProfile profile,
         string transactionIdOrKey,

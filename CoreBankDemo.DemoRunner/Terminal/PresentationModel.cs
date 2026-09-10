@@ -73,30 +73,76 @@ public sealed record EvidenceRowViewModel(
     bool Succeeded);
 
 /// <summary>
-/// One submitted payment as the Operations list renders it. The list is projected in
-/// submission order and never re-sorted, so an arriving outcome updates the row in the
-/// position it already occupies.
+/// The Operations focus card: one large object rendering the <b>selected</b> payment, and the
+/// only place in Operations a payment is read in full. Its first line is a fixed grid — symbol,
+/// state word, clock, action — so nothing on it moves as the state resolves.
 /// </summary>
-/// <param name="Headline">Bold verb/object line — the status label is part of it, never colour alone.</param>
-/// <param name="Meta">
-/// Muted detail beneath the headline. Carries the two clocks as separate figures and, for an
-/// awaiting row, the inline <c>(listening)</c> qualifier.
+/// <param name="StateWord">Never abbreviated: the lifecycle line gives up its room first, and the clock after it.</param>
+/// <param name="Clock">The elapsed clock while unresolved, the final clock once proven.</param>
+/// <param name="ActionLabel">Cancel payment / Look up outcome / Resend same key — one slot, never empty.</param>
+/// <param name="ActionReason">Why the action is disabled, stated on the card rather than implied.</param>
+/// <param name="Closing">
+/// Exactly one closing block: the lifecycle in words while unresolved, the balance legs once
+/// settled, or the ErrorReason once rejected — with the single named exception that a
+/// contradiction holds two records, because a contradiction <i>is</i> two records.
 /// </param>
-/// <param name="Legs">The balance legs observed so far, in a fixed column.</param>
-/// <param name="LegSummary">
-/// States a half-settled payment out loud (<c>1 of 2 legs observed</c>). A visibly half-settled
-/// payment is a real finding, not a rendering gap to paper over.
-/// </param>
-/// <param name="Remedy">The one-step way forward when the console cannot know the outcome.</param>
-public sealed record PaymentRowViewModel(
-    long Sequence,
-    string TransactionId,
+public sealed record FocusCardViewModel(
     string Symbol,
-    string Headline,
+    string StateWord,
+    string Clock,
+    string ActionLabel,
+    bool ActionEnabled,
+    string ActionReason,
+    string RequestDetail,
+    string Accounts,
     string Meta,
-    IReadOnlyList<string> Legs,
-    string LegSummary,
-    string Remedy);
+    IReadOnlyList<string> Closing,
+    string? TransactionId,
+    bool IsPlaceholder)
+{
+    /// <summary>The resting card, before the first submission this session. Never a blank region.</summary>
+    public static FocusCardViewModel Placeholder { get; } = new(
+        " ",
+        "No payment yet this session.",
+        string.Empty,
+        CardActions.Cancel,
+        false,
+        "Fill the lines above and press Enter.",
+        string.Empty,
+        string.Empty,
+        string.Empty,
+        [],
+        null,
+        true);
+}
+
+/// <summary>The three labels the focus card's single action slot ever carries.</summary>
+public static class CardActions
+{
+    public const string Cancel = "Cancel payment";
+    public const string LookUpOutcome = "Look up outcome";
+    public const string ResendSameKey = "Resend same key";
+}
+
+/// <summary>
+/// One line of the STILL OPEN strip: a work queue, never a log. A payment enters when it is
+/// submitted and leaves the moment its outcome is proven. Account identifiers truncate to their
+/// last four digits here and only here — the card above always prints them in full.
+/// </summary>
+public sealed record StillOpenRowViewModel(
+    string TransactionId,
+    bool Selected,
+    string Symbol,
+    string Status,
+    string Amount,
+    string Accounts,
+    string Rail,
+    string Clock)
+{
+    /// <summary>The rendered line, selection marker included, so the strip reads identically everywhere.</summary>
+    public string Line =>
+        $"{(Selected ? "\u25b8" : " ")} {Symbol} {Status,-18} {Amount,10}  {Accounts}  {Rail,-8} {Clock,7}";
+}
 
 public sealed record OperatorPresentationModel(
     string TopologyBar,
@@ -104,14 +150,18 @@ public sealed record OperatorPresentationModel(
     WorkspaceKind ActiveWorkspace,
     IReadOnlyList<ResourceRowViewModel> Resources,
     IReadOnlyList<EvidenceRowViewModel> Evidence,
-    string EvidenceStrip,
     string SelectedEvidenceDetail,
-    string MutationStatus,
     FaultsViewModel Faults,
-    IReadOnlyList<PaymentRowViewModel> Payments,
+    FocusCardViewModel FocusCard,
+    IReadOnlyList<StillOpenRowViewModel> StillOpen,
+    bool ShowStillOpen,
+    string Announcement,
+    bool AnnouncementIsFailure,
     string FeedStatus,
+    string BurstCaption,
     string BurstStatus,
     string BurstProvenStatus,
+    string BurstClosing,
     string LoadPhaseStatus,
     IReadOnlyList<string> LoadResults,
     bool IsBusy,
@@ -119,11 +169,14 @@ public sealed record OperatorPresentationModel(
     bool CanStopOrSwitch,
     bool CanUseLoadTest,
     bool CanResend,
-    string OperationsHint,
     string ResourcesHint,
     string LoadHint,
     string ArmingCaption,
-    bool CanChangeArming);
+    bool CanChangeArming,
+    // What the console is doing or last did to the topology. Rendered in Resources, which is the
+    // workspace that owns the question it answers -- the removed bottom band showed it in all
+    // five, and Evidence/Results is where the durable record of it lives.
+    string TopologyStatus);
 
 public static class PresentationModelBuilder
 {
@@ -197,14 +250,17 @@ public static class PresentationModelBuilder
             });
         }
 
-        var payments = state.TrackedPayments
-            .Select(payment => BuildPaymentRow(state, payment, now))
+        var open = state.TrackedPayments.Where(payment => payment.IsOpen).ToList();
+        var card = BuildFocusCard(state, open, now);
+        var stillOpen = open
+            .Select(payment => BuildStillOpenRow(payment, card.TransactionId, now))
             .ToList();
 
         var resourceSummary = resources.Count == 0
             ? "resources ○ Unknown"
             : string.Join(" ", resources.Select(resource => $"{Abbreviate(resource.Name)} {resource.Symbol}"));
         var faults = BuildFaults(state, now);
+        var announcement = Announcement(state);
         var profile = KnownTopologyProfiles.DisplayName(state.Profile);
         var topologyBar = $"{profile} · {state.Ownership} · generation {state.RunGeneration} · "
             + $"{faults.ChipSymbol} {faults.ChipLabel} · {resourceSummary}";
@@ -216,20 +272,23 @@ public static class PresentationModelBuilder
             state.ActiveWorkspace,
             resources,
             evidence,
-            state.Evidence.LastOrDefault() is { } latest
-                ? $"{KnownTopologyProfiles.DisplayName(latest.Profile)} · generation {latest.RunGeneration} · {latest.Summary}"
-                : "No actions yet this session.",
             selected,
-            state.ActiveMutation is null
-                ? state.StatusLine
-                : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running",
             faults,
-            payments,
+            card,
+            stillOpen,
+            // The strip renders only while more than one payment is open: with exactly one the
+            // card is already showing it, and a strip beneath would list it under itself.
+            open.Count > 1,
+            announcement.Text,
+            announcement.IsFailure,
             FeedStatusLine(state),
-            // The two legs are never merged: a burst is exactly where "acknowledged" and
-            // "finished" diverge.
-            $"HTTP leg · Burst {state.Burst.Sent}/{state.Burst.Requested} · accepted {state.Burst.Accepted} · completed {state.Burst.Completed} · cancelled {state.Burst.CancelledPayments} · failed {state.Burst.Failed}{(state.Burst.Cancelled ? " · Cancelled" : string.Empty)}",
+            BurstCaptionLine(state.Burst),
+            // The two lines are never merged: a burst is exactly where "acknowledged" and
+            // "finished" diverge, and `still moving` draining to zero is the burst's visual
+            // confirmation.
+            BurstSentLine(state.Burst),
             BurstProvenLine(state.Burst),
+            BurstClosingLine(state.Burst),
             $"{state.LoadProgress.Phase} · {state.LoadProgress.Elapsed.TotalSeconds:F0}s · {state.LoadProgress.Detail}",
             loadResults,
             state.ActiveMutation is not null,
@@ -241,11 +300,13 @@ public static class PresentationModelBuilder
                 && state.ResourceAuthorityAvailable
                 && state.Topology?.IsReady == true,
             state.CanResendLastPayment && state.ActiveMutation is null,
-            OperationsHint(state),
             ResourcesHint(state),
             LoadHint(state),
             ArmingCaption(state),
-            state.Ownership == TopologyOwnership.None);
+            state.Ownership == TopologyOwnership.None,
+            state.ActiveMutation is null
+                ? state.StatusLine
+                : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running");
     }
 
     /// <summary>
@@ -270,130 +331,317 @@ public static class PresentationModelBuilder
     };
 
     /// <summary>
-    /// Projects one tracked payment. Every state is carried in the row's own text, so it
-    /// survives a monochrome terminal, and the elapsed readout is only ever attached to a row
-    /// that is genuinely still waiting.
+    /// Which payment the card holds: the operator's explicit selection, then — with nothing
+    /// selected — the single open payment, then the most recently resolved one, so a settled
+    /// result stays readable instead of being cleared by its own success. Selection drives the
+    /// card and nothing else does; an arriving event never re-points it.
     /// </summary>
-    private static PaymentRowViewModel BuildPaymentRow(
+    private static FocusCardViewModel BuildFocusCard(
+        OperatorConsoleState state,
+        IReadOnlyList<TrackedPayment> open,
+        DateTimeOffset now)
+    {
+        var selected = state.SelectedPayment is { Length: > 0 } id
+            ? state.TrackedPayments.FirstOrDefault(payment =>
+                string.Equals(payment.TransactionId, id, StringComparison.Ordinal))
+            : null;
+        selected ??= open.Count == 1 ? open[0] : null;
+        selected ??= state.TrackedPayments.LastOrDefault(payment => !payment.IsOpen);
+
+        if (selected is null)
+        {
+            // An Omitted-mode submission in flight has no id to be tracked by, so it never
+            // becomes a row -- but it is still a payment the console sent, and the card holds it
+            // rather than leaving it unrepresented.
+            return state.UnidentifiedSubmission is { } pending
+                ? UnidentifiedCard(pending, now)
+                : PlaceholderCard(state);
+        }
+
+        var (symbol, stateWord, closing) = CardState(state, selected);
+        var (label, enabled, reason) = CardAction(state, selected, now);
+        return new FocusCardViewModel(
+            symbol,
+            stateWord,
+            CardClock(selected, now),
+            label,
+            enabled,
+            reason,
+            $"{selected.Rail.ToString().ToLowerInvariant()} · {selected.Amount:N2} {selected.Currency}",
+            // The card prints both accounts in full; the strip's truncation never applies here.
+            $"{selected.FromAccount} → {selected.ToAccount}",
+            $"{selected.TransactionId} · submitted {OutcomeFeedNarrative.Clock(selected.SubmittedAt)}",
+            closing,
+            selected.TransactionId,
+            false);
+    }
+
+    /// <summary>
+    /// The resting card. Operations has no workspace hint row any more, so where the workspace
+    /// cannot act the card's own disabled action states the reason and the one-step remedy —
+    /// which is where an operator is already looking, and costs no reserved row.
+    /// </summary>
+    private static FocusCardViewModel PlaceholderCard(OperatorConsoleState state)
+    {
+        var hint = OperationsHint(state);
+        return hint.Length == 0
+            ? FocusCardViewModel.Placeholder
+            : FocusCardViewModel.Placeholder with { ActionReason = hint };
+    }
+
+    private static FocusCardViewModel UnidentifiedCard(UnidentifiedSubmission pending, DateTimeOffset now) =>
+        new(
+            "~",
+            "NO ANSWER YET",
+            ElapsedText(now - pending.SubmittedAt),
+            CardActions.Cancel,
+            false,
+            OmittedNoCancelReason,
+            $"{pending.Request.Rail.ToString().ToLowerInvariant()} · {pending.Request.Amount:N2} {pending.Request.Currency}",
+            $"{pending.Request.FromAccount} → {pending.Request.ToAccount}",
+            $"submitted {OutcomeFeedNarrative.Clock(pending.SubmittedAt)}",
+            [OmittedNoCancelReason],
+            null,
+            false);
+
+    private const string OmittedNoCancelReason =
+        "no transaction id yet — Omitted mode sends no key, so the bank names the payment "
+        + "and the console cannot ask for it back";
+
+    /// <summary>
+    /// The card's state symbol, its state word, and the one closing block that applies. State is
+    /// always symbol + word, never colour alone, and the word is never abbreviated.
+    /// </summary>
+    private static (string Symbol, string StateWord, IReadOnlyList<string> Closing) CardState(
+        OperatorConsoleState state,
+        TrackedPayment payment)
+    {
+        var http = $"HTTP {payment.HttpStatusCode} {payment.HttpOutcome}";
+        switch (payment.State)
+        {
+            // Two clocks, never one: the event's own ProcessedAt and the console's observed-at
+            // delta, above the legs that prove the money moved.
+            case PaymentTrackingState.Settled:
+                return ("●", "SETTLED", Prefixed(ClockText(payment), Legs(payment)));
+
+            case PaymentTrackingState.Rejected:
+                return ("✕", "REJECTED", Prefixed(
+                    payment.Note,
+                    Prefixed(ClockText(payment), [$"ErrorReason: {payment.ErrorReason ?? "(none supplied)"}"])));
+
+            // The one payment state whose closing block holds two records instead of one,
+            // because a contradiction *is* two records. Never resolved to either side.
+            case PaymentTrackingState.Contradiction:
+                return ("✕", "CONTRADICTED",
+                [
+                    $"HTTP {payment.HttpOutcome} {OutcomeFeedNarrative.PreciseClock(payment.SubmittedAt)}",
+                    $"broadcast {payment.BroadcastOutcome} "
+                    + $"{OutcomeFeedNarrative.PreciseClock(payment.ProcessedAt)}, observed here "
+                    + $"+{ObservedDelta(payment)}",
+                ]);
+
+            // The one place the console says *who* withdrew a payment, rather than only that it
+            // was withdrawn. The outcome for the money is identical either way.
+            case PaymentTrackingState.Cancelled when payment.HttpOutcome == PaymentOutcome.Cancelled:
+                return ("⊘", "CANCELLED BY THE RAIL", Prefixed(
+                    ClockText(payment),
+                    [
+                        $"the instant rail ran out of time and withdrew it · {payment.HttpStatusCode} Cancelled",
+                        "no money moved · safe to retry with a new key",
+                    ]));
+
+            case PaymentTrackingState.Cancelled:
+                return ("⊘", "CANCELLED", Prefixed(
+                    ClockText(payment),
+                    [
+                        "withdrawn before execution · no money moved",
+                        "safe to retry with a new key",
+                    ]));
+
+            case PaymentTrackingState.OutcomeUnknown:
+                return ("○", "OUTCOME UNKNOWN",
+                    [payment.Note ?? "the console stopped listening", OutcomeQueryRemedy]);
+
+            // A payment whose whole point is that nothing is coming must never borrow the
+            // vocabulary of one that is waiting legitimately.
+            case PaymentTrackingState.NotObserved when payment.HttpOutcome == PaymentOutcome.Ambiguous:
+                return ("~", "AMBIGUOUS", ["not yet reconciled — Resend is unsafe", OutcomeQueryRemedy]);
+
+            case PaymentTrackingState.NotObserved:
+                return ("○", "OUTCOME NOT OBSERVED",
+                [
+                    payment.Note ?? "the console is not subscribed to transaction-events",
+                    OutcomeQueryRemedy,
+                ]);
+
+            // Under injected faults a long wait is the expected result, so the card names the
+            // condition rather than letting the audience read the delay as a defect.
+            default:
+                return ("~", "AWAITING SETTLEMENT",
+                [
+                    (payment.AwaitingResponse
+                        ? "waiting for the bank to answer"
+                        : $"submitted ──▶ {http} ──▶ waiting for the bank")
+                    + AwaitingQualifier(state),
+                ]);
+        }
+    }
+
+    private static IReadOnlyList<string> Prefixed(string? note, IReadOnlyList<string> lines) =>
+        string.IsNullOrWhiteSpace(note) ? lines : [note, .. lines];
+
+    private static string ObservedDelta(TrackedPayment payment) =>
+        payment.ProcessedAt is { } processed && payment.ObservedAt is { } observed
+            ? $"{(observed - processed).TotalMilliseconds:F0} ms"
+            : "an unrecorded delay";
+
+    /// <summary>
+    /// Two legs per settlement and none per rejection, so the console must never label a payment
+    /// settled on both legs on the strength of one. A visibly half-settled payment is a real
+    /// finding, not a rendering gap to paper over.
+    /// </summary>
+    private static IReadOnlyList<string> Legs(TrackedPayment payment)
+    {
+        var legs = payment.ObservedLegs.Select(leg => leg.ToString()).ToList();
+        var summary = payment.ObservedLegs.Count switch
+        {
+            0 => "No balance legs observed yet.",
+            1 => "1 of 2 legs observed",
+            2 => string.Empty,
+            var count => $"{count} legs observed — a settlement emits two",
+        };
+        if (summary.Length > 0)
+        {
+            legs.Add(summary);
+        }
+
+        return Prefixed(payment.Note, legs);
+    }
+
+    /// <summary>
+    /// The card's single action slot, which is never empty and never hidden. <b>Cancel payment</b>
+    /// while the payment has no proven outcome, then <b>Resend same key</b> where the key is known
+    /// safe to reuse, otherwise the always-available <b>Look up outcome</b>. Cancel is not
+    /// lock-exempt: it dims like every other mutating control while some other action is in
+    /// flight — but never behind the submission of this very payment, whose outstanding answer is
+    /// that payment's own state rather than a console action awaiting a result.
+    /// </summary>
+    private static (string Label, bool Enabled, string Reason) CardAction(
         OperatorConsoleState state,
         TrackedPayment payment,
         DateTimeOffset now)
     {
-        var legs = payment.ObservedLegs.Select(leg => leg.ToString()).ToList();
-        var http = $"HTTP {payment.HttpStatusCode} {payment.HttpOutcome}";
-        var request = $"{payment.Rail.ToString().ToLowerInvariant()} {payment.Amount:N2} {payment.Currency} "
-            + $"{payment.FromAccount} → {payment.ToAccount}";
-
-        // Meta lines are ordered by what must survive a narrow terminal: the qualifier, the
-        // clocks and the ErrorReason lead, and the request detail trails, because a row is
-        // truncated at its right edge and those are the parts read aloud
-        // (EXPERIENCE.md, Responsive & Platform).
-        var (symbol, headline, meta, remedy) = payment.State switch
+        // On dispatch the *action slot* re-states itself, never the state: the payment's own
+        // state, clock and strip line stay exactly as they were, because asking is not an outcome.
+        if (string.Equals(state.CancellingPayment, payment.TransactionId, StringComparison.Ordinal))
         {
-            PaymentTrackingState.Awaiting => (
-                "~",
-                $"Awaiting settlement — {payment.TransactionId}",
-                // The (listening) qualifier is part of the same string as the elapsed time, so
-                // the wait is never ambiguous about *who* is waiting.
-                $"{ElapsedText(now - payment.SubmittedAt)} ({AwaitingQualifier(state)}) · {http} · {request}",
-                string.Empty),
+            return (
+                $"Cancelling — {ElapsedText(now - (state.CancellingSince ?? now))}",
+                false,
+                string.Empty);
+        }
 
-            PaymentTrackingState.Settled => (
-                "●",
-                $"Settled — {payment.TransactionId}",
-                $"{ClockText(payment)} · {http} · {request}",
-                string.Empty),
+        if (payment.IsOpen)
+        {
+            var ownSubmission = state.ActiveMutation is { Kind: MutationKind.SubmitPayment }
+                && payment.AwaitingResponse;
+            return state.ActiveMutation is null || ownSubmission
+                ? (CardActions.Cancel, true, string.Empty)
+                : (CardActions.Cancel, false,
+                    $"another action is in flight ({state.ActiveMutation.Kind} · {state.ActiveMutation.Target})");
+        }
 
-            PaymentTrackingState.Rejected => (
-                "✕",
-                $"Rejected — {payment.TransactionId}",
-                $"ErrorReason: {payment.ErrorReason ?? "(none supplied)"} · {ClockText(payment)} · "
-                + $"{http} · {request}",
-                string.Empty),
+        var resendable = state.CanResendLastPayment
+            && state.LastPayment is not null
+            && string.Equals(state.LastPayment.IdempotencyKey, payment.TransactionId, StringComparison.Ordinal);
+        if (resendable)
+        {
+            return state.ActiveMutation is null
+                ? (CardActions.ResendSameKey, true, string.Empty)
+                : (CardActions.ResendSameKey, false,
+                    $"another action is in flight ({state.ActiveMutation.Kind} · {state.ActiveMutation.Target})");
+        }
 
-            // Both records stay on screen, both stay labelled with their source and time. The
-            // console has no tie-break rule and should never acquire one.
-            PaymentTrackingState.Contradiction => (
-                "✕",
-                $"Contradiction — {payment.Note ?? "HTTP and the broadcast disagree"} — {payment.TransactionId}",
-                $"HTTP said {payment.HttpOutcome} ({payment.HttpStatusCode}) at "
-                + $"{OutcomeFeedNarrative.Clock(payment.SubmittedAt)} · "
-                + $"broadcast said {payment.BroadcastOutcome} at "
-                + $"{OutcomeFeedNarrative.Clock(payment.ProcessedAt)}, observed here "
-                + $"{OutcomeFeedNarrative.Clock(payment.ObservedAt)} · {request}",
-                OutcomeQueryRemedy),
-
-            // Proven by HTTP alone: the rail withdrew the payment, so there is no settlement to
-            // await and no clock from a broadcast to show.
-            PaymentTrackingState.Cancelled => (
-                "✕",
-                $"Cancelled — withdrawn before execution — {payment.TransactionId}",
-                $"{payment.Note ?? "nothing executed; a retry with a new key is safe"} · {http} · {request}",
-                string.Empty),
-
-            PaymentTrackingState.OutcomeUnknown => (
-                "○",
-                $"Outcome unknown — {payment.Note ?? "the console stopped listening"} — {payment.TransactionId}",
-                $"{http} · {request}",
-                OutcomeQueryRemedy),
-
-            _ => (
-                "○",
-                $"Outcome not observed — no feed — {payment.TransactionId}",
-                $"{payment.Note ?? "the console is not subscribed to transaction-events"} · {http} · {request}",
-                OutcomeQueryRemedy),
-        };
-
-        return new PaymentRowViewModel(
-            payment.Sequence,
-            payment.TransactionId,
-            symbol,
-            headline,
-            meta,
-            legs,
-            LegSummary(payment),
-            remedy);
+        // Never disabled by the single-action-in-flight lock: a read-only lookup is always
+        // available, and it is the documented remedy for a feed that has been lost.
+        return (CardActions.LookUpOutcome, true, string.Empty);
     }
 
-    private const string OutcomeQueryRemedy =
-        "Query outcome with this transaction id — it is read-only and never blocked. "
-        + "Select this row and leave the outcome field blank to use it.";
-
     /// <summary>
-    /// Two legs per settlement and none per rejection, so the console must never label a
-    /// payment settled on both legs on the strength of one.
+    /// The elapsed clock while the payment is unresolved, the final clock once it is proven. A
+    /// duration, never a time of day — the meta line's submit stamp is what says <i>when</i>.
     /// </summary>
-    private static string LegSummary(TrackedPayment payment) => payment.State switch
+    private static string CardClock(TrackedPayment payment, DateTimeOffset now) =>
+        payment.IsOpen
+            ? ElapsedText(now - payment.SubmittedAt)
+            : ElapsedText((payment.ObservedAt ?? payment.ProcessedAt ?? payment.SubmittedAt) - payment.SubmittedAt);
+
+    private static StillOpenRowViewModel BuildStillOpenRow(
+        TrackedPayment payment,
+        string? cardTransactionId,
+        DateTimeOffset now)
     {
-        PaymentTrackingState.Rejected => "No balance legs — a rejection emits none.",
-        PaymentTrackingState.Cancelled => "No balance legs — a cancellation emits none.",
-        _ => payment.ObservedLegs.Count switch
+        var (symbol, status) = payment.State switch
         {
-            0 => payment.State == PaymentTrackingState.Settled ? "No balance legs observed yet." : string.Empty,
-            1 => "1 of 2 legs observed",
-            // Two legs is the whole settlement; the aligned amounts say it better than a label.
-            2 => string.Empty,
-            var count => $"{count} legs observed — a settlement emits two",
-        },
-    };
+            PaymentTrackingState.OutcomeUnknown => ("○", "Outcome unknown"),
+            PaymentTrackingState.NotObserved when payment.HttpOutcome == PaymentOutcome.Ambiguous =>
+                ("~", "Ambiguous"),
+            PaymentTrackingState.NotObserved => ("○", "Outcome not observed"),
+            _ => ("~", "Awaiting"),
+        };
+
+        return new StillOpenRowViewModel(
+            payment.TransactionId,
+            string.Equals(payment.TransactionId, cardTransactionId, StringComparison.Ordinal),
+            symbol,
+            status,
+            payment.Amount.ToString("N2"),
+            $"{LastFour(payment.FromAccount)}→{LastFour(payment.ToAccount)}",
+            payment.Rail.ToString().ToLowerInvariant(),
+            ElapsedText(now - payment.SubmittedAt));
+    }
+
+    private static string LastFour(string account) =>
+        account.Length <= 4 ? account : $"…{account[^4..]}";
+
+    private const string OutcomeQueryRemedy =
+        "Look up outcome is read-only and never blocked — it is the way forward from here.";
 
     /// <summary>
-    /// Under injected faults a long wait is the expected result, so the row names the condition
-    /// rather than letting the audience read the delay as a defect.
+    /// The transient announcement's state-derived form. It takes the tone of the thing it
+    /// announces and never a fixed one: a lost feed proves nothing about any payment, so it
+    /// renders as a neutral notice rather than as a failure. A refusal the console produced
+    /// itself is announced by the caller in the failure form, and is already an Evidence record
+    /// by the time it is drawn.
+    /// </summary>
+    private static (string Text, bool IsFailure) Announcement(OperatorConsoleState state) =>
+        state.Feed is { State: OutcomeFeedState.Lost } lost
+            ? (OutcomeFeedNarrative.FeedLost(
+                    lost.LostAt,
+                    state.TrackedPayments.Count(payment => payment.State == PaymentTrackingState.OutcomeUnknown)),
+                false)
+            : (string.Empty, false);
+
+    /// <summary>
+    /// Under injected faults a long wait is the expected result, so the card names the condition
+    /// rather than letting the audience read the delay as a defect. Empty when nothing is being
+    /// injected: the region's own feed statement already says whether anyone is listening, so
+    /// repeating it here would be the duplication the Stage-focus layout exists to remove.
     /// </summary>
     private static string AwaitingQualifier(OperatorConsoleState state) =>
-        state.FaultsArmed && !state.Applied.IsAllZero ? "listening, faults in force" : "listening";
+        state.FaultsArmed && !state.Applied.IsAllZero ? " (faults in force)" : string.Empty;
 
     /// <summary>
     /// Two clocks, never one. Delivery latency belongs to the transport; presenting it as the
     /// bank's processing time would be the same class of lie as a written fault config reported
-    /// as a live one.
+    /// as a live one. Null where the outcome carried no clock of its own — a proven outcome the
+    /// console holds without an event stamp is a real case, not a gap to invent a figure for.
     /// </summary>
-    private static string ClockText(TrackedPayment payment)
+    private static string? ClockText(TrackedPayment payment)
     {
         if (payment.ProcessedAt is not { } processedAt || payment.ObservedAt is not { } observedAt)
         {
-            return "no event clocks recorded";
+            return null;
         }
 
         return $"ProcessedAt {OutcomeFeedNarrative.PreciseClock(processedAt)}, observed here "
@@ -412,14 +660,59 @@ public static class PresentationModelBuilder
     private static string StatusGlyph(bool succeeded) => succeeded ? "●" : "✕";
 
     /// <summary>
-    /// The burst's proven leg. When the feed drops, the share it can no longer account for
-    /// moves out of <c>awaiting</c> and is named: leaving "awaiting 12" on screen with nobody
-    /// listening is the same false wait the payment rows withdraw.
+    /// A burst the operator stopped is captioned distinctly — never "drained in" — and states the
+    /// unsent remainder as its own figure, so a permanently partial run is never read as payments
+    /// that failed to prove themselves.
     /// </summary>
-    private static string BurstProvenLine(BurstProgress burst)
+    private static string BurstCaptionLine(BurstProgress burst) =>
+        burst.Cancelled
+            ? $"BURST · stopped · {burst.Sent} of {burst.Requested} sent"
+            : $"BURST · {burst.Requested} payments";
+
+    /// <summary>
+    /// What the API answered. Its denominator is always the run's <b>requested</b> count and
+    /// never re-bases: "two hundred of two hundred sent" is one word away from "two hundred of
+    /// two hundred done", and the denominator must not quietly move to make a partial run look
+    /// complete.
+    /// </summary>
+    private static string BurstSentLine(BurstProgress burst) =>
+        $"Sent  {burst.Sent} / {burst.Requested}   accepted {burst.Accepted + burst.Completed} · failed {burst.Failed}";
+
+    /// <summary>
+    /// What the broadcast proved. When the feed drops, the share the console can no longer
+    /// account for leaves <c>still moving</c> and is named: leaving a count on screen with nobody
+    /// listening is the same false wait the payment rows withdraw. The four figures always sum to
+    /// what the Sent line accepted, so the room can do that arithmetic straight off the screen.
+    /// </summary>
+    private static string BurstProvenLine(BurstProgress burst) =>
+        $"Settled  {burst.Settled}   rejected {burst.Rejected} · cancelled {burst.CancelledPayments} · "
+        + $"still moving {burst.Awaiting} · unknown {burst.Unknown}";
+
+    /// <summary>
+    /// Printed only when it is true. A drained burst is not the same thing as a proven burst, and
+    /// the longest-lived, loudest sentence this console renders must never say it is.
+    /// </summary>
+    private static string BurstClosingLine(BurstProgress burst)
     {
-        var line = $"Proven leg · settled {burst.Settled} · rejected {burst.Rejected} · awaiting {burst.Awaiting}";
-        return burst.Unknown > 0 ? $"{line} · outcome unknown {burst.Unknown}" : line;
+        if (burst.Requested == 0 || burst.Awaiting > 0)
+        {
+            return string.Empty;
+        }
+
+        // A drained burst is not the same thing as a proven burst. The unsent remainder of a
+        // stopped run counts against the claim exactly as a failed send and an unknown outcome
+        // do -- every payment the operator asked for and did not get an outcome for.
+        var unsent = Math.Max(0, burst.Requested - burst.Sent);
+        var shortfall = burst.Unknown + burst.Failed + unsent;
+        if (shortfall == 0)
+        {
+            return "every payment proved itself · nothing left awaiting";
+        }
+
+        var noun = shortfall == 1 ? "payment has" : "payments have";
+        return unsent == shortfall
+            ? $"{shortfall} {noun} never been sent — see Evidence"
+            : $"{shortfall} {noun} unknown outcomes — see Evidence";
     }
 
     private static string FaultProvenance(EvidenceRecord record) =>

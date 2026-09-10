@@ -87,6 +87,14 @@ public static class KnownEndpoints
 {
     public const string PaymentsSubmit = "payments.submit";
     public const string TransactionOutcome = "corebank.transactions.status";
+
+    /// <summary>
+    /// CoreBank's own cancellation endpoint (<c>POST /api/transactions/cancel</c>). The console
+    /// adds no endpoint to any banking service for its Cancel payment action; it calls the one
+    /// CoreBank already exposes, and it reaches it only through this allow-listed id
+    /// (ADR-015 forbids operator-supplied URLs).
+    /// </summary>
+    public const string TransactionCancel = "corebank.transactions.cancel";
     public const string LoadReset = "loadtestsupport.reset";
     public const string LoadDrain = "loadtestsupport.drain";
     public const string LoadAssert = "loadtestsupport.assert";
