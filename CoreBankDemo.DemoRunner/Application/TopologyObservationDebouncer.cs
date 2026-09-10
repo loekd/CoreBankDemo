@@ -2,6 +2,16 @@ namespace CoreBankDemo.DemoRunner.Application;
 
 public sealed class TopologyObservationDebouncer
 {
+    /// <summary>
+    /// The hold this debouncer stamps onto <see cref="TopologySnapshot.ErrorSummary"/> while it
+    /// waits for a second, confirming observation. Named because the console has to tell it
+    /// apart from the parser's own shape-mismatch text: a shape that changed is no longer a
+    /// reason to refuse a resource command, but "I have not confirmed what I am looking at yet"
+    /// still is.
+    /// </summary>
+    public const string AwaitingConfirmationSummary =
+        "Aspire reported a state change; waiting for one confirming snapshot.";
+
     private string? _candidateSignature;
 
     public TopologySnapshot Observe(TopologySnapshot current, TopologySnapshot observed)
@@ -30,7 +40,7 @@ public sealed class TopologyObservationDebouncer
         return current with
         {
             CapturedAt = observed.CapturedAt,
-            ErrorSummary = "Aspire reported a state change; waiting for one confirming snapshot.",
+            ErrorSummary = AwaitingConfirmationSummary,
         };
     }
 

@@ -33,7 +33,24 @@ public sealed class MainWindow : Window
     /// </summary>
     private const int EvidenceHeaderRows = 7;
 
-    private const int ActionColumnWidth = 22;
+    /// <summary>
+    /// The Resources action column. Widened from 22 so a caption naming both the verb and its
+    /// resource fits: <c>Restart loadtest-support</c> is 24 characters, and a Terminal.Gui
+    /// button spends the other four on its <c>[ ]</c> decoration. The resource list beside it
+    /// cedes the six columns (PRD FR21/NFR3).
+    /// </summary>
+    private const int ActionColumnWidth = 28;
+
+    /// <summary>
+    /// Characters a stacked button gives its caption: the column minus the <c>[ </c> and
+    /// <c> ]</c> Terminal.Gui draws around the text. A caption longer than this falls back to
+    /// the verb alone rather than being truncated into a lie.
+    /// </summary>
+    private const int ActionCaptionWidth = ActionColumnWidth - 4;
+
+    /// <summary>Captions the two resource controls wear when no row offers them an action.</summary>
+    private const string NeutralResourceActionCaption = "Resource action";
+    private const string NeutralRestartCaption = "Restart selected";
 
     // Operations workspace column grid, sized so both columns still fit the
     // narrowest supported content area (80 columns minus the compact rail).
@@ -221,9 +238,8 @@ public sealed class MainWindow : Window
     private readonly Button _startLoadButton = NewButton("Start LoadTests");
     private readonly Button _attachLoadButton = NewButton("Attach LoadTests");
     private readonly Button _stopButton = NewButton("Stop AppHost");
-    private readonly Button _switchButton = NewButton("Switch topology");
-    private readonly Button _resourceActionButton = NewButton("Resource action");
-    private readonly Button _restartResourceButton = NewButton("Restart selected");
+    private readonly Button _resourceActionButton = NewButton(NeutralResourceActionCaption);
+    private readonly Button _restartResourceButton = NewButton(NeutralRestartCaption);
     private readonly Button _refreshButton = NewButton("Refresh state");
     private readonly Button _armingButton = NewButton("Faults: arming");
     private readonly Label _resourcesHint = new();
@@ -300,6 +316,8 @@ public sealed class MainWindow : Window
     private int _stillOpenVisibleRows;
     private bool _rebindingStillOpenList;
     private bool _rebindingEvidenceList;
+    private bool _rebindingResourceList;
+    private View? _resourceActions;
     private bool _compactLayout;
     private bool _burstSetupVisible;
 
@@ -350,7 +368,6 @@ public sealed class MainWindow : Window
         OperatorTheme.Apply(_resourceActionButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_restartResourceButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_stopButton, OperatorTheme.DestructiveScheme);
-        OperatorTheme.Apply(_switchButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_runLoadButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_applyFaultsButton, OperatorTheme.ActionScheme);
         // The lock-exempt family, sharing one signature so the controls that stay live
@@ -719,9 +736,10 @@ public sealed class MainWindow : Window
             Height = Dim.Fill(2),
             CanFocus = true,
         };
+        _resourceActions = actions;
         StackButtons(actions, 0, _startRegularButton, _attachRegularButton, _startLoadButton, _attachLoadButton);
-        StackButtons(actions, 5, _stopButton, _switchButton, _resourceActionButton, _restartResourceButton, _refreshButton);
-        StackButtons(actions, 11, _armingButton);
+        StackButtons(actions, 5, _stopButton, _resourceActionButton, _restartResourceButton, _refreshButton);
+        StackButtons(actions, 10, _armingButton);
 
         _startRegularButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.StartAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
         _attachRegularButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.AttachAsync(TopologyProfile.Regular, _sessionCancellation.Token))); };
@@ -740,17 +758,6 @@ public sealed class MainWindow : Window
                 Dispatch(() => SurfaceAsync(_controller.StopAsync(_sessionCancellation.Token)));
             }
         };
-        _switchButton.Accepting += (_, e) =>
-        {
-            e.Handled = true;
-            var target = _controller.State.Profile == TopologyProfile.Regular ? TopologyProfile.LoadTests : TopologyProfile.Regular;
-            if (ConfirmAndRestore(
-                    new ConfirmationRequest($"Switch to {target}", $"aspire stop current && aspire start {target}", [$"{_controller.State.Profile} AppHost", $"{target} AppHost"]),
-                    _switchButton))
-            {
-                Dispatch(() => SurfaceAsync(_controller.SwitchAsync(target, _sessionCancellation.Token)));
-            }
-        };
         _resourceActionButton.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -759,26 +766,20 @@ public sealed class MainWindow : Window
         _restartResourceButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            if (_resourceRows.Count == 0)
+            TriggerSelectedResourceRestart();
+        };
+
+        // The captions name the selected row, so they have to follow the selection rather than
+        // wait for a press (PRD FR16). Guarded exactly as the Evidence list is: Bind restores
+        // the selection, and reacting to that would re-enter the render on every repaint.
+        _resourceList.ValueChanged += (_, _) =>
+        {
+            if (_rebindingResourceList)
             {
-                ShowMessage("Select a verified resource before restarting.");
                 return;
             }
 
-            var index = Math.Clamp(_resourceList.SelectedItem ?? 0, 0, _resourceRows.Count - 1);
-            var row = _resourceRows[index];
-            if (!row.CanRestart)
-            {
-                ShowMessage($"{row.Name} cannot be restarted from the current fresh Aspire state.");
-                return;
-            }
-
-            if (ConfirmAndRestore(
-                    new ConfirmationRequest($"Restart {row.Name}", ExactCommands(row.Instances, "Restart"), row.Instances),
-                    _restartResourceButton))
-            {
-                Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, ResourceCommand.Restart, _sessionCancellation.Token)));
-            }
+            RenderResourceControls(PresentationModelBuilder.Build(_controller.State, _time.GetUtcNow()));
         };
         _refreshButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => _controller.RefreshAsync(_sessionCancellation.Token)); };
         _armingButton.Accepting += (_, e) =>
@@ -1503,9 +1504,17 @@ public sealed class MainWindow : Window
         UpdateNavigationText();
 
         _resourceRows = model.Resources;
-        _resourceBinding.Bind(model.Resources.Count == 0
-            ? ["○ No verified resources — refresh or attach a known topology"]
-            : [.. model.Resources.Select(row => $"{row.Symbol} {row.Name,-20} {row.State,-11} {row.Detail} [{row.NextAction}]")]);
+        _rebindingResourceList = true;
+        try
+        {
+            _resourceBinding.Bind(model.Resources.Count == 0
+                ? ["○ No verified resources — refresh or attach a known topology"]
+                : [.. model.Resources.Select(row => $"{row.Symbol} {row.Name,-20} {row.State,-11} {row.Detail} [{row.NextAction}]")]);
+        }
+        finally
+        {
+            _rebindingResourceList = false;
+        }
         _evidenceRows = model.Evidence;
         _rebindingEvidenceList = true;
         try
@@ -1526,7 +1535,6 @@ public sealed class MainWindow : Window
         _loadResultBinding.Bind(model.LoadResults);
 
         _topologyStatus.Text = model.TopologyStatus;
-        _resourcesHint.Text = Hint(model.ResourcesHint);
         _loadHint.Text = Hint(model.LoadHint);
         RenderFaults(model.Faults);
         _armingButton.Text = model.ArmingCaption;
@@ -1550,9 +1558,7 @@ public sealed class MainWindow : Window
             && state.Preflight.Profiles.TryGetValue(TopologyProfile.LoadTests, out var loadProfile)
             && loadProfile.CanAttach;
         _stopButton.Enabled = model.CanStopOrSwitch;
-        _switchButton.Enabled = model.CanStopOrSwitch;
-        _resourceActionButton.Enabled = !model.IsBusy && model.Resources.Any(row => row.CanMutate);
-        _restartResourceButton.Enabled = !model.IsBusy && model.Resources.Any(row => row.CanRestart);
+        RenderResourceControls(model);
         _runLoadButton.Enabled = model.CanUseLoadTest && _controller.CanRunLoadTest;
         _aspireDashboardButton.Enabled = _controller.State.Topology?.DashboardUrl is not null;
         _jaegerButton.Enabled = _controller.State.Profile != TopologyProfile.None;
@@ -2300,29 +2306,130 @@ public sealed class MainWindow : Window
         return confirmed;
     }
 
-    private void TriggerSelectedResourceAction()
+    /// <summary>
+    /// The row the two resource controls act on and are captioned from. Both press paths and the
+    /// render go through here, so a caption can never name one resource while the press acts on
+    /// another.
+    /// </summary>
+    private ResourceRowViewModel? SelectedResourceRow()
     {
         if (_resourceRows.Count == 0)
+        {
+            return null;
+        }
+
+        return _resourceRows[Math.Clamp(_resourceList.SelectedItem ?? 0, 0, _resourceRows.Count - 1)];
+    }
+
+    /// <summary>
+    /// The lifecycle command a row is offering, or <c>null</c> when it offers none.
+    /// <c>Unavailable</c> is a sentinel meaning "no legal action", never a verb to dispatch or
+    /// to print beside a resource name.
+    /// </summary>
+    private static ResourceCommand? OfferedCommand(ResourceRowViewModel row) =>
+        Enum.TryParse<ResourceCommand>(row.NextAction, out var command) ? command : null;
+
+    /// <summary>
+    /// <c>"{verb} {resource}"</c>, or the verb alone when that will not fit the action column.
+    /// Truncating would leave a button naming a resource that does not exist.
+    /// </summary>
+    private static string ActionCaption(string verb, string resourceName)
+    {
+        var caption = $"{verb} {resourceName}";
+        return caption.Length <= ActionCaptionWidth ? caption : verb;
+    }
+
+    private void TriggerSelectedResourceAction()
+    {
+        var row = SelectedResourceRow();
+        if (row is null)
         {
             ShowMessage("Select a verified resource before running a resource action.");
             return;
         }
 
-        var index = Math.Clamp(_resourceList.SelectedItem ?? 0, 0, _resourceRows.Count - 1);
-        var row = _resourceRows[index];
-        if (!Enum.TryParse<ResourceCommand>(row.NextAction, out var command))
+        if (OfferedCommand(row) is not { } command)
         {
             ShowMessage($"{row.Name} has no legal next action in the fresh Aspire state.");
             return;
         }
 
-        var exactCommands = ExactCommands(row.Instances, row.NextAction);
+        if (!row.CanMutate)
+        {
+            ShowMessage($"{row.Name} cannot be commanded from the current fresh Aspire state.");
+            return;
+        }
+
+        // PRD FR20: Start destroys nothing and is the demo beat that has to land cleanly, so it
+        // fires straight away. Stop and Restart keep the modal naming their exact commands.
+        if (command == ResourceCommand.Start)
+        {
+            Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, command, _sessionCancellation.Token)));
+            return;
+        }
+
         if (ConfirmAndRestore(
-                new ConfirmationRequest($"{row.NextAction} {row.Name}", exactCommands, row.Instances),
+                new ConfirmationRequest($"{row.NextAction} {row.Name}", ExactCommands(row.Instances, row.NextAction), row.Instances),
                 _resourceActionButton))
         {
             Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, command, _sessionCancellation.Token)));
         }
+    }
+
+    private void TriggerSelectedResourceRestart()
+    {
+        var row = SelectedResourceRow();
+        if (row is null)
+        {
+            ShowMessage("Select a verified resource before restarting.");
+            return;
+        }
+
+        if (!row.CanRestart)
+        {
+            ShowMessage($"{row.Name} cannot be restarted from the current fresh Aspire state.");
+            return;
+        }
+
+        if (ConfirmAndRestore(
+                new ConfirmationRequest($"Restart {row.Name}", ExactCommands(row.Instances, "Restart"), row.Instances),
+                _restartResourceButton))
+        {
+            Dispatch(() => SurfaceAsync(_controller.ExecuteResourceCommandAsync(row.Name, ResourceCommand.Restart, _sessionCancellation.Token)));
+        }
+    }
+
+    /// <summary>
+    /// Captions and enables the two resource controls from the selected row, and explains a dead
+    /// control on the hint line. Enablement follows that one row rather than asking whether
+    /// <i>any</i> resource can be mutated, so an illegal action is refused before the press
+    /// rather than after it (PRD FR17).
+    /// </summary>
+    private void RenderResourceControls(OperatorPresentationModel model)
+    {
+        var row = SelectedResourceRow();
+        var command = row is null ? null : OfferedCommand(row);
+        var canAct = row is { CanMutate: true } && command is not null;
+
+        _resourceActionButton.Text = canAct
+            ? ActionCaption(row!.NextAction, row.Name)
+            : NeutralResourceActionCaption;
+        _resourceActionButton.Enabled = !model.IsBusy && canAct;
+
+        // FR19: the two controls never read the same words. When the row's own next action is
+        // already Restart, the dedicated restart control stands down.
+        var canRestart = row is { CanRestart: true } && command != ResourceCommand.Restart;
+        _restartResourceButton.Text = canRestart
+            ? ActionCaption(nameof(ResourceCommand.Restart), row!.Name)
+            : NeutralRestartCaption;
+        _restartResourceButton.Enabled = !model.IsBusy && canRestart;
+
+        var reason = row is not null && command is null && !model.IsBusy
+            ? $"{row.Name} is {row.State} — no lifecycle action applies to it."
+            : string.Empty;
+        _resourcesHint.Text = Hint(reason.Length == 0
+            ? model.ResourcesHint
+            : model.ResourcesHint.Length == 0 ? reason : $"{reason} | {model.ResourcesHint}");
     }
 
     internal string LastUiMessage { get; private set; } = string.Empty;
@@ -2350,6 +2457,13 @@ public sealed class MainWindow : Window
         return false;
     }
     internal string ResourcesHintText => _resourcesHint.Text;
+
+    /// <summary>Every caption in the Resources action column, top to bottom.</summary>
+    internal IReadOnlyList<string> ResourceActionCaptions =>
+        [.. (_resourceActions?.SubViews ?? []).OfType<Button>().Select(button => button.Text)];
+
+    /// <summary>The characters a stacked action caption may occupy. See ActionCaptionWidth.</summary>
+    internal static int ActionCaptionBudget => ActionCaptionWidth;
     internal string LoadHintText => _loadHint.Text;
     internal bool IsWorkspaceVisible(WorkspaceKind workspace) => workspace switch
     {

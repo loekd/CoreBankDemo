@@ -138,6 +138,58 @@ public class AspireAdapterTests
             "--non-interactive", "--nologo");
     }
 
+    /// <summary>
+    /// The headline case: the operator has stopped a replica, so the graph no longer matches the
+    /// profile's shape. That is the operator's own doing and must not stand between them and the
+    /// command that undoes it.
+    /// </summary>
+    [Fact]
+    public async Task ResourceCommand_ShapeNoLongerMatchesTheProfile_StillDispatches()
+    {
+        var commands = new RecordingCommandRunner();
+        commands.Queue(
+            CommandOutput.Success(ShapeShiftedRegularDescribeJson()),
+            CommandOutput.Success("started"));
+        var adapter = new AspireCliAdapter("/repo", TimeProvider.System, commands);
+
+        var result = await adapter.ExecuteResourceCommandAsync(
+            TopologyProfile.Regular,
+            KnownResources.CoreBankApi,
+            ResourceCommand.Start,
+            CancellationToken.None);
+
+        result.Status.Should().Be(ResourceDispatchStatus.Dispatched);
+        result.AffectedInstances.Should().Equal("corebank-api-a");
+        commands.Calls[1].Arguments.Should().Equal(
+            "resource", "corebank-api-a", "start",
+            "--apphost", "/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj",
+            "--non-interactive", "--nologo");
+    }
+
+    /// <summary>
+    /// A graph the console could not read is not a graph. The parser answers malformed JSON with
+    /// a reachable snapshot carrying fabricated <c>Unknown</c> resources that accept every
+    /// command, so nothing but the empty fingerprint stands between that and a real CLI call.
+    /// </summary>
+    [Fact]
+    public async Task ResourceCommand_UnparseableSnapshot_IsRejectedAndRunsNoCommand()
+    {
+        var commands = new RecordingCommandRunner();
+        commands.Queue(CommandOutput.Success("{ this is not json"));
+        var adapter = new AspireCliAdapter("/repo", TimeProvider.System, commands);
+
+        var result = await adapter.ExecuteResourceCommandAsync(
+            TopologyProfile.Regular,
+            KnownResources.CoreBankApi,
+            ResourceCommand.Stop,
+            CancellationToken.None);
+
+        result.Status.Should().Be(ResourceDispatchStatus.Rejected);
+        result.Detail.Should().Contain("unparseable JSON");
+        commands.Calls.Should().ContainSingle();
+        commands.Calls[0].Arguments.Should().Contain("describe");
+    }
+
     [Fact]
     public async Task ResourceCommand_TimeoutAfterDispatch_IsAmbiguous()
     {
@@ -467,6 +519,24 @@ public class AspireAdapterTests
 
     private static string Ps(string project, int pid) =>
         $$"""[{"appHostPath":"{{project}}","appHostPid":{{pid}}}]""";
+
+    /// <summary>
+    /// The same topology after the operator stopped one <c>corebank-api</c> replica: readable,
+    /// but no longer the profile's shape.
+    /// </summary>
+    private static string ShapeShiftedRegularDescribeJson() =>
+        """
+        {
+          "resources": [
+            {"name":"postgres-x","displayName":"postgres","resourceType":"Container","state":"Running","healthStatus":"Healthy"},
+            {"name":"redis-x","displayName":"redis","resourceType":"Container","state":"Running","healthStatus":"Healthy"},
+            {"name":"jaeger-x","displayName":"jaeger","resourceType":"Container","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://localhost:16686"}]},
+            {"name":"corebank-api-a","displayName":"corebank-api","resourceType":"Project","state":"Exited","healthStatus":"Unhealthy","urls":[{"url":"http://127.0.0.1:5032/swagger"}],"commands":{"start":{"state":"Enabled"},"restart":{"state":"Enabled"},"stop":{"state":"Enabled"}}},
+            {"name":"payments-api-a","displayName":"payments-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5294/swagger"}]},
+            {"name":"payments-api-b","displayName":"payments-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5294/swagger"}]}
+          ]
+        }
+        """;
 
     private static string ValidRegularDescribeJson() =>
         """

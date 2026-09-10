@@ -160,4 +160,45 @@ public class AspireJsonParserTests
             ]
           }
           """;
+
+    /// <summary>
+    /// Captured from a live Regular AppHost after stopping both `corebank-api` replicas
+    /// through the Aspire CLI. Aspire reports a stopped project as <c>Finished</c> with an
+    /// exit code and an empty url list -- not <c>Stopped</c> -- and offers <c>start</c> as the
+    /// only lifecycle command. Every fake in this suite said <c>Stopped</c>, which is why the
+    /// console shipped a Stop that could never be confirmed and a button that never offered
+    /// Start. This test pins the real vocabulary.
+    /// </summary>
+    [Fact]
+    public void Parse_StoppedProjectReplicas_AreReportedByAspireAsFinishedAndCanBeStarted()
+    {
+        const string json =
+            """
+            {
+              "resources": [
+                { "name": "postgres-x", "displayName": "postgres", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy" },
+                { "name": "redis-x", "displayName": "redis", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy" },
+                { "name": "jaeger-x", "displayName": "jaeger", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy", "endpoints": [{"url":"http://localhost:16686"}] },
+                { "name": "corebank-api-dmaegjwa", "displayName": "corebank-api", "resourceType":"Project", "state": "Finished", "exitCode": 0, "urls": [], "commands":{"rebuild":{"state":"Enabled"},"start":{"state":"Enabled"}} },
+                { "name": "corebank-api-tgdtsvwd", "displayName": "corebank-api", "resourceType":"Project", "state": "Finished", "exitCode": 0, "urls": [], "commands":{"rebuild":{"state":"Enabled"},"start":{"state":"Enabled"}} },
+                { "name": "corebank-api-dapr-cli-x", "displayName": "corebank-api-dapr-cli", "resourceType":"Executable", "state": "Running", "healthStatus": "Healthy" },
+                { "name": "payments-api-1", "displayName": "payments-api", "resourceType":"Project", "state": "Running", "healthStatus": "Healthy", "urls":[{"url":"http://127.0.0.1:5294/swagger"}] },
+                { "name": "payments-api-2", "displayName": "payments-api", "resourceType":"Project", "state": "Running", "healthStatus": "Healthy", "urls":[{"url":"http://127.0.0.1:5294/swagger"}] }
+              ]
+            }
+            """;
+
+        var snapshot = AspireJsonParser.Parse(TopologyProfile.Regular, json, DateTimeOffset.UnixEpoch);
+        var coreBank = snapshot.FindResource(KnownResources.CoreBankApi)!;
+
+        coreBank.Condition.Should().Be(ResourceCondition.Completed, "Aspire says 'Finished', never 'Stopped', for a stopped project");
+        coreBank.Supports(ResourceCommand.Start).Should().BeTrue();
+        coreBank.Supports(ResourceCommand.Stop).Should().BeFalse();
+        coreBank.Endpoints.Should().BeEmpty();
+        // The stopped replicas cost the graph its endpoints, so the shape no longer matches --
+        // which must not, on its own, stop the operator starting them again.
+        snapshot.IsFingerprintMatch.Should().BeFalse();
+        snapshot.IsReachable.Should().BeTrue();
+        snapshot.Fingerprint.Should().NotBeEmpty("a readable snapshot is not an unreadable one");
+    }
 }

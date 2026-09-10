@@ -148,9 +148,15 @@ public sealed class AspireCliAdapter : IAspireAdapter
 
         var snapshot = await GetSnapshotAsync(profile, ct);
         var resource = snapshot.FindResource(resourceName);
-        if (!snapshot.IsReachable || !snapshot.IsFingerprintMatch || resource is null)
+        // Readable, not shape-matched: a resource the operator stopped is still the same graph.
+        // What must never be dispatched against is a graph the console could not read at all --
+        // AspireJsonParser's malformed-JSON branch answers IsReachable true and fabricates
+        // Unknown resources whose Supports() says yes to everything, so without this check a
+        // command would go out against a topology nobody has seen. An empty fingerprint is that
+        // branch's marker.
+        if (!snapshot.IsReadable || resource is null)
         {
-            return ResourceCommandResult.Rejected(snapshot.ErrorSummary ?? $"Resource '{resourceName}' is not present in the verified graph.");
+            return ResourceCommandResult.Rejected(snapshot.ErrorSummary ?? $"Resource '{resourceName}' is not present in the readable graph.");
         }
 
         if (!resource.Supports(command))
