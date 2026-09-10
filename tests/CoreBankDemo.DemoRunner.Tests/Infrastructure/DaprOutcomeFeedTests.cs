@@ -4,6 +4,8 @@ using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Infrastructure;
+using Dapr.Messaging.PublishSubscribe;
+using Google.Protobuf.WellKnownTypes;
 using Moq;
 using Xunit;
 
@@ -120,11 +122,54 @@ public class DaprOutcomeFeedTests
     }
 
     [Fact]
-    public void TryParse_UnknownEventType_IsDroppedRatherThanGuessedAt()
+    public void Parse_UnknownEventType_StillProducesARowCarryingTheEnvelopeAndTheRawData()
     {
-        var payload = Payload(new { transactionId = "tx-9000" });
+        // Inverts a documented decision. The old argument -- an event that can neither resolve a
+        // row nor be honestly labelled unattributed is not worth keeping -- still holds for
+        // *attribution*, which is why the id stays null and the controller keeps such an event
+        // out of every accounting path. What changed is that the row itself is worth having:
+        // the console renders raw bytes now, and an unrecognised event on transaction-events is
+        // among the more interesting things that can arrive mid-demo.
+        var message = Message("com.corebank.something.else", Payload(new { transactionId = "tx-9000" }));
 
-        DaprOutcomeFeed.TryParse("com.corebank.something.else", payload).Should().BeNull();
+        var parsed = DaprOutcomeFeed.Parse(message);
+
+        parsed.EventType.Should().Be("com.corebank.something.else");
+        parsed.TransactionId.Should().BeNull("the console must not claim an id it did not parse");
+        parsed.Completed.Should().BeNull();
+        parsed.Envelope.Should().NotBeNull();
+        parsed.Envelope!.Id.Should().Be("evt-1");
+        parsed.Envelope.Source.Should().Be("corebank");
+        parsed.Envelope.SpecVersion.Should().Be("1.0");
+        parsed.Envelope.PubSubName.Should().Be(OutcomeEventTypes.PubSubComponent);
+        parsed.Envelope.Topic.Should().Be(OutcomeEventTypes.Topic);
+        parsed.Envelope.Data.Should().Contain("tx-9000");
+    }
+
+    [Fact]
+    public void Parse_KnownEventType_KeepsTheTypedPayloadAndCarriesTheEnvelopeBeside()
+    {
+        var message = Message(
+            OutcomeEventTypes.TransactionCompleted,
+            Payload(new { transactionId = "tx-8821", status = "Completed", processedAt = ProcessedAt }));
+
+        var parsed = DaprOutcomeFeed.Parse(message);
+
+        parsed.TransactionId.Should().Be("tx-8821");
+        parsed.Completed!.Status.Should().Be("Completed");
+        parsed.Envelope!.Type.Should().Be(OutcomeEventTypes.TransactionCompleted);
+        parsed.Envelope.Data.Should().Contain("tx-8821");
+    }
+
+    [Fact]
+    public void Parse_MalformedBody_KeepsTheBytesVerbatimRatherThanThrowingIntoTheStream()
+    {
+        var message = Message(OutcomeEventTypes.TransactionCompleted, Encoding.UTF8.GetBytes("{ this is not json"));
+
+        var parsed = DaprOutcomeFeed.Parse(message);
+
+        parsed.TransactionId.Should().BeNull();
+        parsed.Envelope!.Data.Should().Be("{ this is not json");
     }
 
     [Fact]
@@ -135,15 +180,124 @@ public class DaprOutcomeFeedTests
         DaprOutcomeFeed.TryParse(OutcomeEventTypes.TransactionCompleted, payload).Should().BeNull();
     }
 
-    [Fact]
-    public void TryParse_MissingTransactionId_IsDropped()
+    [Theory]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Parse_KnownTypeWithoutATransactionId_IsRecordedWithoutOne(string? transactionId)
     {
-        // TransactionId is the only correlation identifier this console has; an event without
-        // one can neither resolve a row nor be honestly labelled unattributed.
-        var payload = Payload(new { status = "Completed", processedAt = ProcessedAt });
+        // TransactionId is the only correlation identifier this console has, so an event without
+        // one is attributed to nothing at all. It is still recorded: the bytes are what it says.
+        var message = Message(
+            OutcomeEventTypes.TransactionCompleted,
+            Payload(new { transactionId, status = "Completed", processedAt = ProcessedAt }));
 
-        DaprOutcomeFeed.TryParse(OutcomeEventTypes.TransactionCompleted, payload).Should().BeNull();
+        var parsed = DaprOutcomeFeed.Parse(message);
+
+        parsed.TransactionId.Should().BeNull();
+        parsed.Completed.Should().BeNull("a payload with no id yields no typed interpretation");
+        parsed.Envelope!.Data.Should().Contain("Completed");
     }
+
+    [Fact]
+    public void Parse_Extensions_AreUnwrappedFromProtobufRatherThanJsonFormatted()
+    {
+        // Value.ToString() is the protobuf JSON formatter, so a string extension would come
+        // back quoted -- route: "/outcome" -- and an extension with no kind set throws rather
+        // than returning anything. Both shapes arrive on the same message here.
+        var message = Message(
+            OutcomeEventTypes.TransactionCompleted,
+            Payload(new { transactionId = "tx-8821", status = "Completed", processedAt = ProcessedAt }),
+            new Dictionary<string, Value>
+            {
+                ["route"] = Value.ForString("/outcome"),
+                ["attempt"] = Value.ForNumber(2),
+                ["replayed"] = Value.ForBool(false),
+                ["unset"] = new Value(),
+            });
+
+        var extensions = DaprOutcomeFeed.Parse(message).Envelope!.Extensions;
+
+        extensions.Should().Contain(extension => extension.Name == "route" && extension.Value == "/outcome");
+        extensions.Should().Contain(extension => extension.Name == "attempt" && extension.Value == "2");
+        extensions.Should().Contain(extension => extension.Name == "replayed" && extension.Value == "false");
+        extensions.Should().NotContain(
+            extension => extension.Name == "unset",
+            "an extension this console cannot read at all is left out, not printed as a blank line");
+    }
+
+    [Fact]
+    public void Parse_ManyLongExtensions_AreBoundedAndSayThatTheyWere()
+    {
+        var crowded = Enumerable.Range(0, JournalText.MaxHeaders + 5)
+            .ToDictionary(index => $"ext-{index}", _ => Value.ForString(new string('x', JournalText.MaxHeaderValueLength + 20)));
+
+        var extensions = DaprOutcomeFeed.Parse(
+            Message(OutcomeEventTypes.TransactionCompleted, Payload(new { transactionId = "tx-8821" }), crowded))
+            .Envelope!.Extensions;
+
+        extensions.Should().HaveCount(JournalText.MaxHeaders + 1, "the cap plus the line that states the drop");
+        extensions.Should().Contain(extension => extension.Name == "…");
+        extensions.Take(JournalText.MaxHeaders).Should().OnlyContain(
+            extension => extension.Value.Length == JournalText.MaxHeaderValueLength + 1);
+    }
+
+    [Fact]
+    public async Task HandleAsync_UnrecognisedType_RaisesTheEventAndStillAcksSuccess()
+    {
+        // Without this the whole feature could ship dead behind a green suite: restoring the
+        // old "drop what TryParse could not read" gate breaks no other test in the file.
+        var feed = NewFeed(() => new FakeSidecar());
+        var received = new List<OutcomeEvent>();
+        feed.EventReceived += received.Add;
+
+        var action = await feed.HandleAsync(
+            Message("com.corebank.something.else", Payload(new { transactionId = "tx-9000" })),
+            CancellationToken.None);
+
+        action.Should().Be(TopicResponseAction.Success);
+        received.Should().ContainSingle();
+        received[0].TransactionId.Should().BeNull();
+        received[0].Envelope!.Data.Should().Contain("tx-9000");
+    }
+
+    [Fact]
+    public async Task HandleAsync_SubscriberThrowsOnAnEventWithNoId_IsRecordedAndTheStreamCarriesOn()
+    {
+        // B1: an exception escaping here reaches the subscription's ErrorHandler, which treats
+        // it as the stream dying and relabels every outstanding payment "Outcome unknown".
+        var feed = NewFeed(() => new FakeSidecar());
+        feed.EventReceived += _ => throw new InvalidOperationException("subscriber blew up");
+
+        var action = await feed.HandleAsync(
+            Message("com.corebank.something.else", Payload(new { transactionId = "tx-9000" })),
+            CancellationToken.None);
+
+        action.Should().Be(TopicResponseAction.Success);
+        feed.LastHandlerError.Should().Contain("com.corebank.something.else")
+            .And.Contain("(no transactionId)")
+            .And.Contain("subscriber blew up");
+    }
+
+    /// <summary>
+    /// A message shaped exactly as the sidecar delivers one. Built directly rather than through
+    /// a fake, so the envelope this console renders is the envelope the SDK actually exposes.
+    /// </summary>
+    private static TopicMessage Message(
+        string type,
+        byte[] data,
+        IReadOnlyDictionary<string, Value>? extensions = null) =>
+        new(
+            "evt-1",
+            "corebank",
+            type,
+            "1.0",
+            "application/json",
+            OutcomeEventTypes.Topic,
+            OutcomeEventTypes.PubSubComponent)
+        {
+            Data = data,
+            Extensions = extensions ?? new Dictionary<string, Value>(),
+        };
 
     [Fact]
     public async Task StartAsync_SidecarRefusesToStart_ReportsUnavailableWithTheSidecarsOwnReason()

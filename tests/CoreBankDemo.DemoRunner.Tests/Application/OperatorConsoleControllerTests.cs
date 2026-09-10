@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
+using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Xunit;
@@ -136,14 +137,14 @@ public class OperatorConsoleControllerTests
     {
         var harness = new OperatorHarness();
         harness.Aspire.DefaultSnapshot = TopologySnapshot.Unreachable(TopologyProfile.Regular, harness.Time.GetUtcNow(), "missing");
-        harness.Processes.Output = new string('x', JournalRedaction.MaxLength + 100);
+        harness.Processes.Output = new string('x', JournalText.MaxLength + 100);
         var controller = harness.CreateController();
 
         var result = await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
 
         result.Succeeded.Should().BeFalse();
         controller.State.Evidence.Single().Succeeded.Should().BeFalse();
-        controller.State.Evidence.Single().Detail.Length.Should().BeLessThanOrEqualTo(JournalRedaction.MaxLength + 1);
+        controller.State.Evidence.Single().Detail.Length.Should().BeLessThanOrEqualTo(JournalText.MaxLength + 1);
         harness.Processes.StopCount.Should().Be(1);
     }
 
@@ -752,7 +753,10 @@ public class OperatorConsoleControllerTests
 
         var record = controller.State.Evidence.Last();
         record.Kind.Should().Be(EvidenceKind.OutcomeEvent);
-        record.Summary.Should().Contain("Withdrawn — transaction-id").And.Contain("Reason: budget exhausted");
+        record.Summary.Should().StartWith("Withdrawn · transaction-id").And.Contain("Reason: budget exhausted");
+        PresentationModelBuilder.RowSummary(record.Summary).Should().Be(
+            "Withdrawn · transaction-id",
+            "the row keeps the verb and the id and drops only the clause");
         record.Detail.Should().Contain("Status: Cancelled").And.Contain("Reason: budget exhausted");
         record.Succeeded.Should().BeTrue("a cancellation is the rail's own proven answer, like a 504 Cancelled");
     }
@@ -1627,10 +1631,92 @@ public class OperatorConsoleControllerTests
 
         controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Awaiting);
         controller.State.Burst.Settled.Should().Be(0, "an unattributed event never counts toward the burst's proven leg");
-        controller.State.Evidence.Should().Contain(record =>
-            record.Kind == EvidenceKind.OutcomeEvent
-            && record.Summary.Contains("Unattributed")
-            && record.Summary.Contains("tx-9004"));
+        var unattributed = controller.State.Evidence.Single(record =>
+            record.Kind == EvidenceKind.OutcomeEvent && record.Summary.Contains("Unattributed"));
+        unattributed.Summary.Should().StartWith("Settled · tx-9004 · Unattributed");
+        // The whole point of the label survives the row cut: a tracked, a retired and an
+        // unattributed event must never read identically from the back of a room.
+        PresentationModelBuilder.RowSummary(unattributed.Summary)
+            .Should().Be("Settled · tx-9004 · Unattributed");
+    }
+
+    [Theory]
+    [InlineData("com.corebank.something.new", "not a CloudEvent type this console recognises")]
+    [InlineData(OutcomeEventTypes.TransactionCompleted, "carried no transactionId")]
+    public async Task EventWithNoReadableId_GetsARowAndTouchesNoAccounting(string eventType, string expected)
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+        var evidenceBefore = controller.State.Evidence.Count;
+
+        harness.Feed.PushUnreadable(eventType, """{"status":"Completed"}""");
+
+        var row = controller.State.Evidence.Last();
+        row.Kind.Should().Be(EvidenceKind.OutcomeEvent);
+        row.Summary.Should().Contain(expected);
+        row.TransactionId.Should().BeNull("the console must not claim an id it could not parse");
+        row.Event.Should().NotBeNull("the envelope and the raw data are the whole of what the event says");
+        row.Event!.Data.Should().Contain("Completed");
+        controller.State.Evidence.Should().HaveCount(evidenceBefore + 1);
+
+        // None of the accounting moved: not the tracked row, not the burst counters.
+        controller.State.TrackedPayments.Single().State.Should().Be(PaymentTrackingState.Awaiting);
+        controller.State.Burst.Settled.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task EventWithNoReadableId_NeverReachesTheUnmatchedBuffer()
+    {
+        // The buffer exists so a leg that beat its own HTTP response can be replayed onto the
+        // row when it appears. It is keyed by transaction id, so an event without one has
+        // nothing to be replayed onto -- and must not be replayed onto the next row that shows up.
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+
+        harness.Feed.PushUnreadable(OutcomeEventTypes.TransactionCompleted, """{"status":"Completed"}""");
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        controller.State.TrackedPayments.Single().State.Should().Be(
+            PaymentTrackingState.Awaiting,
+            "a row must not be settled by an event that named no transaction");
+    }
+
+    [Fact]
+    public async Task PaymentEvidence_CarriesTheExchangeItWasProducedBy()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        var exchange = new HttpExchange(
+            "POST",
+            "http://127.0.0.1:5294/api/payments",
+            [new EvidenceHeader("Idempotency-Key", "demo-key-001")],
+            """{"amount":250}""",
+            202,
+            "Accepted",
+            [new EvidenceHeader("Content-Type", "application/json")],
+            """{"transactionId":"transaction-id"}""");
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending") with { Exchange = exchange });
+
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Generated, null, CancellationToken.None);
+
+        var record = controller.State.Evidence.Last(record => record.Kind == EvidenceKind.Payment);
+        record.Exchange.Should().BeSameAs(exchange);
+        record.Event.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task BurstAndTopologyEvidence_CarryNoExchangeAtAll()
+    {
+        // A burst is an aggregate over many calls and a topology start is not an HTTP call at
+        // all. Neither has a single exchange to show, and stacking them is out of scope.
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending"));
+
+        await controller.RunBurstAsync(StandardPayment, 1, 1, CancellationToken.None);
+
+        controller.State.Evidence.Where(record => record.Kind is EvidenceKind.Burst or EvidenceKind.Topology)
+            .Should().NotBeEmpty()
+            .And.OnlyContain(record => record.Exchange == null && record.Event == null);
     }
 
     [Fact]
@@ -2075,6 +2161,10 @@ public class OperatorConsoleControllerTests
 
         controller.State.Evidence.Should().Contain(record =>
             record.TransactionId == "tx-0" && record.Summary.Contains("submitted earlier this session"));
+        PresentationModelBuilder.RowSummary(
+                controller.State.Evidence.Single(record =>
+                    record.TransactionId == "tx-0" && record.Kind == EvidenceKind.OutcomeEvent).Summary)
+            .Should().Be("Settled · tx-0 · Seen earlier", "a retired event still names itself on the row");
         controller.State.Evidence.Should().NotContain(record =>
             record.TransactionId == "tx-0" && record.Summary.Contains("was not submitted from this console"));
     }

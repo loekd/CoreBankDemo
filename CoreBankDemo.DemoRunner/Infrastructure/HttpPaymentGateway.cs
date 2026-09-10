@@ -12,6 +12,13 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
 {
     private const int BodyExcerptLength = 200;
 
+    /// <summary>
+    /// How many values of one repeated header are joined into its recorded line. HTTP allows
+    /// arbitrarily many; the recorded value is bounded again by <see cref="JournalText"/>, and
+    /// this stops the join itself from building the string that would then be thrown away.
+    /// </summary>
+    private const int MaximumHeaderValues = 16;
+
     public async Task<PaymentResult> SubmitAsync(
         TopologyProfile profile,
         PaymentSubmission submission,
@@ -35,6 +42,12 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             request.Headers.TryAddWithoutValidation("Idempotency-Key", submission.IdempotencyKey);
         }
 
+        // Captured before the send, from the message actually about to go out: the headers on
+        // the record are the headers that were set, never a re-derivation of what they should
+        // have been. In Omitted mode there is simply no key header here, and that absence is
+        // the fact the demo turns on.
+        var sent = Requested(request, payload);
+
         var stopwatch = Stopwatch.StartNew();
         try
         {
@@ -51,7 +64,8 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 parsed.Status,
                 body,
                 violation,
-                stopwatch.Elapsed);
+                stopwatch.Elapsed,
+                Answered(sent, response, body));
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -64,7 +78,10 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 null,
                 null,
                 "Request timed out; the server may have accepted it.",
-                stopwatch.Elapsed);
+                stopwatch.Elapsed,
+                // A request that got no answer is still evidence, and the exchange says which
+                // half is missing by leaving StatusCode null.
+                sent);
         }
         catch (HttpRequestException ex)
         {
@@ -79,9 +96,49 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 null,
                 null,
                 $"Could not reach PaymentsAPI: {ex.Message}",
-                stopwatch.Elapsed);
+                stopwatch.Elapsed,
+                sent);
         }
     }
+
+    /// <summary>
+    /// The request half of an exchange, taken off the message that is about to be sent. Both
+    /// header collections are merged so <c>Content-Type</c> lands beside <c>Idempotency-Key</c>,
+    /// exactly as a tool that replays the call would show them.
+    /// </summary>
+    private static HttpExchange Requested(HttpRequestMessage request, string? body) => new(
+        request.Method.Method,
+        request.RequestUri?.ToString() ?? string.Empty,
+        Headers(request.Headers, request.Content?.Headers),
+        body is null ? null : JournalText.Bound(body),
+        null,
+        null,
+        [],
+        null);
+
+    /// <summary>Fills the response half in. Called only when an answer actually arrived.</summary>
+    private static HttpExchange Answered(HttpExchange sent, HttpResponseMessage response, string body) =>
+        sent with
+        {
+            StatusCode = (int)response.StatusCode,
+            ReasonPhrase = response.ReasonPhrase,
+            ResponseHeaders = Headers(response.Headers, response.Content.Headers),
+            ResponseBody = JournalText.Bound(body),
+        };
+
+    /// <summary>
+    /// Merges the message's own headers with its content's, so <c>Content-Type</c> lands beside
+    /// the headers this console set. Bounded on the way out in both directions: a remote is not
+    /// allowed to decide how many lines the pane draws, nor how wide one of them is.
+    /// </summary>
+    private static IReadOnlyList<EvidenceHeader> Headers(
+        params IEnumerable<KeyValuePair<string, IEnumerable<string>>>?[] collections) =>
+        JournalText.Bound(collections
+            .Where(collection => collection is not null)
+            .SelectMany(collection => collection!)
+            .Select(header => new EvidenceHeader(
+                header.Key,
+                string.Join(", ", header.Value.Take(MaximumHeaderValues)))));
 
     /// <summary>
     /// Withdraws a payment through CoreBank's own cancellation endpoint. The mapping is driven by
@@ -109,6 +166,7 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
         {
             Content = new StringContent(payload, Encoding.UTF8, "application/json"),
         };
+        var sent = Requested(request, payload);
 
         var stopwatch = Stopwatch.StartNew();
         try
@@ -118,6 +176,7 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             stopwatch.Stop();
             var (status, processedAt) = ReadCancelResponse(body);
             var code = (int)response.StatusCode;
+            var exchange = Answered(sent, response, body);
 
             if (string.IsNullOrWhiteSpace(status))
             {
@@ -133,7 +192,8 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                     errors is { Length: > 0 }
                         ? $"CoreBankAPI refused the cancel with HTTP {code}: {errors}"
                         : $"CoreBankAPI answered the cancel with HTTP {code} and no readable status{Excerpt(body)}",
-                    stopwatch.Elapsed);
+                    stopwatch.Elapsed,
+                    Exchange: exchange);
             }
 
             var outcome = MapOutcome(status);
@@ -155,7 +215,7 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
             };
 
             PaymentCancellationResult Result(PaymentCancelOutcome mapped, string? error) =>
-                new(mapped, code, cancellation.TransactionId, status, body, error, stopwatch.Elapsed, processedAt);
+                new(mapped, code, cancellation.TransactionId, status, body, error, stopwatch.Elapsed, processedAt, exchange);
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -167,7 +227,8 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 null,
                 null,
                 "The cancel request timed out; the payment is left exactly as it was.",
-                stopwatch.Elapsed);
+                stopwatch.Elapsed,
+                Exchange: sent);
         }
         catch (HttpRequestException ex)
         {
@@ -179,7 +240,8 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 null,
                 null,
                 $"Could not reach CoreBankAPI to cancel: {ex.Message}",
-                stopwatch.Elapsed);
+                stopwatch.Elapsed,
+                Exchange: sent);
         }
     }
 
@@ -285,10 +347,16 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 query.Select(pair => $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
         }
 
+        // A bare request: no headers, no body. Its REQUEST column is a request line and nothing
+        // else, which is honest and is what a tool replaying the call would show. Headers are
+        // never synthesised to fill the column.
+        using var request = new HttpRequestMessage(method, url);
+        var sent = Requested(request, null);
+
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            using var response = await httpClient.SendAsync(new HttpRequestMessage(method, url), ct);
+            using var response = await httpClient.SendAsync(request, ct);
             var body = await response.Content.ReadAsStringAsync(ct);
             stopwatch.Stop();
             return new InspectionResult(
@@ -297,17 +365,18 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
                 endpointId,
                 body,
                 response.IsSuccessStatusCode ? null : $"HTTP {(int)response.StatusCode}",
-                stopwatch.Elapsed);
+                stopwatch.Elapsed,
+                Answered(sent, response, body));
         }
         catch (TaskCanceledException) when (!ct.IsCancellationRequested)
         {
             stopwatch.Stop();
-            return new InspectionResult(false, 0, endpointId, null, "Request timed out.", stopwatch.Elapsed);
+            return new InspectionResult(false, 0, endpointId, null, "Request timed out.", stopwatch.Elapsed, sent);
         }
         catch (HttpRequestException ex)
         {
             stopwatch.Stop();
-            return new InspectionResult(false, 0, endpointId, null, ex.Message, stopwatch.Elapsed);
+            return new InspectionResult(false, 0, endpointId, null, ex.Message, stopwatch.Elapsed, sent);
         }
     }
 

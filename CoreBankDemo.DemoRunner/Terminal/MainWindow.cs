@@ -24,6 +24,15 @@ public sealed class MainWindow : Window
     /// </summary>
     private const int RailWidthPreferred = 16;
     private const int RailWidthCompact = 5;
+
+    /// <summary>
+    /// Rows the Details pane's header block keeps for itself: five fixed lines plus the
+    /// optional <c>Transaction:</c> line, and one spare so nothing sits against the columns.
+    /// The columns take everything under it, because the payload is what the demonstration
+    /// points at.
+    /// </summary>
+    private const int EvidenceHeaderRows = 7;
+
     private const int ActionColumnWidth = 22;
 
     // Operations workspace column grid, sized so both columns still fit the
@@ -220,7 +229,27 @@ public sealed class MainWindow : Window
     private readonly Label _resourcesHint = new();
 
     private readonly ListView _evidenceList = new();
-    private readonly TextView _evidenceDetail = new() { ReadOnly = true, WordWrap = false };
+
+    // A bordered container holding three read-only panes: the header block, then REQUEST and
+    // RESPONSE side by side. No scheme is assigned to any of them -- every Evidence control
+    // inherits BaseScheme from the window and a Border inherits its view's SchemeName, so the
+    // border is already drawn on the same surface as the workspace around it (FR-21).
+    private readonly View _evidenceDetail = new();
+    private readonly TextView _evidenceHeader = new() { ReadOnly = true, WordWrap = false };
+    private readonly TextView _evidenceRequest = new() { ReadOnly = true, WordWrap = false };
+    private readonly TextView _evidenceResponse = new() { ReadOnly = true, WordWrap = false };
+
+    /// <summary>What Copy puts on the clipboard: the model's raw text, never the column art.</summary>
+    private string _evidenceCopyText = string.Empty;
+
+    /// <summary>
+    /// Whether the RESPONSE column is showing. Tracked so the columns are only relaid out when
+    /// the answer actually changes -- initialised true to match the constructed widths.
+    /// </summary>
+    private bool _evidenceShowsBothColumns = true;
+
+    /// <summary>Whether the announcement row is currently borrowed from the Evidence panes.</summary>
+    private bool _announcementBorrowsAnEvidenceRow;
     private readonly Button _detailsButton = NewButton("Details");
     private readonly Button _wrapButton = NewButton("Wrap: off");
     private readonly Button _copyButton = NewButton("Copy detail");
@@ -773,14 +802,45 @@ public sealed class MainWindow : Window
     private View BuildEvidenceView()
     {
         var view = NewWorkspace("EVIDENCE / RESULTS");
-        _evidenceList.X = 1;
-        _evidenceList.Y = 1;
         _evidenceList.Width = Dim.Percent(42);
-        _evidenceList.Height = Dim.Fill(3);
-        _evidenceDetail.X = Pos.Right(_evidenceList) + 1;
-        _evidenceDetail.Y = 1;
-        _evidenceDetail.Width = Dim.Fill(1);
-        _evidenceDetail.Height = Dim.Fill(3);
+        ApplyEvidenceLayout();
+
+        // The header block gets a fixed band at the top; the columns take everything under it,
+        // so a long payload grows the part of the pane the demonstration is pointing at.
+        _evidenceHeader.X = 0;
+        _evidenceHeader.Y = 0;
+        _evidenceHeader.Width = Dim.Fill();
+        _evidenceHeader.Height = EvidenceHeaderRows;
+        _evidenceRequest.X = 0;
+        _evidenceRequest.Y = EvidenceHeaderRows;
+        _evidenceRequest.Width = Dim.Percent(50);
+        _evidenceRequest.Height = Dim.Fill();
+        _evidenceResponse.X = Pos.Right(_evidenceRequest);
+        _evidenceResponse.Y = EvidenceHeaderRows;
+        _evidenceResponse.Width = Dim.Fill();
+        _evidenceResponse.Height = Dim.Fill();
+
+        // Auto rather than Always: a bar appears only when the payload is larger than its
+        // column. The horizontal one is doing more than accommodating the split -- the panes
+        // are WordWrap = false by default, so a long JSON line used to run off the right edge
+        // with nothing on screen saying there was more.
+        foreach (var column in new[] { _evidenceRequest, _evidenceResponse })
+        {
+            column.VerticalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
+            column.HorizontalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
+        }
+
+        // The header block needs the horizontal bar as much as the columns do: a full summary
+        // is exactly what row truncation exists to accommodate, and without a bar it would run
+        // off the right edge with nothing on screen saying so.
+        _evidenceHeader.VerticalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
+        _evidenceHeader.HorizontalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
+        // The panes carry the payload the room is asked to read, so they are pinned to the
+        // workspace's own surface rather than left on the blend a ReadOnly TextView derives.
+        OperatorTheme.Apply(_evidenceHeader, OperatorTheme.EvidencePaneScheme);
+        OperatorTheme.Apply(_evidenceRequest, OperatorTheme.EvidencePaneScheme);
+        OperatorTheme.Apply(_evidenceResponse, OperatorTheme.EvidencePaneScheme);
+        _evidenceDetail.Add(_evidenceHeader, _evidenceRequest, _evidenceResponse);
 
         _detailsButton.X = 1;
         _detailsButton.Y = Pos.AnchorEnd(2);
@@ -822,13 +882,16 @@ public sealed class MainWindow : Window
             var index = Math.Clamp(_evidenceList.SelectedItem ?? 0, 0, _evidenceRows.Count - 1);
             _controller.SelectEvidence(_evidenceRows[index].Sequence);
             // The pane is the point of the button, so put the reader in it.
-            _evidenceDetail.SetFocus();
+            _evidenceRequest.SetFocus();
         };
         _wrapButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            _evidenceDetail.WordWrap = !_evidenceDetail.WordWrap;
-            _wrapButton.Text = _evidenceDetail.WordWrap ? "Wrap: on" : "Wrap: off";
+            var wrap = !_evidenceRequest.WordWrap;
+            _evidenceHeader.WordWrap = wrap;
+            _evidenceRequest.WordWrap = wrap;
+            _evidenceResponse.WordWrap = wrap;
+            _wrapButton.Text = wrap ? "Wrap: on" : "Wrap: off";
         };
         _copyButton.Accepting += (_, e) => { e.Handled = true; CopyDetailToTerminalClipboard(); };
         _exportButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token))); };
@@ -1456,10 +1519,7 @@ public sealed class MainWindow : Window
             _rebindingEvidenceList = false;
         }
 
-        if (!string.Equals(_evidenceDetail.Text, model.SelectedEvidenceDetail, StringComparison.Ordinal))
-        {
-            _evidenceDetail.Text = model.SelectedEvidenceDetail;
-        }
+        RenderEvidenceDetail(model.SelectedEvidencePane);
 
         RenderOperations(model);
         _loadStatus.Text = model.LoadPhaseStatus;
@@ -1694,8 +1754,81 @@ public sealed class MainWindow : Window
 
         // Evidence has no spare row at its foot, so its two panes lend one for as long as the
         // announcement is showing and take it straight back when it clears.
-        _evidenceList.Height = Dim.Fill(showing ? 4 : 3);
-        _evidenceDetail.Height = Dim.Fill(showing ? 4 : 3);
+        _announcementBorrowsAnEvidenceRow = showing;
+        ApplyEvidenceLayout();
+    }
+
+    /// <summary>
+    /// Places the evidence list and the Details pane so their first text rows line up.
+    /// <para>
+    /// The pane's border is an adornment: it eats a row and a column on every side of the
+    /// container, and the list beside it has none. So the container is offset outwards by the
+    /// border's thickness, which lands its viewport exactly where the unbordered pane's content
+    /// sat — otherwise the two panes read one row and one column out of step with each other.
+    /// </para>
+    /// </summary>
+    private void ApplyEvidenceLayout()
+    {
+        var inset = _evidenceDetail.BorderStyle == LineStyle.None ? 0 : 1;
+        var foot = _announcementBorrowsAnEvidenceRow ? 4 : 3;
+        _evidenceList.X = 1;
+        _evidenceList.Y = 1;
+        _evidenceList.Height = Dim.Fill(foot);
+        _evidenceDetail.X = Pos.Right(_evidenceList) + (1 - inset);
+        _evidenceDetail.Y = 1 - inset;
+        _evidenceDetail.Width = Dim.Fill(1 - inset);
+        _evidenceDetail.Height = Dim.Fill(foot - inset);
+    }
+
+    /// <summary>
+    /// Puts one pane model on the three controls. A record with no second column hides the
+    /// right pane and gives the left the full width -- an empty column beside a full one reads
+    /// as a broken console, and the CloudEvent case is the one that needs the room.
+    /// </summary>
+    private void RenderEvidenceDetail(EvidencePaneViewModel pane)
+    {
+        _evidenceCopyText = pane.CopyText;
+        SetPaneText(_evidenceHeader, pane.Header);
+        SetPaneText(_evidenceRequest, pane.Left);
+        SetPaneText(_evidenceResponse, pane.Right ?? string.Empty);
+
+        // Only when it actually flips: a fresh Dim on every poll would relayout the pane the
+        // operator is reading, for a width that did not change.
+        var showsBoth = pane.Right is not null;
+        if (showsBoth != _evidenceShowsBothColumns)
+        {
+            _evidenceShowsBothColumns = showsBoth;
+            if (!showsBoth && _evidenceResponse.HasFocus)
+            {
+                // Hiding a view that holds the keyboard strands the operator on something they
+                // cannot see. The left column is where the record now is, so focus goes there.
+                _evidenceRequest.SetFocus();
+            }
+
+            _evidenceResponse.Visible = showsBoth;
+            _evidenceRequest.Width = showsBoth ? Dim.Percent(50) : Dim.Fill();
+        }
+    }
+
+    /// <summary>
+    /// Assigns only on a real change: setting <see cref="TextView.Text"/> resets the caret and
+    /// the scroll offset, and a pane that jumped back to the top on every poll would lose the
+    /// operator's place mid-sentence.
+    /// </summary>
+    /// <summary>
+    /// Replaces a pane's contents and returns it to its top-left. The scroll offset belongs to
+    /// the record that was being read, not to the pane: a caret left mid-line by an arrow key or
+    /// a click survives the assignment, so the next record drew one column short — every line
+    /// missing its first character, and a line holding nothing but <c>{</c> missing altogether.
+    /// Guarded on the text actually changing, so scrolling within one record is left alone.
+    /// </summary>
+    private static void SetPaneText(TextView pane, string text)
+    {
+        if (!string.Equals(pane.Text, text, StringComparison.Ordinal))
+        {
+            pane.Text = text;
+            pane.Viewport = pane.Viewport with { Location = Point.Empty };
+        }
     }
 
     private void ApplyResponsiveLayout()
@@ -1704,6 +1837,11 @@ public sealed class MainWindow : Window
         _compactLayout = layout != TerminalLayoutMode.Preferred;
         _navigation.Width = _compactLayout ? RailWidthCompact : RailWidthPreferred;
         _navigation.BorderStyle = _compactLayout ? LineStyle.None : LineStyle.Rounded;
+        // The Details pane follows the rail: rounded where there is room for it, gone in
+        // compact where every row and column is spoken for. The layout is reapplied after it,
+        // because the border's thickness is what the pane's own position compensates for.
+        _evidenceDetail.BorderStyle = _compactLayout ? LineStyle.None : LineStyle.Rounded;
+        ApplyEvidenceLayout();
         _content.X = Pos.Right(_navigation);
         foreach (var button in _navigationButtons)
         {
@@ -2097,7 +2235,9 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var detail = _evidenceDetail.Text;
+        // The model's raw text, not what is on screen: a clipboard full of column titles and
+        // this console's re-indentation does not paste into a .http file and run.
+        var detail = _evidenceCopyText;
         if (string.IsNullOrWhiteSpace(detail))
         {
             ShowMessage("Select an entry and press Details first — there is nothing to copy.");
@@ -2299,7 +2439,30 @@ public sealed class MainWindow : Window
     internal ListView StillOpenList => _stillOpenList;
     internal ListView EvidenceList => _evidenceList;
     internal int EvidenceRowCount => _evidenceList.Source?.Count ?? 0;
-    internal string EvidenceDetailText => _evidenceDetail.Text;
+    internal string EvidenceDetailText => string.Join(
+        Environment.NewLine,
+        new[] { _evidenceHeader.Text, _evidenceRequest.Text, _evidenceResponse.Text }
+            .Where(text => !string.IsNullOrEmpty(text)));
+
+    internal string EvidenceHeaderText => _evidenceHeader.Text;
+    internal string EvidenceRequestText => _evidenceRequest.Text;
+    internal string EvidenceResponseText => _evidenceResponse.Text;
+    internal bool EvidenceResponseVisible => _evidenceResponse.Visible;
+    internal TextView EvidenceResponsePane => _evidenceResponse;
+    internal bool EvidenceColumnsWrap =>
+        _evidenceHeader.WordWrap && _evidenceRequest.WordWrap && _evidenceResponse.WordWrap;
+    internal string EvidenceCopyText => _evidenceCopyText;
+    internal LineStyle? EvidenceDetailBorderStyle => _evidenceDetail.BorderStyle;
+    internal (int Left, int Right) EvidenceColumnWidths =>
+        (_evidenceRequest.Frame.Width, _evidenceResponse.Frame.Width);
+
+    /// <summary>
+    /// Where the two panes' first text rows actually land on screen. The border is an adornment
+    /// that shifts the container's content, so these are the numbers that prove the list and
+    /// the Details pane still read as one row.
+    /// </summary>
+    internal (Point List, Point Header) EvidenceFirstRows =>
+        (_evidenceList.FrameToScreen().Location, _evidenceHeader.FrameToScreen().Location);
     internal IReadOnlyList<string> StillOpenRowTexts =>
         [.. _stillOpenList.Source?.ToList().Cast<string>() ?? []];
     internal string FeedStatusText => _feedStatus.Text;

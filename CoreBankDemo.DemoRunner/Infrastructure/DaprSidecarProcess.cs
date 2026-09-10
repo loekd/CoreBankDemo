@@ -43,7 +43,7 @@ public interface IDaprSidecar : IAsyncDisposable
     bool IsRunning { get; }
 
     /// <summary>
-    /// Bounded, redacted tail of the sidecar's own output. Read into the feed's failure detail,
+    /// Bounded tail of the sidecar's own output, verbatim. Read into the feed's failure detail,
     /// so a sidecar that refused to come up explains itself rather than leaving the operator
     /// with a bare "unavailable".
     /// </summary>
@@ -242,7 +242,7 @@ public sealed class DaprSidecarProcess : IDaprSidecar
         {
             var detail = $"{_executable} exited immediately with code {process.ExitCode}. {RecentOutput}";
             process.Dispose();
-            return new DaprSidecarStartResult(false, null, JournalRedaction.Apply(detail));
+            return new DaprSidecarStartResult(false, null, JournalText.Bound(detail));
         }
 
         var handle = new DaprSidecarHandle(process.Id, launch.GrpcPort, launch.HttpPort, command);
@@ -336,7 +336,7 @@ public sealed class DaprSidecarProcess : IDaprSidecar
                 return new DaprSidecarStartResult(
                     false,
                     null,
-                    JournalRedaction.Apply($"{_executable} exited with code {process.ExitCode} before it became ready. {RecentOutput}"));
+                    JournalText.Bound($"{_executable} exited with code {process.ExitCode} before it became ready. {RecentOutput}"));
             }
 
             try
@@ -370,7 +370,7 @@ public sealed class DaprSidecarProcess : IDaprSidecar
 
         lock (_output)
         {
-            _output.AppendLine(JournalRedaction.Apply(line));
+            _output.AppendLine(JournalText.Bound(line));
             if (_output.Length > MaximumOutputLength)
             {
                 _output.Remove(0, _output.Length - MaximumOutputLength);

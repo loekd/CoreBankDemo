@@ -62,7 +62,7 @@ public sealed record FaultsViewModel(
 
 /// <summary>
 /// One row of the evidence list. Deliberately carries no expanded detail: the Details pane reads
-/// the separately computed <see cref="OperatorPresentationModel.SelectedEvidenceDetail"/> for the
+/// the separately computed <see cref="OperatorPresentationModel.SelectedEvidencePane"/> for the
 /// one record the operator actually selected. A per-row copy meant re-parsing and re-serializing
 /// every retained payload on every render, for text nothing ever read.
 /// </summary>
@@ -71,6 +71,34 @@ public sealed record EvidenceRowViewModel(
     string Summary,
     string Provenance,
     bool Succeeded);
+
+/// <summary>
+/// The Details pane for the one selected record: a header block, then the payload as columns.
+/// <para>
+/// <see cref="Left"/> and <see cref="Right"/> are what the two column panes show — the first
+/// line of each is its own title, so two columns cost two controls rather than four. A record
+/// that is not a two-sided HTTP exchange (an inbound CloudEvent, an Aspire CLI invocation, a
+/// local file write) has a <see cref="Right"/> of <see langword="null"/> and its left column
+/// runs full width: an empty column beside a full one reads as a broken console.
+/// </para>
+/// </summary>
+/// <param name="CopyText">
+/// What Copy puts on the clipboard: the raw request text, a blank line, the raw response text.
+/// Never the column titles and never this console's re-indentation — it has to paste into a
+/// <c>.http</c> file or Postman and run.
+/// </param>
+public sealed record EvidencePaneViewModel(
+    string Header,
+    string Left,
+    string? Right,
+    string CopyText)
+{
+    public static readonly EvidencePaneViewModel Empty = new(
+        "No action selected. Select a row on the left, or press Details.",
+        string.Empty,
+        null,
+        string.Empty);
+}
 
 /// <summary>
 /// The Operations focus card: one large object rendering the <b>selected</b> payment, and the
@@ -150,7 +178,7 @@ public sealed record OperatorPresentationModel(
     WorkspaceKind ActiveWorkspace,
     IReadOnlyList<ResourceRowViewModel> Resources,
     IReadOnlyList<EvidenceRowViewModel> Evidence,
-    string SelectedEvidenceDetail,
+    EvidencePaneViewModel SelectedEvidencePane,
     FaultsViewModel Faults,
     FocusCardViewModel FocusCard,
     IReadOnlyList<StillOpenRowViewModel> StillOpen,
@@ -217,8 +245,8 @@ public static class PresentationModelBuilder
                 // rather than replacing it -- swallowing the glyph made a failed inbound event
                 // indistinguishable from a settled one.
                 record.Kind == EvidenceKind.OutcomeEvent
-                    ? $"< {StatusGlyph(record.Succeeded)} {record.Summary}"
-                    : $"  {StatusGlyph(record.Succeeded)} {record.Summary}",
+                    ? $"< {StatusGlyph(record.Succeeded)} {RowSummary(record.Summary)}"
+                    : $"  {StatusGlyph(record.Succeeded)} {RowSummary(record.Summary)}",
                 $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}{FaultProvenance(record)}",
                 record.Succeeded))
             .ToList();
@@ -227,8 +255,8 @@ public static class PresentationModelBuilder
         // and had already drifted: the pane omitted the timestamp the row showed, so the same
         // record read differently depending on where you looked at it.
         var selected = state.SelectedEvidence is null
-            ? "No action selected. Select a row on the left, or press Details."
-            : EvidenceDetailText(state.SelectedEvidence);
+            ? EvidencePaneViewModel.Empty
+            : EvidencePane(state.SelectedEvidence);
 
         var loadResults = new List<string>();
         if (state.LastLoadResult is { } load)
@@ -719,11 +747,177 @@ public static class PresentationModelBuilder
         record.FaultLevels is { } levels ? $" · faults {levels}" : string.Empty;
 
     /// <summary>
-    /// The full readout for one evidence record: what happened, where, under what conditions,
-    /// then the payload. Shared by the list row and the Details pane so the same record cannot
-    /// read two different ways depending on which one you are looking at.
+    /// A list row shows the summary up to its first em dash and no further. Sixty-four of this
+    /// console's summaries are a verdict, an em dash and a trailing clause; the clause is what
+    /// makes the list unreadable from the back of a room. The whole summary survives untouched
+    /// on the record, in the Details pane, in the status line and in the export — only this one
+    /// projection is short.
     /// </summary>
-    internal static string EvidenceDetailText(EvidenceRecord record)
+    internal static string RowSummary(string summary)
+    {
+        var dash = summary.IndexOf('\u2014');
+        if (dash <= 0)
+        {
+            return summary;
+        }
+
+        // A cut that leaves nothing identifies nothing: a row of a gutter marker and a glyph is
+        // worse than a long one, so a summary that opens with its clause keeps all of itself.
+        var head = summary[..dash].TrimEnd();
+        return head.Length == 0 ? summary : head;
+    }
+
+    /// <summary>
+    /// The whole Details pane for one record: the header block, then the payload as columns.
+    /// An HTTP exchange reads REQUEST left and RESPONSE right; an inbound CloudEvent is one
+    /// full-width EVENT column; anything else states in one line that it was not an HTTP
+    /// exchange and keeps this console's own prose beneath it.
+    /// </summary>
+    internal static EvidencePaneViewModel EvidencePane(EvidenceRecord record)
+    {
+        var header = EvidenceHeaderText(record);
+        if (record.Exchange is { } exchange)
+        {
+            return new EvidencePaneViewModel(
+                header,
+                Titled("REQUEST", RequestText(exchange, pretty: true)),
+                Titled("RESPONSE", ResponseText(exchange, record.Detail, pretty: true)),
+                CopyText(header, RequestText(exchange, pretty: false), ResponseText(exchange, null, pretty: false)));
+        }
+
+        if (record.Event is { } cloudEvent)
+        {
+            return new EvidencePaneViewModel(
+                header,
+                Titled("EVENT", EventText(cloudEvent, pretty: true)),
+                null,
+                CopyText(header, EventText(cloudEvent, pretty: false)));
+        }
+
+        // A stated absence reads as a fact; an empty pane reads as a broken console. The
+        // console's own record of the action follows it, because an Aspire CLI invocation or a
+        // load workflow's investigation is evidence even though it is not an exchange.
+        var stated = "(this action was not an HTTP exchange, so no request or response was recorded)";
+        var prose = FormatBody(record.Detail);
+        var left = string.IsNullOrWhiteSpace(prose)
+            ? stated
+            : stated + Environment.NewLine + Environment.NewLine + prose;
+        return new EvidencePaneViewModel(header, left, null, CopyText(header, record.Detail));
+    }
+
+    /// <summary>
+    /// What Copy puts on the clipboard: the header block, then the raw sections, blank lines
+    /// between. The header block is in every branch — a record whose timestamp, profile,
+    /// duration, faults and transaction id could not be copied would be half a record — and
+    /// because it is never empty, a pane that shows something can never report nothing to copy.
+    /// </summary>
+    private static string CopyText(string header, params string[] sections) => string.Join(
+        Environment.NewLine + Environment.NewLine,
+        new[] { header }.Concat(sections.Where(section => !string.IsNullOrWhiteSpace(section))));
+
+    private static string Titled(string title, string body) => title + Environment.NewLine + body;
+
+    /// <summary>
+    /// The request as sent: request line, headers, blank, body. An outcome query and an inspect
+    /// send a bare message with neither headers nor body, so their column is a request line and
+    /// nothing else. That is honest and it is what a tool replaying the call would show; no
+    /// header is synthesised to fill the column.
+    /// </summary>
+    private static string RequestText(HttpExchange exchange, bool pretty) => HttpText(
+        $"{exchange.Method} {exchange.Url}",
+        exchange.RequestHeaders,
+        exchange.RequestBody,
+        pretty,
+        "(no request body was sent)");
+
+    /// <param name="detail">
+    /// The console's own account of a call that got no answer, for the pane. Passed as
+    /// <see langword="null"/> for the copy text: prose is not raw response bytes, and a
+    /// clipboard that carried it would not paste into a <c>.http</c> file and run.
+    /// </param>
+    private static string ResponseText(HttpExchange exchange, string? detail, bool pretty)
+    {
+        if (exchange.StatusCode is not { } statusCode)
+        {
+            // FR-5: a call that never got an answer carries its request and no response. There
+            // is nothing raw to copy, so the copy path takes an empty section and drops it.
+            if (!pretty)
+            {
+                return string.Empty;
+            }
+
+            var lines = new List<string> { "(no answer arrived — the request got no response)" };
+            if (!string.IsNullOrWhiteSpace(detail))
+            {
+                lines.Add(string.Empty);
+                lines.Add(FormatBody(detail));
+            }
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        // No HTTP version: the exchange records the code and the reason phrase, and this console
+        // does not print a fact it did not observe.
+        var statusLine = $"HTTP {statusCode} {exchange.ReasonPhrase}".TrimEnd();
+        return HttpText(
+            statusLine,
+            exchange.ResponseHeaders,
+            exchange.ResponseBody,
+            pretty,
+            "(no response body was recorded)");
+    }
+
+    private static string HttpText(
+        string startLine,
+        IReadOnlyList<EvidenceHeader> headers,
+        string? body,
+        bool pretty,
+        string absence)
+    {
+        var lines = new List<string> { startLine };
+        lines.AddRange(headers.Select(header => $"{header.Name}: {header.Value}"));
+        lines.Add(string.Empty);
+        lines.Add(string.IsNullOrEmpty(body)
+            ? pretty ? absence : string.Empty
+            : pretty ? FormatBody(body) : body);
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// The CloudEvent as delivered: the envelope attributes the SDK actually exposes, then the
+    /// data. An attribute the message did not carry is left out rather than printed empty —
+    /// there is no <c>subject</c> and no <c>time</c> on a <c>TopicMessage</c>, and an invented
+    /// envelope line would be worse than a short one.
+    /// </summary>
+    private static string EventText(CloudEventRecord cloudEvent, bool pretty)
+    {
+        var envelope = new List<EvidenceHeader>
+        {
+            new("Type", cloudEvent.Type),
+            new("Id", cloudEvent.Id),
+            new("Source", cloudEvent.Source),
+            new("SpecVersion", cloudEvent.SpecVersion),
+            new("DataContentType", cloudEvent.DataContentType),
+            new("PubSubName", cloudEvent.PubSubName),
+            new("Topic", cloudEvent.Topic),
+            new("Path", cloudEvent.Path ?? string.Empty),
+        };
+        envelope.AddRange(cloudEvent.Extensions);
+        return HttpText(
+            "CloudEvent",
+            [.. envelope.Where(attribute => attribute.Value.Length > 0)],
+            cloudEvent.Data,
+            pretty,
+            "(the event carried no data)");
+    }
+
+    /// <summary>
+    /// What happened, where, and under what conditions. Shared by the list row and the Details
+    /// pane so the same record cannot read two different ways depending on which one you are
+    /// looking at. The payload is not in here: it is the columns beneath, and printing it twice
+    /// would be two things to point at where the demonstration needs one.
+    /// </summary>
+    internal static string EvidenceHeaderText(EvidenceRecord record)
     {
         var lines = new List<string>
         {
@@ -739,12 +933,6 @@ public static class PresentationModelBuilder
             lines.Add($"Transaction: {transactionId}");
         }
 
-        var body = FormatBody(record.Detail);
-        lines.Add(string.Empty);
-        // Say so rather than trailing off into blank space: an empty pane reads as a broken
-        // console, while "no body" is a fact about the response.
-        lines.Add(string.IsNullOrWhiteSpace(body) ? "(no response body was recorded)" : body);
-
         return string.Join(Environment.NewLine, lines);
     }
 
@@ -754,9 +942,10 @@ public static class PresentationModelBuilder
     /// is passed through untouched rather than mangled into looking like it.
     /// </summary>
     /// <remarks>
-    /// Display-only. The stored <see cref="EvidenceRecord.Detail"/> keeps the bytes the service
-    /// actually returned, already redacted, so the export and the clipboard still carry the
-    /// real payload rather than this console's reformatting of it.
+    /// Display-only. The stored <see cref="EvidenceRecord.Detail"/> and
+    /// <see cref="EvidenceRecord.Exchange"/> keep the bytes as sent and as received, so the
+    /// export and the clipboard carry the real payload rather than this console's
+    /// reformatting of it.
     /// </remarks>
     internal static string FormatBody(string? detail)
     {

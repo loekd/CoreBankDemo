@@ -253,3 +253,15 @@
 - source_spec: `docs/bmad/implementation-artifacts/spec-demorunner-operations-stage-focus.md`
   summary: "`Q` tears the session down on one unmodified keypress with no confirmation and, since the StatusBar was removed, no on-screen hint that it does; the nav rail advertises `1`-`5` only."
   evidence: Surfaced by the blind-hunter review and confirmed against `MainWindow.OnKeyDown`. The removed bottom band was the console's only key legend, and its removal is a deliberate spine decision, so restoring the legend is not the answer. But `Q` is the one key on this console whose stray press ends the demonstration, and neither spine considered it when the legend went. Needs a UX decision: confirm the quit, re-modify the key, or advertise it somewhere that costs no permanent rows.
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-evidence-payload-bodies.md`
+  summary: JournalText.Bound can split a UTF-16 surrogate pair at the 8192-character cut, leaving a lone surrogate in exported JSON.
+  evidence: Pre-existing in JournalRedaction.Apply, but newly reachable from Encoding.UTF8.GetString over arbitrary CloudEvent data rather than only from process output.
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-evidence-payload-bodies.md`
+  summary: A flood of unrecognised or foreign events on transaction-events can now evict real payment records from the 500-record evidence ring.
+  evidence: HandleAsync no longer drops unparseable messages, so every message on the topic becomes a record; previously only the four known types could.
+
+- source_spec: `docs/bmad/implementation-artifacts/spec-evidence-payload-bodies.md`
+  summary: Non-UTF-8 CloudEvent data is rendered as replacement characters on a pane that claims to show the bytes as delivered.
+  evidence: Envelope() calls Encoding.UTF8.GetString unconditionally, regardless of the message's DataContentType.

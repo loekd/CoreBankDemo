@@ -1,7 +1,10 @@
+using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
 using Dapr.Messaging.PublishSubscribe;
+using Google.Protobuf.WellKnownTypes;
 
 namespace CoreBankDemo.DemoRunner.Infrastructure;
 
@@ -315,7 +318,10 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
     /// and dropped rather than retried, because retrying would make the console's parsing
     /// problem the broker's problem.
     /// </summary>
-    internal static OutcomeEvent? TryParse(string? eventType, ReadOnlySpan<byte> data)
+    internal static OutcomeEvent? TryParse(
+        string? eventType,
+        ReadOnlySpan<byte> data,
+        CloudEventRecord? envelope = null)
     {
         try
         {
@@ -323,19 +329,19 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
             {
                 OutcomeEventTypes.TransactionCompleted =>
                     Deserialize<TransactionCompletedWireEvent>(data) is { TransactionId.Length: > 0 } completed
-                        ? OutcomeEvent.From(completed)
+                        ? OutcomeEvent.From(completed, envelope)
                         : null,
                 OutcomeEventTypes.TransactionFailed =>
                     Deserialize<TransactionFailedWireEvent>(data) is { TransactionId.Length: > 0 } failed
-                        ? OutcomeEvent.From(failed)
+                        ? OutcomeEvent.From(failed, envelope)
                         : null,
                 OutcomeEventTypes.BalanceUpdated =>
                     Deserialize<BalanceUpdatedWireEvent>(data) is { TransactionId.Length: > 0 } balance
-                        ? OutcomeEvent.From(balance)
+                        ? OutcomeEvent.From(balance, envelope)
                         : null,
                 OutcomeEventTypes.TransactionCancelled =>
                     Deserialize<TransactionCancelledWireEvent>(data) is { TransactionId.Length: > 0 } cancelled
-                        ? OutcomeEvent.From(cancelled)
+                        ? OutcomeEvent.From(cancelled, envelope)
                         : null,
                 _ => null,
             };
@@ -346,33 +352,97 @@ public sealed class DaprOutcomeFeed : IOutcomeFeed, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Turns one delivered message into an event that always exists. What the typed switch
+    /// cannot read — an unrecognised type, a body that is not JSON, a known type carrying no
+    /// <c>transactionId</c> — comes back as the envelope and the raw data with a null id, which
+    /// the console records and attributes to nothing. An event silently dropped here is the
+    /// thing this seam exists to stop: an unrecognised event on <c>transaction-events</c> is
+    /// among the more interesting things that can arrive mid-demo.
+    /// </summary>
+    internal static OutcomeEvent Parse(TopicMessage message)
+    {
+        var envelope = Envelope(message);
+        return TryParse(message.Type, message.Data.Span, envelope)
+            ?? new OutcomeEvent(message.Type ?? string.Empty, null, Envelope: envelope);
+    }
+
+    /// <summary>
+    /// Every envelope attribute <c>TopicMessage</c> actually exposes, and nothing else. There is
+    /// no <c>subject</c> and no <c>time</c> on it, so neither is surfaced -- the console's own
+    /// receive clock lives on the evidence record and the two are never conflated.
+    /// </summary>
+    private static CloudEventRecord Envelope(TopicMessage message) => new(
+        message.Id ?? string.Empty,
+        message.Source ?? string.Empty,
+        message.Type ?? string.Empty,
+        message.SpecVersion ?? string.Empty,
+        message.DataContentType ?? string.Empty,
+        message.PubSubName ?? string.Empty,
+        message.Topic ?? string.Empty,
+        message.Path,
+        Extensions(message),
+        JournalText.Bound(Encoding.UTF8.GetString(message.Data.Span)));
+
+    /// <summary>
+    /// The CloudEvent extensions, unwrapped from protobuf and bounded.
+    /// <para>
+    /// <c>Value.ToString()</c> is the protobuf JSON formatter, so a string extension would come
+    /// back quoted -- <c>route: "/outcome"</c> -- and an extension whose kind oneof is unset
+    /// throws rather than returning anything. Each kind is read for what it is, and one this
+    /// console cannot read at all is left out rather than printed as an empty line.
+    /// </para>
+    /// </summary>
+    private static IReadOnlyList<EvidenceHeader> Extensions(TopicMessage message) =>
+        JournalText.Bound((message.Extensions ?? new Dictionary<string, Value>())
+            .Select(extension => (extension.Key, Text: ExtensionText(extension.Value)))
+            .Where(extension => extension.Text is not null)
+            .Select(extension => new EvidenceHeader(extension.Key, extension.Text!)));
+
+    private static string? ExtensionText(Value? value) => value?.KindCase switch
+    {
+        Value.KindOneofCase.StringValue => value.StringValue,
+        Value.KindOneofCase.NumberValue => value.NumberValue.ToString(CultureInfo.InvariantCulture),
+        Value.KindOneofCase.BoolValue => value.BoolValue ? "true" : "false",
+        Value.KindOneofCase.NullValue => "null",
+        Value.KindOneofCase.StructValue or Value.KindOneofCase.ListValue => value.ToString(),
+        // No kind set at all: there is nothing here to show, and an empty line would imply the
+        // event carried an extension whose value was blank.
+        _ => null,
+    };
+
     private static T? Deserialize<T>(ReadOnlySpan<byte> data) => JsonSerializer.Deserialize<T>(data, Json);
 
-    private Task<TopicResponseAction> HandleAsync(TopicMessage message, CancellationToken ct)
+    internal Task<TopicResponseAction> HandleAsync(TopicMessage message, CancellationToken ct)
     {
-        var parsed = TryParse(message.Type, message.Data.Span);
-        if (parsed is not null)
+        OutcomeEvent? parsed = null;
+        try
         {
-            try
-            {
-                EventReceived?.Invoke(parsed);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                // B1: the subscriber does real work on this thread. Letting one message's
-                // failure escape reaches the subscription's ErrorHandler, which treats it as
-                // the stream dying and re-labels every outstanding payment "Outcome unknown" --
-                // withdrawing true claims about healthy payments because of one bad message.
-                // A per-message failure is recorded and the stream carries on.
-                Interlocked.Increment(ref _handlerErrorCount);
-                _lastHandlerError = $"{parsed.EventType} for {parsed.TransactionId}: {ex.Message}";
-            }
+            // Inside the guard, not before it: reading the envelope decodes bytes and unwraps
+            // protobuf, and either can throw on a message this console has never seen.
+            parsed = Parse(message);
+            EventReceived?.Invoke(parsed);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // B1: the subscriber does real work on this thread. Letting one message's
+            // failure escape reaches the subscription's ErrorHandler, which treats it as
+            // the stream dying and re-labels every outstanding payment "Outcome unknown" --
+            // withdrawing true claims about healthy payments because of one bad message.
+            // A per-message failure is recorded and the stream carries on.
+            Interlocked.Increment(ref _handlerErrorCount);
+            _lastHandlerError =
+                $"{parsed?.EventType ?? message.Type ?? "(no CloudEvent type)"} for "
+                + $"{parsed?.TransactionId ?? "(no transactionId)"}: {ex.Message}";
         }
 
         // Always Success: the console is a read-only listener with its own consumer group, and
         // a Retry here would only make its own sidecar redeliver to itself.
         return Task.FromResult(TopicResponseAction.Success);
     }
+
+    /// <summary>The last per-message failure, for the tests that prove one never escapes.</summary>
+    internal string? LastHandlerError => _lastHandlerError;
 
     /// <summary>
     /// States the orphans this start had to clear. A reaped sidecar means an earlier run ended

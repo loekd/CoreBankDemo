@@ -260,7 +260,10 @@ public sealed record PaymentResult(
     string? ResponseStatus,
     string? Body,
     string? ErrorSummary,
-    TimeSpan Duration)
+    TimeSpan Duration,
+    // Appended last and optional so no existing construction site moves. Carries the call home
+    // exactly as it went out, for the record the console writes about it.
+    HttpExchange? Exchange = null)
 {
     public bool IsAmbiguous => Outcome == PaymentOutcome.Ambiguous;
 }
@@ -323,7 +326,8 @@ public sealed record PaymentCancellationResult(
     string? Body,
     string? ErrorSummary,
     TimeSpan Duration,
-    DateTimeOffset? ProcessedAt = null);
+    DateTimeOffset? ProcessedAt = null,
+    HttpExchange? Exchange = null);
 
 public sealed record InspectionResult(
     bool Succeeded,
@@ -331,7 +335,55 @@ public sealed record InspectionResult(
     string Target,
     string? Body,
     string? ErrorSummary,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    HttpExchange? Exchange = null);
+
+/// <summary>
+/// One header line, recorded as it was set or as it came back. Never interpreted: a header the
+/// console set is shown verbatim, and a header it did not set is absent rather than explained.
+/// </summary>
+public sealed record EvidenceHeader(string Name, string Value);
+
+/// <summary>
+/// One outbound HTTP call as it happened — the request as sent, the answer as received. Read
+/// top to bottom it is a raw exchange, which is what the audience's prior (Postman, a
+/// <c>.http</c> file) already knows how to read.
+/// </summary>
+/// <param name="StatusCode">
+/// Null when no answer ever arrived — a timeout or a dead connection. The absence is the fact,
+/// and the pane states it rather than rendering a blank column.
+/// </param>
+public sealed record HttpExchange(
+    string Method,
+    string Url,
+    IReadOnlyList<EvidenceHeader> RequestHeaders,
+    string? RequestBody,
+    int? StatusCode,
+    string? ReasonPhrase,
+    IReadOnlyList<EvidenceHeader> ResponseHeaders,
+    string? ResponseBody);
+
+/// <summary>
+/// One <c>transaction-events</c> CloudEvent as Dapr delivered it: every envelope attribute
+/// <c>TopicMessage</c> actually exposes, plus the data payload verbatim.
+/// <para>
+/// There is deliberately no <c>subject</c> and no <c>time</c>: the SDK does not project them
+/// onto the message, and an invented envelope line would be worse than a short one. The
+/// console's own receive clock is on <see cref="EvidenceRecord.Timestamp"/> and the two are
+/// never presented as the same thing.
+/// </para>
+/// </summary>
+public sealed record CloudEventRecord(
+    string Id,
+    string Source,
+    string Type,
+    string SpecVersion,
+    string DataContentType,
+    string PubSubName,
+    string Topic,
+    string? Path,
+    IReadOnlyList<EvidenceHeader> Extensions,
+    string Data);
 
 public sealed record EvidenceRecord(
     long Sequence,
@@ -350,9 +402,14 @@ public sealed record EvidenceRecord(
     // seconds of injected latency and one captured under none are different facts.
     FaultLevels? FaultLevels = null,
     // The only correlation identifier in this console. Present on payment records and on
-    // every inbound event, so the Evidence feed can be read alongside an Operations row
-    // without a second lookup. Null for records that belong to no transaction.
-    string? TransactionId = null);
+    // every inbound event that carried one, so the Evidence feed can be read alongside an
+    // Operations row without a second lookup. Null for records that belong to no transaction.
+    string? TransactionId = null,
+    // The call this record is about, as sent and as answered. Only the four one-record-one-call
+    // sites attach one; a burst or a load workflow is an aggregate over many and attaches none.
+    HttpExchange? Exchange = null,
+    // The CloudEvent this record is about, as delivered. Only ever on an OutcomeEvent record.
+    CloudEventRecord? Event = null);
 
 /// <summary>
 /// One <c>com.corebank.account.balance.updated</c> leg. Two per settlement, none per

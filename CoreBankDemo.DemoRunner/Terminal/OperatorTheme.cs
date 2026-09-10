@@ -43,6 +43,18 @@ internal static class OperatorTheme
     internal const string NavigationActiveScheme = "CoreBankNavActive";
 
     /// <summary>
+    /// The Evidence Details panes: <c>text-primary</c> on <c>surface-base</c>, the same surface
+    /// as everything around them, with the read-only roles pinned rather than derived. A
+    /// <see cref="Scheme"/> built from one <see cref="Attribute"/> lets Terminal.Gui blend the
+    /// roles it was not given, and a <c>ReadOnly</c> <c>TextView</c> draws with the blend: the
+    /// payload rendered at <c>#C9D3DE</c> on <c>#536B88</c>, about 3.4:1, on a pane whose whole
+    /// job is to be read from the back of a room. Pinning the roles puts it back on the
+    /// workspace's own surface at about 16:1, which is what lets the border alone carry the
+    /// separation.
+    /// </summary>
+    internal const string EvidencePaneScheme = "CoreBankEvidencePane";
+
+    /// <summary>
     /// The eight values every scheme is derived from. Both modes fill the same shape, so the
     /// scheme table below is written once and the palette is the only thing that swaps —
     /// no view needs to know which mode is in force.
@@ -149,10 +161,31 @@ internal static class OperatorTheme
         yield return (OverlayScheme, Scheme(p.TextPrimary, p.SurfaceOverlay));
         yield return (LockExemptScheme, Scheme(p.AccentTeal, p.SurfaceBase));
         yield return (NavigationActiveScheme, Scheme(p.TextOnAccent, p.AccentNavy));
+        yield return (EvidencePaneScheme, ReadableScheme(p.TextPrimary, p.SurfaceBase));
     }
 
     internal static void Apply(View view, string schemeName) => view.SchemeName = schemeName;
 
     private static Scheme Scheme(string foreground, string background) =>
-        new(new global::Terminal.Gui.Drawing.Attribute(new Color(foreground), new Color(background)));
+        new(Attribute(foreground, background));
+
+    /// <summary>
+    /// The same colours as <see cref="Scheme"/>, with every role a read-only text pane can draw
+    /// with set explicitly so none of them is blended into a lower-contrast variant.
+    /// </summary>
+    private static Scheme ReadableScheme(string foreground, string background)
+    {
+        var attribute = Attribute(foreground, background);
+        return new Scheme(attribute)
+        {
+            Normal = attribute,
+            ReadOnly = attribute,
+            Editable = attribute,
+            Focus = attribute,
+            Active = attribute,
+        };
+    }
+
+    private static global::Terminal.Gui.Drawing.Attribute Attribute(string foreground, string background) =>
+        new(new Color(foreground), new Color(background));
 }
