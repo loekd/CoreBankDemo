@@ -8,7 +8,7 @@
 
 ## 0. Document Purpose
 
-Defines the requirements for rebuilding CoreBankDemo from scratch on the rebuild branch: the same externally observable system that exists on `main`, re-implemented story-driven with a first-class unit-test suite. Consumed downstream by the architecture workflow and the epics and stories workflow. The binding technical contract (invariants, endpoint surface, conventions, cruft rulings A1–A8) lives in `../../constraints.md`; this PRD does not restate what that contract fixes — it defines the capabilities and quality bar.
+Defines the requirements for rebuilding CoreBankDemo from scratch on branch `feature/bmad`: the same externally observable system that exists on `main`, re-implemented story-driven with a first-class unit-test suite. Consumed downstream by the architecture workflow and the epics and stories workflow. The binding technical contract (invariants, endpoint surface, conventions, cruft rulings A1–A8) lives in `../../constraints.md`; this PRD does not restate what that contract fixes — it defines the capabilities and quality bar.
 
 ## 1. Vision
 

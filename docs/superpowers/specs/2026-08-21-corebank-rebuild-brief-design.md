@@ -33,7 +33,7 @@ This brief proposes the product: **the same system, rebuilt from scratch, story-
 
 ## Approach (fixed decisions)
 
-- In-place rebuild on the rebuild branch; `main` keeps the last working demo.
+- In-place rebuild on `feature/bmad`; `main` keeps the last working demo.
 - Bottom-up dependency order (test infra → Messaging → ServiceDefaults → CoreBankAPI/PaymentsAPI → AppHost → load-test realignment → docs), gated per story by `dotnet test` on `CoreBankDemo.Rebuild.slnf`. Stories may overlap when their recorded prerequisites and stable contracts are available; overlap never permits a story to claim live integration or completion before its dependency gate passes.
 - The k6 + LoadTestSupport harness remains the acceptance tier; if code and load tests conflict, load tests adapt unless a §1 invariant is genuinely violated.
 - TDD per story; TEA (Test Architect) workflows for test design and epic-end coverage review.
