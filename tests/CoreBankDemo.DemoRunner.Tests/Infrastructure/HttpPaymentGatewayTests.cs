@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
+using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Infrastructure;
 using Xunit;
 
@@ -508,6 +509,164 @@ public class HttpPaymentGatewayTests
         result.Outcome.Should().Be(PaymentCancelOutcome.TransportFailure);
         result.StatusCode.Should().Be(0);
         result.ErrorSummary.Should().Contain("connection refused");
+    }
+
+    // --- The exchange the record carries -------------------------------------------------
+    //
+    // Every one of these asserts on PaymentResult.Exchange rather than on what the handler saw:
+    // the point of the feature is that the call comes *home* on the result, and a test that only
+    // inspects the outgoing message would pass with the exchange discarded exactly as it was.
+
+    [Fact]
+    public async Task Submit_GeneratedKey_BringsTheRequestAndTheResponseHomeOnTheResult()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent(
+                    """{"paymentId":"p1","transactionId":"demo-key-001","status":"Pending"}""",
+                    Encoding.UTF8,
+                    "application/json"),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            "demo-key-001");
+
+        var exchange = (await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None)).Exchange;
+
+        exchange.Should().NotBeNull();
+        exchange!.Method.Should().Be("POST");
+        exchange.Url.Should().Be("http://127.0.0.1:5294/api/payments");
+        // The one line the audience is asked to read, and the content type beside it: the
+        // request headers are merged from the message and its content so both are present.
+        exchange.RequestHeaders.Should().Contain(header =>
+            header.Name == "Idempotency-Key" && header.Value == "demo-key-001");
+        exchange.RequestHeaders.Should().Contain(header =>
+            header.Name == "Content-Type" && header.Value.Contains("application/json"));
+        exchange.RequestBody.Should().Contain("\"Scheme\":\"standard\"");
+        exchange.StatusCode.Should().Be(202);
+        exchange.ResponseHeaders.Should().Contain(header => header.Name == "Content-Type");
+        exchange.ResponseBody.Should().Contain("\"transactionId\":\"demo-key-001\"");
+    }
+
+    [Fact]
+    public async Task Submit_OmittedKey_RecordsNoKeyHeaderRatherThanAnExplanation()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted)
+            {
+                Content = new StringContent("""{"paymentId":"p1","transactionId":"server-key","status":"Pending"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Omitted,
+            null);
+
+        var exchange = (await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None)).Exchange;
+
+        // The absence is the fact. A line saying "no key was sent" would be this console
+        // interpreting the exchange instead of showing it.
+        exchange!.RequestHeaders.Should().NotContain(header => header.Name == "Idempotency-Key");
+        exchange.RequestHeaders.Should().Contain(header => header.Name == "Content-Type");
+    }
+
+    [Fact]
+    public async Task Submit_NoAnswer_KeepsTheRequestAndLeavesTheStatusCodeNull()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            throw new HttpRequestException("connection refused")));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            "demo-key-002");
+
+        var exchange = (await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None)).Exchange;
+
+        // A request that got no answer is still evidence, and the null status is how the record
+        // says which half is missing.
+        exchange.Should().NotBeNull();
+        exchange!.RequestBody.Should().NotBeNullOrEmpty();
+        exchange.RequestHeaders.Should().Contain(header => header.Name == "Idempotency-Key");
+        exchange.StatusCode.Should().BeNull();
+        exchange.ResponseBody.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Cancel_BringsItsBodyHomeAndSetsNoIdempotencyKey()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"transactionId":"tx-1","status":"Cancelled"}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+
+        var result = await gateway.CancelAsync(
+            TopologyProfile.Regular,
+            new PaymentCancellation("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", "tx-1"),
+            CancellationToken.None);
+
+        result.Exchange!.Method.Should().Be("POST");
+        result.Exchange.Url.Should().Be("http://127.0.0.1:5032/api/transactions/cancel");
+        result.Exchange.RequestBody.Should().Contain("tx-1");
+        result.Exchange.RequestHeaders.Should().NotContain(header => header.Name == "Idempotency-Key");
+        result.Exchange.StatusCode.Should().Be(200);
+        result.Exchange.ResponseBody.Should().Contain("Cancelled");
+    }
+
+    [Fact]
+    public async Task Inspect_SendsABareRequestAndSaysSoRatherThanSynthesisingHeaders()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"rows":[]}"""),
+            })));
+        var gateway = new HttpPaymentGateway(client);
+
+        var result = await gateway.QueryOutcomeAsync(TopologyProfile.Regular, "tx-1", CancellationToken.None);
+
+        result.Exchange!.Method.Should().Be("GET");
+        result.Exchange.Url.Should().Be("http://127.0.0.1:5032/api/transactions/tx-1");
+        result.Exchange.RequestHeaders.Should().BeEmpty("the call sets none, and none are invented to fill the column");
+        result.Exchange.RequestBody.Should().BeNull();
+        result.Exchange.StatusCode.Should().Be(200);
+    }
+
+    [Fact]
+    public async Task Inspect_UnresolvableEndpoint_YieldsARecordWithNoExchangeAtAll()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK))));
+        var gateway = new HttpPaymentGateway(client);
+
+        // The resolver refuses before a request ever exists, so there is nothing to record.
+        var result = await gateway.QueryOutcomeAsync(TopologyProfile.Regular, "   ", CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.Exchange.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Submit_BodyLongerThanTheBound_IsTruncatedRatherThanTakingThePaneApart()
+    {
+        var huge = "{\"pad\":\"" + new string('x', JournalText.MaxLength * 2) + "\"}";
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.Accepted) { Content = new StringContent(huge) })));
+        var gateway = new HttpPaymentGateway(client);
+        var submission = new PaymentSubmission(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 1m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            "demo-key-003");
+
+        var exchange = (await gateway.SubmitAsync(TopologyProfile.Regular, submission, CancellationToken.None)).Exchange;
+
+        exchange!.ResponseBody!.Length.Should().Be(JournalText.MaxLength + 1);
+        exchange.ResponseBody.Should().EndWith("…").And.NotContain("[redacted]");
     }
 
     private sealed class StubHttpHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler

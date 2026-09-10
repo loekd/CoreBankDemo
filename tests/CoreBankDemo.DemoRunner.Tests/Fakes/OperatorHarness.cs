@@ -627,6 +627,27 @@ public sealed class FakeOutcomeFeed : IOutcomeFeed
     public void PushCancelled(string transactionId, DateTimeOffset processedAt, string? reason = "Cancelled by the instant rail on budget exhaustion") =>
         Push(OutcomeEvent.From(new TransactionCancelledWireEvent(transactionId, "Cancelled", processedAt, reason)));
 
+    /// <summary>
+    /// An event the adapter could not read an id out of — an unrecognised type, a body that is
+    /// not JSON, a known type carrying no <c>transactionId</c>. It still arrives, carrying its
+    /// envelope and its raw data and nothing else.
+    /// </summary>
+    public void PushUnreadable(string eventType, string data) =>
+        Push(new OutcomeEvent(
+            eventType,
+            null,
+            Envelope: new CloudEventRecord(
+                "evt-1",
+                "corebank",
+                eventType,
+                "1.0",
+                "application/json",
+                OutcomeEventTypes.PubSubComponent,
+                OutcomeEventTypes.Topic,
+                null,
+                [],
+                data)));
+
     /// <summary>Drops a live subscription, the console's most dangerous condition.</summary>
     public void Fault(DateTimeOffset lostAt, string detail = "the stream faulted") =>
         Publish(new OutcomeFeedStatus(

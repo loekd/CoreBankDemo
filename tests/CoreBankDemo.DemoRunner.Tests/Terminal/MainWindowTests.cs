@@ -4,6 +4,8 @@ using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Infrastructure;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
+using System.Drawing;
+using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.Text;
 using Terminal.Gui.Views;
@@ -1310,6 +1312,235 @@ public class MainWindowTests
             (closing.Y + closing.Height).Should().BeLessThanOrEqualTo(
                 rule.Y, "the closing block yields its rows to the strip rather than overlapping it");
         }
+    }
+
+    // --- The Details pane's three controls -------------------------------------------------
+
+    [Fact]
+    public async Task EvidencePane_Exchange_FillsBothColumnsAndCopiesTheRawText()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending,
+            202,
+            "payment-id",
+            "tx-8821",
+            "Pending",
+            """{"transactionId":"tx-8821"}""",
+            null,
+            TimeSpan.FromMilliseconds(5),
+            new HttpExchange(
+                "POST",
+                "http://127.0.0.1:5294/api/payments",
+                [new EvidenceHeader("Idempotency-Key", "demo-key-001")],
+                """{"amount":250}""",
+                202,
+                "Accepted",
+                [new EvidenceHeader("Content-Type", "application/json")],
+                """{"transactionId":"tx-8821"}""")));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        using var window = CreateWindow(controller);
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(120, 40);
+        window.RenderForTest();
+        window.Layout();
+
+        // The key and the id the audience is asked to compare are on screen together.
+        window.EvidenceRequestText.Should().StartWith("REQUEST").And.Contain("Idempotency-Key: demo-key-001");
+        window.EvidenceResponseText.Should().StartWith("RESPONSE").And.Contain("tx-8821");
+        window.EvidenceResponseVisible.Should().BeTrue();
+        window.EvidenceColumnWidths.Left.Should().BeGreaterThan(0);
+        window.EvidenceColumnWidths.Right.Should().BeGreaterThan(0);
+
+        // And neither column is clipped away at the 80x24 floor: scroll bars cover the
+        // degradation, which is why there is no narrow-terminal layout fallback to maintain.
+        window.ResizeForTest(80, 24);
+        window.RenderForTest();
+        window.Layout();
+        window.EvidenceColumnWidths.Left.Should().BeGreaterThan(0);
+        window.EvidenceColumnWidths.Right.Should().BeGreaterThan(0);
+        window.ResizeForTest(120, 40);
+
+        window.CopyButton.InvokeCommand(Command.Accept);
+
+        terminal.ToString().Should().StartWith("\u001b]52;c;");
+        window.EvidenceCopyText.Should().StartWith(window.EvidenceHeaderText)
+            .And.Contain("POST http://127.0.0.1:5294/api/payments")
+            .And.NotContain("REQUEST")
+            .And.NotContain("RESPONSE");
+    }
+
+    [Fact]
+    public async Task EvidencePane_SelectingAnExchangeAfterAPayloadLessRecord_BringsTheResponseColumnBack()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending,
+            202,
+            "payment-id",
+            "tx-8821",
+            "Pending",
+            """{"transactionId":"tx-8821"}""",
+            null,
+            TimeSpan.FromMilliseconds(5),
+            new HttpExchange(
+                "POST",
+                "http://127.0.0.1:5294/api/payments",
+                [new EvidenceHeader("Idempotency-Key", "demo-key-001")],
+                """{"amount":250}""",
+                202,
+                "Accepted",
+                [new EvidenceHeader("Content-Type", "application/json")],
+                """{"transactionId":"tx-8821"}""")));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(120, 40);
+
+        // The attach record: one column, no second.
+        var attach = controller.State.Evidence.OrderBy(record => record.Sequence).First();
+        controller.SelectEvidence(attach.Sequence);
+        window.RenderForTest();
+        window.Layout();
+        window.EvidenceResponseVisible.Should().BeFalse();
+
+        // And back again: a column that hides and never returns is the failure this covers.
+        var payment = controller.State.Evidence.Single(record => record.Exchange is not null);
+        controller.SelectEvidence(payment.Sequence);
+        window.RenderForTest();
+        window.Layout();
+
+        window.EvidenceResponseVisible.Should().BeTrue();
+        window.EvidenceColumnWidths.Right.Should().BeGreaterThan(0);
+        window.EvidenceResponseText.Should().Contain("tx-8821");
+    }
+
+    [Fact]
+    public async Task EvidencePane_RecordWithNoSecondColumn_HidesItRatherThanShowingItEmpty()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+
+        // An attach is not an HTTP exchange, so its record has one column and no second.
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(120, 40);
+        window.RenderForTest();
+
+        window.EvidenceResponseVisible.Should().BeFalse();
+        window.EvidenceRequestText.Should().Contain("was not an HTTP exchange");
+    }
+
+    [Fact]
+    public void EvidencePane_TheSameKeyTwice_RendersTwoByteIdenticalResponseColumns()
+    {
+        // The retry beat: two records side by side, and the room sees the bytes are the same
+        // without being told. Nothing in the projection may vary between two equal exchanges.
+        // Two separately built exchanges, as two captures of the same idempotent answer would
+        // be. Handing one object to both records would only prove the projection is a function.
+        var first = EvidenceForTest(31, ReplayedExchange());
+        var second = EvidenceForTest(32, ReplayedExchange());
+        first.Exchange.Should().NotBeSameAs(second.Exchange);
+
+        PresentationModelBuilder.EvidencePane(first).Right
+            .Should().Be(PresentationModelBuilder.EvidencePane(second).Right);
+    }
+
+    private static HttpExchange ReplayedExchange() => new(
+        "POST",
+        "http://127.0.0.1:5294/api/payments",
+        [new EvidenceHeader("Idempotency-Key", "demo-key-001")],
+        """{"amount":250}""",
+        202,
+        "Accepted",
+        [new EvidenceHeader("Content-Type", "application/json")],
+        """{"paymentId":"p1","transactionId":"demo-key-001","status":"Pending"}""");
+
+    private static EvidenceRecord EvidenceForTest(long sequence, HttpExchange exchange) => new(
+        sequence,
+        DateTimeOffset.UnixEpoch,
+        TopologyProfile.Regular,
+        1,
+        EvidenceKind.Payment,
+        "202 Pending",
+        "POST",
+        "payments.submit",
+        202,
+        TimeSpan.FromMilliseconds(12),
+        string.Empty,
+        true,
+        TransactionId: "demo-key-001",
+        Exchange: exchange);
+
+    [Fact]
+    public void EvidencePane_WrapToggle_AppliesToBothColumns()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+
+        window.WrapButton.InvokeCommand(Command.Accept);
+
+        window.WrapButton.Text.Should().Be("Wrap: on");
+        window.EvidenceColumnsWrap.Should().BeTrue(
+            "a toggle that moved one pane and not the others reads as a bug, and the header block "
+            + "holds the full summary that row truncation exists to accommodate");
+    }
+
+    [Fact]
+    public void EvidencePane_Border_FollowsTheNavigationRailBetweenLayouts()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(120, 40);
+        window.RenderForTest();
+        window.Layout();
+        window.EvidenceDetailBorderStyle.Should().Be(LineStyle.Rounded);
+
+        // At the 80x24 floor the border goes the way the rail's does.
+        window.ResizeForTest(80, 24);
+        window.RenderForTest();
+        window.Layout();
+        window.EvidenceDetailBorderStyle.Should().Be(LineStyle.None);
+    }
+
+    [Theory]
+    [InlineData(120, 40)]
+    [InlineData(80, 24)]
+    public void EvidencePane_FirstTextRow_LinesUpWithTheListBesideIt(int width, int height)
+    {
+        // The border is an adornment: it takes a row and a column off every side of the
+        // container while the list beside it has none, so without compensating for its
+        // thickness the two panes read one row and one column out of step.
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(width, height);
+        window.RenderForTest();
+        window.Layout();
+
+        var (list, header) = window.EvidenceFirstRows;
+        header.Y.Should().Be(list.Y, "the two panes' first text rows are one row");
+        header.X.Should().BeGreaterThan(list.X, "the pane sits to the right of the list");
     }
 
     private static MainWindow CreateWindow(

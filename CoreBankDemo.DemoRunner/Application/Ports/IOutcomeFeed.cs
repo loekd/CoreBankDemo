@@ -64,13 +64,22 @@ public sealed record BalanceUpdatedWireEvent(
 /// controller's <see cref="TimeProvider"/>, so that the two figures a row prints — the event's
 /// <c>ProcessedAt</c> and the console's observed-at — can never come from the same source.
 /// </remarks>
+/// <param name="TransactionId">
+/// Null when the delivered event carried none — an unrecognised type, a body that is not JSON,
+/// or a known type whose <c>transactionId</c> was missing or empty. Such an event still gets a
+/// row, because raw bytes off <c>transaction-events</c> are among the more interesting things
+/// that can arrive mid-demo; what it never gets is attribution, because the console must not
+/// claim an id it could not parse.
+/// </param>
+/// <param name="Envelope">The CloudEvent as delivered. Null for the console's own lifecycle events.</param>
 public sealed record OutcomeEvent(
     string EventType,
-    string TransactionId,
+    string? TransactionId,
     TransactionCompletedWireEvent? Completed = null,
     TransactionFailedWireEvent? Failed = null,
     BalanceUpdatedWireEvent? BalanceUpdated = null,
-    TransactionCancelledWireEvent? Cancelled = null)
+    TransactionCancelledWireEvent? Cancelled = null,
+    CloudEventRecord? Envelope = null)
 {
     /// <summary>The event's own clock, when it carries one. Balance events do not.</summary>
     public DateTimeOffset? ProcessedAt => Completed?.ProcessedAt ?? Failed?.ProcessedAt ?? Cancelled?.ProcessedAt;
@@ -81,17 +90,17 @@ public sealed record OutcomeEvent(
     /// </summary>
     public bool IsTerminal => Completed is not null || Failed is not null || Cancelled is not null;
 
-    public static OutcomeEvent From(TransactionCompletedWireEvent completed) =>
-        new(OutcomeEventTypes.TransactionCompleted, completed.TransactionId, Completed: completed);
+    public static OutcomeEvent From(TransactionCompletedWireEvent completed, CloudEventRecord? envelope = null) =>
+        new(OutcomeEventTypes.TransactionCompleted, completed.TransactionId, Completed: completed, Envelope: envelope);
 
-    public static OutcomeEvent From(TransactionFailedWireEvent failed) =>
-        new(OutcomeEventTypes.TransactionFailed, failed.TransactionId, Failed: failed);
+    public static OutcomeEvent From(TransactionFailedWireEvent failed, CloudEventRecord? envelope = null) =>
+        new(OutcomeEventTypes.TransactionFailed, failed.TransactionId, Failed: failed, Envelope: envelope);
 
-    public static OutcomeEvent From(BalanceUpdatedWireEvent balance) =>
-        new(OutcomeEventTypes.BalanceUpdated, balance.TransactionId, BalanceUpdated: balance);
+    public static OutcomeEvent From(BalanceUpdatedWireEvent balance, CloudEventRecord? envelope = null) =>
+        new(OutcomeEventTypes.BalanceUpdated, balance.TransactionId, BalanceUpdated: balance, Envelope: envelope);
 
-    public static OutcomeEvent From(TransactionCancelledWireEvent cancelled) =>
-        new(OutcomeEventTypes.TransactionCancelled, cancelled.TransactionId, Cancelled: cancelled);
+    public static OutcomeEvent From(TransactionCancelledWireEvent cancelled, CloudEventRecord? envelope = null) =>
+        new(OutcomeEventTypes.TransactionCancelled, cancelled.TransactionId, Cancelled: cancelled, Envelope: envelope);
 }
 
 public enum OutcomeFeedState

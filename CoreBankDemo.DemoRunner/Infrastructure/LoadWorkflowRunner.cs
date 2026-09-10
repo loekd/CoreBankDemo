@@ -204,7 +204,7 @@ public sealed class LoadWorkflowRunner(
             sections.Add($"{endpoint}{Environment.NewLine}{result.Body ?? result.ErrorSummary}");
         }
 
-        return JournalRedaction.Apply(string.Join(Environment.NewLine + Environment.NewLine, sections));
+        return JournalText.Bound(string.Join(Environment.NewLine + Environment.NewLine, sections));
     }
 
     private async Task<InspectionResult> SendAsync(

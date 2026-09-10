@@ -11,6 +11,13 @@ public class PresentationModelBuilderTests
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
 
+    /// <summary>Everything the Details pane puts on screen, for assertions that do not care which pane.</summary>
+    private static string PaneText(OperatorPresentationModel model) => string.Join(
+        Environment.NewLine,
+        model.SelectedEvidencePane.Header,
+        model.SelectedEvidencePane.Left,
+        model.SelectedEvidencePane.Right ?? string.Empty);
+
     [Fact]
     public void Build_EmptyState_ShowsFiveWorkspacesAndColdPlaceholders()
     {
@@ -121,7 +128,7 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.SelectedEvidenceDetail.Should().Contain("Payment accepted 202")
+        PaneText(model).Should().Contain("Payment accepted 202")
             .And.Contain("POST /api/payments")
             .And.Contain("HTTP 202")
             .And.Contain("Transaction: tx-8821")
@@ -145,7 +152,7 @@ public class PresentationModelBuilderTests
             .Select(property => property.Name)
             .Should().NotContain(
                 "Detail",
-                "the Details pane reads SelectedEvidenceDetail for the one record being read");
+                "the Details pane reads SelectedEvidencePane for the one record being read");
     }
 
     [Fact]
@@ -156,8 +163,12 @@ public class PresentationModelBuilderTests
             "Topology attached", "attach", "Regular", null, TimeSpan.Zero, string.Empty, true);
         var state = OperatorConsoleState.Empty with { Evidence = [record], SelectedEvidence = record };
 
-        PresentationModelBuilder.Build(state, Now).SelectedEvidenceDetail
-            .Should().Contain("(no response body was recorded)");
+        // A Topology record is not an HTTP exchange at all, so the stated absence names that
+        // rather than a response body it was never going to have.
+        var pane = PresentationModelBuilder.Build(state, Now).SelectedEvidencePane;
+
+        pane.Left.Should().Contain("was not an HTTP exchange");
+        pane.Right.Should().BeNull("an empty column beside a full one reads as a broken console");
     }
 
     [Fact]
@@ -195,7 +206,8 @@ public class PresentationModelBuilderTests
         var model = PresentationModelBuilder.Build(state, Now);
 
         model.Evidence.Single().Provenance.Should().Contain("LoadTests · generation 4");
-        model.SelectedEvidenceDetail.Should().Contain("raw");
+        model.SelectedEvidencePane.Left.Should().Contain("raw", "a load workflow keeps its investigation detail");
+        model.SelectedEvidencePane.Right.Should().BeNull("a load workflow is an aggregate, not one exchange");
         model.LoadResults.Should().Contain(value => value.Contains("Inline instant settlement"));
         model.CanStopOrSwitch.Should().BeTrue();
         model.CanUseLoadTest.Should().BeTrue();
@@ -705,7 +717,7 @@ public class PresentationModelBuilderTests
             TopologyProfile.Regular,
             1,
             EvidenceKind.OutcomeEvent,
-            "Settled — tx-8821",
+            "Settled · tx-8821",
             "com.corebank.transaction.completed",
             "tx-8821",
             null,
@@ -718,7 +730,7 @@ public class PresentationModelBuilderTests
         // The inbound marker sits left of the status gutter rather than replacing it, so a
         // failed inbound event still reads as failed.
         PresentationModelBuilder.Build(state, Now).Evidence.Single().Summary
-            .Should().Be("< ● Settled — tx-8821");
+            .Should().Be("< ● Settled · tx-8821", "the row keeps its identity; only a clause is droppable");
     }
 
     [Fact]
@@ -731,4 +743,245 @@ public class PresentationModelBuilderTests
         model.FeedStatus.Should().Contain("No outcome feed");
         model.BurstProvenStatus.Should().Contain("still moving 0");
     }
+
+    // --- The Details pane, one row of the I/O matrix at a time -----------------------------
+
+    [Fact]
+    public void EvidencePane_Exchange_ReadsAsTwoRawHttpColumns()
+    {
+        var pane = PresentationModelBuilder.EvidencePane(PaymentRecord(Exchange()));
+
+        // FR-14: each column reads top to bottom as a raw exchange -- start line, headers, blank
+        // line, body -- under a title that costs no extra control.
+        pane.Left.Should().StartWith("REQUEST" + Environment.NewLine + "POST http://127.0.0.1:5294/api/payments");
+        pane.Left.Should().Contain("Idempotency-Key: demo-key-001")
+            .And.Contain("Content-Type: application/json");
+        pane.Left.Should().Contain("  \"amount\": 250", "a one-line payload hides its own fields on stage");
+        pane.Right.Should().StartWith("RESPONSE" + Environment.NewLine + "HTTP 202 Accepted");
+        pane.Right.Should().Contain("  \"transactionId\": \"tx-8821\"");
+    }
+
+    [Fact]
+    public void EvidencePane_ExchangeThatGotNoAnswer_SaysSoAndKeepsTheConsolesOwnAccount()
+    {
+        var record = PaymentRecord(Exchange() with
+        {
+            StatusCode = null,
+            ReasonPhrase = null,
+            ResponseHeaders = [],
+            ResponseBody = null,
+        }) with
+        {
+            Detail = "Request timed out; the server may have accepted it.",
+        };
+
+        var pane = PresentationModelBuilder.EvidencePane(record);
+
+        pane.Left.Should().Contain("Idempotency-Key: demo-key-001", "the request is still evidence");
+        pane.Right.Should().Contain("no answer arrived")
+            .And.Contain("Request timed out", "the only account of what went wrong is this console's own");
+    }
+
+    [Fact]
+    public void EvidencePane_NonJsonBody_IsShownVerbatimRatherThanMangled()
+    {
+        var record = PaymentRecord(Exchange() with { ResponseBody = "<html>upstream timed out</html>" });
+
+        PresentationModelBuilder.EvidencePane(record).Right
+            .Should().Contain("<html>upstream timed out</html>");
+    }
+
+    [Fact]
+    public void EvidencePane_EmptyResponseBody_SaysSoRatherThanShowingABlankColumn()
+    {
+        var record = PaymentRecord(Exchange() with { ResponseBody = string.Empty });
+
+        PresentationModelBuilder.EvidencePane(record).Right.Should().Contain("(no response body was recorded)");
+    }
+
+    [Fact]
+    public void EvidencePane_CloudEvent_IsOneFullWidthColumnAndNoEmptyRequestBeside()
+    {
+        var record = EventRecord();
+
+        var pane = PresentationModelBuilder.EvidencePane(record);
+
+        pane.Right.Should().BeNull("an EVENT record renders no empty REQUEST column beside it");
+        pane.Left.Should().StartWith("EVENT");
+        pane.Left.Should().Contain("Type: com.corebank.transaction.completed")
+            .And.Contain("Id: evt-1")
+            .And.Contain("Source: corebank")
+            .And.Contain("SpecVersion: 1.0")
+            .And.Contain("PubSubName: pubsub")
+            .And.Contain("Topic: transaction-events")
+            .And.Contain("route: /outcome");
+        pane.Left.Should().Contain("  \"transactionId\": \"tx-8821\"");
+        // Neither is exposed by the SDK, so neither is invented.
+        pane.Left.Should().NotContain("subject").And.NotContain("time:");
+    }
+
+    [Theory]
+    [InlineData(EvidenceKind.Topology)]
+    [InlineData(EvidenceKind.Resource)]
+    [InlineData(EvidenceKind.Export)]
+    [InlineData(EvidenceKind.Fault)]
+    [InlineData(EvidenceKind.Burst)]
+    [InlineData(EvidenceKind.LoadTest)]
+    public void EvidencePane_PayloadLessKind_StatesTheAbsenceAndRendersNoEmptyColumn(EvidenceKind kind)
+    {
+        var record = PaymentRecord(null) with { Kind = kind, Detail = "aspire start exited with code 1" };
+
+        var pane = PresentationModelBuilder.EvidencePane(record);
+
+        pane.Header.Should().Contain("202 Pending", "the header block is unchanged");
+        pane.Left.Should().Contain("was not an HTTP exchange")
+            .And.Contain("aspire start exited with code 1", "the console's own record of it is still evidence");
+        pane.Right.Should().BeNull();
+        pane.CopyText.Should().StartWith(pane.Header).And.Contain("aspire start exited with code 1");
+    }
+
+    [Fact]
+    public void EvidencePane_PayloadLessRecordWithNoDetail_StillHasSomethingToCopy()
+    {
+        // A Fault record passes `ErrorSummary ?? string.Empty` as its detail, so an empty one is
+        // ordinary. Copy reporting "there is nothing to copy" while the pane visibly shows a
+        // header block would be the console contradicting itself on stage.
+        var record = PaymentRecord(null) with { Kind = EvidenceKind.Fault, Detail = string.Empty };
+
+        var pane = PresentationModelBuilder.EvidencePane(record);
+
+        pane.Left.Should().Contain("was not an HTTP exchange");
+        pane.CopyText.Should().NotBeNullOrWhiteSpace().And.Be(pane.Header);
+    }
+
+    [Fact]
+    public void EvidencePane_Copy_IsTheHeaderBlockThenRawTextWithNoColumnArt()
+    {
+        var pane = PresentationModelBuilder.EvidencePane(PaymentRecord(Exchange()));
+
+        // The header block is copied too: a record whose timestamp, profile, duration, faults
+        // and transaction id could not be copied would be half a record.
+        pane.CopyText.Should().StartWith(pane.Header)
+            .And.Contain("Transaction: tx-8821");
+        // FR-17: the rest has to paste into a .http file or Postman and run.
+        pane.CopyText.Should().Contain(
+            Environment.NewLine + Environment.NewLine + "POST http://127.0.0.1:5294/api/payments");
+        pane.CopyText.Should().Contain("""{"amount":250,"currency":"EUR"}""", "the bytes as sent, not as re-indented");
+        pane.CopyText.Should().Contain(
+            Environment.NewLine + Environment.NewLine + "HTTP 202 Accepted",
+            "raw request, blank line, raw response");
+        pane.CopyText.Should().NotContain("REQUEST").And.NotContain("RESPONSE");
+    }
+
+    [Fact]
+    public void EvidencePane_CopyOfACallThatGotNoAnswer_CarriesNoProse()
+    {
+        var record = PaymentRecord(Exchange() with
+        {
+            StatusCode = null,
+            ReasonPhrase = null,
+            ResponseHeaders = [],
+            ResponseBody = null,
+        }) with
+        {
+            Detail = "Request timed out; the server may have accepted it.",
+        };
+
+        var pane = PresentationModelBuilder.EvidencePane(record);
+
+        pane.Right.Should().Contain("no answer arrived").And.Contain("Request timed out");
+        pane.CopyText.Should().NotContain("no answer arrived")
+            .And.NotContain("Request timed out", "prose is not raw response bytes");
+        pane.CopyText.Should().Contain("POST http://127.0.0.1:5294/api/payments");
+    }
+
+    [Fact]
+    public void EvidencePane_CopyOfACloudEvent_CarriesTheHeaderAndTheRawEnvelope()
+    {
+        var pane = PresentationModelBuilder.EvidencePane(EventRecord());
+
+        pane.CopyText.Should().StartWith(pane.Header)
+            .And.Contain("Type: com.corebank.transaction.completed")
+            .And.Contain("""{"transactionId":"tx-8821","status":"Completed"}""")
+            .And.NotContain("EVENT" + Environment.NewLine);
+    }
+
+    [Fact]
+    public void EvidencePane_LongSummary_IsCutOnTheRowAndWholeEverywhereElse()
+    {
+        var record = PaymentRecord(null) with
+        {
+            Summary = "202 Pending — no committed outcome yet",
+        };
+        var state = OperatorConsoleState.Empty with { Evidence = [record], SelectedEvidence = record };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        model.Evidence.Single().Summary.Should().Be("  ● 202 Pending");
+        model.SelectedEvidencePane.Header.Should().Contain("202 Pending — no committed outcome yet");
+    }
+
+    [Fact]
+    public void RowSummary_WithoutAnEmDash_IsUnchanged() =>
+        PresentationModelBuilder.RowSummary("Inspected payments.outbox").Should().Be("Inspected payments.outbox");
+
+    [Theory]
+    [InlineData("— nothing before the dash")]
+    [InlineData("   — only blank before the dash")]
+    public void RowSummary_WithNothingBeforeTheEmDash_KeepsTheWholeSummary(string summary) =>
+        // A row cut down to a gutter marker and a status glyph identifies nothing at all, which
+        // is worse than the long row truncation exists to shorten.
+        PresentationModelBuilder.RowSummary(summary).Should().Be(summary);
+
+    private static HttpExchange Exchange() => new(
+        "POST",
+        "http://127.0.0.1:5294/api/payments",
+        [new EvidenceHeader("Idempotency-Key", "demo-key-001"), new EvidenceHeader("Content-Type", "application/json")],
+        """{"amount":250,"currency":"EUR"}""",
+        202,
+        "Accepted",
+        [new EvidenceHeader("Content-Type", "application/json")],
+        """{"transactionId":"tx-8821","status":"Pending"}""");
+
+    private static EvidenceRecord PaymentRecord(HttpExchange? exchange) => new(
+        21,
+        DateTimeOffset.UnixEpoch,
+        TopologyProfile.Regular,
+        1,
+        EvidenceKind.Payment,
+        "202 Pending",
+        "POST",
+        "payments.submit",
+        202,
+        TimeSpan.FromMilliseconds(12),
+        string.Empty,
+        true,
+        TransactionId: "tx-8821",
+        Exchange: exchange);
+
+    private static EvidenceRecord EventRecord() => new(
+        22,
+        DateTimeOffset.UnixEpoch,
+        TopologyProfile.Regular,
+        1,
+        EvidenceKind.OutcomeEvent,
+        "Settled · tx-8821",
+        OutcomeEventTypes.TransactionCompleted,
+        "tx-8821",
+        null,
+        TimeSpan.Zero,
+        "detail",
+        true,
+        TransactionId: "tx-8821",
+        Event: new CloudEventRecord(
+            "evt-1",
+            "corebank",
+            OutcomeEventTypes.TransactionCompleted,
+            "1.0",
+            "application/json",
+            OutcomeEventTypes.PubSubComponent,
+            OutcomeEventTypes.Topic,
+            "/outcome",
+            [new EvidenceHeader("route", "/outcome")],
+            """{"transactionId":"tx-8821","status":"Completed"}"""));
 }

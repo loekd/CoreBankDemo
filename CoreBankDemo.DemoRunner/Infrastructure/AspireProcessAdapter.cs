@@ -72,7 +72,7 @@ public sealed class AspireProcessAdapter : IProcessAdapter
             {
                 [ArmFaultsVariable] = armFaults ? "true" : "false",
             });
-        _output[profile] = JournalRedaction.Apply(
+        _output[profile] = JournalText.Bound(
             string.Join(Environment.NewLine, new[] { result.StandardOutput, result.StandardError }.Where(value => !string.IsNullOrWhiteSpace(value))));
 
         var outputPid = TryReadProcessId(result.StandardOutput);
@@ -86,7 +86,7 @@ public sealed class AspireProcessAdapter : IProcessAdapter
         {
             await CleanupNewAppHostAsync(profile, projectPath, before, outputPid, trustOutputPid: true, CancellationToken.None);
             throw new InvalidOperationException(
-                JournalRedaction.Apply(string.IsNullOrWhiteSpace(result.StandardError)
+                JournalText.Bound(string.IsNullOrWhiteSpace(result.StandardError)
                     ? $"aspire start exited with code {result.ExitCode}."
                     : result.StandardError));
         }
@@ -195,7 +195,7 @@ public sealed class AspireProcessAdapter : IProcessAdapter
         if (!result.Succeeded)
         {
             throw new InvalidOperationException(
-                JournalRedaction.Apply(string.IsNullOrWhiteSpace(result.StandardError)
+                JournalText.Bound(string.IsNullOrWhiteSpace(result.StandardError)
                     ? "aspire ps failed while verifying AppHost ownership."
                     : result.StandardError));
         }

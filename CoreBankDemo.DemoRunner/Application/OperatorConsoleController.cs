@@ -404,7 +404,7 @@ public sealed class OperatorConsoleController
             var snapshot = await WaitForTopologyAsync(profile, expectPresent: true, ct);
             if (snapshot is null)
             {
-                var detail = JournalRedaction.Apply(_processes.GetRecentOutput(handle));
+                var detail = JournalText.Bound(_processes.GetRecentOutput(handle));
                 await _processes.StopOwnedAsync(handle, CancellationToken.None);
                 _ownedHandle = null;
                 AddEvidence(EvidenceKind.Topology, $"Start {profile} timed out", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), detail, false);
@@ -618,7 +618,7 @@ public sealed class OperatorConsoleController
             {
                 await _processes.StopOwnedAsync(targetHandle, CancellationToken.None);
                 _ownedHandle = null;
-                AddEvidence(EvidenceKind.Topology, $"Switch to {target} timed out", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), JournalRedaction.Apply(_processes.GetRecentOutput(targetHandle)), false);
+                AddEvidence(EvidenceKind.Topology, $"Switch to {target} timed out", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), JournalText.Bound(_processes.GetRecentOutput(targetHandle)), false);
                 return CommandResult.Rejected($"Timed out switching to {target}.");
             }
 
@@ -865,7 +865,8 @@ public sealed class OperatorConsoleController
                 result.Duration == TimeSpan.Zero ? TimeSpanSince(mutation.StartedAt) : result.Duration,
                 result.Body ?? result.ErrorSummary ?? string.Empty,
                 succeeded,
-                transactionId: payment.TransactionId);
+                transactionId: payment.TransactionId,
+                exchange: result.Exchange);
             return succeeded ? CommandResult.Ok(message) : CommandResult.Rejected(message);
         }
         finally
@@ -1113,7 +1114,8 @@ public sealed class OperatorConsoleController
             result.StatusCode,
             result.Duration,
             result.Body ?? result.ErrorSummary ?? string.Empty,
-            result.Succeeded);
+            result.Succeeded,
+            exchange: result.Exchange);
         return result with { Duration = result.Duration == TimeSpan.Zero ? TimeSpanSince(startedAt) : result.Duration };
     }
 
@@ -1140,7 +1142,8 @@ public sealed class OperatorConsoleController
             result.StatusCode,
             result.Duration,
             result.Body ?? result.ErrorSummary ?? string.Empty,
-            result.Succeeded);
+            result.Succeeded,
+            exchange: result.Exchange);
         return result;
     }
 
@@ -1974,7 +1977,8 @@ public sealed class OperatorConsoleController
                 $"Idempotency {submission.IdempotencyMode}: {submission.IdempotencyKey ?? "(omitted)"}{Environment.NewLine}"
                 + (safeResult.Body ?? safeResult.ErrorSummary ?? string.Empty),
                 safeResult.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed or PaymentOutcome.Failed or PaymentOutcome.Cancelled,
-                transactionId: safeResult.TransactionId);
+                transactionId: safeResult.TransactionId,
+                exchange: safeResult.Exchange);
             return safeResult;
         }
         finally
@@ -2357,40 +2361,19 @@ public sealed class OperatorConsoleController
 
         var observedAt = _time.GetUtcNow();
         var attribution = EventAttribution.Unattributed;
-        Update(state =>
+        if (outcomeEvent.TransactionId is { Length: > 0 } transactionId)
         {
-            var index = IndexOfTrackedPayment(state, outcomeEvent.TransactionId);
-            if (index < 0)
-            {
-                return state;
-            }
-
-            attribution = EventAttribution.Tracked;
-            var payments = state.TrackedPayments.ToList();
-            payments[index] = ResolveTrackedPayment(payments[index], outcomeEvent, observedAt);
-            return state with { TrackedPayments = payments };
-        });
-
-        if (attribution == EventAttribution.Unattributed
-            && _burstTransactions.TryGetValue(outcomeEvent.TransactionId, out var burstTransaction))
-        {
-            attribution = EventAttribution.Tracked;
-            CountForBurst(outcomeEvent, burstTransaction, context);
+            attribution = AttributeEvent(outcomeEvent, transactionId, observedAt, context);
         }
-
-        if (attribution == EventAttribution.Unattributed
-            && _retiredTransactions.Contains(outcomeEvent.TransactionId))
+        else
         {
-            // A3/A4: this console did submit it -- in a previous burst, or in a row since
-            // evicted. It counts for nothing, but calling it a stranger's transaction is false.
-            attribution = EventAttribution.Retired;
-        }
-
-        if (attribution == EventAttribution.Unattributed)
-        {
-            // A5: legs are buffered too. On the instant rail all three events can beat the 200,
-            // and dropping the two legs left the row reading "1 of 2 legs observed" for ever.
-            RememberUnmatchedEvent(outcomeEvent);
+            // An event this console could not attribute -- an unrecognised type, a body that is
+            // not JSON, a known type carrying no transactionId -- reaches none of the
+            // accounting: not a tracked row, not a burst counter, not the retired set, not the
+            // unmatched buffer. Every one of them is keyed by an id, and inventing one to get a
+            // row would be the exact silent guess this console exists not to make. The row is
+            // still worth having, which is why it falls through to AddEvidence.
+            attribution = EventAttribution.Unreadable;
         }
 
         AddEvidence(
@@ -2399,7 +2382,10 @@ public sealed class OperatorConsoleController
             EventSummary(outcomeEvent, attribution),
             // The meta line always prints the CloudEvent type verbatim and the transaction id.
             outcomeEvent.EventType,
-            outcomeEvent.TransactionId,
+            // A structured field the export serialises and the header block renders as
+            // "{Method} {Target}". An event with no id names the topic it came off instead --
+            // EventDetail is where the absence is stated in words.
+            outcomeEvent.TransactionId ?? OutcomeEventTypes.Topic,
             null,
             // The delivery delta, which is the transport's and never the bank's processing
             // time. Deliberately not admitted as proof that injected faults reached traffic:
@@ -2412,7 +2398,59 @@ public sealed class OperatorConsoleController
             outcomeEvent.Failed is null,
             outcomeEvent.TransactionId,
             // Never steals the Details pane from a record the operator is reading.
-            select: false);
+            select: false,
+            cloudEvent: outcomeEvent.Envelope);
+    }
+
+    /// <summary>
+    /// The accounting an event with a readable id is allowed to touch, in order: the live row,
+    /// the burst on screen, the retired ids, and finally the unmatched buffer. Split out from
+    /// <see cref="OnOutcomeEventReceived"/> so that the id guard reads as one decision -- an
+    /// event without an id enters none of this.
+    /// </summary>
+    private EventAttribution AttributeEvent(
+        OutcomeEvent outcomeEvent,
+        string transactionId,
+        DateTimeOffset observedAt,
+        OperationContext context)
+    {
+        var attribution = EventAttribution.Unattributed;
+        Update(state =>
+        {
+            var index = IndexOfTrackedPayment(state, transactionId);
+            if (index < 0)
+            {
+                return state;
+            }
+
+            attribution = EventAttribution.Tracked;
+            var payments = state.TrackedPayments.ToList();
+            payments[index] = ResolveTrackedPayment(payments[index], outcomeEvent, observedAt);
+            return state with { TrackedPayments = payments };
+        });
+
+        if (attribution == EventAttribution.Unattributed
+            && _burstTransactions.TryGetValue(transactionId, out var burstTransaction))
+        {
+            attribution = EventAttribution.Tracked;
+            CountForBurst(outcomeEvent, burstTransaction, context);
+        }
+
+        if (attribution == EventAttribution.Unattributed && _retiredTransactions.Contains(transactionId))
+        {
+            // A3/A4: this console did submit it -- in a previous burst, or in a row since
+            // evicted. It counts for nothing, but calling it a stranger's transaction is false.
+            attribution = EventAttribution.Retired;
+        }
+
+        if (attribution == EventAttribution.Unattributed)
+        {
+            // A5: legs are buffered too. On the instant rail all three events can beat the 200,
+            // and dropping the two legs left the row reading "1 of 2 legs observed" for ever.
+            RememberUnmatchedEvent(outcomeEvent, transactionId);
+        }
+
+        return attribution;
     }
 
     private static TimeSpan DeliveryDelta(OutcomeEvent outcomeEvent, DateTimeOffset observedAt) =>
@@ -2431,6 +2469,13 @@ public sealed class OperatorConsoleController
 
         /// <summary>This console's own payment, but no longer on screen or counted.</summary>
         Retired,
+
+        /// <summary>
+        /// The event carried no transaction id this console could read, so it is attributed to
+        /// nothing at all -- not even to "not submitted from here", which is itself a claim
+        /// about an id. Its bytes are the whole of what it says.
+        /// </summary>
+        Unreadable,
     }
 
     /// <summary>
@@ -2841,15 +2886,20 @@ public sealed class OperatorConsoleController
 
         foreach (var outcomeEvent in events)
         {
-            RememberUnmatchedEvent(outcomeEvent);
+            RememberUnmatchedEvent(outcomeEvent, transactionId);
         }
     }
 
-    private void RememberUnmatchedEvent(OutcomeEvent outcomeEvent)
+    /// <summary>
+    /// Buffers one event under the id its caller already resolved. The id is a parameter rather
+    /// than re-read from the event so there is no branch here that could silently drop one: the
+    /// only caller that could hold an event without an id is guarded before it ever gets here.
+    /// </summary>
+    private void RememberUnmatchedEvent(OutcomeEvent outcomeEvent, string transactionId)
     {
         lock (_unmatchedTerminalEvents)
         {
-            if (_unmatchedTerminalEvents.TryGetValue(outcomeEvent.TransactionId, out var existing))
+            if (_unmatchedTerminalEvents.TryGetValue(transactionId, out var existing))
             {
                 existing.Events.Add(outcomeEvent);
                 return;
@@ -2867,7 +2917,7 @@ public sealed class OperatorConsoleController
                 _unmatchedTerminalEvents.Remove(oldest);
             }
 
-            _unmatchedTerminalEvents[outcomeEvent.TransactionId] =
+            _unmatchedTerminalEvents[transactionId] =
                 (++_unmatchedArrivalSequence, [outcomeEvent]);
         }
     }
@@ -2899,30 +2949,82 @@ public sealed class OperatorConsoleController
     /// Past-tense grammar for something the system said, and the full "not submitted from this
     /// console" label when it matched nothing. Dropping an unattributed event would make the
     /// feed a lie by omission; attributing it would make it a lie outright.
+    /// <para>
+    /// Punctuation is load-bearing, because a list row is cut at the first em dash: <c> · </c>
+    /// separates one piece of identity from the next, and <c> — </c> only ever introduces the
+    /// explaining clause a row is allowed to drop. An em dash placed before the transaction id
+    /// would take the id off every row and make a tracked, a retired and an unattributed event
+    /// read identically -- which is the lie by omission this method exists to prevent.
+    /// </para>
     /// </summary>
     private static string EventSummary(OutcomeEvent outcomeEvent, EventAttribution attribution)
     {
-        var subject = outcomeEvent.EventType switch
+        if (attribution == EventAttribution.Unreadable)
         {
-            OutcomeEventTypes.TransactionCompleted => $"Settled — {outcomeEvent.TransactionId}",
-            OutcomeEventTypes.TransactionFailed =>
-                $"Rejected — {outcomeEvent.TransactionId} · ErrorReason: {outcomeEvent.Failed?.ErrorReason ?? "(none supplied)"}",
-            OutcomeEventTypes.BalanceUpdated =>
-                $"Balance updated — {outcomeEvent.TransactionId} · {LegText(outcomeEvent)}",
-            OutcomeEventTypes.TransactionCancelled =>
-                $"Withdrawn — {outcomeEvent.TransactionId} · Reason: {outcomeEvent.Cancelled?.Reason ?? "(none supplied)"}",
-            // A type this console does not model is still printed verbatim rather than
-            // flattened into one it happens to know.
-            _ => $"{outcomeEvent.EventType} — {outcomeEvent.TransactionId}",
-        };
-        return attribution switch
+            // Names the type and says what could not be read from it. Never a transaction: an
+            // id the console could not parse is not an id it may print. The clause after the em
+            // dash is the droppable half; the type before it is what the row keeps.
+            var type = outcomeEvent.EventType is { Length: > 0 } named ? named : "(no CloudEvent type)";
+            return IsKnownEventType(outcomeEvent.EventType)
+                ? $"{type} — carried no transactionId; this console can attribute it to nothing"
+                : $"{type} — not a CloudEvent type this console recognises; its bytes are all it says";
+        }
+
+        var identity = $"{EventVerb(outcomeEvent)} · {outcomeEvent.TransactionId}";
+        identity += attribution switch
         {
-            EventAttribution.Tracked => subject,
-            EventAttribution.Retired =>
-                $"{subject} · from a payment this console submitted earlier this session",
-            _ => $"{subject} · Unattributed — {outcomeEvent.TransactionId} was not submitted from this console",
+            EventAttribution.Retired => " · Seen earlier",
+            EventAttribution.Unattributed => " · Unattributed",
+            _ => string.Empty,
         };
+
+        var clauses = new List<string>();
+        if (outcomeEvent.Failed is { } failed)
+        {
+            clauses.Add($"ErrorReason: {failed.ErrorReason ?? "(none supplied)"}");
+        }
+
+        if (outcomeEvent.Cancelled is { } cancelled)
+        {
+            clauses.Add($"Reason: {cancelled.Reason ?? "(none supplied)"}");
+        }
+
+        if (outcomeEvent.BalanceUpdated is not null)
+        {
+            clauses.Add(LegText(outcomeEvent));
+        }
+
+        if (attribution == EventAttribution.Retired)
+        {
+            clauses.Add("from a payment this console submitted earlier this session");
+        }
+
+        if (attribution == EventAttribution.Unattributed)
+        {
+            clauses.Add($"{outcomeEvent.TransactionId} was not submitted from this console");
+        }
+
+        return clauses.Count == 0 ? identity : $"{identity} — {string.Join(" · ", clauses)}";
     }
+
+    /// <summary>
+    /// The verb, taken from the typed payload the parse produced rather than from the type
+    /// string, so there is no arm for a type that cannot reach here: an event this console does
+    /// not recognise arrives with no id at all and is summarised as unreadable. The final
+    /// fallback prints the type verbatim rather than flattening it into a verb it is not.
+    /// </summary>
+    private static string EventVerb(OutcomeEvent outcomeEvent) =>
+        outcomeEvent.Completed is not null ? "Settled"
+        : outcomeEvent.Failed is not null ? "Rejected"
+        : outcomeEvent.Cancelled is not null ? "Withdrawn"
+        : outcomeEvent.BalanceUpdated is not null ? "Balance updated"
+        : outcomeEvent.EventType;
+
+    private static bool IsKnownEventType(string eventType) => eventType is
+        OutcomeEventTypes.TransactionCompleted
+        or OutcomeEventTypes.TransactionFailed
+        or OutcomeEventTypes.BalanceUpdated
+        or OutcomeEventTypes.TransactionCancelled;
 
     private static string LegText(OutcomeEvent outcomeEvent) =>
         outcomeEvent.BalanceUpdated is { } leg
@@ -2937,7 +3039,11 @@ public sealed class OperatorConsoleController
     /// </summary>
     private static string EventDetail(OutcomeEvent outcomeEvent, DateTimeOffset observedAt)
     {
-        var lines = new List<string> { outcomeEvent.EventType, $"TransactionId: {outcomeEvent.TransactionId}" };
+        var lines = new List<string>
+        {
+            outcomeEvent.EventType,
+            $"TransactionId: {outcomeEvent.TransactionId ?? "(none in the event)"}",
+        };
         if (outcomeEvent.ProcessedAt is { } processedAt)
         {
             lines.Add($"ProcessedAt {OutcomeFeedNarrative.PreciseClock(processedAt)}, observed here "
@@ -3366,7 +3472,9 @@ public sealed class OperatorConsoleController
         string detail,
         bool succeeded,
         string? transactionId = null,
-        bool select = true)
+        bool select = true,
+        HttpExchange? exchange = null,
+        CloudEventRecord? cloudEvent = null)
     {
         Update(state =>
         {
@@ -3377,15 +3485,17 @@ public sealed class OperatorConsoleController
                 provenance.Profile,
                 provenance.RunGeneration,
                 kind,
-                JournalRedaction.Apply(summary),
+                JournalText.Bound(summary),
                 method,
                 target,
                 statusCode,
                 duration,
-                JournalRedaction.Apply(detail ?? string.Empty),
+                JournalText.Bound(detail ?? string.Empty),
                 succeeded,
                 provenance.Faults,
-                transactionId);
+                transactionId,
+                exchange,
+                cloudEvent);
             records.Add(record);
             if (records.Count > _options.MaximumEvidenceRecords)
             {

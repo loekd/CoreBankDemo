@@ -43,7 +43,7 @@ public sealed class AspireCliAdapter : IAspireAdapter
         if (!processes.Succeeded)
         {
             return TopologyDiscoveryResult.Unreachable(
-                JournalRedaction.Apply(string.IsNullOrWhiteSpace(processes.StandardError)
+                JournalText.Bound(string.IsNullOrWhiteSpace(processes.StandardError)
                     ? $"aspire ps exited with code {processes.ExitCode}."
                     : processes.StandardError));
         }
@@ -122,7 +122,7 @@ public sealed class AspireCliAdapter : IAspireAdapter
             return TopologySnapshot.Unreachable(
                 profile,
                 _time.GetUtcNow(),
-                JournalRedaction.Apply(string.IsNullOrWhiteSpace(result.StandardError)
+                JournalText.Bound(string.IsNullOrWhiteSpace(result.StandardError)
                     ? $"aspire describe exited with code {result.ExitCode}."
                     : result.StandardError));
         }
@@ -190,7 +190,7 @@ public sealed class AspireCliAdapter : IAspireAdapter
             {
                 return new ResourceCommandResult(
                     ResourceDispatchStatus.Ambiguous,
-                    JournalRedaction.Apply($"Timed out after dispatching {command} to {instanceName}. Refresh is required.{Environment.NewLine}{string.Join(Environment.NewLine, details)}"),
+                    JournalText.Bound($"Timed out after dispatching {command} to {instanceName}. Refresh is required.{Environment.NewLine}{string.Join(Environment.NewLine, details)}"),
                     affected,
                     [instanceName]);
             }
@@ -200,7 +200,7 @@ public sealed class AspireCliAdapter : IAspireAdapter
                 failed.Add(instanceName);
                 return new ResourceCommandResult(
                     affected.Count > 0 ? ResourceDispatchStatus.Partial : ResourceDispatchStatus.Rejected,
-                    JournalRedaction.Apply(string.Join(Environment.NewLine, details)),
+                    JournalText.Bound(string.Join(Environment.NewLine, details)),
                     affected,
                     failed);
             }
@@ -210,7 +210,7 @@ public sealed class AspireCliAdapter : IAspireAdapter
 
         return new ResourceCommandResult(
             ResourceDispatchStatus.Dispatched,
-            JournalRedaction.Apply(string.Join(Environment.NewLine, details)),
+            JournalText.Bound(string.Join(Environment.NewLine, details)),
             affected,
             failed);
     }

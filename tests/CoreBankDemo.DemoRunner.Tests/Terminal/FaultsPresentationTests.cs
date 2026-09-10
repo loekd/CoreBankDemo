@@ -100,9 +100,9 @@ public class FaultsPresentationTests
         // Detail is projected on demand for the record being read, not carried on every row, so
         // the per-record stamping is asserted against that projection directly. Both records are
         // checked, which the selected-record pane alone could not cover.
-        PresentationModelBuilder.EvidenceDetailText(underFaults).Should().Contain("Faults: error rate 40%");
-        PresentationModelBuilder.EvidenceDetailText(quiet).Should().Contain("Faults: none in force");
-        model.SelectedEvidenceDetail.Should().Contain("Faults: error rate 40%");
+        PresentationModelBuilder.EvidenceHeaderText(underFaults).Should().Contain("Faults: error rate 40%");
+        PresentationModelBuilder.EvidenceHeaderText(quiet).Should().Contain("Faults: none in force");
+        model.SelectedEvidencePane.Header.Should().Contain("Faults: error rate 40%");
     }
 
     private static EvidenceRecord Record(long sequence, FaultLevels? faults) =>
