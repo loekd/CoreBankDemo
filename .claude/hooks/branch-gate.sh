@@ -8,12 +8,48 @@
 # Output: exit 0 to allow; exit 2 with a message on stderr to block.
 set -u
 
-root="${CLAUDE_PROJECT_DIR:-$PWD}"
-branch="$(git -C "$root" branch --show-current 2>/dev/null || true)"
-[ "$branch" = "main" ] || exit 0
-
+# Empty or non-JSON stdin fails closed (blocks) on main by design: every lookup below
+# then yields nothing and the fallback chain lands on $CLAUDE_PROJECT_DIR/$PWD.
 input="$(cat)"
 tool="$(printf '%s' "$input" | grep -oE '"tool_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')"
+
+# Decide which directory's branch governs this call: the directory of the file being
+# written (Edit/Write/MultiEdit/NotebookEdit), else the cwd the tool ran in, else
+# CLAUDE_PROJECT_DIR, else $PWD. This matters when the session works inside a git
+# worktree (e.g. .claude/worktrees/<name>) while the root checkout sits on main.
+dir=""
+if command -v python3 >/dev/null 2>&1; then
+  case "$tool" in
+    Edit|Write|MultiEdit|NotebookEdit)
+      fpdir="$(printf '%s' "$input" | python3 -c '
+import json, os, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+ti = data.get("tool_input") or {}
+fp = ti.get("file_path") or ti.get("notebook_path") or ""
+print(os.path.dirname(fp))
+' 2>/dev/null || true)"
+      [ -n "$fpdir" ] && [ -d "$fpdir" ] && dir="$fpdir"
+      ;;
+  esac
+  if [ -z "$dir" ]; then
+    cwd="$(printf '%s' "$input" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+print(data.get("cwd") or "")
+' 2>/dev/null || true)"
+    [ -n "$cwd" ] && [ -d "$cwd" ] && dir="$cwd"
+  fi
+fi
+[ -n "$dir" ] || dir="${CLAUDE_PROJECT_DIR:-$PWD}"
+
+branch="$(git -C "$dir" branch --show-current 2>/dev/null || true)"
+[ "$branch" = "main" ] || exit 0
 
 if [ "$tool" = "Bash" ]; then
   # Without python3 the command cannot be decoded safely; allow and rely on the edit-tool block.
@@ -26,7 +62,7 @@ if [ "$tool" = "Bash" ]; then
 fi
 
 cat >&2 <<EOF
-Branch gate: '$root' has 'main' checked out, and nothing may be written on main.
+Branch gate: '$dir' has 'main' checked out, and nothing may be written on main.
 Cut a branch from freshly fetched origin/main first:
   git fetch origin main && git switch -c feature/<slug> origin/main
 Use docs/<slug> for documentation-only work. Tool blocked: ${tool:-unknown}.

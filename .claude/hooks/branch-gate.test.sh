@@ -66,4 +66,30 @@ git -C "$repo" switch -q main
 printf '%s' "$edit" | (cd "$repo" && env -u CLAUDE_PROJECT_DIR bash "$hook" >/dev/null 2>&1); actual=$?
 if [ "$actual" -eq 2 ]; then echo "ok   - cwd fallback"; else echo "FAIL - cwd fallback (got $actual)"; fails=$((fails+1)); fi
 
+edit_json() { # edit_json <file_path> [cwd]
+  local fp="$1" cwd="${2:-}"
+  if [ -n "$cwd" ]; then
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"},"cwd":"%s"}' "$fp" "$cwd"
+  else
+    printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$fp"
+  fi
+}
+bash_cwd_json() { # bash_cwd_json <command> <cwd>
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"cwd":"%s"}' "$1" "$2"
+}
+
+echo "# worktree: decide branch from where the write happens, not only from CLAUDE_PROJECT_DIR"
+git -C "$repo" switch -q main
+git -C "$repo" worktree add -q "$tmp/wt" -b feature/wt
+run 0 "$repo" "$(edit_json "$tmp/wt/x.txt")" \
+  "worktree on feature branch while root is on main: Edit in worktree passes"
+run 0 "$repo" "$(bash_cwd_json "echo hi > notes.txt" "$tmp/wt")" \
+  "worktree on feature branch while root is on main: Bash with cwd in worktree passes"
+run 0 "$repo" "$(edit_json "$tmp/wt/x.txt" "$repo")" \
+  "cwd on main overrides nothing when file_path is in worktree"
+run 2 "$repo" "$(edit_json "$repo/x.txt" "$tmp/wt")" \
+  "edit inside root while root is on main still blocks (file location wins over cwd)"
+run 2 "$tmp/wt" "$(bash_cwd_json "echo hi > notes.txt" "$repo")" \
+  "Bash with cwd on main blocks even when project dir is on a feature branch"
+
 [ "$fails" -eq 0 ] && echo "all tests passed" || { echo "$fails test(s) failed"; exit 1; }

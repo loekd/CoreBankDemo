@@ -115,6 +115,17 @@ Conversion rules (applied per file, content otherwise preserved verbatim):
 5. Mentions of BMAD process machinery in the body (skill names such as `bmad-build` or
    `bmad-spec`, "BMAD workflow", "BMAD artifact") are reworded to neutral terms ("the
    build workflow", "the spec"). Domain content is never rewritten.
+6. Non-hyperlinked mentions of `docs/bmad/...` paths (prose, backticks, checklists,
+   shell snippets) are rewritten exactly like links in rule 4, because those paths no
+   longer exist after the migration.
+7. Story specs whose frontmatter carried review-derived `deferred:` or `warnings:`
+   entries (4.3, 4.6, 5.6, 6.3) keep them in a closing section, "Deferred items and
+   warnings (from review)", so nothing recorded during review is lost.
+8. Links to code or test files that were already dead in the source (the file has since
+   been renamed or removed) become plain backtick paths without link syntax.
+9. The two UX documents share a `name:` in their frontmatter; their titles are
+   disambiguated as "CoreBankDemo DemoRunner — UX design" and "CoreBankDemo DemoRunner
+   — UX experience".
 
 `docs/backlog.md` has three sections: **Open stories** (6.1, 6.4, 8.1, 8.2 with their
 acceptance criteria copied from `epics.md`), **Deferred work** (the 81 items from
@@ -125,8 +136,10 @@ path of its source spec), and **Open retrospective action items**.
 
 - `AGENTS.md`: the "BMAD Rebuild (in progress)" section is replaced by a "Workflow"
   section describing superpowers, the branch-and-PR policy, the install command, the
-  document layout, and the test bar (which stays word for word). The rebuild is
-  described as complete apart from the stories in `docs/backlog.md`.
+  document layout, and the test bar (which keeps the same coverage rule, tiers and
+  SQLite prohibition; its closing clause now points at story 6.1 in `docs/backlog.md`
+  instead of "until the rebuild completes"). The rebuild is described as complete apart
+  from the stories in `docs/backlog.md`.
 - `README.md` documentation list: the `docs/bmad/` bullet becomes bullets for
   `docs/constraints.md`, `docs/superpowers/`, and `docs/backlog.md`.
 - `ARCHITECTURE.md` banner: the `feature/bmad` and spine links are replaced by links to

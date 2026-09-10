@@ -47,7 +47,7 @@ As the process record, I want the accepted rebuild decisions audited against the
 **Given** ADR-008..ADR-016 are accepted
 **When** the final documentation audit runs
 **Then** each ADR's status, Context, Decision, Consequences, supersession links, and implementation references match the final code; ADR-012 identifies ADR-016's PostgreSQL Testcontainers supersession, ADR-015 records the presentation-tool exception, and no forward-looking artifact refers to an undefined ruling
-**And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where implemented surfaces changed; `ARCHITECTURE.md` links the complete ADR set; and the `AGENTS.md` rebuild section flips to "completed" only after the implementation and acceptance gates pass.
+**And** `.claude/skills` (`conventions`, `messaging-patterns`, `observability`) are updated where implemented surfaces changed; `ARCHITECTURE.md` links the complete ADR set; and the `AGENTS.md` rebuild section flips to "completed" only after the implementation and acceptance gates pass [that section was replaced by the "Workflow" section on 2026-09-10].
 
 ## Deferred work
 
@@ -215,13 +215,13 @@ As the process record, I want the accepted rebuild decisions audited against the
 
 ## Open retrospective action items
 
-- Epic 1: Stories 2.1 / 3.1 remove their `Threshold=0` override; stories 4.1 / 5.1 additionally add ProjectReference + `Include` filter.
+These carry-forwards were copied from the epic retrospectives during the 2026-09-10 migration; items verifiable as done in the code were removed then, the rest have not been re-verified.
+
 - Epic 1: NU1903 advisory on transitive `SQLitePCLRaw.lib.e_sqlite3` via EF Sqlite 10.0.8 — informational, revisit if EF pins bump.
 - Epic 2: Epic 3 delivers the real `IDistributedLockService`/`DaprDistributedLockService` with 5/6-lock-lifetime cooperative cancellation; story 2.6 proved the kernel honors whatever token it's given, but the real timing behavior remained untested until epic 3 landed.
 - Epic 2: `CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs` and both APIs' legacy inbox/outbox processors still exist, un-migrated, outside `CoreBankDemo.Rebuild.slnf` — epics 4/5 replace them with concrete strategies/handlers on this kernel.
 - Epic 2: `queue_duration_ms` activity tag understates latency for reclaimed messages, since it's computed from the ordering timestamp that story 2.3 established gets reset only on true reclaims (a reclaimed message's first claim-to-reclaim window isn't reflected) — flagged for epic 7 docs if it matters for the demo narrative.
-- Epic 3: `CoreBankAPI/Program.cs` and `PaymentsAPI/Program.cs` call `AddServiceDefaults()` before `AddDaprClient()`; whoever adds the first real `IEventPublisher.PublishAsync` call must reorder these two calls first (elevated urgency).
+- Epic 3: `PaymentsAPI/Program.cs` still never calls `AddDaprClient()` at all, so it calls `AddServiceDefaults()` with no Dapr client registered first (`CoreBankAPI/Program.cs`'s equivalent ordering is now fixed); whoever adds the first real `IEventPublisher.PublishAsync` call there must add `AddDaprClient()` before `AddServiceDefaults()` (elevated urgency).
 - Epic 3: `PaymentsAPI/Program.cs` never calls `AddMessagingOutboxProcessingOptions()` — if it starts resolving `IEventPublisher`, `DaprEventPublisher` would silently bind to unconfigured defaults instead of failing fast.
-- Epic 3: `PaymentsAPI/appsettings.json` and `CoreBankAPI/appsettings.json` still carry `PartitionCount:2` and dead `LockRenewIntervalSeconds` keys — epics 4/5 must fix these when rebuilding those projects' config, not just the C# option types, which are already correct.
 - Epic 3: `DaprEventPublisher.PublishAsync` applies no validation to `type`/`source`/`subject` (only `traceParent` is checked) — acceptable while the port has zero callers; revisit if epics 4/5 ever feed it unvalidated external input.
-- Epic 3: A handful of low-confidence, low-severity items — undisposed `TryLockResponse`, `LogError`-severity ordinary-cancellation noise, snapshot tests' Dapr-defaults claim resting on a comment rather than a live assertion, and `ResolveOtlpEndpoint` edge cases outside the frozen matrix — are logged in deferred-work.md; none are correctness bugs against any frozen contract, all are "revisit if it ever matters" rather than "must fix."
+- Epic 3: A handful of low-confidence, low-severity items — undisposed `TryLockResponse`, `LogError`-severity ordinary-cancellation noise, snapshot tests' Dapr-defaults claim resting on a comment rather than a live assertion, and `ResolveOtlpEndpoint` edge cases outside the frozen matrix — are logged in the Deferred work section above; none are correctness bugs against any frozen contract, all are "revisit if it ever matters" rather than "must fix."
