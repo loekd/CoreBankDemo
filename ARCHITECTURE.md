@@ -1,6 +1,6 @@
 # Architecture Overview
 
-> **Brownfield snapshot:** This document currently describes the pre-rebuild `main` system and may name obsolete implementations such as `Features:UseDapr` and Dapr-backed locking. During the `feature/bmad` rebuild, accepted records in [`docs/adr/`](docs/adr/) and the [architecture spine](docs/bmad/planning-artifacts/architecture/architecture-CoreBankDemo-2026-08-21/ARCHITECTURE-SPINE.md) govern new work. Story 8.1 will regenerate this document from the completed code.
+> **Snapshot:** This document still describes the pre-rebuild system in places and may name obsolete implementations such as `Features:UseDapr` and Dapr-backed locking. Accepted records in [`docs/adr/`](docs/adr/) and the [architecture spine](docs/superpowers/specs/2026-08-21-architecture-spine-design.md) govern new work. Regenerating this document from the code is story 8.1 in [`docs/backlog.md`](docs/backlog.md).
 
 This document provides technical architecture details. For demo instructions and quick start, see [README.md](README.md).
 
