@@ -835,6 +835,11 @@ public sealed class MainWindow : Window
         // off the right edge with nothing on screen saying so.
         _evidenceHeader.VerticalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
         _evidenceHeader.HorizontalScrollBar.VisibilityMode = ScrollBarVisibilityMode.Auto;
+        // The panes carry the payload the room is asked to read, so they are pinned to the
+        // workspace's own surface rather than left on the blend a ReadOnly TextView derives.
+        OperatorTheme.Apply(_evidenceHeader, OperatorTheme.EvidencePaneScheme);
+        OperatorTheme.Apply(_evidenceRequest, OperatorTheme.EvidencePaneScheme);
+        OperatorTheme.Apply(_evidenceResponse, OperatorTheme.EvidencePaneScheme);
         _evidenceDetail.Add(_evidenceHeader, _evidenceRequest, _evidenceResponse);
 
         _detailsButton.X = 1;
@@ -1810,11 +1815,19 @@ public sealed class MainWindow : Window
     /// the scroll offset, and a pane that jumped back to the top on every poll would lose the
     /// operator's place mid-sentence.
     /// </summary>
+    /// <summary>
+    /// Replaces a pane's contents and returns it to its top-left. The scroll offset belongs to
+    /// the record that was being read, not to the pane: a caret left mid-line by an arrow key or
+    /// a click survives the assignment, so the next record drew one column short — every line
+    /// missing its first character, and a line holding nothing but <c>{</c> missing altogether.
+    /// Guarded on the text actually changing, so scrolling within one record is left alone.
+    /// </summary>
     private static void SetPaneText(TextView pane, string text)
     {
         if (!string.Equals(pane.Text, text, StringComparison.Ordinal))
         {
             pane.Text = text;
+            pane.Viewport = pane.Viewport with { Location = Point.Empty };
         }
     }
 
@@ -2435,6 +2448,7 @@ public sealed class MainWindow : Window
     internal string EvidenceRequestText => _evidenceRequest.Text;
     internal string EvidenceResponseText => _evidenceResponse.Text;
     internal bool EvidenceResponseVisible => _evidenceResponse.Visible;
+    internal TextView EvidenceResponsePane => _evidenceResponse;
     internal bool EvidenceColumnsWrap =>
         _evidenceHeader.WordWrap && _evidenceRequest.WordWrap && _evidenceResponse.WordWrap;
     internal string EvidenceCopyText => _evidenceCopyText;
