@@ -5,6 +5,8 @@ using CoreBankDemo.DemoRunner.Infrastructure;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
+using Terminal.Gui.Text;
+using Terminal.Gui.Views;
 using Xunit;
 using CoreBankDemo.DemoRunner.Tests;
 
@@ -782,6 +784,44 @@ public class MainWindowTests
         window.ResizeForTest(100, 30);
 
         window.NavigationFrameWidth.Should().Be(16);
+    }
+
+    /// <summary>
+    /// Every rail row is one line: marker, shortcut digit and label together, inside the width
+    /// the rail actually has. It shipped wrapping — Terminal.Gui brackets and pads a Button's
+    /// title by default, four cells the 16-column derivation never budgeted for, so "▸4 Load
+    /// Test" reflowed into "4 Load" / "Test" and read as two workspaces. Asserting the label
+    /// fits its own laid-out frame is what catches that, and it catches the next label that
+    /// outgrows the rail too — a rail row is where a long name is least survivable.
+    /// </summary>
+    [Fact]
+    public void NavigationLabels_EachFitOneRowAtThePreferredWidth()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.ResizeForTest(100, 30);
+        window.RenderForTest();
+
+        foreach (var button in window.NavigationButtons)
+        {
+            // TextFormatter.Text is what actually reaches the screen, decorations included --
+            // Button.UpdateTextFormatterText wraps Text in "[ ... ]" unless NoDecorations is set.
+            // Asserting against Button.Text instead would measure the string we handed in and
+            // miss the four cells that caused the wrap in the first place.
+            var drawn = button.TextFormatter.Text;
+            button.Frame.Height.Should().Be(1, "a rail row that grows a second line breaks mid-phrase");
+            drawn.GetColumns().Should().BeLessThanOrEqualTo(
+                button.Frame.Width,
+                "'{0}' as drawn must fit the {1} cells the rail leaves it",
+                drawn,
+                button.Frame.Width);
+        }
+
+        window.NavigationButtons.Select(button => button.Text.Trim().Split(' ')).Should().AllSatisfy(
+            tokens => tokens.Should().HaveCount(
+                2,
+                "a rail row carries exactly two tokens — the marked shortcut and a one-word label"));
     }
 
     /// <summary>

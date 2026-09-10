@@ -99,7 +99,15 @@ public sealed class MainWindow : Window
     private const int FaultTrackWidthCompact = 10;
     private const int MaximumFaultPresets = 3;
 
-    private static readonly string[] NavigationLabels = ["Operations", "Resources", "Evidence", "Load Test", "Faults"];
+    /// <summary>
+    /// The rail's own short labels, deliberately one word each. The rail is
+    /// <see cref="RailWidthPreferred"/> cells wide and its longest row is the marker, the
+    /// shortcut digit and the label together; a two-word label broke mid-phrase there
+    /// ("4 Load" / "Test"), which reads as two workspaces rather than one. The descriptive
+    /// names live in <c>PresentationModelBuilder.NavigationLabel</c>, which is where a
+    /// longer form belongs.
+    /// </summary>
+    private static readonly string[] NavigationLabels = ["Operations", "Resources", "Evidence", "Tests", "Faults"];
 
     private readonly OperatorConsoleController _controller;
     private readonly TimeProvider _time;
@@ -1265,12 +1273,25 @@ public sealed class MainWindow : Window
     /// <c>Accepted</c> only for the default button, so every command here handles
     /// <c>Accepting</c> and marks it handled to stop the command bubbling to the default.
     /// </summary>
+    /// <summary>
+    /// A rail item is bare text, not a bracketed button. Terminal.Gui brackets and pads a
+    /// Button's title by default — <c>[ ▸1 Operations ]</c> — four cells the rail's
+    /// <see cref="RailWidthPreferred"/> derivation never budgeted for, so every label
+    /// overflowed its row and reflowed into the blank row beneath it. The marker is what
+    /// carries the active workspace (DESIGN.md, Nav rail item), so the brackets were never
+    /// doing any work here. <see cref="View.Height"/> is pinned to one row as well: a label
+    /// that outgrows the rail must truncate visibly rather than silently wrap into its
+    /// neighbour's row.
+    /// </summary>
     private Button CreateNavigationButton(WorkspaceKind workspace, int y)
     {
         var button = NewButton(string.Empty);
-        button.X = 1;
+        button.NoDecorations = true;
+        button.NoPadding = true;
+        button.X = 0;
         button.Y = y;
-        button.Width = Dim.Fill(1);
+        button.Height = 1;
+        button.Width = Dim.Fill();
         button.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -1670,8 +1691,8 @@ public sealed class MainWindow : Window
         _content.X = Pos.Right(_navigation);
         foreach (var button in _navigationButtons)
         {
-            button.X = _compactLayout ? 0 : 1;
-            button.Width = _compactLayout ? Dim.Fill() : Dim.Fill(1);
+            button.X = 0;
+            button.Width = Dim.Fill();
         }
 
         ApplyOperationsRows();
@@ -2145,6 +2166,8 @@ public sealed class MainWindow : Window
     internal Task? LastDispatchedTask { get; private set; }
     internal WorkspaceKind VisibleWorkspace => _controller.State.ActiveWorkspace;
     internal int NavigationFrameWidth => _navigation.Frame.Width;
+
+    internal IReadOnlyList<Button> NavigationButtons => _navigationButtons;
     internal string AnnouncementLineText => _announcementRows[0].Text;
     internal bool AnnouncementVisibleIn(WorkspaceKind workspace) =>
         _announcementRows.Any(row => row.Visible && IsUnder(row, _workspaces[(int)workspace]));
