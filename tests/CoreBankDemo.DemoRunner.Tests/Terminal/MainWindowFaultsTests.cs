@@ -224,17 +224,17 @@ public class MainWindowFaultsTests
         window.RenderForTest();
 
         window.ArmingButton.Enabled.Should().BeTrue();
-        window.ArmingButton.Text.Should().Be("Faults not armed on next AppHost start", "Dev Proxy is opt-in");
+        window.ArmingButton.Text.Should().Be("Faults armed on next AppHost start", "Dev Proxy now arms by default so sliders work without a restart");
         window.TriggerArmingToggleForTest();
         window.RenderForTest();
-        window.ArmingButton.Text.Should().Be("Faults armed on next AppHost start");
+        window.ArmingButton.Text.Should().Be("Faults not armed on next AppHost start");
 
         await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
         window.RenderForTest();
 
         window.ArmingButton.Enabled.Should().BeFalse();
         window.ArmingButton.Text.Should().Contain("restart it to change");
-        harness.Processes.ArmFaultsRequests.Should().Equal(true);
+        harness.Processes.ArmFaultsRequests.Should().Equal(false);
     }
 
     [Fact]
