@@ -625,10 +625,12 @@ public sealed record OperatorConsoleState(
     string StatusLine,
     // --- Fault injection -------------------------------------------------
     // Arming is a launch-time property: this flag decides what the *next* start
-    // does, and is never a live on/off switch for a running topology. Off by
-    // default because Dev Proxy is opt-in -- defaulting on would make the binary
-    // a hard prerequisite for every console-started topology.
-    bool FaultArmingRequested = false,
+    // does, and is never a live on/off switch for a running topology. On by
+    // default (ADR-020) so Dev Proxy is always up in the Resources workspace and
+    // the fault sliders work without a restart -- devproxy is therefore a Start-time
+    // prerequisite unless the operator explicitly unarms. Fault levels still default
+    // to AllZero, so nothing is actually injected until a knob is staged and applied.
+    bool FaultArmingRequested = true,
     // True only when this session started the current topology with a Dev Proxy.
     // An Attached topology can be reported on, never re-armed.
     bool FaultsArmed = false,
