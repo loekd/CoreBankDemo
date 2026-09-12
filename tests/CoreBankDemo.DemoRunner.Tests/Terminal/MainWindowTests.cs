@@ -1739,6 +1739,52 @@ public class MainWindowTests
         header.X.Should().BeGreaterThan(list.X, "the pane sits to the right of the list");
     }
 
+    /// <summary>Display-only reset: no backend call, matching <see cref="OperatorConsoleController.ClearTrackedPayments"/>.</summary>
+    [Fact]
+    public async Task ClearButton_EmptiesTheStillOpenStripAndTheSelection()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-clear", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        window.RenderForTest();
+        controller.State.TrackedPayments.Should().NotBeEmpty();
+
+        window.ClearTrackedPaymentsButton.InvokeCommand(Command.Accept);
+
+        controller.State.TrackedPayments.Should().BeEmpty();
+        controller.State.SelectedPayment.Should().BeNull();
+        window.RenderForTest();
+        window.StillOpenVisible.Should().BeFalse("the strip has nothing left to list");
+    }
+
+    /// <summary>Display-only reset: no backend call, matching <see cref="OperatorConsoleController.ClearEvidence"/>.</summary>
+    [Fact]
+    public async Task ClearButton_EmptiesTheEvidenceLog()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.LoadTests, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        await controller.QueryOutcomeAsync("known-id", CancellationToken.None);
+        window.RenderForTest();
+        controller.State.Evidence.Should().NotBeEmpty();
+
+        window.ClearEvidenceButton.InvokeCommand(Command.Accept);
+
+        controller.State.Evidence.Should().BeEmpty();
+        controller.State.SelectedEvidence.Should().BeNull();
+    }
+
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
         IConfirmationService? confirmation = null) =>

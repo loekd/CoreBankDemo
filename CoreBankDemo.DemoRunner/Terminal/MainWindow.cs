@@ -204,6 +204,7 @@ public sealed class MainWindow : Window
     private readonly Label _stillOpenRule = new();
     private readonly ListView _stillOpenList = new();
     private readonly Label _feedStatus = new();
+    private readonly Button _clearTrackedPaymentsButton = NewButton("Clear");
 
     /// <summary>
     /// The transient announcement's row, one per surface that can be the content area: all five
@@ -272,6 +273,7 @@ public sealed class MainWindow : Window
     private readonly Button _exportButton = NewButton("Export session evidence");
     private readonly Button _inspectPaymentsOutbox = NewButton("Payments outbox");
     private readonly Button _inspectCoreBankInbox = NewButton("CoreBank inbox");
+    private readonly Button _clearEvidenceButton = NewButton("Clear");
 
     private readonly Label _loadPhase = new() { Text = "Reset → Run → Wait → Assert → Investigate" };
     private readonly Label _loadStatus = new();
@@ -592,8 +594,19 @@ public sealed class MainWindow : Window
         _feedStatus.X = LabelX;
         _feedStatus.Y = Pos.AnchorEnd(1);
         _feedStatus.Height = 1;
-        _feedStatus.Width = Dim.Fill(1);
-        view.Add(_stillOpenRule, _stillOpenList, _feedStatus);
+        // Leaves room for Clear at the same row's right end: the row is otherwise idle whenever
+        // the strip itself is showing, since the feed statement moves onto the strip's own rule.
+        _feedStatus.Width = Dim.Fill(CardActionSlotWidth + 1);
+        // Clears the tracked-payments list only -- display-only, no backend call -- so it sits on
+        // the strip's own row rather than the compose bar, which acts on a payment being composed.
+        _clearTrackedPaymentsButton.X = Pos.AnchorEnd(CardActionSlotWidth);
+        _clearTrackedPaymentsButton.Y = Pos.AnchorEnd(1);
+        _clearTrackedPaymentsButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            _controller.ClearTrackedPayments();
+        };
+        view.Add(_stillOpenRule, _stillOpenList, _feedStatus, _clearTrackedPaymentsButton);
     }
 
     /// <summary>
@@ -855,6 +868,9 @@ public sealed class MainWindow : Window
         _inspectPaymentsOutbox.Y = Pos.AnchorEnd(1);
         _inspectCoreBankInbox.X = Pos.Right(_inspectPaymentsOutbox) + 1;
         _inspectCoreBankInbox.Y = Pos.AnchorEnd(1);
+        // Acts on the whole log, same scope as Export, but display-only -- no backend call.
+        _clearEvidenceButton.X = Pos.Right(_inspectCoreBankInbox) + 1;
+        _clearEvidenceButton.Y = Pos.AnchorEnd(1);
 
         // Moving through the list is how an operator reads the journal, so the pane follows the
         // selection instead of waiting for Details to be pressed. Guarded against the rebind:
@@ -898,8 +914,9 @@ public sealed class MainWindow : Window
         _exportButton.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.ExportEvidenceAsync(_sessionCancellation.Token))); };
         _inspectPaymentsOutbox.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.PaymentsOutbox, _sessionCancellation.Token))); };
         _inspectCoreBankInbox.Accepting += (_, e) => { e.Handled = true; Dispatch(() => SurfaceAsync(_controller.InspectAsync(KnownEndpoints.CoreBankInbox, _sessionCancellation.Token))); };
+        _clearEvidenceButton.Accepting += (_, e) => { e.Handled = true; _controller.ClearEvidence(); };
 
-        view.Add(_evidenceList, _evidenceDetail, _detailsButton, _wrapButton, _copyButton, _exportButton, _inspectPaymentsOutbox, _inspectCoreBankInbox);
+        view.Add(_evidenceList, _evidenceDetail, _detailsButton, _wrapButton, _copyButton, _exportButton, _inspectPaymentsOutbox, _inspectCoreBankInbox, _clearEvidenceButton);
         // Above the two action rows rather than beside them, and the lists give up the row only
         // while it is showing -- nothing is held empty against its arrival.
         AddAnnouncementRow(view, Pos.AnchorEnd(3));
@@ -2496,6 +2513,7 @@ public sealed class MainWindow : Window
     internal View CardClosingLabel => _cardClosing;
     internal View StillOpenRuleLabel => _stillOpenRule;
     internal View ComposeRuleLabel => _composeRule;
+    internal Button ClearTrackedPaymentsButton => _clearTrackedPaymentsButton;
     internal string TopologyStatusText => _topologyStatus.Text;
 
     /// <summary>The rows the Operations payment area actually has, chrome removed.</summary>
@@ -2509,6 +2527,7 @@ public sealed class MainWindow : Window
     internal Button DetailsButton => _detailsButton;
 
     internal Button CopyButton => _copyButton;
+    internal Button ClearEvidenceButton => _clearEvidenceButton;
     internal Button JaegerButton => _jaegerButton;
     internal Button AspireDashboardButton => _aspireDashboardButton;
 
