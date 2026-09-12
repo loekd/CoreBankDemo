@@ -364,8 +364,9 @@ resource, or drop `.WithRedisInsight(...)` from `CoreBankDemo.AppHost/AppHost.cs
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — component detail, database schemas, data flow
 - **[docs/adr/](docs/adr/)** — 19 accepted decision records; these govern the system's behavior
-- **[docs/bmad/](docs/bmad/)** — planning, implementation and test artifacts, plus
-  `constraints.md` (the binding invariants, external API surface, ports and test rules)
+- **[docs/constraints.md](docs/constraints.md)** — the binding invariants, external API surface, ports and test rules
+- **[docs/superpowers/](docs/superpowers/)** — design specs (including the migrated 2026 rebuild PRDs, briefs, architecture spine and story specs) and implementation plans
+- **[docs/backlog.md](docs/backlog.md)** — open stories and deferred work
 - **[AGENTS.md](AGENTS.md)** — orientation for AI agents working in this repository
 
 ## Further reading
