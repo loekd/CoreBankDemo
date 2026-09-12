@@ -12,8 +12,9 @@ process's lifetime and threads it as an explicit, required, leading constructor 
 `MainWindow` and `ConfirmationDialog`'s `TerminalConfirmationService` — no DI container, matching
 the console's existing plain-`new` style. `TerminalCrashGuard` (which fires from
 `AppDomain.UnhandledException`, on arbitrary threads, before a normal constructor dependency is
-possible) gets the instance attached/detached around its lifetime via two new static methods
-instead. Every render test gets its own instance via a small shared factory.
+possible) gets the instance attached via a new static method, and both normal shutdown and a
+crash take atomic ownership of it via `Interlocked.Exchange` before disposing it, so exactly one
+caller ever disposes it. Every render test gets its own instance via a small shared factory.
 
 **Tech Stack:** .NET 10, Terminal.Gui 2.5.0 (bumped from 2.4.17 in this plan), xUnit v3,
 AwesomeAssertions.
@@ -32,13 +33,29 @@ AwesomeAssertions.
   2.4.17) and pointing at a different, separate, still-incubating control — explicitly out of
   scope. Its 5 pre-existing warning sites in `MainWindow.cs` (lines 255-257, 1871, 2611) get
   **narrow** replacement pragmas, not swept into the broad ones being removed.
-- **Build will not be green until Task 8.** Tasks 2-7 touch one side of a call-site relationship
+- **Build will not be green until Task 7.** Tasks 2-6 touch one side of a call-site relationship
   at a time (e.g., `MainWindow.cs`'s constructor signature before its callers are updated), so
   the solution will not compile in between. This is expected — each task's diff is still
-  independently reviewable; just don't run `dotnet build` as a pass/fail gate until Task 8 says to.
+  independently reviewable; just don't run `dotnet build` as a pass/fail gate until Task 7 says to.
 - Run `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj` (not the whole
   solution) after Tasks 2-3 to catch typos early even though it won't succeed until later tasks
   land — read the error list, don't expect 0 errors.
+- **Branch first.** This repo requires every change to land on a branch cut from a freshly
+  fetched `origin/main` (`git fetch origin main && git switch -c feature/<slug> origin/main`), and
+  `.claude/hooks/branch-gate.sh` blocks writes while `main` is checked out. This plan has no
+  explicit "create a branch" task — do it before Task 1.
+- **Namespace footgun:** `CoreBankDemo.DemoRunner.Tests` has a nested namespace literally named
+  `CoreBankDemo.DemoRunner.Tests.Application` (`tests/CoreBankDemo.DemoRunner.Tests/Application/`).
+  Because enclosing-namespace member lookup beats a `using` directive, a plain
+  `using Terminal.Gui.App;` plus a bare `Application.Create()` call **will not compile** anywhere
+  under `CoreBankDemo.DemoRunner.Tests.*` — the bare identifier `Application` resolves to that
+  nested namespace instead of `Terminal.Gui.App.Application`, the class. Every test file in this
+  plan that needs to call `Application.Create()` uses the same
+  `using AppTerminal = Terminal.Gui.App.Application;` alias the production code already uses, for
+  exactly this reason — never a bare `using Terminal.Gui.App;` for that call. (`using
+  Terminal.Gui.App;` alone is still fine, and used, anywhere the plan only names the `IApplication`
+  *type*, never calls `Application.Create()` directly — there's no nested namespace named
+  `IApplication` to collide with.)
 
 ---
 
@@ -57,6 +74,7 @@ AwesomeAssertions.
 ```csharp
 using System.Drawing;
 using Terminal.Gui.App;
+using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
@@ -65,12 +83,16 @@ internal static class TerminalAppFactory
 {
     internal static IApplication CreateHeadless(int width, int height)
     {
-        var app = Application.Create().Init("dotnet");
+        var app = AppTerminal.Create().Init("dotnet");
         app.Screen = new Rectangle(0, 0, width, height);
         return app;
     }
 }
 ```
+
+(`using Terminal.Gui.App;` is still needed for the `IApplication` return type; `Application.Create()`
+must go through the `AppTerminal` alias, not a bare `Application`, because
+`CoreBankDemo.DemoRunner.Tests.Application` is a nested namespace here — see Global Constraints.)
 
 - [ ] **Step 2: Build the test project to confirm it compiles standalone**
 
@@ -93,7 +115,12 @@ git commit -m "test(demorunner): add TerminalAppFactory for headless IApplicatio
 
 **Interfaces:**
 - Produces: `TerminalCrashGuard.AttachApplication(IApplication application)`,
-  `TerminalCrashGuard.DetachApplication()` — consumed by Task 5 (`Program.cs`).
+  `TerminalCrashGuard.TakeApplication() : IApplication?` — consumed by Task 5 (`Program.cs`).
+  `TakeApplication` atomically clears the recorded instance and returns whatever was there (or
+  `null`), so it doubles as the "detach" operation: whichever of a crash or normal shutdown calls
+  it first is the only one that gets a non-null result, so exactly one of them ever disposes the
+  instance. This closes a race the simpler "read-then-separately-clear" version would have: a
+  crash arriving between disposing and clearing could otherwise dispose the same instance twice.
 - `TerminalCrashGuard.Install(string artifactsDirectory)` (unchanged signature) and
   `TerminalCrashGuard.Report(...)` (unchanged) are still consumed by Task 5.
 
@@ -101,7 +128,41 @@ There is no existing dedicated test file for `TerminalCrashGuard` (it hooks
 `AppDomain.UnhandledException`, which isn't practically unit-testable) — verification here is a
 build check plus the manual smoke test in Task 9.
 
-- [ ] **Step 1: Replace the `AppTerminal` alias with a plain `IApplication` using**
+- [ ] **Step 1: Retarget the class doc comment's `Application.Shutdown` references**
+
+The type's `<remarks>` doc comment (right above `internal static class TerminalCrashGuard`)
+mentions `<c>Application.Shutdown</c>` twice — an API this class no longer calls once this task is
+done. Change:
+
+```csharp
+/// A Terminal.Gui console switches the terminal into the alternate screen buffer, turns off
+/// echo and canonical mode, hides the cursor and enables mouse reporting. Every one of those is
+/// undone by <c>Application.Shutdown</c> -- so any exit that does not reach it leaves the
+/// operator staring at a dead full-screen view in a window that no longer responds to typing,
+/// with no message saying what happened. On stage that is indistinguishable from the machine
+/// having locked up.
+/// </para>
+/// <para>
+/// The restore is therefore belt and braces. <c>Application.Shutdown</c> is tried first because
+/// it is the only thing that can put the terminal's own attributes back; but it can itself throw
+```
+
+to:
+
+```csharp
+/// A Terminal.Gui console switches the terminal into the alternate screen buffer, turns off
+/// echo and canonical mode, hides the cursor and enables mouse reporting. Every one of those is
+/// undone by <c>IApplication.Dispose</c> -- so any exit that does not reach it leaves the
+/// operator staring at a dead full-screen view in a window that no longer responds to typing,
+/// with no message saying what happened. On stage that is indistinguishable from the machine
+/// having locked up.
+/// </para>
+/// <para>
+/// The restore is therefore belt and braces. <c>IApplication.Dispose</c> is tried first because
+/// it is the only thing that can put the terminal's own attributes back; but it can itself throw
+```
+
+- [ ] **Step 2: Replace the `AppTerminal` alias with a plain `IApplication` using**
 
 Change line 4 from:
 
@@ -115,7 +176,7 @@ to:
 using Terminal.Gui.App;
 ```
 
-- [ ] **Step 2: Add the attach/detach static field and methods**
+- [ ] **Step 3: Add the attach/take-ownership static field and methods**
 
 Add, right after the existing `_reported` field (after line 49, before the blank line at 50):
 
@@ -138,16 +199,19 @@ closing `}`):
     }
 
     /// <summary>
-    /// Clears the recorded instance once it has been disposed normally, so a later crash (e.g.
-    /// during process teardown) does not try to dispose it a second time.
+    /// Atomically clears the recorded instance and returns whatever was there, or <c>null</c> if
+    /// nothing was attached or it was already taken. Whichever of a crash (<see
+    /// cref="RestoreTerminal"/>) or normal shutdown (<c>Program.RunConsole</c>'s <c>finally</c>)
+    /// calls this first is the only one that gets a non-null result back — so exactly one of them
+    /// ever disposes the instance, with no window for a double-dispose race between the two.
     /// </summary>
-    internal static void DetachApplication()
+    internal static IApplication? TakeApplication()
     {
-        Volatile.Write(ref _application, null);
+        return Interlocked.Exchange(ref _application, null);
     }
 ```
 
-- [ ] **Step 3: Replace the obsolete `Shutdown()` call in `RestoreTerminal`**
+- [ ] **Step 4: Replace the obsolete `Shutdown()` call in `RestoreTerminal`**
 
 In `RestoreTerminal()`, change:
 
@@ -168,7 +232,7 @@ to:
 ```csharp
         try
         {
-            Volatile.Read(ref _application)?.Dispose();
+            TakeApplication()?.Dispose();
         }
         catch (Exception)
         {
@@ -177,14 +241,14 @@ to:
         }
 ```
 
-- [ ] **Step 4: Build the DemoRunner project (errors expected — MainWindow/Program not yet migrated)**
+- [ ] **Step 5: Build the DemoRunner project (errors expected — MainWindow/Program not yet migrated)**
 
 Run: `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj`
 Expected: this file alone compiles; the project as a whole may still show pre-existing CS0618
 warnings from `Program.cs`/`MainWindow.cs` until Tasks 3-5 land. No new errors should originate
 from `TerminalCrashGuard.cs` itself.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add CoreBankDemo.DemoRunner/Terminal/TerminalCrashGuard.cs
@@ -347,8 +411,8 @@ public sealed class MainWindow : Window
 
 - [ ] **Step 2: Delete the trailing `#pragma warning restore CS0618`**
 
-`MainWindow.cs` currently ends its class body with `#pragma warning restore CS0618` right before
-the file's final closing brace. Delete that line.
+`MainWindow.cs`'s class body closes on its second-to-last line; `#pragma warning restore CS0618`
+is the file's actual final line, right after that closing brace. Delete that last line.
 
 - [ ] **Step 3: Add narrow pragmas around the 5 pre-existing, unrelated `TextView` warning sites**
 
@@ -516,9 +580,32 @@ git commit -m "refactor(demorunner): MainWindow takes an IApplication instance"
 
 **Interfaces:**
 - Consumes: `MainWindow(IApplication app, ...)` from Task 4,
-  `TerminalCrashGuard.AttachApplication`/`DetachApplication` from Task 2.
+  `TerminalCrashGuard.AttachApplication`/`TakeApplication` from Task 2.
 
-- [ ] **Step 1: Remove the method-wide pragma and create the instance (not `using`-scoped)**
+- [ ] **Step 1: Retarget the stale `Application.Shutdown` comment near `TerminalCrashGuard.Install`**
+
+This comment sits in `Main()`, above the `TerminalCrashGuard.Install(...)` call — separate from
+`RunConsole`, which the rest of this task touches. Change:
+
+```csharp
+        // Armed before anything else can fail. A Terminal.Gui console puts the terminal into the
+        // alternate screen and raw mode, and only Application.Shutdown undoes that -- so any exit
+        // that misses it leaves the operator looking at a dead full-screen view in a window that
+        // no longer echoes typing, with nothing on screen saying why.
+        TerminalCrashGuard.Install(Path.Combine(repositoryRoot, ".demo-runner-artifacts"));
+```
+
+to:
+
+```csharp
+        // Armed before anything else can fail. A Terminal.Gui console puts the terminal into the
+        // alternate screen and raw mode, and only disposing the IApplication instance undoes that
+        // -- so any exit that misses it leaves the operator looking at a dead full-screen view in
+        // a window that no longer echoes typing, with nothing on screen saying why.
+        TerminalCrashGuard.Install(Path.Combine(repositoryRoot, ".demo-runner-artifacts"));
+```
+
+- [ ] **Step 2: Remove the method-wide pragma and create the instance (not `using`-scoped)**
 
 Change:
 
@@ -581,11 +668,19 @@ non-obsolete static factory method, so keeping the alias for that one call is fi
 `using` needed since `app` is always referred to via `var`, never by naming `IApplication`
 explicitly in this file.)
 
-- [ ] **Step 2: Replace the remaining `AppTerminal.X` calls inside the try block**
+- [ ] **Step 3: Replace the remaining `AppTerminal.X` calls inside the try block**
 
+This also retargets the stale "an ordinary Shutdown" comment immediately above (see Global
+Constraints: comments referring to the removed API are updated everywhere this plan touches them).
 Change:
 
 ```csharp
+            // Without an error handler, Run rethrows -- unwinding past the run loop and leaving
+            // the runtime to dump a stack trace over a terminal still in its alternate screen.
+            // Returning true keeps the loop's own teardown intact, and RequestStop then ends it
+            // at the next iteration, so the finally below performs an ordinary Shutdown. The
+            // report is deliberately deferred until after that: it restores the terminal itself,
+            // which must not happen underneath a live run loop.
             AppTerminal.Run(window, errorHandler: exception =>
             {
                 crash ??= exception;
@@ -600,6 +695,12 @@ Change:
 to:
 
 ```csharp
+            // Without an error handler, Run rethrows -- unwinding past the run loop and leaving
+            // the runtime to dump a stack trace over a terminal still in its alternate screen.
+            // Returning true keeps the loop's own teardown intact, and RequestStop then ends it
+            // at the next iteration, so the finally below performs an ordinary disposal. The
+            // report is deliberately deferred until after that: it restores the terminal itself,
+            // which must not happen underneath a live run loop.
             app.Run(window, errorHandler: exception =>
             {
                 crash ??= exception;
@@ -611,64 +712,48 @@ to:
             });
 ```
 
-- [ ] **Step 3: Replace `Shutdown()` with `Dispose()` in the `finally` block, and detach the crash guard**
+- [ ] **Step 4: Replace `Shutdown()` with a `TakeApplication()`-owned `Dispose()` in the `finally` block, and delete the trailing pragma**
 
-Change:
+These are two separate edits — the original "before" text is not contiguous (11 lines sit between
+them: the `if (crash is null)` early return and the `TerminalCrashGuard.Report(...)` call).
+
+**Change A** — inside the existing `finally` block, change:
 
 ```csharp
-        finally
-        {
-            Console.CancelKeyPress -= cancelHandler;
-            try
-            {
-                controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
-            }
-            catch (InvalidOperationException ex)
-            {
-                Console.Error.WriteLine($"Could not stop the owned AppHost cleanly: {ex.Message}");
-            }
             AppTerminal.Shutdown();
         }
-    }
-#pragma warning restore CS0618
 ```
 
 to:
 
 ```csharp
-        finally
-        {
-            Console.CancelKeyPress -= cancelHandler;
-            try
-            {
-                controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
-            }
-            catch (InvalidOperationException ex)
-            {
-                Console.Error.WriteLine($"Could not stop the owned AppHost cleanly: {ex.Message}");
-            }
-            app.Dispose();
-            TerminalCrashGuard.DetachApplication();
+            TerminalCrashGuard.TakeApplication()?.Dispose();
         }
-    }
 ```
 
-This preserves the exact original ordering the comments call out: disposal happens in `finally`,
-before the post-`try` `TerminalCrashGuard.Report(crash, ...)` call below it — never after, which
-is why this is deliberately *not* a top-level `using var app = ...;` (see spec).
+(Not `app.Dispose(); TerminalCrashGuard.TakeApplication();` as two statements — `TakeApplication()`
+*is* the take-and-clear operation; calling `app.Dispose()` directly here and separately clearing
+would reopen the double-dispose race `TakeApplication()` exists to close. See Task 2's Interfaces
+note.)
 
-- [ ] **Step 4: Build and run the full solution**
+**Change B** — separately, delete the file's actual final line (after the method's closing `}`):
+
+```csharp
+#pragma warning restore CS0618
+```
+
+- [ ] **Step 5: Build and run the full solution**
 
 Run: `dotnet build CoreBankDemo.sln`
-Expected: still fails — `MainWindowTests.cs`, `EvidencePaneRenderTests.cs`, and
-`NavigationRailRenderTests.cs` (Tasks 6-7) still call the old constructor shapes. Confirm the only
-remaining errors are in those three test files, and that `CoreBankDemo.DemoRunner.csproj` itself
-now builds clean with 0 warnings:
+Expected: still fails — three files in `MainWindowTests.cs`/`MainWindowFaultsTests.cs` (Task 6)
+and the two render test files (Task 7) still call the old constructor shapes. Confirm the only
+remaining errors are in those test files, and that `CoreBankDemo.DemoRunner.csproj` itself now
+builds clean with 0 warnings:
 
 Run: `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj`
 Expected: `Build succeeded`, 0 warnings, 0 errors.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add CoreBankDemo.DemoRunner/Program.cs
@@ -677,29 +762,41 @@ git commit -m "refactor(demorunner): Program owns and threads the IApplication i
 
 ---
 
-### Task 6: Update MainWindowTests.cs's 4 constructor call sites
+### Task 6: Update MainWindowTests.cs's and MainWindowFaultsTests.cs's constructor call sites
 
 **Files:**
 - Modify: `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs`
+- Modify: `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowFaultsTests.cs`
 
 **Interfaces:**
 - Consumes: `MainWindow(IApplication app, ...)` from Task 4.
 
-None of these 4 call sites reference `AppTerminal`/`Application` today — they all pass
+`MainWindowTests.cs` has 4 call sites that construct `new MainWindow(...)` directly, plus its own
+`CreateWindow(...)` helper method with 59 further callers within the same file.
+`MainWindowFaultsTests.cs` — a separate file, not mentioned by name anywhere else in this plan or
+the spec — has an *identical* `CreateWindow(...)` helper with 12 callers of its own. `grep "new
+MainWindow("` finds only the first 4: `CreateWindow`'s own `new(...)` uses target-typed
+construction (no literal `MainWindow` text), which is why both helpers were missed until this plan
+was reviewed. None of these call sites reference `AppTerminal`/`Application` today — all pass
 `marshalUpdates: false`, so they never render and never actually invoke `app.Invoke` at runtime.
 They still need a valid `IApplication` instance to satisfy the constructor (it's captured into
 `_repaints`'s delegate at construction time regardless of whether it's ever called) —
 `Application.Create()` alone (no `Init()`) is enough; delegate creation from an instance method
-just binds `this`, it doesn't require the driver to be running.
+just binds `this`, it doesn't require the driver to be running, and a never-`Init()`'d instance
+never touches the real terminal, so leaving the 71 `CreateWindow`-helper instances (see Steps 6-7)
+undisposed has no actual resource cost.
 
-- [ ] **Step 1: Add the missing using directive**
+- [ ] **Step 1: Add the missing using directive to `MainWindowTests.cs`**
 
-Add to the top of the file (alphabetically among the existing `using` lines, e.g. right after
-`using System.Drawing;`):
+Add to the top of the file, among the existing `using` lines:
 
 ```csharp
-using Terminal.Gui.App;
+using AppTerminal = Terminal.Gui.App.Application;
 ```
+
+(An alias, not a plain `using Terminal.Gui.App;` — see Global Constraints' namespace footgun note.
+This file never names the `IApplication` type directly, only calls `Application.Create()`, so the
+alias alone is sufficient; no separate `using Terminal.Gui.App;` is needed here.)
 
 - [ ] **Step 2: Update `RefreshAndOrderlyExit_RunThroughActualMainWindowPaths`**
 
@@ -727,7 +824,7 @@ to:
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
         var exited = false;
-        using var app = Application.Create();
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
             app,
             controller,
@@ -760,7 +857,7 @@ to:
 
 ```csharp
         var controller = new OperatorHarness().CreateController();
-        using var app = Application.Create();
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
             app,
             controller,
@@ -795,7 +892,7 @@ to:
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
         var exited = false;
-        using var app = Application.Create();
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
             app,
             controller,
@@ -831,7 +928,7 @@ to:
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
         var exited = false;
-        using var app = Application.Create();
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
             app,
             controller,
@@ -843,18 +940,69 @@ to:
         window.QuitButton.InvokeCommand(Command.Accept);
 ```
 
-- [ ] **Step 6: Build and run this test file**
+- [ ] **Step 6: Fix `MainWindowTests.cs`'s own `CreateWindow` helper (59 callers)**
+
+Near the end of the file, change:
+
+```csharp
+    private static MainWindow CreateWindow(
+        OperatorConsoleController controller,
+        IConfirmationService? confirmation = null) =>
+        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+```
+
+to:
+
+```csharp
+    private static MainWindow CreateWindow(
+        OperatorConsoleController controller,
+        IConfirmationService? confirmation = null) =>
+        new(AppTerminal.Create(), controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+```
+
+None of `CreateWindow`'s 59 callers need to change — the fix is entirely inside the helper. Each
+call now creates its own never-`Init()`'d `IApplication` instance (see this task's intro for why
+leaving it undisposed is fine here).
+
+- [ ] **Step 7: Fix `MainWindowFaultsTests.cs`'s `CreateWindow` helper (12 callers)**
+
+This file has an identical helper (near its end, right before the `ThrowingConfirmationService`
+nested class) and needs both the same `using` and the same fix. Add to its `using` list:
+
+```csharp
+using AppTerminal = Terminal.Gui.App.Application;
+```
+
+Then change:
+
+```csharp
+    private static MainWindow CreateWindow(
+        OperatorConsoleController controller,
+        IConfirmationService? confirmation = null) =>
+        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+```
+
+to:
+
+```csharp
+    private static MainWindow CreateWindow(
+        OperatorConsoleController controller,
+        IConfirmationService? confirmation = null) =>
+        new(AppTerminal.Create(), controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+```
+
+- [ ] **Step 8: Build and run these test files**
 
 Run: `dotnet build tests/CoreBankDemo.DemoRunner.Tests/CoreBankDemo.DemoRunner.Tests.csproj`
-Expected: still fails overall (Tasks 7 not done yet) unless `EvidencePaneRenderTests.cs`/
-`NavigationRailRenderTests.cs` are also already broken the same way — that's expected. Search the
-build output specifically for `MainWindowTests.cs` and confirm it has zero errors of its own.
+Expected: still fails overall (Task 7's two render test files aren't done yet) — that's expected.
+Search the build output specifically for `MainWindowTests.cs` and `MainWindowFaultsTests.cs` and
+confirm neither has any errors of its own.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs
-git commit -m "test(demorunner): MainWindowTests passes an IApplication instance"
+git add tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowFaultsTests.cs
+git commit -m "test(demorunner): MainWindowTests and MainWindowFaultsTests pass an IApplication instance"
 ```
 
 ---
@@ -869,7 +1017,12 @@ git commit -m "test(demorunner): MainWindowTests passes an IApplication instance
 - Consumes: `TerminalAppFactory.CreateHeadless(int, int)` from Task 1,
   `MainWindow(IApplication app, ...)` from Task 4.
 
-Both files are small enough to replace in full.
+Both files are small enough to replace in full. Note one small, harmless reordering: originally
+each test did `Init("dotnet")` → construct `MainWindow` → set `Screen` → `Begin(window)`;
+`TerminalAppFactory.CreateHeadless` folds `Init` and `Screen` together, so the new order is `Init`
+→ set `Screen` → construct `MainWindow` → `Begin(window)`. The move is entirely *before* `Begin`,
+which is the part that actually matters for rendering — everything from `Begin` onward keeps its
+original sequence.
 
 - [ ] **Step 1: Replace the full contents of `EvidencePaneRenderTests.cs`**
 
@@ -1118,9 +1271,13 @@ Expected: `Build succeeded`, **0 warnings**, 0 errors — this is the first poin
 the whole solution compiles clean. If any warnings remain, stop and diagnose before continuing;
 don't proceed to Task 8 with an unexplained warning.
 
-Run: `dotnet test CoreBankDemo.sln --no-build`
-Expected: all 8 test projects `Passed!`, in particular `CoreBankDemo.DemoRunner.Tests` at 687
-tests (same count as before this plan — no test was added or removed, only their setup changed).
+Run: `dotnet test CoreBankDemo.Rebuild.slnf` (this repo's documented build/test gate per
+AGENTS.md — a narrower project set than the full `.sln`, but it still includes
+`CoreBankDemo.Persistence.IntegrationTests`, so Docker must be up for its Testcontainer-backed
+tests)
+Expected: every project in it passes; in particular `CoreBankDemo.DemoRunner.Tests` reports
+`Passed!` at 687 tests (same count as before this plan — no test was added or removed, only their
+setup changed).
 
 - [ ] **Step 4: Commit**
 
@@ -1194,8 +1351,9 @@ dotnet build CoreBankDemo.sln --no-restore
 Expected: `Build succeeded`, 0 warnings, 0 errors, against 2.5.0 specifically (a clean rebuild
 rules out anything masked by incremental build state).
 
-Run: `dotnet test CoreBankDemo.sln --no-build`
-Expected: all 8 test projects pass, same counts as Task 7's verification.
+Run: `dotnet test CoreBankDemo.Rebuild.slnf`
+Expected: same result as Task 7's verification — every project in the gate passes,
+`CoreBankDemo.DemoRunner.Tests` at 687 tests.
 
 - [ ] **Step 4: Commit**
 
@@ -1223,12 +1381,41 @@ alternate-screen artifacts.
 
 - [ ] **Step 2: Confirm a forced crash still restores the terminal**
 
-With the console running, from another terminal find its PID (`pgrep -f CoreBankDemo.DemoRunner`)
-and send it a signal that reaches `AppDomain.UnhandledException` indirectly is hard to force
-externally — instead, temporarily add a `throw new InvalidOperationException("smoke test");` at
-the top of `OnStateChanged` in `MainWindow.cs`, trigger any state change (e.g. press a key that
-refreshes a workspace), confirm the terminal is restored and the crash report file appears under
-`.demo-runner-artifacts/`, then **revert the temporary throw** (`git checkout -- CoreBankDemo.DemoRunner/Terminal/MainWindow.cs` if nothing else uncommitted is pending in that file, or a manual undo).
+The point of this step is to exercise `TerminalCrashGuard.AttachApplication`/`TakeApplication` —
+i.e. an exception that actually reaches `AppDomain.UnhandledException` while the `IApplication`
+instance is still live. **A `throw` placed directly in `OnStateChanged` does not do this**: that
+method runs on the UI thread inside `app.Run(window, errorHandler: ...)`'s run loop, so such an
+exception is caught by the `errorHandler` lambda in `Program.cs`, not by
+`AppDomain.UnhandledException` — `Program.cs`'s own `finally` block would already have called
+`TerminalCrashGuard.TakeApplication()?.Dispose()` by the time `TerminalCrashGuard.Report` runs, so
+`RestoreTerminal()`'s `TakeApplication()` would just get `null` back and this step would prove
+nothing new.
+
+Instead, temporarily wire a throw through a background thread, so it truly escapes the run loop.
+In `MainWindow.cs`'s `OnStateChanged` (around line 1485), change:
+
+```csharp
+    private void OnStateChanged(OperatorConsoleState state)
+    {
+        if (!_marshalUpdates)
+```
+
+to:
+
+```csharp
+    private void OnStateChanged(OperatorConsoleState state)
+    {
+        ThreadPool.QueueUserWorkItem(_ => throw new InvalidOperationException("smoke test"));
+
+        if (!_marshalUpdates)
+```
+
+Launch the console (`dotnet run --project CoreBankDemo.DemoRunner`), trigger any state change
+(e.g. switch workspaces or press a key that refreshes one), and confirm the terminal is restored
+and a crash report file appears under `.demo-runner-artifacts/`. Then **revert the temporary
+throw** — `git checkout -- CoreBankDemo.DemoRunner/Terminal/MainWindow.cs` (safe only if nothing
+else uncommitted is pending in that file at this point in the plan; otherwise undo the two added
+lines by hand).
 
 Expected: terminal returns to a normal shell prompt (not a dead alternate-screen view), and a
 `crash-<timestamp>.log` file exists under the repository's `.demo-runner-artifacts/` directory
@@ -1237,5 +1424,5 @@ containing the exception detail.
 - [ ] **Step 3: Report results**
 
 No commit for this task — it's verification only. If both checks pass, the migration is
-complete: `dotnet build CoreBankDemo.sln` shows 0 warnings, `dotnet test CoreBankDemo.sln` passes
-in full, and the console behaves identically to before under both normal and crash exits.
+complete: `dotnet build CoreBankDemo.sln` shows 0 warnings, `dotnet test CoreBankDemo.Rebuild.slnf`
+passes in full, and the console behaves identically to before under both normal and crash exits.

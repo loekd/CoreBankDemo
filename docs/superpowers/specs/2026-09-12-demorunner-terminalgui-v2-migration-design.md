@@ -42,6 +42,15 @@ migration docs:
 Also grepped the codebase for zero use of anything from the new API today, confirming this is a
 green-field migration with no partial adoption to reconcile.
 
+**Namespace footgun, found during plan review.** `CoreBankDemo.DemoRunner.Tests` has a nested
+namespace literally named `CoreBankDemo.DemoRunner.Tests.Application`
+(`tests/CoreBankDemo.DemoRunner.Tests/Application/`). Enclosing-namespace member lookup beats a
+`using` directive in C#, so a plain `using Terminal.Gui.App;` plus a bare `Application.Create()`
+call does not compile anywhere under `CoreBankDemo.DemoRunner.Tests.*` — `Application` resolves to
+that nested namespace, not `Terminal.Gui.App.Application`. Every test file that needs to call
+`Application.Create()` must use the same `using AppTerminal = Terminal.Gui.App.Application;` alias
+the production code already uses, for exactly this reason.
+
 `ADR-015` pins Terminal.Gui centrally at exactly `2.4.17`. This migration bumps that pin to
 `2.5.0` and needs a short amendment note on that ADR, not a silent version drift.
 
@@ -142,18 +151,19 @@ all. So the app instance is threaded in separately, after the fact, via two new 
 
 ```csharp
 internal static void AttachApplication(IApplication application)  // static field, Volatile.Write
-internal static void DetachApplication()                          // clears it, Volatile.Write(null)
+internal static IApplication? TakeApplication()                   // Interlocked.Exchange(ref _application, null)
 ```
 
-`Program.cs` calls `AttachApplication(app)` in `RunConsole` right after creating the instance, and
-`DetachApplication()` in the `finally` block right after `app.Dispose()` — so a crash *during* the
-run loop can reach the live instance, but nothing after normal disposal tries to double-dispose
-it. `RestoreTerminal()` replaces `AppTerminal.Shutdown()` with
-`Volatile.Read(ref _application)?.Dispose()`, inside the same defensive
-`try { ... } catch (Exception) { /* driver already broken */ }` block it already has (matching the
-file's existing `Volatile`-based thread-safety style, e.g. `WriteReportFile`'s
-`Volatile.Read(ref _artifactsDirectory)`). Belt-and-braces behavior is unchanged; only the
-mechanism for handing the terminal back becomes instance-based.
+`Program.cs` calls `AttachApplication(app)` in `RunConsole` right after creating the instance.
+Both normal shutdown (`RunConsole`'s `finally`) and a crash (`RestoreTerminal()`) call
+`TakeApplication()` to get ownership before disposing — `Interlocked.Exchange` makes this a true
+atomic hand-off, so whichever of the two calls it first is the only one that gets a non-null
+result back, closing a double-dispose race a simpler read-then-clear version would leave open (a
+crash arriving between disposing and clearing could otherwise dispose the same instance twice).
+`RestoreTerminal()` replaces `AppTerminal.Shutdown()` with `TakeApplication()?.Dispose()`, inside
+the same defensive `try { ... } catch (Exception) { /* driver already broken */ }` block it
+already has. Belt-and-braces behavior is unchanged; only the mechanism for handing the terminal
+back becomes instance-based.
 
 ### Tests
 
@@ -161,9 +171,14 @@ mechanism for handing the terminal back becomes instance-based.
 parameter — see below), which means every test that constructs a `MainWindow` needs updating,
 not just the two files that reference `AppTerminal` today. All call sites:
 
-- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs` — 4 call sites (none of which
-  reference `AppTerminal` today; they pass `marshalUpdates: false` and never render, so they only
-  need a plain, uninitialized `IApplication` instance to satisfy the constructor).
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs` — 4 direct call sites (none of
+  which reference `AppTerminal` today; they pass `marshalUpdates: false` and never render, so they
+  only need a plain, uninitialized `IApplication` instance to satisfy the constructor), plus its
+  own `CreateWindow(...)` helper with 59 further callers.
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowFaultsTests.cs` — a separate file, easy
+  to miss (a `grep "new MainWindow("` finds none of it): it has an identical `CreateWindow(...)`
+  helper, with 12 callers, using the same target-typed `new(...)` construction that made both
+  helpers invisible to that grep in the first place.
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/EvidencePaneRenderTests.cs` — 1 call site (the
   `EvidenceWindowAsync` helper).
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/NavigationRailRenderTests.cs` — 1 call site
@@ -232,8 +247,11 @@ build at 0 warnings without re-suppressing anything the `Application` migration 
 - `CoreBankDemo.DemoRunner/Terminal/MainWindow.cs`
 - `CoreBankDemo.DemoRunner/Terminal/ConfirmationDialog.cs`
 - `CoreBankDemo.DemoRunner/Terminal/TerminalCrashGuard.cs`
-- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs` — 4 constructor call sites,
-  collateral from the `MainWindow` signature change; no `AppTerminal` usage today
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs` — 4 direct constructor call
+  sites plus its own `CreateWindow` helper (59 further callers), all collateral from the
+  `MainWindow` signature change; no `AppTerminal` usage today
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowFaultsTests.cs` — same shape, its own
+  `CreateWindow` helper (12 callers); easy to miss, found only during plan review
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/EvidencePaneRenderTests.cs`
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/NavigationRailRenderTests.cs`
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/TerminalAppFactory.cs` — new
@@ -253,7 +271,7 @@ build at 0 warnings without re-suppressing anything the `Application` migration 
 
 ## Risk
 
-Contained to the seven files above plus one new test file. No behavior change intended anywhere —
+Contained to the eight files above plus one new test file. No behavior change intended anywhere —
 every replacement is call-site substitution against a verified equivalent instance member. The
 main residual risk is the crash-guard path, which is inherently hard to unit test; the manual
 smoke test above is the mitigation.
