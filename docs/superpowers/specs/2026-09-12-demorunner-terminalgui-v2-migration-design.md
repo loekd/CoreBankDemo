@@ -62,30 +62,53 @@ exactly why this migration is scoped tightly rather than opportunistically impro
   equivalent instance member with the same shape as the static one it replaces.
 - No touching `View.Text`, `IAcceptTarget`, or `ConfigurationManager` — the three other 2.5.0
   breaking changes. Grepped the codebase; none of the three are used.
+- **No migrating `TextView` to `EditorView`.** `MainWindow.cs` declares three `TextView` fields
+  and one method/property that name the type (5 call sites total: lines 255-257, 1871, 2611).
+  `TextView` is independently marked `[Obsolete]` in Terminal.Gui — true already at the current
+  2.4.17, not something 2.5.0 introduces — pointing at `EditorView`, a different control from a
+  separate, still-incubating project (`tui-cs/Editor`). This has nothing to do with the static
+  `Application` API and is a materially bigger, separate migration; explicitly deferred. See
+  "Package bump and pragma removal" below for how its warnings stay suppressed without
+  reintroducing the broad pragma this plan removes.
 
 ## Design
 
 ### Instance ownership
 
 `Program.cs` becomes the sole owner of the single `IApplication` instance for the process's
-lifetime:
+lifetime, created (not `using`-scoped — see below) at the top of `RunConsole`:
 
 ```csharp
-using var app = Application.Create().Init();
+var app = AppTerminal.Create().Init();
 ```
 
-replacing `AppTerminal.Init()` / `AppTerminal.Shutdown()`. Every other `AppTerminal.X` call in
-`Program.cs` becomes `app.X` — `Driver`, `RequestStop()`, `Run(window, errorHandler: ...)`,
-`Invoke`. These are mechanical substitutions: `IApplication`'s instance members have the same
-signatures as the static ones they replace.
+(`AppTerminal` is the file's existing alias for `Terminal.Gui.App.Application`; `Create()` is a
+new, non-obsolete static factory method, so the alias and its one remaining call are fine to
+keep.) Every other `AppTerminal.X` call in `Program.cs` becomes `app.X` — `Driver`,
+`RequestStop()`, `Run(window, errorHandler: ...)`. These are mechanical substitutions:
+`IApplication`'s instance members have the same signatures as the static ones they replace.
+
+**Not a top-level `using`.** `RunConsole`'s existing `finally` block disposes the terminal
+(`AppTerminal.Shutdown()`) *before* the post-`try` code calls `TerminalCrashGuard.Report(crash,
+...)` — the comment on the current code is explicit that the report "must not happen underneath a
+live run loop" and is "deliberately deferred until after" the shutdown. A top-level `using var app
+= ...;` would instead dispose at the end of the whole method, *after* `Report` runs, silently
+reversing that ordering. So `app.Dispose()` replaces `AppTerminal.Shutdown()` in place, inside the
+same `finally` block, and `app` is declared as a plain `var`, not `using var`.
 
 ### Threading the instance into MainWindow and ConfirmationDialog
 
-`MainWindow`'s `UiRepaintCoalescer` field needs `app.Invoke` at field-initializer time, before the
-window is ever passed to `Run`/`Begin` — i.e. before the framework-populated `View.App` property
-would be set. So `View.App` isn't viable as the access path here. Both `MainWindow` and
-`ConfirmationDialog`'s `TerminalConfirmationService` take `IApplication` as an explicit
-constructor parameter, supplied by `Program.cs` at construction time:
+`MainWindow`'s `UiRepaintCoalescer` field is currently a **field initializer**
+(`private readonly UiRepaintCoalescer _repaints = new(AppTerminal.Invoke);`), which needs
+`app.Invoke` — but field initializers cannot reference constructor parameters, only other
+instance members. So this field moves from an initializer to a plain declaration, assigned in the
+constructor body once `app` is available. This also rules out `View.App` as the access path here:
+even if it worked, the window hasn't been passed to `Run`/`Begin` yet at construction time, so
+`View.App` wouldn't be populated regardless.
+
+Both `MainWindow`'s two constructors (public and internal) and
+`ConfirmationDialog`'s `TerminalConfirmationService` take `IApplication` as an explicit,
+**required, leading** constructor parameter, supplied by the caller:
 
 ```csharp
 var window = new MainWindow(app, controller, onExit, theme);
@@ -104,41 +127,90 @@ internal sealed class TerminalConfirmationService(IApplication app) : IConfirmat
 }
 ```
 
+`MainWindow`'s internal constructor (used by 6 test call sites — see Tests below) also gains the
+same leading `IApplication app` parameter, and its default-confirmation-service branch becomes
+`_confirmation = confirmation ?? new TerminalConfirmationService(_app);`.
+
 ### TerminalCrashGuard
 
 `RestoreTerminal()` fires from `AppDomain.CurrentDomain.UnhandledException`, on whatever thread
 the runtime hands it, precisely when the object graph may already be broken — it cannot take a
-normal constructor dependency. `TerminalCrashGuard.Install(...)` gains an `IApplication` parameter
-captured into a static field:
+normal constructor dependency, and it exists (and is called) *before* the `IApplication` instance
+does: `TerminalCrashGuard.Install(artifactsDirectory)` is called from `Main()`, once, to wire the
+`AppDomain`/`TaskScheduler` handlers, before `RunConsole` (and the app instance it owns) exists at
+all. So the app instance is threaded in separately, after the fact, via two new methods:
 
 ```csharp
-internal static void Install(string artifactsDirectory, IApplication application)
+internal static void AttachApplication(IApplication application)  // static field, Volatile.Write
+internal static void DetachApplication()                          // clears it, Volatile.Write(null)
 ```
 
-`Program.cs` calls `TerminalCrashGuard.Install(artifactsDirectory, app)` right after creating the
-instance — the same place it already installs the guard. `RestoreTerminal()` replaces
-`AppTerminal.Shutdown()` with `instance.Dispose()`, inside the same defensive
-`try { ... } catch (Exception) { /* driver already broken */ }` block it already has. Belt-and-braces
-behavior is unchanged; only the mechanism for handing the terminal back becomes instance-based.
+`Program.cs` calls `AttachApplication(app)` in `RunConsole` right after creating the instance, and
+`DetachApplication()` in the `finally` block right after `app.Dispose()` — so a crash *during* the
+run loop can reach the live instance, but nothing after normal disposal tries to double-dispose
+it. `RestoreTerminal()` replaces `AppTerminal.Shutdown()` with
+`Volatile.Read(ref _application)?.Dispose()`, inside the same defensive
+`try { ... } catch (Exception) { /* driver already broken */ }` block it already has (matching the
+file's existing `Volatile`-based thread-safety style, e.g. `WriteReportFile`'s
+`Volatile.Read(ref _artifactsDirectory)`). Belt-and-braces behavior is unchanged; only the
+mechanism for handing the terminal back becomes instance-based.
 
 ### Tests
 
-`EvidencePaneRenderTests.cs` and `NavigationRailRenderTests.cs` currently hand-roll an identical
-`Init("dotnet")` → set `Screen` → `Begin(window)` → `LayoutAndDraw(true)` → ... → `Shutdown()`
-sequence in every test method. This becomes a shared test fixture (new file,
-`tests/CoreBankDemo.DemoRunner.Tests/Terminal/TerminalAppFixture.cs` or similar) that wraps
-`Application.Create().Init("dotnet")` behind `IDisposable`, so each test gets an isolated
-`IApplication` instance:
+**MainWindow's constructor signature changes** (both overloads gain a leading `IApplication app`
+parameter — see below), which means every test that constructs a `MainWindow` needs updating,
+not just the two files that reference `AppTerminal` today. All call sites:
+
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs` — 4 call sites (none of which
+  reference `AppTerminal` today; they pass `marshalUpdates: false` and never render, so they only
+  need a plain, uninitialized `IApplication` instance to satisfy the constructor).
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/EvidencePaneRenderTests.cs` — 1 call site (the
+  `EvidenceWindowAsync` helper).
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/NavigationRailRenderTests.cs` — 1 call site
+  (inside `RenderRail`).
+
+`IApplication` doesn't need to be initialized (`Init()`) to construct — `Application.Create()`
+alone is enough to satisfy a constructor that only needs `app.Invoke` as a delegate target
+(delegate creation from an instance method just binds `this`; it doesn't require the driver to be
+running). So `MainWindowTests.cs`'s 4 non-rendering call sites each just add
+`using var app = Application.Create();` and pass `app` as the new first constructor argument — no
+other change.
+
+`EvidencePaneRenderTests.cs` and `NavigationRailRenderTests.cs` actually render, so they need a
+real `Init("dotnet")` + sized `Screen` + disposal — currently hand-rolled identically in every
+test method (`Init("dotnet")` → set `Screen` → `Begin(window)` → `LayoutAndDraw(true)` → ... →
+`Shutdown()`). This becomes a small static factory (new file,
+`tests/CoreBankDemo.DemoRunner.Tests/Terminal/TerminalAppFactory.cs`):
 
 ```csharp
-using var fixture = new TerminalAppFixture(width: 140, height: 40);
-fixture.App.Begin(window);
-window.RenderForTest();
-fixture.App.LayoutAndDraw(true);
+internal static class TerminalAppFactory
+{
+    internal static IApplication CreateHeadless(int width, int height)
+    {
+        var app = Application.Create().Init("dotnet");
+        app.Screen = new System.Drawing.Rectangle(0, 0, width, height);
+        return app;
+    }
+}
 ```
 
-This both clears the obsolete-API warnings in both files and removes the duplicated boilerplate
-between them — a genuine simplification, not just a warning fix.
+used as:
+
+```csharp
+using var app = TerminalAppFactory.CreateHeadless(140, 40);
+...
+app.Begin(window);
+window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
+...
+app.LayoutAndDraw(true);
+```
+
+`IApplication : IDisposable`, so the `using` also replaces the existing `try { ... } finally {
+AppTerminal.Shutdown(); }` wrapper — a genuine simplification (one line instead of a wrapping
+try/finally), not just a warning fix, and consistent with the officially documented v2 pattern.
+Everything between `Begin` and the end of the `using` block (frame assignment, key handling,
+resize, redraw calls) is otherwise untouched — same sequence, same assertions, just `app.X`
+instead of `AppTerminal.X`.
 
 ### Package bump and pragma removal
 
@@ -146,8 +218,13 @@ between them — a genuine simplification, not just a warning fix.
 note (in its existing amendment style) recording the version bump and pointing at this spec.
 
 Once `Program.cs`, `MainWindow.cs`, and `ConfirmationDialog.cs` no longer reference anything from
-the obsolete static API, their `#pragma warning disable/restore CS0618` blocks are deleted
-entirely — that pragma exists only to suppress warnings this migration eliminates at the source.
+the obsolete static `Application` API, their whole-method/whole-file `#pragma warning
+disable/restore CS0618` blocks are deleted — that pragma exists only to suppress warnings this
+migration eliminates at the source. `MainWindow.cs` keeps three **narrow** replacement pragma
+pairs, scoped to only the pre-existing, unrelated `TextView`-obsolete call sites (see
+Non-goals): one around the three field declarations (lines 255-257), one around `SetPaneText`'s
+signature (line 1871), one around the `EvidenceResponsePane` property (line 2611). This keeps the
+build at 0 warnings without re-suppressing anything the `Application` migration itself touches.
 
 ## Files touched
 
@@ -155,15 +232,19 @@ entirely — that pragma exists only to suppress warnings this migration elimina
 - `CoreBankDemo.DemoRunner/Terminal/MainWindow.cs`
 - `CoreBankDemo.DemoRunner/Terminal/ConfirmationDialog.cs`
 - `CoreBankDemo.DemoRunner/Terminal/TerminalCrashGuard.cs`
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs` — 4 constructor call sites,
+  collateral from the `MainWindow` signature change; no `AppTerminal` usage today
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/EvidencePaneRenderTests.cs`
 - `tests/CoreBankDemo.DemoRunner.Tests/Terminal/NavigationRailRenderTests.cs`
-- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/` — new shared test fixture file
+- `tests/CoreBankDemo.DemoRunner.Tests/Terminal/TerminalAppFactory.cs` — new
 - `Directory.Packages.props` (Terminal.Gui version)
 - `docs/adr/ADR-015-presentation-safe-terminal-demo-console.md` (amendment note)
 
 ## Testing
 
-- `dotnet build CoreBankDemo.sln` — 0 warnings expected (down from 21), 0 errors.
+- `dotnet build CoreBankDemo.sln` — 0 warnings expected (down from 21), 0 errors. (The 3 narrow
+  `TextView`-scoped pragma pairs in `MainWindow.cs` are deliberate and expected to stay silent —
+  see "Package bump and pragma removal".)
 - `dotnet test CoreBankDemo.sln` — all 8 test projects pass, in particular
   `CoreBankDemo.DemoRunner.Tests` (687 tests today) with no behavior change.
 - Manual smoke: launch the console for real (`dotnet run --project CoreBankDemo.DemoRunner`) and
@@ -172,7 +253,7 @@ entirely — that pragma exists only to suppress warnings this migration elimina
 
 ## Risk
 
-Contained to the six files above plus one new test file. No behavior change intended anywhere —
+Contained to the seven files above plus one new test file. No behavior change intended anywhere —
 every replacement is call-site substitution against a verified equivalent instance member. The
 main residual risk is the crash-guard path, which is inherently hard to unit test; the manual
 smoke test above is the mitigation.
