@@ -1136,6 +1136,28 @@ public class MainWindowTests
     }
 
     /// <summary>
+    /// The rail's Quit button is the mouse path to the same exit Shift+Q reaches by keyboard,
+    /// so clicking it must terminate the application exactly as reliably as the key does.
+    /// </summary>
+    [Fact]
+    public void QuitButton_ClickAlwaysTerminatesTheApplication()
+    {
+        var harness = new OperatorHarness();
+        var controller = harness.CreateController();
+        var exited = false;
+        using var window = new MainWindow(
+            controller,
+            () => { exited = true; return Task.CompletedTask; },
+            null,
+            startPolling: false,
+            marshalUpdates: false);
+
+        window.QuitButton.InvokeCommand(Command.Accept);
+
+        exited.Should().BeTrue("the rail's Quit button is the mouse path to Shift+Q's exit");
+    }
+
+    /// <summary>
     /// The card's own action, fired with no confirmation modal: a cancellation destroys no state.
     /// </summary>
     [Fact]
