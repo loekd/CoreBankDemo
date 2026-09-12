@@ -11,6 +11,7 @@ using Terminal.Gui.Text;
 using Terminal.Gui.Views;
 using Xunit;
 using CoreBankDemo.DemoRunner.Tests;
+using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
@@ -250,7 +251,9 @@ public class MainWindowTests
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
         var exited = false;
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
+            app,
             controller,
             () =>
             {
@@ -972,7 +975,9 @@ public class MainWindowTests
     public void Window_ResolvesTheRequestedPalette(ThemeMode mode, bool expectLightCanvas)
     {
         var controller = new OperatorHarness().CreateController();
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
+            app,
             controller,
             () => Task.CompletedTask,
             new FakeConfirmationService(),
@@ -1157,7 +1162,9 @@ public class MainWindowTests
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
         var exited = false;
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
+            app,
             controller,
             () => { exited = true; return Task.CompletedTask; },
             null,
@@ -1180,7 +1187,9 @@ public class MainWindowTests
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
         var exited = false;
+        using var app = AppTerminal.Create();
         using var window = new MainWindow(
+            app,
             controller,
             () => { exited = true; return Task.CompletedTask; },
             null,
@@ -1845,7 +1854,7 @@ public class MainWindowTests
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
         IConfirmationService? confirmation = null) =>
-        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+        new(AppTerminal.Create(), controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
 
     private sealed class FakeConfirmationService : IConfirmationService
     {
