@@ -154,6 +154,7 @@ public sealed class MainWindow : Window
     private readonly FrameView _content = new() { X = RailWidthPreferred, Y = 1, Width = Dim.Fill(), Height = Dim.Fill() };
 
     private readonly Button[] _navigationButtons;
+    private readonly Button _quitButton = NewButton("Quit");
     private readonly View _operationsView;
     private readonly View _resourcesView;
     private readonly View _evidenceView;
@@ -379,6 +380,7 @@ public sealed class MainWindow : Window
         OperatorTheme.Apply(_errorRateRange, OperatorTheme.LockExemptScheme);
         OperatorTheme.Apply(_latencyRange, OperatorTheme.LockExemptScheme);
         OperatorTheme.Apply(_throttleRange, OperatorTheme.LockExemptScheme);
+        OperatorTheme.Apply(_quitButton, OperatorTheme.DestructiveScheme);
 
         _navigationButtons =
         [
@@ -389,6 +391,21 @@ public sealed class MainWindow : Window
             CreateNavigationButton(WorkspaceKind.Faults, 8),
         ];
         _navigation.Add(_navigationButtons);
+
+        // Not part of _navigationButtons: it selects no workspace, so it must stay out of the
+        // array the rail's 1-5 shortcut logic and workspace-shaped assertions index by ordinal.
+        _quitButton.NoDecorations = true;
+        _quitButton.NoPadding = true;
+        _quitButton.TextAlignment = Alignment.Start;
+        _quitButton.X = 0;
+        _quitButton.Y = Pos.AnchorEnd(1);
+        _quitButton.Width = Dim.Fill();
+        _quitButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            Dispatch(RequestExitAsync);
+        };
+        _navigation.Add(_quitButton);
 
         _operationsView = BuildOperationsView();
         _resourcesView = BuildResourcesView();
@@ -2455,6 +2472,7 @@ public sealed class MainWindow : Window
     internal int NavigationFrameWidth => _navigation.Frame.Width;
 
     internal IReadOnlyList<Button> NavigationButtons => _navigationButtons;
+    internal Button QuitButton => _quitButton;
     internal string AnnouncementLineText => _announcementRows[0].Text;
     internal bool AnnouncementVisibleIn(WorkspaceKind workspace) =>
         _announcementRows.Any(row => row.Visible && IsUnder(row, _workspaces[(int)workspace]));
