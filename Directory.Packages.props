@@ -17,28 +17,34 @@
     <PackageVersion Include="DistributedLock.Redis" Version="1.1.1" />
     <!-- Dapr & Community Toolkit -->
     <PackageVersion Include="CommunityToolkit.Aspire.Hosting.Dapr" Version="13.0.0" />
-    <PackageVersion Include="Dapr.AspNetCore" Version="1.18.5" />
-    <PackageVersion Include="Dapr.Client" Version="1.18.5" />
+    <PackageVersion Include="Dapr.AspNetCore" Version="1.18.7" />
+    <PackageVersion Include="Dapr.Client" Version="1.18.7" />
     <!-- Outcome feedback loop: the DemoRunner console's own streaming pub/sub
          subscription to transaction-events, through a daprd sidecar it spawns and
          owns. Same 1.18.x line as the rest of the Dapr SDK. -->
-    <PackageVersion Include="Dapr.Messaging" Version="1.18.5" />
+    <PackageVersion Include="Dapr.Messaging" Version="1.18.7" />
     <!-- Dev Proxy -->
     <PackageVersion Include="DevProxy.Hosting" Version="0.3.5" />
     <!-- CloudEvents -->
     <PackageVersion Include="CloudNative.CloudEvents" Version="2.9.0" />
     <PackageVersion Include="CloudNative.CloudEvents.AspNetCore" Version="2.9.0" />
     <!-- Microsoft & ASP.NET Core -->
-    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.12" />
+    <!-- Held at 10.0.11, not the latest 10.0.12: Aspire.Npgsql.EntityFrameworkCore.PostgreSQL
+         13.5.3 (already Aspire's own latest) pins its Microsoft.Extensions.Diagnostics.
+         HealthChecks.EntityFrameworkCore dependency to the exact version 10.0.11, which itself
+         pins Microsoft.EntityFrameworkCore.Relational to 10.0.11 exactly. Taking 10.0.12 here
+         creates an unresolvable version conflict (MSB3277) until Aspire ships a release that
+         moves that pin forward. -->
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="10.0.11" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11" />
-    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.9.0" />
-    <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.9.0" />
+    <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="10.10.0" />
+    <PackageVersion Include="Microsoft.Extensions.ServiceDiscovery" Version="10.10.0" />
     <!-- Story 5.5: boots PaymentsAPI's real Program entry point in-process so
          the event-subscription-intake wiring test can POST a structured
          CloudEvent through the actual production middleware/DI/routing
          (never a reconstructed application). -->
-    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
     <!-- Database -->
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.3" />
     <!-- Swagger -->
@@ -55,7 +61,7 @@
     <!-- Kiota (story 5.3): runtime dependencies consumed by the generated
          CoreBank client and its adapter. Pinned to a version known to be
          compatible with the CLI in .config/dotnet-tools.json. -->
-    <PackageVersion Include="Microsoft.Kiota.Bundle" Version="2.1.1" />
+    <PackageVersion Include="Microsoft.Kiota.Bundle" Version="2.1.2" />
     <!-- Story 5.3: the adapter recognizes the standard resilience pipeline's
          own timeout exception type explicitly. Pinned to the exact Polly.Core
          version Microsoft.Extensions.Http.Resilience 10.9.0 already resolves
@@ -65,7 +71,7 @@
     <!-- Test Stack (verified on NuGet 2026-08-21) -->
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="4.0.0" />
-    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.0" />
     <PackageVersion Include="AwesomeAssertions" Version="9.6.0" />
     <PackageVersion Include="Moq" Version="4.20.72" />
     <PackageVersion Include="coverlet.collector" Version="10.0.1" />
@@ -74,11 +80,11 @@
          PostgreSQL container — there is no second relational engine in this
          repository. Testcontainers.XunitV3 is the xUnit v3 integration package
          matching Testcontainers 4.14.0. -->
-    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.14.0" />
-    <PackageVersion Include="Testcontainers.XunitV3" Version="4.14.0" />
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.15.0" />
+    <PackageVersion Include="Testcontainers.XunitV3" Version="4.15.0" />
     <!-- FakeTimeProvider: deterministic TimeProvider.CreateTimer-driven cancellation
          tests (story 3.2) without waiting on a real clock. -->
-    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.9.0" />
+    <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.10.0" />
     <!-- Story 7.4: Terminal.Gui is the sole UI package for the standalone
          CoreBankDemo.DemoRunner presentation console (ADR-015). Pinned centrally
          so exactly one version is used repo-wide. -->
