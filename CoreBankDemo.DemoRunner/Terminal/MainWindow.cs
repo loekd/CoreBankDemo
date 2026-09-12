@@ -178,7 +178,6 @@ public sealed class MainWindow : Window
     private readonly Button _idempotencyButton = NewButton("Key ‹ Generated ›");
     private readonly Button _submitButton = NewButton("Submit", isDefault: true);
     private readonly Button _burstButton = NewButton("Burst…");
-    private readonly Button _startBurstButton = NewButton("Start burst");
     private readonly Button _cancelBurstButton = NewButton("Stop sending");
 
     // --- Operations: the two regions that replace each other -----------------------------
@@ -537,10 +536,10 @@ public sealed class MainWindow : Window
         _burstConcurrency.Y = 3;
         _burstConcurrency.Height = 1;
         _burstConcurrency.Width = NarrowFieldWidth;
-        _startBurstButton.X = Pos.AnchorEnd(CardActionSlotWidth);
-        _startBurstButton.Y = 3;
-        view.Add(_burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency, _startBurstButton);
+        view.Add(_burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency);
 
+        // Submit itself sends the burst once one is armed, so there is exactly one action that
+        // fires payments — not a second "Start burst" button duplicating what Submit already does.
         _submitButton.Accepting += (_, e) => { e.Handled = true; Dispatch(SubmitPaymentAsync); };
         _burstButton.Accepting += (_, e) =>
         {
@@ -548,7 +547,6 @@ public sealed class MainWindow : Window
             _burstSetupVisible = !_burstSetupVisible;
             Repaint();
         };
-        _startBurstButton.Accepting += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
 
         _composeRule.X = LabelX;
         _composeRule.Y = ComposeBarRows;
@@ -1307,6 +1305,15 @@ public sealed class MainWindow : Window
 
     private async Task SubmitPaymentAsync()
     {
+        // Burst… arms the burst rather than firing it, so Submit is the one action that sends
+        // payments: while the burst setup is visible, Submit sends the burst instead of a single
+        // payment. There is no separate "Start burst" button duplicating this.
+        if (_burstSetupVisible)
+        {
+            await RunBurstAsync();
+            return;
+        }
+
         if (!decimal.TryParse(_amount.Text.ToString(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var amount))
         {
             ShowMessage("Amount must be a decimal using '.' as the separator.");
@@ -1559,7 +1566,6 @@ public sealed class MainWindow : Window
 
         _submitButton.Enabled = !model.IsBusy;
         _burstButton.Enabled = !model.IsBusy;
-        _startBurstButton.Enabled = !model.IsBusy;
         _cancelBurstButton.Enabled = model.CanCancelBurst;
         var state = _controller.State;
         _startRegularButton.Enabled = !model.IsBusy && state.Preflight?.CanStart(TopologyProfile.Regular) == true;
@@ -1921,14 +1927,17 @@ public sealed class MainWindow : Window
         _burstCount.Visible = _burstSetupVisible;
         _burstConcurrencyLabel.Visible = _burstSetupVisible;
         _burstConcurrency.Visible = _burstSetupVisible;
-        _startBurstButton.Visible = _burstSetupVisible;
+
+        // Submit is the one action that fires payments, so its label states which one it will
+        // fire while burst setup is armed.
+        _submitButton.Text = _burstSetupVisible ? "Send burst" : "Submit";
 
         var modeRow = ComposeBarRows + wrapRows;
         var burstRow = modeRow + (_modeLine.Visible ? 1 : 0);
         var ruleRow = burstRow + (_burstSetupVisible ? 1 : 0);
         _modeLine.Y = modeRow;
         _suppliedKey.Y = modeRow;
-        foreach (var view in new View[] { _burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency, _startBurstButton })
+        foreach (var view in new View[] { _burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency })
         {
             view.Y = burstRow;
         }
