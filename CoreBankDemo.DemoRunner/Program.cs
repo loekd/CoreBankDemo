@@ -32,9 +32,9 @@ public static class Program
         var repositoryRoot = FindRepositoryRoot();
 
         // Armed before anything else can fail. A Terminal.Gui console puts the terminal into the
-        // alternate screen and raw mode, and only Application.Shutdown undoes that -- so any exit
-        // that misses it leaves the operator looking at a dead full-screen view in a window that
-        // no longer echoes typing, with nothing on screen saying why.
+        // alternate screen and raw mode, and only disposing the IApplication instance undoes that
+        // -- so any exit that misses it leaves the operator looking at a dead full-screen view in
+        // a window that no longer echoes typing, with nothing on screen saying why.
         TerminalCrashGuard.Install(Path.Combine(repositoryRoot, ".demo-runner-artifacts"));
         using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(12) };
         var aspire = new AspireCliAdapter(repositoryRoot, TimeProvider.System);
@@ -93,11 +93,11 @@ public static class Program
         return RunConsole(controller, theme);
     }
 
-#pragma warning disable CS0618
     private static int RunConsole(OperatorConsoleController controller, ThemeMode theme)
     {
         Exception? crash = null;
-        AppTerminal.Init();
+        var app = AppTerminal.Create().Init();
+        TerminalCrashGuard.AttachApplication(app);
 
         // Terminal.Gui's own clipboard shells out to xclip, which exists in the sandbox
         // but has no display to hand the text to, so Ctrl+C silently copied nothing.
@@ -106,15 +106,15 @@ public static class Program
             Console.Out,
             Environment.GetEnvironmentVariable("TERM"),
             Environment.GetEnvironmentVariable("TMUX"));
-        if (AppTerminal.Driver is { } driver)
+        if (app.Driver is { } driver)
         {
             driver.Clipboard = clipboard;
         }
 
-        var window = new MainWindow(controller, async () =>
+        var window = new MainWindow(app, controller, async () =>
         {
             await controller.ShutdownAsync(CancellationToken.None);
-            AppTerminal.RequestStop();
+            app.RequestStop();
         }, theme);
         clipboard.Copied += window.ShowClipboardResult;
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
@@ -123,6 +123,7 @@ public static class Program
             window.RequestExitAsync().GetAwaiter().GetResult();
         };
         Console.CancelKeyPress += cancelHandler;
+        var reportedElsewhere = false;
         try
         {
             // Preflight probes ports and the Aspire CLI; running it before the first paint
@@ -131,31 +132,51 @@ public static class Program
             // Without an error handler, Run rethrows -- unwinding past the run loop and leaving
             // the runtime to dump a stack trace over a terminal still in its alternate screen.
             // Returning true keeps the loop's own teardown intact, and RequestStop then ends it
-            // at the next iteration, so the finally below performs an ordinary Shutdown. The
+            // at the next iteration, so the finally below performs an ordinary disposal. The
             // report is deliberately deferred until after that: it restores the terminal itself,
             // which must not happen underneath a live run loop.
-            AppTerminal.Run(window, errorHandler: exception =>
+            app.Run(window, errorHandler: exception =>
             {
                 crash ??= exception;
 
                 // Stopped rather than resumed: a console that keeps running after an unhandled
                 // fault is a console that may now be showing something untrue.
-                AppTerminal.RequestStop();
+                app.RequestStop();
                 return true;
             });
         }
         finally
         {
             Console.CancelKeyPress -= cancelHandler;
-            try
+            if (TerminalCrashGuard.TakeApplication() is { } application)
             {
-                controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
+                try
+                {
+                    controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.Error.WriteLine($"Could not stop the owned AppHost cleanly: {ex.Message}");
+                }
+                application.Dispose();
             }
-            catch (InvalidOperationException ex)
+            else
             {
-                Console.Error.WriteLine($"Could not stop the owned AppHost cleanly: {ex.Message}");
+                // The crash guard took the instance first: a fault on a thread the console does
+                // not own, or a termination signal, is being reported right now, and disposing
+                // the instance is what ended the run loop above. The report restores the terminal
+                // and names the fault itself; the owned AppHost is deliberately left alone, as
+                // the report tells the operator it is.
+                reportedElsewhere = true;
             }
-            AppTerminal.Shutdown();
+        }
+
+        if (reportedElsewhere)
+        {
+            // Returning before the report has finished would end the process with exit code 0
+            // underneath it: no banner, no crash file, and a status that says nothing went wrong.
+            TerminalCrashGuard.WaitForReport(TimeSpan.FromSeconds(10));
+            return 70;
         }
 
         if (crash is null)
@@ -168,7 +189,6 @@ public static class Program
         // Non-zero so a wrapper script or an outer `aspire`/CI step can tell a crash from a quit.
         return 70;
     }
-#pragma warning restore CS0618
 
     /// <summary>
     /// Best-effort, bounded teardown from a signal handler. The process is on its way out, so

@@ -1,8 +1,8 @@
 using CoreBankDemo.DemoRunner.Application;
+using Terminal.Gui.App;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
-using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Terminal;
 
@@ -13,14 +13,13 @@ internal interface IConfirmationService
     bool Confirm(ConfirmationRequest request);
 }
 
-#pragma warning disable CS0618
-internal sealed class TerminalConfirmationService : IConfirmationService
+internal sealed class TerminalConfirmationService(IApplication app) : IConfirmationService
 {
     public bool Confirm(ConfirmationRequest request)
     {
         var dialog = new DestructiveConfirmationDialog(request);
         dialog.FocusCancel();
-        AppTerminal.Run(dialog);
+        app.Run(dialog);
         return dialog.Result == true;
     }
 }
@@ -93,4 +92,3 @@ internal sealed class DestructiveConfirmationDialog : Dialog<bool>
         RequestStop();
     }
 }
-#pragma warning restore CS0618

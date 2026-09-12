@@ -5,6 +5,7 @@ using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.Input;
 using Xunit;
 using CoreBankDemo.DemoRunner.Tests;
+using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
@@ -297,7 +298,7 @@ public class MainWindowFaultsTests
     private static MainWindow CreateWindow(
         OperatorConsoleController controller,
         IConfirmationService? confirmation = null) =>
-        new(controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
+        new(AppTerminal.Create(), controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
 
     /// <summary>Proves no fault control ever routes through the <c>Y</c> confirmation modal.</summary>
     private sealed class ThrowingConfirmationService : IConfirmationService

@@ -3,7 +3,6 @@ using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Xunit;
-using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
@@ -53,43 +52,35 @@ public class NavigationRailRenderTests
     /// <summary>Reads the rail's cells straight out of the driver's output buffer.</summary>
     private static List<string> RenderRail()
     {
-        AppTerminal.Init("dotnet");
-        try
+        using var app = TerminalAppFactory.CreateHeadless(100, 30);
+        OperatorTheme.Register(ThemeMode.Dark);
+        var controller = new OperatorHarness().CreateController();
+        using var window = new MainWindow(
+            app, controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 100, 30);
+        app.LayoutAndDraw(true);
+
+        var contents = app.Driver!.Contents!;
+        var rows = new List<string>();
+        // Rail rows start below the window border, the topology bar and the rail's own
+        // border; column 2 is the first cell inside the rail.
+        for (var row = 3; row < 3 + 10; row++)
         {
-            OperatorTheme.Register(ThemeMode.Dark);
-            var controller = new OperatorHarness().CreateController();
-            using var window = new MainWindow(
-                controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false);
-            AppTerminal.Screen = new System.Drawing.Rectangle(0, 0, 100, 30);
-            AppTerminal.Begin(window);
-            window.Frame = new System.Drawing.Rectangle(0, 0, 100, 30);
-            AppTerminal.LayoutAndDraw(true);
-
-            var contents = AppTerminal.Driver!.Contents!;
-            var rows = new List<string>();
-            // Rail rows start below the window border, the topology bar and the rail's own
-            // border; column 2 is the first cell inside the rail.
-            for (var row = 3; row < 3 + 10; row++)
+            var line = new StringBuilder();
+            for (var column = 2; column < 2 + RailInnerWidth; column++)
             {
-                var line = new StringBuilder();
-                for (var column = 2; column < 2 + RailInnerWidth; column++)
-                {
-                    var grapheme = contents[row, column].Grapheme;
-                    line.Append(string.IsNullOrEmpty(grapheme) || grapheme == "\0" ? " " : grapheme);
-                }
-
-                var text = line.ToString().TrimEnd();
-                if (text.Trim().Length > 0)
-                {
-                    rows.Add(text.Trim());
-                }
+                var grapheme = contents[row, column].Grapheme;
+                line.Append(string.IsNullOrEmpty(grapheme) || grapheme == "\0" ? " " : grapheme);
             }
 
-            return rows;
+            var text = line.ToString().TrimEnd();
+            if (text.Trim().Length > 0)
+            {
+                rows.Add(text.Trim());
+            }
         }
-        finally
-        {
-            AppTerminal.Shutdown();
-        }
+
+        return rows;
     }
 }

@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
-using AppTerminal = Terminal.Gui.App.Application;
+using Terminal.Gui.App;
 
 namespace CoreBankDemo.DemoRunner.Terminal;
 
@@ -12,13 +12,13 @@ namespace CoreBankDemo.DemoRunner.Terminal;
 /// <para>
 /// A Terminal.Gui console switches the terminal into the alternate screen buffer, turns off
 /// echo and canonical mode, hides the cursor and enables mouse reporting. Every one of those is
-/// undone by <c>Application.Shutdown</c> -- so any exit that does not reach it leaves the
+/// undone by <c>IApplication.Dispose</c> -- so any exit that does not reach it leaves the
 /// operator staring at a dead full-screen view in a window that no longer responds to typing,
 /// with no message saying what happened. On stage that is indistinguishable from the machine
 /// having locked up.
 /// </para>
 /// <para>
-/// The restore is therefore belt and braces. <c>Application.Shutdown</c> is tried first because
+/// The restore is therefore belt and braces. <c>IApplication.Dispose</c> is tried first because
 /// it is the only thing that can put the terminal's own attributes back; but it can itself throw
 /// or hang when the driver is already broken, which is exactly the situation a crash creates. So
 /// the escape sequences are written unconditionally afterwards, and <c>stty sane</c> is run as a
@@ -44,9 +44,11 @@ internal static class TerminalCrashGuard
         + Esc + "[0m";                                     // clear attributes
 
     private static readonly object Sync = new();
+    private static readonly ManualResetEventSlim ReportFinished = new(false);
     private static string? _artifactsDirectory;
     private static bool _installed;
     private static bool _reported;
+    private static IApplication? _application;
 
     /// <summary>
     /// Arms the guard for the rest of the process. Idempotent.
@@ -86,6 +88,52 @@ internal static class TerminalCrashGuard
     }
 
     /// <summary>
+    /// Records the live application instance so a crash on any thread can dispose it. Called by
+    /// <c>Program.RunConsole</c> right after the instance is created.
+    /// </summary>
+    internal static void AttachApplication(IApplication application)
+    {
+        Volatile.Write(ref _application, application);
+    }
+
+    /// <summary>
+    /// Atomically clears the recorded instance and returns whatever was there, or <c>null</c> if
+    /// nothing was attached or it was already taken. Whichever of a crash (<see
+    /// cref="RestoreTerminal"/>) or normal shutdown (<c>Program.RunConsole</c>'s <c>finally</c>)
+    /// calls this first is the only one that gets a non-null result back — so exactly one of them
+    /// ever disposes the instance, with no window for a double-dispose race between the two.
+    /// </summary>
+    internal static IApplication? TakeApplication()
+    {
+        return Interlocked.Exchange(ref _application, null);
+    }
+
+    /// <summary>
+    /// Blocks until a report started on another thread has finished restoring the terminal and
+    /// writing its explanation, or until <paramref name="timeout"/> elapses. Returns
+    /// <c>false</c> at once if nothing was ever reported.
+    /// </summary>
+    /// <remarks>
+    /// Disposing the application instance from the reporting thread ends the run loop on the UI
+    /// thread, which then heads for the end of <c>Main</c>. Without this wait it gets there
+    /// first, and the process exits with code 0 underneath a half-written report: no banner,
+    /// no crash file, and an exit status that says nothing went wrong.
+    /// </remarks>
+    internal static bool WaitForReport(TimeSpan timeout)
+    {
+        lock (Sync)
+        {
+            if (!_reported)
+            {
+                return false;
+            }
+        }
+
+        ReportFinished.Wait(timeout);
+        return true;
+    }
+
+    /// <summary>
     /// Restores the terminal and states what happened, once. Safe to call from a signal
     /// handler, from a catch block, or from both.
     /// </summary>
@@ -101,6 +149,18 @@ internal static class TerminalCrashGuard
             _reported = true;
         }
 
+        try
+        {
+            RestoreAndExplain(exception, headline);
+        }
+        finally
+        {
+            ReportFinished.Set();
+        }
+    }
+
+    private static void RestoreAndExplain(Exception? exception, string headline)
+    {
         RestoreTerminal();
         var path = WriteReportFile(headline, exception);
 
@@ -154,7 +214,7 @@ internal static class TerminalCrashGuard
     {
         try
         {
-            AppTerminal.Shutdown();
+            TakeApplication()?.Dispose();
         }
         catch (Exception)
         {

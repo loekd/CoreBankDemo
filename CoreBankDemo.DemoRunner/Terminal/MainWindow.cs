@@ -4,15 +4,14 @@ using System.Globalization;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Application.Ports;
 using CoreBankDemo.DemoRunner.Infrastructure;
+using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
-using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Terminal;
 
-#pragma warning disable CS0618
 public sealed class MainWindow : Window
 {
     /// <summary>
@@ -252,9 +251,11 @@ public sealed class MainWindow : Window
     // inherits BaseScheme from the window and a Border inherits its view's SchemeName, so the
     // border is already drawn on the same surface as the workspace around it (FR-21).
     private readonly View _evidenceDetail = new();
+#pragma warning disable CS0618 // TextView is obsolete in favor of a separate EditorView control; out of scope here (see migration spec).
     private readonly TextView _evidenceHeader = new() { ReadOnly = true, WordWrap = false };
     private readonly TextView _evidenceRequest = new() { ReadOnly = true, WordWrap = false };
     private readonly TextView _evidenceResponse = new() { ReadOnly = true, WordWrap = false };
+#pragma warning restore CS0618
 
     /// <summary>What Copy puts on the clipboard: the model's raw text, never the column art.</summary>
     private string _evidenceCopyText = string.Empty;
@@ -333,14 +334,16 @@ public sealed class MainWindow : Window
     private bool _messageIsFailure = true;
     private long _messageMark = -1;
 
-    private readonly UiRepaintCoalescer _repaints = new(AppTerminal.Invoke);
+    private readonly IApplication _app;
+    private readonly UiRepaintCoalescer _repaints;
 
-    public MainWindow(OperatorConsoleController controller, Func<Task> onExitRequested, ThemeMode theme = ThemeMode.Dark)
-        : this(controller, onExitRequested, null, true, theme: theme)
+    public MainWindow(IApplication app, OperatorConsoleController controller, Func<Task> onExitRequested, ThemeMode theme = ThemeMode.Dark)
+        : this(app, controller, onExitRequested, null, true, theme: theme)
     {
     }
 
     internal MainWindow(
+        IApplication app,
         OperatorConsoleController controller,
         Func<Task> onExitRequested,
         IConfirmationService? confirmation,
@@ -350,10 +353,12 @@ public sealed class MainWindow : Window
         ThemeMode theme = ThemeMode.Dark)
     {
         OperatorTheme.Register(theme);
+        _app = app;
+        _repaints = new(_app.Invoke);
         _controller = controller;
         _time = time ?? TimeProvider.System;
         _onExitRequested = onExitRequested;
-        _confirmation = confirmation ?? new TerminalConfirmationService();
+        _confirmation = confirmation ?? new TerminalConfirmationService(_app);
         _marshalUpdates = marshalUpdates;
         _resourceBinding = new ListBinding(_resourceList);
         _evidenceBinding = new ListBinding(_evidenceList);
@@ -1498,7 +1503,7 @@ public sealed class MainWindow : Window
     {
         if (_marshalUpdates)
         {
-            AppTerminal.Invoke(action);
+            _app.Invoke(action);
         }
         else
         {
@@ -1868,7 +1873,9 @@ public sealed class MainWindow : Window
     /// missing its first character, and a line holding nothing but <c>{</c> missing altogether.
     /// Guarded on the text actually changing, so scrolling within one record is left alone.
     /// </summary>
+#pragma warning disable CS0618 // TextView is obsolete in favor of a separate EditorView control; out of scope here (see migration spec).
     private static void SetPaneText(TextView pane, string text)
+#pragma warning restore CS0618
     {
         if (!string.Equals(pane.Text, text, StringComparison.Ordinal))
         {
@@ -2608,7 +2615,9 @@ public sealed class MainWindow : Window
     internal string EvidenceRequestText => _evidenceRequest.Text;
     internal string EvidenceResponseText => _evidenceResponse.Text;
     internal bool EvidenceResponseVisible => _evidenceResponse.Visible;
+#pragma warning disable CS0618 // TextView is obsolete in favor of a separate EditorView control; out of scope here (see migration spec).
     internal TextView EvidenceResponsePane => _evidenceResponse;
+#pragma warning restore CS0618
     internal bool EvidenceColumnsWrap =>
         _evidenceHeader.WordWrap && _evidenceRequest.WordWrap && _evidenceResponse.WordWrap;
     internal string EvidenceCopyText => _evidenceCopyText;
@@ -2727,4 +2736,3 @@ public sealed class MainWindow : Window
         }
     }
 }
-#pragma warning restore CS0618
