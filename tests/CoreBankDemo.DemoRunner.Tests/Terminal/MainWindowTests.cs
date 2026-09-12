@@ -210,6 +210,41 @@ public class MainWindowTests
     }
 
     [Fact]
+    public async Task ArmedBurst_SubmitSendsTheBurstInsteadOfASinglePayment()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        window.BurstButton.InvokeCommand(Command.Accept);
+        window.BurstCountField.Text = "2";
+        window.BurstConcurrencyField.Text = "1";
+
+        await window.TriggerSubmitForTestAsync();
+
+        controller.State.Burst.Sent.Should().Be(2);
+        harness.Payments.Submissions.Should().HaveCount(2, "Submit must fire the burst, not a single payment, while burst setup is armed");
+        window.LastUiMessage.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void SubmitButtonLabel_TogglesToSendBurst_WhileBurstSetupIsArmed()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.SubmitButton.Text.ToString().Should().Be("Submit");
+
+        window.BurstButton.InvokeCommand(Command.Accept);
+        window.SubmitButton.Text.ToString().Should().Be("Send burst", "arming burst setup must make it obvious Submit will send a burst");
+
+        window.BurstButton.InvokeCommand(Command.Accept);
+        window.SubmitButton.Text.ToString().Should().Be("Submit");
+    }
+
+    [Fact]
     public async Task RefreshAndOrderlyExit_RunThroughActualMainWindowPaths()
     {
         var harness = new OperatorHarness();
