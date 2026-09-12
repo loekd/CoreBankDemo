@@ -218,6 +218,13 @@ public sealed class OperatorConsoleController
     }
 
     /// <summary>
+    /// Display-only reset of the Evidence workspace: no backend call, nothing exported or
+    /// destroyed remotely. A later action still appends to the (now empty) log normally.
+    /// </summary>
+    public void ClearEvidence() =>
+        Update(state => state with { Evidence = [], SelectedEvidence = null });
+
+    /// <summary>
     /// Points the Operations focus card at one payment. Selection is moved by the operator and
     /// by nothing else; an arriving event never calls this. An id that names no tracked payment
     /// clears the selection rather than pinning the card to a row that is not there, exactly as
@@ -233,6 +240,14 @@ public sealed class OperatorConsoleController
                 : null,
         });
     }
+
+    /// <summary>
+    /// Display-only reset of the Operations workspace: no backend call, pending and settled
+    /// payments alike are dropped from the tracked list. A later submission or arriving event
+    /// still repopulates it normally.
+    /// </summary>
+    public void ClearTrackedPayments() =>
+        Update(state => state with { TrackedPayments = [], SelectedPayment = null });
 
     public async Task RefreshAsync(CancellationToken ct)
     {

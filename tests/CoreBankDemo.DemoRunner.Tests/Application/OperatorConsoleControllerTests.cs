@@ -1211,6 +1211,28 @@ public class OperatorConsoleControllerTests
             "an arriving answer never re-points the screen the operator moved");
     }
 
+    /// <summary>
+    /// Clear is a display-only reset (no backend call): it discards whatever is tracked right
+    /// now, pending or settled alike, and lets a fresh submission or arriving event repopulate
+    /// the list normally afterward.
+    /// </summary>
+    [Fact]
+    public async Task ClearTrackedPayments_EmptiesTheListAndTheSelectionAndRaisesStateChange()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202, "Pending") with { TransactionId = "tx-first" });
+        await controller.SubmitPaymentAsync(StandardPayment, IdempotencyMode.Supplied, "tx-first", CancellationToken.None);
+        controller.SelectPayment("tx-first");
+        OperatorConsoleState? observed = null;
+        controller.StateChanged += state => observed = state;
+
+        controller.ClearTrackedPayments();
+
+        controller.State.TrackedPayments.Should().BeEmpty();
+        controller.State.SelectedPayment.Should().BeNull();
+        observed.Should().Be(controller.State);
+    }
+
     [Fact]
     public async Task Burst_CancelIsSoleMutationExceptionAndPreservesPartialEvidence()
     {
@@ -1468,6 +1490,23 @@ public class OperatorConsoleControllerTests
 
         controller.State.Evidence.Should().HaveCount(2);
         controller.State.SelectedEvidence.Should().Be(controller.State.Evidence.First());
+    }
+
+    /// <summary>Clear is display-only, matching <see cref="OperatorConsoleController.ClearTrackedPayments"/>: no backend call.</summary>
+    [Fact]
+    public async Task ClearEvidence_EmptiesTheListAndTheSelectionAndRaisesStateChange()
+    {
+        var (controller, _) = await AttachedControllerAsync(TopologyProfile.LoadTests);
+        await controller.QueryOutcomeAsync("known-id", CancellationToken.None);
+        controller.SelectEvidence(controller.State.Evidence.First().Sequence);
+        OperatorConsoleState? observed = null;
+        controller.StateChanged += state => observed = state;
+
+        controller.ClearEvidence();
+
+        controller.State.Evidence.Should().BeEmpty();
+        controller.State.SelectedEvidence.Should().BeNull();
+        observed.Should().Be(controller.State);
     }
 
     [Fact]
