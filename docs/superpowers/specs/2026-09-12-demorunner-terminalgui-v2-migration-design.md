@@ -165,6 +165,23 @@ the same defensive `try { ... } catch (Exception) { /* driver already broken */ 
 already has. Belt-and-braces behavior is unchanged; only the mechanism for handing the terminal
 back becomes instance-based.
 
+**Found during implementation (2026-09-12): the main thread must wait for an in-flight report.**
+On Terminal.Gui 2.5.0, disposing the instance from the reporting thread *ends the run loop* on the
+UI thread — `app.Run(...)` returns — where 2.4.17 (and the old static `Shutdown()`) left it
+blocked until the runtime aborted the process. With the design as written above, the UI thread then
+reached the end of `Main` first and the process exited with code 0 underneath a half-written
+report: no banner, no crash file, and a status saying nothing went wrong (4 of 6 pty smoke runs;
+the same code on 2.4.17 was 6/6 correct). Two additions close this:
+
+- `TerminalCrashGuard.WaitForReport(TimeSpan timeout) : bool` — blocks until a report started on
+  another thread has finished (a `ManualResetEventSlim` set in a `finally` around the report's
+  body), or returns `false` at once if nothing was ever reported.
+- `RunConsole`'s `finally` calls `TakeApplication()` *first*. A non-null result is the normal
+  path: stop the owned AppHost, then `Dispose()`. A null result means the crash guard already has
+  the instance — a report is in flight on another thread — so the AppHost is left alone (the
+  report tells the operator it is) and, after the `finally`, the main thread waits on
+  `WaitForReport` and returns 70 instead of falling through to `return 0`.
+
 ### Tests
 
 **MainWindow's constructor signature changes** (both overloads gain a leading `IApplication app`
@@ -274,4 +291,9 @@ build at 0 warnings without re-suppressing anything the `Application` migration 
 Contained to the eight files above plus one new test file. No behavior change intended anywhere —
 every replacement is call-site substitution against a verified equivalent instance member. The
 main residual risk is the crash-guard path, which is inherently hard to unit test; the manual
-smoke test above is the mitigation.
+smoke test above is the mitigation — and it earned its keep: it is what caught the 2.5.0 run-loop
+behavior described under "TerminalCrashGuard" above, which no unit test in the repository could
+have. The smoke test was run under a pseudo-terminal (a small Python `pty` driver sending
+`Shift+Q`, and separately a temporary `ThreadPool.QueueUserWorkItem(_ => throw ...)` in
+`OnStateChanged`), 8/8 crash runs producing the banner, the crash file and a non-zero exit after
+the fix.

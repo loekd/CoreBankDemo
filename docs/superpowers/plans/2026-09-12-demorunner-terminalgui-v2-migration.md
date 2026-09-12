@@ -69,7 +69,7 @@ AwesomeAssertions.
   initialized (`Init("dotnet")`), screen-sized, disposable `IApplication` instance. Used by Tasks
   6 and 7.
 
-- [ ] **Step 1: Create the factory file**
+- [x] **Step 1: Create the factory file**
 
 ```csharp
 using System.Drawing;
@@ -94,12 +94,12 @@ internal static class TerminalAppFactory
 must go through the `AppTerminal` alias, not a bare `Application`, because
 `CoreBankDemo.DemoRunner.Tests.Application` is a nested namespace here — see Global Constraints.)
 
-- [ ] **Step 2: Build the test project to confirm it compiles standalone**
+- [x] **Step 2: Build the test project to confirm it compiles standalone**
 
 Run: `dotnet build tests/CoreBankDemo.DemoRunner.Tests/CoreBankDemo.DemoRunner.Tests.csproj`
 Expected: succeeds (this file has no dependents yet, so nothing else changes).
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/CoreBankDemo.DemoRunner.Tests/Terminal/TerminalAppFactory.cs
@@ -128,7 +128,7 @@ There is no existing dedicated test file for `TerminalCrashGuard` (it hooks
 `AppDomain.UnhandledException`, which isn't practically unit-testable) — verification here is a
 build check plus the manual smoke test in Task 9.
 
-- [ ] **Step 1: Retarget the class doc comment's `Application.Shutdown` references**
+- [x] **Step 1: Retarget the class doc comment's `Application.Shutdown` references**
 
 The type's `<remarks>` doc comment (right above `internal static class TerminalCrashGuard`)
 mentions `<c>Application.Shutdown</c>` twice — an API this class no longer calls once this task is
@@ -162,7 +162,7 @@ to:
 /// it is the only thing that can put the terminal's own attributes back; but it can itself throw
 ```
 
-- [ ] **Step 2: Replace the `AppTerminal` alias with a plain `IApplication` using**
+- [x] **Step 2: Replace the `AppTerminal` alias with a plain `IApplication` using**
 
 Change line 4 from:
 
@@ -176,7 +176,7 @@ to:
 using Terminal.Gui.App;
 ```
 
-- [ ] **Step 3: Add the attach/take-ownership static field and methods**
+- [x] **Step 3: Add the attach/take-ownership static field and methods**
 
 Add, right after the existing `_reported` field (after line 49, before the blank line at 50):
 
@@ -211,7 +211,7 @@ closing `}`):
     }
 ```
 
-- [ ] **Step 4: Replace the obsolete `Shutdown()` call in `RestoreTerminal`**
+- [x] **Step 4: Replace the obsolete `Shutdown()` call in `RestoreTerminal`**
 
 In `RestoreTerminal()`, change:
 
@@ -241,14 +241,14 @@ to:
         }
 ```
 
-- [ ] **Step 5: Build the DemoRunner project (errors expected — MainWindow/Program not yet migrated)**
+- [x] **Step 5: Build the DemoRunner project (errors expected — MainWindow/Program not yet migrated)**
 
 Run: `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj`
 Expected: this file alone compiles; the project as a whole may still show pre-existing CS0618
 warnings from `Program.cs`/`MainWindow.cs` until Tasks 3-5 land. No new errors should originate
 from `TerminalCrashGuard.cs` itself.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add CoreBankDemo.DemoRunner/Terminal/TerminalCrashGuard.cs
@@ -267,7 +267,7 @@ git commit -m "refactor(demorunner): TerminalCrashGuard disposes an attached IAp
 - Produces: `TerminalConfirmationService(IApplication app)` — consumed by Task 4 (`MainWindow.cs`'s
   default-confirmation-service branch).
 
-- [ ] **Step 1: Replace the `AppTerminal` alias and update `TerminalConfirmationService`**
+- [x] **Step 1: Replace the `AppTerminal` alias and update `TerminalConfirmationService`**
 
 Change:
 
@@ -336,7 +336,7 @@ here; the matching `#pragma warning restore CS0618` at the very end of the file,
 `DestructiveConfirmationDialog` itself doesn't reference the obsolete API — only
 `TerminalConfirmationService` did.)
 
-- [ ] **Step 2: Remove the trailing `#pragma warning restore CS0618`**
+- [x] **Step 2: Remove the trailing `#pragma warning restore CS0618`**
 
 Delete the last line of the file:
 
@@ -344,7 +344,7 @@ Delete the last line of the file:
 #pragma warning restore CS0618
 ```
 
-- [ ] **Step 3: Build the DemoRunner project**
+- [x] **Step 3: Build the DemoRunner project**
 
 Run: `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj`
 Expected: `ConfirmationDialog.cs` compiles cleanly on its own. `MainWindow.cs` will fail to build
@@ -352,7 +352,7 @@ at this point because its default-confirmation-service branch (`new TerminalConf
 no argument) no longer matches this constructor — that's fixed in Task 4, which comes next. If you
 see that specific error, it confirms this task is correct; don't fix it here.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add CoreBankDemo.DemoRunner/Terminal/ConfirmationDialog.cs
@@ -376,7 +376,7 @@ git commit -m "refactor(demorunner): TerminalConfirmationService takes an IAppli
   required, leading `IApplication app` parameter. Consumed by Task 5 (`Program.cs`) and Tasks 6-7
   (tests).
 
-- [ ] **Step 1: Replace the top-of-file alias and the class-wide pragma**
+- [x] **Step 1: Replace the top-of-file alias and the class-wide pragma**
 
 Change:
 
@@ -409,12 +409,12 @@ public sealed class MainWindow : Window
 {
 ```
 
-- [ ] **Step 2: Delete the trailing `#pragma warning restore CS0618`**
+- [x] **Step 2: Delete the trailing `#pragma warning restore CS0618`**
 
 `MainWindow.cs`'s class body closes on its second-to-last line; `#pragma warning restore CS0618`
 is the file's actual final line, right after that closing brace. Delete that last line.
 
-- [ ] **Step 3: Add narrow pragmas around the 5 pre-existing, unrelated `TextView` warning sites**
+- [x] **Step 3: Add narrow pragmas around the 5 pre-existing, unrelated `TextView` warning sites**
 
 These are independent of this migration (see Global Constraints / spec Non-goals) — wrap only
 these three spots so they keep compiling silently:
@@ -447,7 +447,7 @@ Around `EvidenceResponsePane` (originally line 2611):
 #pragma warning restore CS0618
 ```
 
-- [ ] **Step 4: Add the `_app` field and stop `_repaints` being a field initializer**
+- [x] **Step 4: Add the `_app` field and stop `_repaints` being a field initializer**
 
 Change:
 
@@ -466,7 +466,7 @@ to:
 only exists once `app` is a constructor parameter, so its construction moves into the constructor
 body in the next step.)
 
-- [ ] **Step 5: Add `app` as the leading parameter on both constructors, and assign the new fields**
+- [x] **Step 5: Add `app` as the leading parameter on both constructors, and assign the new fields**
 
 Change:
 
@@ -523,7 +523,7 @@ to:
 
 Everything after `_marshalUpdates = marshalUpdates;` in the constructor body is unchanged.
 
-- [ ] **Step 6: Replace the obsolete `Invoke` call in `RunOnUiThread`**
+- [x] **Step 6: Replace the obsolete `Invoke` call in `RunOnUiThread`**
 
 Change:
 
@@ -557,14 +557,14 @@ to:
     }
 ```
 
-- [ ] **Step 7: Build the DemoRunner project**
+- [x] **Step 7: Build the DemoRunner project**
 
 Run: `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj`
 Expected: `MainWindow.cs` and `ConfirmationDialog.cs` now compile together cleanly. `Program.cs`
 will fail (it still calls the old 3-argument public `MainWindow(...)` constructor) — that's Task 5,
 next. If that's the only remaining error, this task is correct.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add CoreBankDemo.DemoRunner/Terminal/MainWindow.cs
@@ -582,7 +582,7 @@ git commit -m "refactor(demorunner): MainWindow takes an IApplication instance"
 - Consumes: `MainWindow(IApplication app, ...)` from Task 4,
   `TerminalCrashGuard.AttachApplication`/`TakeApplication` from Task 2.
 
-- [ ] **Step 1: Retarget the stale `Application.Shutdown` comment near `TerminalCrashGuard.Install`**
+- [x] **Step 1: Retarget the stale `Application.Shutdown` comment near `TerminalCrashGuard.Install`**
 
 This comment sits in `Main()`, above the `TerminalCrashGuard.Install(...)` call — separate from
 `RunConsole`, which the rest of this task touches. Change:
@@ -605,7 +605,7 @@ to:
         TerminalCrashGuard.Install(Path.Combine(repositoryRoot, ".demo-runner-artifacts"));
 ```
 
-- [ ] **Step 2: Remove the method-wide pragma and create the instance (not `using`-scoped)**
+- [x] **Step 2: Remove the method-wide pragma and create the instance (not `using`-scoped)**
 
 Change:
 
@@ -668,7 +668,7 @@ non-obsolete static factory method, so keeping the alias for that one call is fi
 `using` needed since `app` is always referred to via `var`, never by naming `IApplication`
 explicitly in this file.)
 
-- [ ] **Step 3: Replace the remaining `AppTerminal.X` calls inside the try block**
+- [x] **Step 3: Replace the remaining `AppTerminal.X` calls inside the try block**
 
 This also retargets the stale "an ordinary Shutdown" comment immediately above (see Global
 Constraints: comments referring to the removed API are updated everywhere this plan touches them).
@@ -712,7 +712,7 @@ to:
             });
 ```
 
-- [ ] **Step 4: Replace `Shutdown()` with a `TakeApplication()`-owned `Dispose()` in the `finally` block, and delete the trailing pragma**
+- [x] **Step 4: Replace `Shutdown()` with a `TakeApplication()`-owned `Dispose()` in the `finally` block, and delete the trailing pragma**
 
 These are two separate edits — the original "before" text is not contiguous (11 lines sit between
 them: the `if (crash is null)` early return and the `TerminalCrashGuard.Report(...)` call).
@@ -742,7 +742,7 @@ note.)
 #pragma warning restore CS0618
 ```
 
-- [ ] **Step 5: Build and run the full solution**
+- [x] **Step 5: Build and run the full solution**
 
 Run: `dotnet build CoreBankDemo.sln`
 Expected: still fails — three files in `MainWindowTests.cs`/`MainWindowFaultsTests.cs` (Task 6)
@@ -753,7 +753,7 @@ builds clean with 0 warnings:
 Run: `dotnet build CoreBankDemo.DemoRunner/CoreBankDemo.DemoRunner.csproj`
 Expected: `Build succeeded`, 0 warnings, 0 errors.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add CoreBankDemo.DemoRunner/Program.cs
@@ -786,7 +786,7 @@ just binds `this`, it doesn't require the driver to be running, and a never-`Ini
 never touches the real terminal, so leaving the 71 `CreateWindow`-helper instances (see Steps 6-7)
 undisposed has no actual resource cost.
 
-- [ ] **Step 1: Add the missing using directive to `MainWindowTests.cs`**
+- [x] **Step 1: Add the missing using directive to `MainWindowTests.cs`**
 
 Add to the top of the file, among the existing `using` lines:
 
@@ -798,7 +798,7 @@ using AppTerminal = Terminal.Gui.App.Application;
 This file never names the `IApplication` type directly, only calls `Application.Create()`, so the
 alias alone is sufficient; no separate `using Terminal.Gui.App;` is needed here.)
 
-- [ ] **Step 2: Update `RefreshAndOrderlyExit_RunThroughActualMainWindowPaths`**
+- [x] **Step 2: Update `RefreshAndOrderlyExit_RunThroughActualMainWindowPaths`**
 
 Change:
 
@@ -838,7 +838,7 @@ to:
             marshalUpdates: false);
 ```
 
-- [ ] **Step 3: Update `Window_ResolvesTheRequestedPalette`**
+- [x] **Step 3: Update `Window_ResolvesTheRequestedPalette`**
 
 Change:
 
@@ -868,7 +868,7 @@ to:
             theme: mode);
 ```
 
-- [ ] **Step 4: Update `RefreshAndQuit_SurviveTheRemovedStatusBarAsWindowWideKeys`**
+- [x] **Step 4: Update `RefreshAndQuit_SurviveTheRemovedStatusBarAsWindowWideKeys`**
 
 Change:
 
@@ -904,7 +904,7 @@ to:
         window.HandleKeyForTest(Key.R).Should().BeTrue();
 ```
 
-- [ ] **Step 5: Update `QuitButton_ClickAlwaysTerminatesTheApplication`**
+- [x] **Step 5: Update `QuitButton_ClickAlwaysTerminatesTheApplication`**
 
 Change:
 
@@ -940,7 +940,7 @@ to:
         window.QuitButton.InvokeCommand(Command.Accept);
 ```
 
-- [ ] **Step 6: Fix `MainWindowTests.cs`'s own `CreateWindow` helper (59 callers)**
+- [x] **Step 6: Fix `MainWindowTests.cs`'s own `CreateWindow` helper (59 callers)**
 
 Near the end of the file, change:
 
@@ -964,7 +964,7 @@ None of `CreateWindow`'s 59 callers need to change — the fix is entirely insid
 call now creates its own never-`Init()`'d `IApplication` instance (see this task's intro for why
 leaving it undisposed is fine here).
 
-- [ ] **Step 7: Fix `MainWindowFaultsTests.cs`'s `CreateWindow` helper (12 callers)**
+- [x] **Step 7: Fix `MainWindowFaultsTests.cs`'s `CreateWindow` helper (12 callers)**
 
 This file has an identical helper (near its end, right before the `ThrowingConfirmationService`
 nested class) and needs both the same `using` and the same fix. Add to its `using` list:
@@ -991,14 +991,14 @@ to:
         new(AppTerminal.Create(), controller, () => Task.CompletedTask, confirmation, startPolling: false, marshalUpdates: false);
 ```
 
-- [ ] **Step 8: Build and run these test files**
+- [x] **Step 8: Build and run these test files**
 
 Run: `dotnet build tests/CoreBankDemo.DemoRunner.Tests/CoreBankDemo.DemoRunner.Tests.csproj`
 Expected: still fails overall (Task 7's two render test files aren't done yet) — that's expected.
 Search the build output specifically for `MainWindowTests.cs` and `MainWindowFaultsTests.cs` and
 confirm neither has any errors of its own.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowTests.cs tests/CoreBankDemo.DemoRunner.Tests/Terminal/MainWindowFaultsTests.cs
@@ -1024,7 +1024,7 @@ each test did `Init("dotnet")` → construct `MainWindow` → set `Screen` → `
 which is the part that actually matters for rendering — everything from `Begin` onward keeps its
 original sequence.
 
-- [ ] **Step 1: Replace the full contents of `EvidencePaneRenderTests.cs`**
+- [x] **Step 1: Replace the full contents of `EvidencePaneRenderTests.cs`**
 
 ```csharp
 using System.Text;
@@ -1173,7 +1173,7 @@ public class EvidencePaneRenderTests
 }
 ```
 
-- [ ] **Step 2: Replace the full contents of `NavigationRailRenderTests.cs`**
+- [x] **Step 2: Replace the full contents of `NavigationRailRenderTests.cs`**
 
 ```csharp
 using System.Text;
@@ -1264,7 +1264,7 @@ public class NavigationRailRenderTests
 }
 ```
 
-- [ ] **Step 3: Build and run the full solution**
+- [x] **Step 3: Build and run the full solution**
 
 Run: `dotnet tool restore && dotnet restore CoreBankDemo.sln && dotnet build CoreBankDemo.sln --no-restore`
 Expected: `Build succeeded`, **0 warnings**, 0 errors — this is the first point in the plan where
@@ -1279,7 +1279,7 @@ Expected: every project in it passes; in particular `CoreBankDemo.DemoRunner.Tes
 `Passed!` at 687 tests (same count as before this plan — no test was added or removed, only their
 setup changed).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add tests/CoreBankDemo.DemoRunner.Tests/Terminal/EvidencePaneRenderTests.cs tests/CoreBankDemo.DemoRunner.Tests/Terminal/NavigationRailRenderTests.cs
@@ -1300,7 +1300,7 @@ against the actual 2.4.17 assembly). This task takes the version bump that was d
 deferred out of the earlier mechanical package-update round specifically to land with this
 migration, and re-verifies against it as a separate, bisectable step.
 
-- [ ] **Step 1: Bump the package version**
+- [x] **Step 1: Bump the package version**
 
 In `Directory.Packages.props`, change:
 
@@ -1320,7 +1320,7 @@ to:
     <PackageVersion Include="Terminal.Gui" Version="2.5.0" />
 ```
 
-- [ ] **Step 2: Amend ADR-015**
+- [x] **Step 2: Amend ADR-015**
 
 In `docs/adr/ADR-015-presentation-safe-terminal-demo-console.md`, in the "Terminal.Gui as the
 pinned TUI adapter" section, change:
@@ -1339,7 +1339,7 @@ to:
 Terminal.Gui's stable v2 line is the only UI package, pinned centrally at **2.5.0** in `Directory.Packages.props` (one version for the whole repo, consistent with existing central package management). **Amended (Terminal.Gui v2 instance migration, 2026-09-12):** bumped from 2.4.17. The static `Terminal.Gui.App.Application` class this console originally used is obsolete and slated for removal; the console now owns an instance-based `IApplication` created in `Program.cs` and threaded explicitly to the views and services that need it. See `docs/superpowers/specs/2026-09-12-demorunner-terminalgui-v2-migration-design.md`. The package boundary stays thin:
 ```
 
-- [ ] **Step 3: Full clean rebuild and test against 2.5.0**
+- [x] **Step 3: Full clean rebuild and test against 2.5.0**
 
 Run:
 ```bash
@@ -1355,7 +1355,7 @@ Run: `dotnet test CoreBankDemo.Rebuild.slnf`
 Expected: same result as Task 7's verification — every project in the gate passes,
 `CoreBankDemo.DemoRunner.Tests` at 687 tests.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add Directory.Packages.props docs/adr/ADR-015-presentation-safe-terminal-demo-console.md
@@ -1372,14 +1372,14 @@ Automated tests can't exercise `TerminalCrashGuard`'s actual `AppDomain.Unhandle
 (that's the one place this migration touches real thread/lifetime semantics, not just call-site
 substitution), so this is a manual check before considering the migration done.
 
-- [ ] **Step 1: Launch the console and confirm ordinary start/quit**
+- [x] **Step 1: Launch the console and confirm ordinary start/quit**
 
 Run: `dotnet run --project CoreBankDemo.DemoRunner`
 Expected: the console starts normally (Operations workspace visible), and pressing `Shift+Q`
 (or clicking Quit) exits cleanly, returning the terminal to a normal shell prompt with no leftover
 alternate-screen artifacts.
 
-- [ ] **Step 2: Confirm a forced crash still restores the terminal**
+- [x] **Step 2: Confirm a forced crash still restores the terminal**
 
 The point of this step is to exercise `TerminalCrashGuard.AttachApplication`/`TakeApplication` —
 i.e. an exception that actually reaches `AppDomain.UnhandledException` while the `IApplication`
@@ -1421,8 +1421,37 @@ Expected: terminal returns to a normal shell prompt (not a dead alternate-screen
 `crash-<timestamp>.log` file exists under the repository's `.demo-runner-artifacts/` directory
 containing the exception detail.
 
-- [ ] **Step 3: Report results**
+- [x] **Step 3: Report results**
 
 No commit for this task — it's verification only. If both checks pass, the migration is
 complete: `dotnet build CoreBankDemo.sln` shows 0 warnings, `dotnet test CoreBankDemo.Rebuild.slnf`
 passes in full, and the console behaves identically to before under both normal and crash exits.
+
+---
+
+### Implementation note (2026-09-12): Task 9 Step 2 failed on 2.5.0, and this is the fix
+
+Executed as written, Step 2 passed only 3 times in 7 on Terminal.Gui 2.5.0 — the terminal was
+always restored, but in the failing runs the process exited with **code 0** and wrote **no banner
+and no crash file**. The same build against 2.4.17 was 6/6 correct, as was pristine `origin/main`,
+so this is a 2.5.0 behavior: disposing the `IApplication` instance from the crash guard's thread
+now makes `app.Run(...)` return on the UI thread, which then reached the end of `Main` before the
+report had finished. (The runs were driven under a pseudo-terminal with a small Python `pty`
+script, since the sandbox has no interactive TTY.)
+
+The fix landed as one extra commit after Task 8, `fix(demorunner): keep the crash report intact
+when Dispose ends the run loop`, and supersedes Task 5 Step 4's `finally` block:
+
+- `TerminalCrashGuard` gains `internal static bool WaitForReport(TimeSpan timeout)`: `Report`'s
+  body moves into a private `RestoreAndExplain` wrapped in `try { ... } finally
+  { ReportFinished.Set(); }` (a `ManualResetEventSlim`), and `WaitForReport` returns `false` at
+  once if `_reported` is still false, else blocks on that event up to the timeout and returns
+  `true`.
+- `RunConsole`'s `finally` becomes: `if (TerminalCrashGuard.TakeApplication() is { } application)
+  { <stop the owned AppHost as before>; application.Dispose(); } else { reportedElsewhere = true; }`
+  — and after the `finally`, `if (reportedElsewhere) { TerminalCrashGuard.WaitForReport(
+  TimeSpan.FromSeconds(10)); return 70; }` precedes the existing `if (crash is null) return 0;`.
+
+After the fix: 8/8 crash runs produce the banner, the crash file and a non-zero exit; `Shift+Q`
+still exits 0 with the alternate screen left exactly once; all 687 `CoreBankDemo.DemoRunner.Tests`
+still pass. The spec's "TerminalCrashGuard" section carries the same note.
