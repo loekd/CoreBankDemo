@@ -123,6 +123,7 @@ public static class Program
             window.RequestExitAsync().GetAwaiter().GetResult();
         };
         Console.CancelKeyPress += cancelHandler;
+        var reportedElsewhere = false;
         try
         {
             // Preflight probes ports and the Aspire CLI; running it before the first paint
@@ -147,15 +148,35 @@ public static class Program
         finally
         {
             Console.CancelKeyPress -= cancelHandler;
-            try
+            if (TerminalCrashGuard.TakeApplication() is { } application)
             {
-                controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
+                try
+                {
+                    controller.ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.Error.WriteLine($"Could not stop the owned AppHost cleanly: {ex.Message}");
+                }
+                application.Dispose();
             }
-            catch (InvalidOperationException ex)
+            else
             {
-                Console.Error.WriteLine($"Could not stop the owned AppHost cleanly: {ex.Message}");
+                // The crash guard took the instance first: a fault on a thread the console does
+                // not own, or a termination signal, is being reported right now, and disposing
+                // the instance is what ended the run loop above. The report restores the terminal
+                // and names the fault itself; the owned AppHost is deliberately left alone, as
+                // the report tells the operator it is.
+                reportedElsewhere = true;
             }
-            TerminalCrashGuard.TakeApplication()?.Dispose();
+        }
+
+        if (reportedElsewhere)
+        {
+            // Returning before the report has finished would end the process with exit code 0
+            // underneath it: no banner, no crash file, and a status that says nothing went wrong.
+            TerminalCrashGuard.WaitForReport(TimeSpan.FromSeconds(10));
+            return 70;
         }
 
         if (crash is null)

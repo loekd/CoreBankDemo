@@ -44,6 +44,7 @@ internal static class TerminalCrashGuard
         + Esc + "[0m";                                     // clear attributes
 
     private static readonly object Sync = new();
+    private static readonly ManualResetEventSlim ReportFinished = new(false);
     private static string? _artifactsDirectory;
     private static bool _installed;
     private static bool _reported;
@@ -108,6 +109,31 @@ internal static class TerminalCrashGuard
     }
 
     /// <summary>
+    /// Blocks until a report started on another thread has finished restoring the terminal and
+    /// writing its explanation, or until <paramref name="timeout"/> elapses. Returns
+    /// <c>false</c> at once if nothing was ever reported.
+    /// </summary>
+    /// <remarks>
+    /// Disposing the application instance from the reporting thread ends the run loop on the UI
+    /// thread, which then heads for the end of <c>Main</c>. Without this wait it gets there
+    /// first, and the process exits with code 0 underneath a half-written report: no banner,
+    /// no crash file, and an exit status that says nothing went wrong.
+    /// </remarks>
+    internal static bool WaitForReport(TimeSpan timeout)
+    {
+        lock (Sync)
+        {
+            if (!_reported)
+            {
+                return false;
+            }
+        }
+
+        ReportFinished.Wait(timeout);
+        return true;
+    }
+
+    /// <summary>
     /// Restores the terminal and states what happened, once. Safe to call from a signal
     /// handler, from a catch block, or from both.
     /// </summary>
@@ -123,6 +149,18 @@ internal static class TerminalCrashGuard
             _reported = true;
         }
 
+        try
+        {
+            RestoreAndExplain(exception, headline);
+        }
+        finally
+        {
+            ReportFinished.Set();
+        }
+    }
+
+    private static void RestoreAndExplain(Exception? exception, string headline)
+    {
         RestoreTerminal();
         var path = WriteReportFile(headline, exception);
 
