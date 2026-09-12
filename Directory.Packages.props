@@ -88,6 +88,6 @@
     <!-- Story 7.4: Terminal.Gui is the sole UI package for the standalone
          CoreBankDemo.DemoRunner presentation console (ADR-015). Pinned centrally
          so exactly one version is used repo-wide. -->
-    <PackageVersion Include="Terminal.Gui" Version="2.4.17" />
+    <PackageVersion Include="Terminal.Gui" Version="2.5.0" />
   </ItemGroup>
 </Project>
