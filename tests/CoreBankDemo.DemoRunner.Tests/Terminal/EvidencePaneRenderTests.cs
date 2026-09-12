@@ -3,10 +3,10 @@ using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
+using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
 using Xunit;
-using AppTerminal = Terminal.Gui.App.Application;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
@@ -30,41 +30,33 @@ public class EvidencePaneRenderTests
     [Fact]
     public async Task ReadingAnotherRecordAndComingBack_DrawsTheResponseColumnFromItsFirstCharacter()
     {
-        AppTerminal.Init("dotnet");
-        try
-        {
-            OperatorTheme.Register(ThemeMode.Dark);
-            using var window = await EvidenceWindowAsync();
-            AppTerminal.Screen = new System.Drawing.Rectangle(0, 0, 140, 40);
-            AppTerminal.Begin(window);
-            window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
-            window.HandleKeyForTest(Key.D3);
-            window.ResizeForTest(140, 40);
-            window.RenderForTest();
-            AppTerminal.LayoutAndDraw(true);
+        using var app = TerminalAppFactory.CreateHeadless(140, 40);
+        OperatorTheme.Register(ThemeMode.Dark);
+        using var window = await EvidenceWindowAsync(app);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(140, 40);
+        window.RenderForTest();
+        app.LayoutAndDraw(true);
 
-            // The operator reads into the column, then walks the list and comes back.
-            window.EvidenceResponsePane.SetFocus();
-            window.EvidenceResponsePane.NewKeyDownEvent(Key.End);
-            window.EvidenceList.SelectedItem = 1;
-            window.RenderForTest();
-            AppTerminal.LayoutAndDraw(true);
-            window.EvidenceList.SelectedItem = 0;
-            window.RenderForTest();
-            AppTerminal.LayoutAndDraw(true);
+        // The operator reads into the column, then walks the list and comes back.
+        window.EvidenceResponsePane.SetFocus();
+        window.EvidenceResponsePane.NewKeyDownEvent(Key.End);
+        window.EvidenceList.SelectedItem = 1;
+        window.RenderForTest();
+        app.LayoutAndDraw(true);
+        window.EvidenceList.SelectedItem = 0;
+        window.RenderForTest();
+        app.LayoutAndDraw(true);
 
-            window.EvidenceResponsePane.Viewport.Location.X.Should().Be(
-                0, "a new record is read from its first column, not from the last one's offset");
+        window.EvidenceResponsePane.Viewport.Location.X.Should().Be(
+            0, "a new record is read from its first column, not from the last one's offset");
 
-            var column = ResponseColumnAsDrawn(window);
-            column[0].Should().Be("RESPONSE");
-            column.Should().Contain("HTTP 202 Accepted");
-            column.Should().Contain("{", "a line holding only an opening brace is the first casualty of a one-column scroll");
-        }
-        finally
-        {
-            AppTerminal.Shutdown();
-        }
+        var column = ResponseColumnAsDrawn(app, window);
+        column[0].Should().Be("RESPONSE");
+        column.Should().Contain("HTTP 202 Accepted");
+        column.Should().Contain("{", "a line holding only an opening brace is the first casualty of a one-column scroll");
     }
 
     /// <summary>
@@ -79,36 +71,28 @@ public class EvidencePaneRenderTests
     [InlineData(ThemeMode.Light, "#1F2328", "#FFFFFF")]
     public async Task ThePayloadDrawsOnTheWorkspacesOwnSurface(ThemeMode mode, string foreground, string background)
     {
-        AppTerminal.Init("dotnet");
-        try
-        {
-            // The window registers the palette itself, so it is the one that must be told.
-            using var window = await EvidenceWindowAsync(mode);
-            AppTerminal.Screen = new System.Drawing.Rectangle(0, 0, 140, 40);
-            AppTerminal.Begin(window);
-            window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
-            window.HandleKeyForTest(Key.D3);
-            window.ResizeForTest(140, 40);
-            window.RenderForTest();
-            AppTerminal.LayoutAndDraw(true);
+        using var app = TerminalAppFactory.CreateHeadless(140, 40);
+        // The window registers the palette itself, so it is the one that must be told.
+        using var window = await EvidenceWindowAsync(app, mode);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(140, 40);
+        window.RenderForTest();
+        app.LayoutAndDraw(true);
 
-            var origin = window.EvidenceResponsePane.FrameToScreen();
-            var cell = AppTerminal.Driver!.Contents![origin.Y, origin.X];
+        var origin = window.EvidenceResponsePane.FrameToScreen();
+        var cell = app.Driver!.Contents![origin.Y, origin.X];
 
-            cell.Grapheme.Should().Be("R", "this is the first cell of the RESPONSE column");
-            cell.Attribute!.Value.Foreground.Should().Be(new Color(foreground));
-            cell.Attribute!.Value.Background.Should().Be(
-                new Color(background),
-                "the pane is the same surface as the rest of the workspace, not a dimmed variant");
-        }
-        finally
-        {
-            AppTerminal.Shutdown();
-        }
+        cell.Grapheme.Should().Be("R", "this is the first cell of the RESPONSE column");
+        cell.Attribute!.Value.Foreground.Should().Be(new Color(foreground));
+        cell.Attribute!.Value.Background.Should().Be(
+            new Color(background),
+            "the pane is the same surface as the rest of the workspace, not a dimmed variant");
     }
 
     /// <summary>A console holding one payment record that carries a full HTTP exchange.</summary>
-    private static async Task<MainWindow> EvidenceWindowAsync(ThemeMode theme = ThemeMode.Dark)
+    private static async Task<MainWindow> EvidenceWindowAsync(IApplication app, ThemeMode theme = ThemeMode.Dark)
     {
         var harness = new OperatorHarness();
         harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
@@ -130,18 +114,18 @@ public class EvidencePaneRenderTests
             new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
             IdempotencyMode.Generated, null, CancellationToken.None);
         return new MainWindow(
-            controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false, theme: theme);
+            app, controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false, theme: theme);
     }
 
     private const string Body =
         """{"transactionId":"tx-8821","status":"Pending","note":"long enough that the column can scroll"}""";
 
     /// <summary>Reads the RESPONSE column's cells straight off the driver's screen buffer.</summary>
-    private static List<string> ResponseColumnAsDrawn(MainWindow window)
+    private static List<string> ResponseColumnAsDrawn(IApplication app, MainWindow window)
     {
         var pane = window.EvidenceResponsePane;
         var origin = pane.FrameToScreen();
-        var contents = AppTerminal.Driver!.Contents!;
+        var contents = app.Driver!.Contents!;
         var lines = new List<string>();
         for (var row = 0; row < pane.Frame.Height; row++)
         {
