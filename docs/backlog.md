@@ -213,6 +213,11 @@ As the process record, I want the accepted rebuild decisions audited against the
 - A flood of unrecognised or foreign events on transaction-events can now evict real payment records from the 500-record evidence ring. — HandleAsync no longer drops unparseable messages, so every message on the topic becomes a record; previously only the four known types could.
 - Non-UTF-8 CloudEvent data is rendered as replacement characters on a pane that claims to show the bytes as delivered. — Envelope() calls Encoding.UTF8.GetString unconditionally, regardless of the message's DataContentType.
 
+### [LGTM observability backend](superpowers/specs/2026-09-16-lgtm-observability-design.md)
+
+- The LGTM dashboard has no Inbox/Outbox backlog-depth gauge; it shows in-vs-out rates per store instead. — No instrument reports pending rows, and subtracting cumulative counters goes wrong once a replica restarts. A per-store observable gauge adds an instrument to the banking services, so it needs its own design.
+- `corebank-trace-analysis` still analyses traces only. — Extend it to check error rate, retries, and terminal failures through `mcp-grafana` (Prometheus, Loki) before digging into Tempo traces.
+
 ## Open retrospective action items
 
 These carry-forwards were copied from the epic retrospectives during the 2026-09-10 migration; items verifiable as done in the code were removed then, the rest have not been re-verified.
