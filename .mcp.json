@@ -13,8 +13,18 @@
       "command": "uvx",
       "args": ["opentelemetry-mcp"],
       "env": {
-        "BACKEND_TYPE": "jaeger",
-        "BACKEND_URL": "http://localhost:16686"
+        "BACKEND_TYPE": "tempo",
+        "BACKEND_URL": "http://localhost:3200"
+      }
+    },
+    "grafana": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["mcp-grafana"],
+      "env": {
+        "GRAFANA_URL": "http://localhost:3000",
+        "GRAFANA_USERNAME": "admin",
+        "GRAFANA_PASSWORD": "admin"
       }
     }
   }

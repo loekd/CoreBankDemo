@@ -6,7 +6,7 @@ Mission-critical banking demo for a conference talk. Shows resilient, observable
 
 - **PaymentsAPI** — accepts payments; Outbox for reliable forwarding, Inbox for event consumption
 - **CoreBankAPI** — processes transactions; Inbox for idempotent handling, Messaging Outbox for domain events
-- **AppHost** — Aspire orchestration: Postgres, Redis, Jaeger, Dapr sidecars, optional Dev Proxy for fault injection
+- **AppHost** — Aspire orchestration: Postgres, Redis, LGTM (Grafana, Tempo, Loki, Prometheus), Dapr sidecars, optional Dev Proxy for fault injection
 - **ServiceDefaults** — shared OpenTelemetry, health checks, distributed locking
 - **Messaging** — Inbox/Outbox base classes, MessageConstants, PartitionHelper
 

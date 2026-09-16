@@ -6,7 +6,7 @@ This document provides technical architecture details. For demo instructions and
 
 ## System Description
 
-CoreBankDemo is a distributed banking system consisting of a **Payments API** (accepts and forwards payments), a **Core Bank API** (executes transactions and maintains account balances), and an **.NET Aspire AppHost** that orchestrates all infrastructure — PostgreSQL, Redis, Dapr sidecars, Jaeger, and optionally DevProxy for fault injection. The system demonstrates how to achieve exactly-once payment processing in the face of network failures, retries, and concurrent load.
+CoreBankDemo is a distributed banking system consisting of a **Payments API** (accepts and forwards payments), a **Core Bank API** (executes transactions and maintains account balances), and an **.NET Aspire AppHost** that orchestrates all infrastructure — PostgreSQL, Redis, Dapr sidecars, LGTM (Grafana, Tempo, Loki, Prometheus), and optionally DevProxy for fault injection. The system demonstrates how to achieve exactly-once payment processing in the face of network failures, retries, and concurrent load.
 
 ## Technology Stack
 
@@ -17,7 +17,7 @@ CoreBankDemo is a distributed banking system consisting of a **Payments API** (a
 | PostgreSQL | Persistent storage (Outbox, Inbox, Accounts) |
 | Dapr | Pub/sub messaging, distributed locking (Redis-backed) |
 | Redis | Lock store and pub/sub broker |
-| OpenTelemetry + Jaeger | Distributed tracing, metrics, structured logs |
+| OpenTelemetry + LGTM (Grafana, Tempo, Loki, Prometheus) | Distributed tracing, metrics, structured logs |
 | Microsoft DevProxy | Fault injection (503, 429, 500 errors) |
 | K6 | Automated load and resilience testing |
 | Microsoft.Extensions.Http.Resilience | Retry, circuit breaker, timeout on HTTP clients |
@@ -45,7 +45,7 @@ Formal decision records are maintained in [`docs/adr/`](docs/adr/).
 
 ## Running the Demo
 
-**Prerequisites:** .NET 10 SDK, Docker (for PostgreSQL, Redis, Jaeger containers).
+**Prerequisites:** .NET 10 SDK, Docker (for PostgreSQL, Redis, LGTM containers).
 
 ```bash
 # Option 1: Development mode (with Aspire CLI)
@@ -58,7 +58,7 @@ aspire run --project CoreBankDemo.AppHost -- --Features:UseDevProxy=true
 aspire run --project CoreBankDemo.LoadTests
 ```
 
-The Aspire Dashboard is available at `http://localhost:15888` and Jaeger UI at `http://localhost:16686`.
+The Aspire Dashboard is available at `http://localhost:15888` and the LGTM Grafana UI at `http://localhost:3000` (CoreBank dashboard at `/d/corebank`, anonymous access).
 
 A devcontainer configuration is provided in `.devcontainer/` for GitHub Codespaces or VS Code Remote Containers with all tools pre-installed.
 
@@ -147,13 +147,13 @@ A devcontainer configuration is provided in `.devcontainer/` for GitHub Codespac
 │                     Observability Stack                          │
 │                                                                   │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │                    Jaeger                                 │  │
-│  │                (Port 16686 - UI)                          │  │
+│  │              LGTM (grafana/otel-lgtm)                     │  │
+│  │                (Port 3000 - Grafana UI)                   │  │
+│  │                (Port 3200 - Tempo API)                    │  │
 │  │                (Port 4317 - OTLP gRPC)                    │  │
 │  │                                                            │  │
-│  │  • Distributed Tracing                                     │  │
-│  │  • Metrics Collection                                      │  │
-│  │  • Service Dependencies                                    │  │
+│  │  • Traces (Tempo), Logs (Loki), Metrics (Prometheus)      │  │
+│  │  • Provisioned CoreBank dashboard (/d/corebank)           │  │
 │  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -348,7 +348,7 @@ Defaults.PollingInterval     // 5 seconds
 7. Observability
    - All steps traced with OpenTelemetry
    - Parent trace context propagated via TraceParent/TraceState
-   - End-to-end visibility in Jaeger UI
+   - End-to-end visibility in the LGTM Grafana UI (Tempo)
 ```
 
 ## Database Schemas
@@ -481,8 +481,9 @@ Defaults.PollingInterval     // 5 seconds
 | CoreBankAPI   | 5032  | Legacy core bank system    |
 | DevProxy      | 8000  | Chaos proxy                |
 | Aspire        | 15888 | Aspire Dashboard           |
-| Jaeger UI     | 16686 | Tracing visualization      |
-| Jaeger OTLP   | 4317  | OpenTelemetry collection   |
+| LGTM Grafana  | 3000  | Dashboards, traces, logs   |
+| LGTM Tempo    | 3200  | Trace query API (MCP)      |
+| LGTM OTLP     | 4317  | OpenTelemetry collection   |
 
 ## Project Structure
 
@@ -806,4 +807,4 @@ All components instrument with OpenTelemetry:
 
 View in:
 - Aspire Dashboard: Real-time logs and metrics
-- Jaeger UI: Distributed traces and service dependencies
+- LGTM Grafana UI: CoreBank dashboard (`/d/corebank`), Tempo traces, Loki logs, Prometheus metrics

@@ -28,13 +28,14 @@
       ]
     }
   },
-  "forwardPorts": [5032, 5294, 8000, 15888, 16686, 4317, 5432, 6379],
+  "forwardPorts": [5032, 5294, 8000, 15888, 3000, 3200, 4317, 5432, 6379],
   "portsAttributes": {
     "5032":  { "label": "CoreBank API" },
     "5294":  { "label": "Payments API" },
     "8000":  { "label": "DevProxy" },
     "15888": { "label": "Aspire Dashboard" },
-    "16686": { "label": "Jaeger UI" },
+    "3000":  { "label": "LGTM (Grafana)" },
+    "3200":  { "label": "LGTM (Tempo)" },
     "4317":  { "label": "OTEL Collector (gRPC)" },
     "5432":  { "label": "PostgreSQL" },
     "6379":  { "label": "Redis" }

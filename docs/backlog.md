@@ -14,7 +14,7 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 
 **Given** `aspire run` (per `aspire-launch` skill)
 **When** the AppHost starts
-**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr pub/sub and subscription components, one Dapr pub/sub adapter per logical API service, and both APIs come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
+**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), LGTM, Dapr pub/sub and subscription components, one Dapr pub/sub adapter per logical API service, and both APIs come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
 **And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
 
 ### Story 6.4: Chaos opt-in and demo smoke
@@ -26,7 +26,7 @@ As the speaker, I want DevProxy and the demo flows verified, so that talk stages
 **Given** the running AppHost
 **When** `demo-requests.http` and `payment-idempotency-tests.http` flows run
 **Then** all behave as on `main` (202s, duplicate replay, outbox/inbox visibility via LoadTestSupport endpoints once E6 lands — until then via DB)
-**And** enabling DevProxy injects faults and the Polly layer retries visibly in Jaeger; one payment renders as one trace (NFR-2).
+**And** enabling DevProxy injects faults and the Polly layer retries visibly in LGTM; one payment renders as one trace (NFR-2).
 
 ### Story 8.1: Regenerate ARCHITECTURE.md
 
@@ -215,7 +215,7 @@ As the process record, I want the accepted rebuild decisions audited against the
 
 ### [LGTM observability backend](superpowers/specs/2026-09-16-lgtm-observability-design.md)
 
-- The LGTM dashboard has no Inbox/Outbox backlog-depth gauge; it shows in-vs-out rates per store instead. — No instrument reports pending rows, and subtracting cumulative counters goes wrong once a replica restarts. A per-store observable gauge adds an instrument to the banking services, so it needs its own design.
+- The LGTM dashboard has no Inbox/Outbox backlog-depth gauge; it shows in-vs-out rates per store instead. — No instrument reports pending rows, and subtracting cumulative counters goes wrong once a replica restarts. A per-store observable gauge adds an instrument to the banking services, so it needs its own design. The in-vs-out signal also undercounts: `items.processed{completed}` is only recorded by the Inbox/Outbox processors, so rows completed inline (instant-rail `payments-outbox` rows, `corebank-inbox` rows executed at intake) never appear as out — in the 500-transaction acceptance run `corebank-outbox` and `payments-inbox` matched 1500/1500 while `payments-outbox` showed 500/400 and `corebank-inbox` 500/0. The gauge would make the drain visible for those stores too.
 - `corebank-trace-analysis` still analyses traces only. — Extend it to check error rate, retries, and terminal failures through `mcp-grafana` (Prometheus, Loki) before digging into Tempo traces.
 
 ## Open retrospective action items

@@ -3,7 +3,7 @@
 **Date:** 2026-05-23  
 **Status:** Accepted
 **Deciders:** Architecture team
-**Superseded in part by:** ADR-013 replaces the hand-written CoreBank HTTP client; the trace-propagation decision remains accepted
+**Superseded in part by:** ADR-013 replaces the hand-written CoreBank HTTP client; ADR-022 replaces the Jaeger telemetry backend with Grafana LGTM (and `JAEGER_OTLP_ENDPOINT` with `OTLP_ENDPOINT`); the OpenTelemetry instrumentation and trace-propagation decisions remain accepted
 
 ## Context
 

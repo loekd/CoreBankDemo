@@ -509,7 +509,7 @@
           "refId": "B"
         }
       ],
-      "description": "Rows added versus rows completed per store. The dashed out-line meets the in-line once the backlog drains."
+      "description": "Rows added versus rows the processors completed, per store. The dashed out-line meets the in-line once the backlog drains. Rows completed inline instead of by a processor (instant-rail payments-outbox rows, corebank-inbox rows executed at intake) are not counted as out, so those stores show out below in; see the backlog-depth gauge deferred in docs/backlog.md."
     },
     {
       "id": 9,
