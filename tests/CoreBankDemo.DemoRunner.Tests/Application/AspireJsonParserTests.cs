@@ -15,7 +15,7 @@ public class AspireJsonParserTests
               "resources": [
                 { "name": "postgres-x", "displayName": "postgres", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy" },
                 { "name": "redis-x", "displayName": "redis", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy" },
-                { "name": "jaeger-x", "displayName": "jaeger", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy", "endpoints": [{"url":"http://localhost:16686"}] },
+                { "name": "lgtm-x", "displayName": "lgtm", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy", "endpoints": [{"url":"http://localhost:3000"}] },
                 { "name": "corebank-api-1", "displayName": "corebank-api", "resourceType":"Project", "state": "Running", "healthStatus": "Healthy", "dashboardUrl":"https://localhost:17253/?resource=corebank-api-1", "urls":[{"url":"http://127.0.0.1:5032/swagger"}], "commands":{"stop":{"state":"Enabled"},"restart":{"state":"Enabled"}} },
                 { "name": "corebank-api-2", "displayName": "corebank-api", "resourceType":"Project", "state": "Running", "healthStatus": "Healthy", "urls":[{"url":"http://127.0.0.1:5032/swagger"}], "commands":{"stop":{"state":"Enabled"},"restart":{"state":"Enabled"}} },
                 { "name": "corebank-api-dapr-cli-x", "displayName": "corebank-api-dapr-cli", "resourceType":"Executable", "state": "Running", "healthStatus": "Healthy" },
@@ -33,7 +33,7 @@ public class AspireJsonParserTests
         snapshot.FindResource(KnownResources.CoreBankApi)!.InstanceNames.Should().BeEquivalentTo(["corebank-api-1", "corebank-api-2"]);
         snapshot.FindResource(KnownResources.CoreBankApi)!.Supports(ResourceCommand.Stop).Should().BeTrue();
         snapshot.FindResource(KnownResources.CoreBankApi)!.Supports(ResourceCommand.Start).Should().BeFalse();
-        snapshot.FindResource(KnownResources.Jaeger)!.Endpoints.Should().Contain("http://localhost:16686");
+        snapshot.FindResource(KnownResources.Lgtm)!.Endpoints.Should().Contain("http://localhost:3000");
         snapshot.FindResource(KnownResources.DevProxy)!.Condition.Should().Be(ResourceCondition.Stopped);
         snapshot.DashboardUrl.Should().Be("https://localhost:17253");
     }
@@ -72,7 +72,7 @@ public class AspireJsonParserTests
         var json = RequiredJson("Running", "Healthy")
             .Replace("\"corebank-api\", \"resourceState\": \"Running\"", "\"corebank-api\", \"resourceState\": \"Running\", \"urls\":[{\"url\":\"http://127.0.0.1:9999\"}]")
             .Replace("\"payments-api\", \"resourceState\": \"Running\"", "\"payments-api\", \"resourceState\": \"Running\", \"urls\":[{\"url\":\"http://127.0.0.1:5294\"}]")
-            .Replace("\"jaeger\", \"resourceState\": \"Running\"", "\"jaeger\", \"resourceState\": \"Running\", \"urls\":[{\"url\":\"http://127.0.0.1:16686\"}]");
+            .Replace("\"lgtm\", \"resourceState\": \"Running\"", "\"lgtm\", \"resourceState\": \"Running\", \"urls\":[{\"url\":\"http://127.0.0.1:3000\"}]");
 
         var snapshot = AspireJsonParser.Parse(TopologyProfile.Regular, json, DateTimeOffset.UnixEpoch);
 
@@ -109,7 +109,7 @@ public class AspireJsonParserTests
               "resources": [
                 { "name":"postgres-x", "displayName":"postgres", "resourceType":"Container", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"redis-x", "displayName":"redis", "resourceType":"Container", "state":"Running", "healthStatus":"Healthy" },
-                { "name":"jaeger-x", "displayName":"jaeger", "resourceType":"Container", "state":"Running", "healthStatus":"Healthy" },
+                { "name":"lgtm-x", "displayName":"lgtm", "resourceType":"Container", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"core-1", "displayName":"corebank-api", "resourceType":"Project", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"core-2", "displayName":"corebank-api", "resourceType":"Project", "state":"Stopped" },
                 { "name":"payments-1", "displayName":"payments-api", "resourceType":"Project", "state":"Running", "healthStatus":"Healthy" }
@@ -132,7 +132,7 @@ public class AspireJsonParserTests
               "resources": [
                 { "name":"postgres", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"redis", "state":"Running", "healthStatus":"Healthy" },
-                { "name":"jaeger", "state":"Running", "healthStatus":"Healthy" },
+                { "name":"lgtm", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"corebank-api", "resourceType":"Project", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"payments-api", "resourceType":"Project", "state":"Running", "healthStatus":"Healthy" },
                 { "name":"loadtest-support", "resourceType":"Project", "state":"Running", "healthStatus":"Healthy" },
@@ -154,7 +154,7 @@ public class AspireJsonParserTests
             "items": [
               { "resourceName": "postgres", "resourceState": "Running", "health": "Healthy" },
               { "resourceName": "redis", "resourceState": "Running", "health": "Healthy" },
-              { "resourceName": "jaeger", "resourceState": "Running", "health": "Healthy" },
+              { "resourceName": "lgtm", "resourceState": "Running", "health": "Healthy" },
               { "resourceName": "corebank-api", "resourceState": "{{coreBankState}}", "health": "{{coreBankHealth}}" },
               { "resourceName": "payments-api", "resourceState": "Running", "health": "Healthy" }
             ]
@@ -178,7 +178,7 @@ public class AspireJsonParserTests
               "resources": [
                 { "name": "postgres-x", "displayName": "postgres", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy" },
                 { "name": "redis-x", "displayName": "redis", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy" },
-                { "name": "jaeger-x", "displayName": "jaeger", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy", "endpoints": [{"url":"http://localhost:16686"}] },
+                { "name": "lgtm-x", "displayName": "lgtm", "resourceType":"Container", "state": "Running", "healthStatus": "Healthy", "endpoints": [{"url":"http://localhost:3000"}] },
                 { "name": "corebank-api-dmaegjwa", "displayName": "corebank-api", "resourceType":"Project", "state": "Finished", "exitCode": 0, "urls": [], "commands":{"rebuild":{"state":"Enabled"},"start":{"state":"Enabled"}} },
                 { "name": "corebank-api-tgdtsvwd", "displayName": "corebank-api", "resourceType":"Project", "state": "Finished", "exitCode": 0, "urls": [], "commands":{"rebuild":{"state":"Enabled"},"start":{"state":"Enabled"}} },
                 { "name": "corebank-api-dapr-cli-x", "displayName": "corebank-api-dapr-cli", "resourceType":"Executable", "state": "Running", "healthStatus": "Healthy" },

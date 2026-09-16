@@ -15,16 +15,18 @@ public static class EndpointResolver
 
     // Probing goes to the literal loopback address, like every other health probe here, so
     // the result never depends on how the machine orders "localhost" across address
-    // families; the browser link keeps the friendlier hostname.
-    private const string JaegerProbeUrl = "http://127.0.0.1:16686/";
-    private const string JaegerLinkUrl = "http://localhost:16686/";
+    // families; the browser link keeps the friendlier hostname and deep-links to the
+    // provisioned CoreBank dashboard (uid "corebank" is a contract with
+    // observability/grafana/dashboards/corebank.json).
+    private const string LgtmProbeUrl = "http://127.0.0.1:3000/api/health";
+    private const string LgtmLinkUrl = "http://localhost:3000/d/corebank";
 
     public static string HealthUrlFor(string resourceName, TopologyProfile profile = TopologyProfile.Regular) => resourceName switch
     {
         KnownResources.PaymentsApi => $"{PaymentsBaseUrl(profile)}/health",
         KnownResources.CoreBankApi => $"{CoreBankApiBaseUrl}/health",
         KnownResources.LoadTestSupport => $"{LoadTestSupportBaseUrl}/health",
-        KnownResources.Jaeger => JaegerProbeUrl,
+        KnownResources.Lgtm => LgtmProbeUrl,
         // Postgres, Redis, and Dapr are not directly HTTP-probed by the console
         // (ADR-015 forbids connecting to their sockets); their confidence status is
         // reported via the owning API's health check instead.
@@ -62,7 +64,7 @@ public static class EndpointResolver
 
     public static string LinkFor(string linkId) => linkId switch
     {
-        KnownLinks.Jaeger => JaegerLinkUrl,
+        KnownLinks.Lgtm => LgtmLinkUrl,
         _ => throw new ArgumentOutOfRangeException(nameof(linkId), linkId, "Unknown link."),
     };
 
@@ -70,7 +72,7 @@ public static class EndpointResolver
     {
         [KnownResources.PaymentsApi] = 5294,
         [KnownResources.CoreBankApi] = 5032,
-        [KnownResources.Jaeger] = 16686,
+        [KnownResources.Lgtm] = 3000,
     };
 
     public static readonly IReadOnlyDictionary<string, int> LoadTestProfilePorts = new Dictionary<string, int>
@@ -78,6 +80,7 @@ public static class EndpointResolver
         [KnownResources.PaymentsApi] = 5295,
         [KnownResources.LoadTestSupport] = 5181,
         [KnownResources.CoreBankApi] = 5032,
+        [KnownResources.Lgtm] = 3000,
     };
 
     private static string PaymentsBaseUrl(TopologyProfile profile) =>

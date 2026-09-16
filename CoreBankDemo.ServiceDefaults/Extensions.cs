@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging;
 using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Instrumentation.GrpcNetClient;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -181,6 +182,8 @@ public static class Extensions
             {
                 logging.IncludeFormattedMessage = true;
                 logging.IncludeScopes = true;
+                // OTLP exporter: configured endpoint over gRPC, else the OTEL_EXPORTER_OTLP_* defaults.
+                logging.AddOtlpExporter(options => ApplyOtlpEndpoint(options, otlpEndpoint));
             });
 
             builder.Services.AddOpenTelemetry()
@@ -190,20 +193,8 @@ public static class Extensions
                     metrics.AddAspNetCoreInstrumentation()
                         .AddHttpClientInstrumentation()
                         .AddRuntimeInstrumentation()
-                        .AddMeter(BusinessMetrics.MeterName);
-
-                    if (otlpEndpoint is not null)
-                    {
-                        metrics.AddOtlpExporter(options =>
-                        {
-                            options.Endpoint = otlpEndpoint;
-                            options.Protocol = OtlpExportProtocol.Grpc;
-                        });
-                    }
-                    else
-                    {
-                        metrics.AddOtlpExporter();
-                    }
+                        .AddMeter(BusinessMetrics.MeterName)
+                        .AddOtlpExporter(options => ApplyOtlpEndpoint(options, otlpEndpoint));
                 })
                 .WithTracing(tracing =>
                 {
@@ -223,18 +214,7 @@ public static class Extensions
                         tracing.AddSource(sourceName);
                     }
 
-                    if (otlpEndpoint is not null)
-                    {
-                        tracing.AddOtlpExporter(options =>
-                        {
-                            options.Endpoint = otlpEndpoint;
-                            options.Protocol = OtlpExportProtocol.Grpc;
-                        });
-                    }
-                    else
-                    {
-                        tracing.AddOtlpExporter();
-                    }
+                    tracing.AddOtlpExporter(options => ApplyOtlpEndpoint(options, otlpEndpoint));
                 });
 
             var activitySource = new ActivitySource(serviceName);
@@ -243,17 +223,17 @@ public static class Extensions
 
         internal Uri? ResolveOtlpEndpoint()
         {
-            // Prefer explicit Jaeger endpoint over Aspire's OTEL_EXPORTER_OTLP_ENDPOINT default.
-            var endpointValue = builder.Configuration["JAEGER_OTLP_ENDPOINT"];
+            // Prefer the explicit LGTM endpoint over Aspire's OTEL_EXPORTER_OTLP_ENDPOINT default.
+            var endpointValue = builder.Configuration["OTLP_ENDPOINT"];
             if (string.IsNullOrWhiteSpace(endpointValue))
             {
                 return null;
             }
 
             // Gate the first parse attempt on an explicit "://": without it, a bare
-            // "host:port" value (e.g. "jaeger:4317") would still satisfy
+            // "host:port" value (e.g. "lgtm:4317") would still satisfy
             // Uri.TryCreate(..., UriKind.Absolute) whenever the host is a
-            // syntactically valid URI scheme name — Uri would then read "jaeger" as
+            // syntactically valid URI scheme name — Uri would then read "lgtm" as
             // the scheme and "4317" as an opaque scheme-specific part instead of as
             // host:port, skipping the http:// normalization below entirely.
             if (endpointValue.Contains("://", StringComparison.Ordinal)
@@ -277,7 +257,7 @@ public static class Extensions
                 return endpointUri;
             }
 
-            throw new InvalidOperationException($"Invalid JAEGER_OTLP_ENDPOINT value '{endpointValue}'.");
+            throw new InvalidOperationException($"Invalid OTLP_ENDPOINT value '{endpointValue}'.");
         }
 
         private void AddDefaultHealthChecks()
@@ -286,6 +266,22 @@ public static class Extensions
                 // Add a default liveness check to ensure app is responsive
                 .AddCheck("self", () => HealthCheckResult.Healthy(), ["live"]);
         }
+    }
+
+    /// <summary>
+    /// Shared by the log, metric, and trace exporters: an explicit
+    /// <c>OTLP_ENDPOINT</c> is dialed over gRPC; without one the exporter keeps
+    /// the <c>OTEL_EXPORTER_OTLP_*</c> defaults Aspire injects, untouched.
+    /// </summary>
+    private static void ApplyOtlpEndpoint(OtlpExporterOptions options, Uri? otlpEndpoint)
+    {
+        if (otlpEndpoint is null)
+        {
+            return;
+        }
+
+        options.Endpoint = otlpEndpoint;
+        options.Protocol = OtlpExportProtocol.Grpc;
     }
 
     /// <summary>

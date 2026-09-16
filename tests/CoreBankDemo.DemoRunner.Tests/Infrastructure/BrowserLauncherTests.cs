@@ -47,13 +47,13 @@ public class BrowserLauncherTests
     }
 
     [Fact]
-    public async Task OpenAsync_Jaeger_ResolvesItsFixedUrlRegardlessOfWhetherAnOsBrowserIsReachable()
+    public async Task OpenAsync_Lgtm_ResolvesItsFixedUrlRegardlessOfWhetherAnOsBrowserIsReachable()
     {
         var launcher = new BrowserLauncher();
 
-        var result = await launcher.OpenAsync(KnownLinks.Jaeger, verifiedUrl: null, CancellationToken.None);
+        var result = await launcher.OpenAsync(KnownLinks.Lgtm, verifiedUrl: null, CancellationToken.None);
 
         result.Url.Should().NotBeNullOrWhiteSpace();
-        result.Url.Should().Be(EndpointResolver.LinkFor(KnownLinks.Jaeger));
+        result.Url.Should().Be(EndpointResolver.LinkFor(KnownLinks.Lgtm));
     }
 }

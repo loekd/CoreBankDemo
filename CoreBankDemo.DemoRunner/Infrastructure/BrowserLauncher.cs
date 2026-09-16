@@ -4,7 +4,7 @@ using CoreBankDemo.DemoRunner.Application.Ports;
 
 namespace CoreBankDemo.DemoRunner.Infrastructure;
 
-/// <summary>Opens a known Aspire or Jaeger URL using the OS default browser.</summary>
+/// <summary>Opens a known Aspire or LGTM URL using the OS default browser.</summary>
 public sealed class BrowserLauncher : IBrowserLauncher
 {
     public Task<LinkOpenResult> OpenAsync(string linkId, string? verifiedUrl, CancellationToken ct)

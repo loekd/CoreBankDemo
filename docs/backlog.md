@@ -14,7 +14,7 @@ As the demo owner, I want one-command startup, so that the talk demo boots relia
 
 **Given** `aspire run` (per `aspire-launch` skill)
 **When** the AppHost starts
-**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), Jaeger, Dapr pub/sub and subscription components, one Dapr pub/sub adapter per logical API service, and both APIs come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
+**Then** Postgres (paymentsdb, corebankdb, pgAdmin), Redis (+ RedisInsight), LGTM, Dapr pub/sub and subscription components, one Dapr pub/sub adapter per logical API service, and both APIs come up healthy; both APIs receive the shared Aspire Redis connection for distributed locking, and no Dapr `lockstore` component exists
 **And** every service config has PartitionCount=4 and no dead flags; `CoreBankDemo.Rebuild.slnf` now equals the full solution's buildable set and `dotnet build CoreBankDemo.sln` is green.
 
 ### Story 6.4: Chaos opt-in and demo smoke
@@ -26,7 +26,7 @@ As the speaker, I want DevProxy and the demo flows verified, so that talk stages
 **Given** the running AppHost
 **When** `demo-requests.http` and `payment-idempotency-tests.http` flows run
 **Then** all behave as on `main` (202s, duplicate replay, outbox/inbox visibility via LoadTestSupport endpoints once E6 lands — until then via DB)
-**And** enabling DevProxy injects faults and the Polly layer retries visibly in Jaeger; one payment renders as one trace (NFR-2).
+**And** enabling DevProxy injects faults and the Polly layer retries visibly in LGTM; one payment renders as one trace (NFR-2).
 
 ### Story 8.1: Regenerate ARCHITECTURE.md
 
@@ -212,6 +212,16 @@ As the process record, I want the accepted rebuild decisions audited against the
 - JournalText.Bound can split a UTF-16 surrogate pair at the 8192-character cut, leaving a lone surrogate in exported JSON. — Pre-existing in JournalRedaction.Apply, but newly reachable from Encoding.UTF8.GetString over arbitrary CloudEvent data rather than only from process output.
 - A flood of unrecognised or foreign events on transaction-events can now evict real payment records from the 500-record evidence ring. — HandleAsync no longer drops unparseable messages, so every message on the topic becomes a record; previously only the four known types could.
 - Non-UTF-8 CloudEvent data is rendered as replacement characters on a pane that claims to show the bytes as delivered. — Envelope() calls Encoding.UTF8.GetString unconditionally, regardless of the message's DataContentType.
+
+### [LGTM observability backend](superpowers/specs/2026-09-16-lgtm-observability-design.md)
+
+- The LGTM dashboard has no Inbox/Outbox backlog-depth gauge; it shows in-vs-out rates per store instead. — No instrument reports pending rows, and subtracting cumulative counters goes wrong once a replica restarts. A per-store observable gauge adds an instrument to the banking services, so it needs its own design. The in-vs-out signal also undercounts: `items.processed{completed}` is only recorded by the Inbox/Outbox processors, so rows completed inline (instant-rail `payments-outbox` rows, `corebank-inbox` rows executed at intake) never appear as out — in the 500-transaction acceptance run `corebank-outbox` and `payments-inbox` matched 1500/1500 while `payments-outbox` showed 500/400 and `corebank-inbox` 500/0. The gauge would make the drain visible for those stores too.
+- `corebank-trace-analysis` still analyses traces only. — Extend it to check error rate, retries, and terminal failures through `mcp-grafana` (Prometheus, Loki) before digging into Tempo traces.
+- The dashboard's Inbox/Outbox "in vs out" panel suggests a stuck backlog for `payments-outbox` and `corebank-inbox` even when everything drained. — Undercount explained in the depth-gauge item above; on stage it reads as lost messages. Decide between dropping in-vs-out for those two stores, recording `items.processed{completed}` for inline completions too, or pulling the depth gauge forward.
+- The design spec no longer matches the implementation in four places. — `dashboards.yaml` needs its own file mount at `provisioning/dashboards/corebank.yaml` (Grafana reads provider YAML only from the top level); the `service` variable values are `CoreBank.PaymentsAPI`/`CoreBank.CoreBankAPI`, not `payments-api`/`corebank-api`; the variable's "All" value is `.+` because Loki rejects `.*`; the log-exporter test inspects the exporter by reflection. Update the spec's sections 1, 3, and 6.
+- The OTLP log-exporter registration test in `CoreBankDemo.ServiceDefaults.Tests` reads private OpenTelemetry SDK members (`LoggerProviderSdk.Processor`, `BaseExportProcessor<LogRecord>.exporter`) by reflection. — The SDK exposes no public view of the exporter, so an OpenTelemetry package bump can break the test without any behavior change. Replace it with an observable assertion (for example, an in-process OTLP receiver) or accept and document the brittleness.
+- CoreBankAPI logs EF Core's "The query uses the 'First'/'FirstOrDefault' operator without 'OrderBy' and filter operators" warning, now visible in the LGTM logs panel. — Source is `AccountRepository.LockForUpdateAsync` (`CoreBankDemo.CoreBankAPI/Inbox/AccountRepository.cs`): the `WHERE "AccountNumber" = … FOR UPDATE` filter lives in `FromSqlInterpolated` raw SQL that EF Core cannot see. Harmless, since `AccountNumber` is the primary key, but noisy on stage. Replace `FirstOrDefaultAsync` with `SingleOrDefaultAsync` (not a LINQ `.Where`, which would wrap the locking SQL in a subquery) and cover it with a persistence-tier test.
+- `opentelemetry-mcp` crashes on startup when `NO_PROXY` contains the bracketed `[::1]` entry Aspire needs in the sandbox (httpx: `Invalid port ':1]'`). — Verified working only with `NO_PROXY=localhost,127.0.0.1`. Set that override in the `.mcp.json` server's `env`, or document it in the README next to the `uvx` note.
 
 ## Open retrospective action items
 

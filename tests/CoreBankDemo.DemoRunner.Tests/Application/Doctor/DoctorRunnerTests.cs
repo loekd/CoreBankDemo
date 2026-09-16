@@ -182,19 +182,19 @@ public class DoctorRunnerTests
     [Fact]
     public async Task RunAsync_HealthyPersistentContainerHoldingItsPort_LeavesStartAvailable()
     {
-        // Jaeger, Postgres and Redis are declared ContainerLifetime.Persistent, so they keep
+        // LGTM, Postgres and Redis are declared ContainerLifetime.Persistent, so they keep
         // their published ports after an AppHost stops and Aspire reuses them on the next start.
         var environment = ReadyEnvironment();
-        environment.Setup(probe => probe.IsPortFreeAsync(16686, It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        environment.Setup(probe => probe.IsPortFreeAsync(3000, It.IsAny<CancellationToken>())).ReturnsAsync(false);
         var health = new Mock<IHealthMonitor>();
-        health.Setup(probe => probe.CheckAsync(KnownResources.Jaeger, TopologyProfile.Regular, It.IsAny<CancellationToken>()))
+        health.Setup(probe => probe.CheckAsync(KnownResources.Lgtm, TopologyProfile.Regular, It.IsAny<CancellationToken>()))
             .ReturnsAsync(HealthStatus.Healthy);
 
         var report = await new DoctorRunner(
                 environment.Object,
                 health.Object,
                 new FakeAspireAdapter(),
-                [new DoctorPortRequirement(TopologyProfile.Regular, KnownResources.Jaeger, 16686)])
+                [new DoctorPortRequirement(TopologyProfile.Regular, KnownResources.Lgtm, 3000)])
             .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.CanStart(TopologyProfile.Regular).Should().BeTrue();
@@ -207,21 +207,21 @@ public class DoctorRunnerTests
     public async Task RunAsync_SilentPersistentContainer_PointsAtTheContainerNotAProcess()
     {
         var environment = ReadyEnvironment();
-        environment.Setup(probe => probe.IsPortFreeAsync(16686, It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        environment.Setup(probe => probe.IsPortFreeAsync(3000, It.IsAny<CancellationToken>())).ReturnsAsync(false);
         var health = new Mock<IHealthMonitor>();
-        health.Setup(probe => probe.CheckAsync(KnownResources.Jaeger, TopologyProfile.Regular, It.IsAny<CancellationToken>()))
+        health.Setup(probe => probe.CheckAsync(KnownResources.Lgtm, TopologyProfile.Regular, It.IsAny<CancellationToken>()))
             .ReturnsAsync(HealthStatus.Unreachable);
 
         var report = await new DoctorRunner(
                 environment.Object,
                 health.Object,
                 new FakeAspireAdapter(),
-                [new DoctorPortRequirement(TopologyProfile.Regular, KnownResources.Jaeger, 16686)])
+                [new DoctorPortRequirement(TopologyProfile.Regular, KnownResources.Lgtm, 3000)])
             .RunAsync(faultArmingRequested: false, CancellationToken.None);
 
         report.CanStart(TopologyProfile.Regular).Should().BeFalse();
         report.Checks.Single(check => check.Name.StartsWith("Port ", StringComparison.Ordinal))
-            .Remediation.Should().Contain("persistent jaeger container").And.Contain("docker ps --filter publish=16686");
+            .Remediation.Should().Contain("persistent lgtm container").And.Contain("docker ps --filter publish=3000");
     }
 
     [Fact]

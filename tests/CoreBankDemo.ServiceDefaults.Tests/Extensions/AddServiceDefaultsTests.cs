@@ -1,3 +1,4 @@
+using System.Reflection;
 using AwesomeAssertions;
 using CoreBankDemo.ServiceDefaults;
 using Dapr.Client;
@@ -10,6 +11,7 @@ using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Moq;
 using OpenTelemetry;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Trace;
 using Xunit;
@@ -108,18 +110,44 @@ public class AddServiceDefaultsTests
     }
 
     [Fact]
-    public void JAEGER_OTLP_ENDPOINT_override_does_not_prevent_OTel_registration()
+    public void OTLP_ENDPOINT_override_does_not_prevent_OTel_registration()
     {
         var builder = CreateBuilder();
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["JAEGER_OTLP_ENDPOINT"] = "http://jaeger:4317",
+            ["OTLP_ENDPOINT"] = "http://lgtm:4317",
         });
 
         var act = () => builder.AddServiceDefaults("test-service");
 
         act.Should().NotThrow();
         builder.Services.Should().Contain(sd => sd.ServiceType == typeof(TracerProvider));
+    }
+
+    [Fact]
+    public void Registers_an_OTLP_log_exporter_on_the_logging_pipeline_when_OTLP_ENDPOINT_is_configured()
+    {
+        var builder = CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["OTLP_ENDPOINT"] = "http://lgtm:4317",
+        });
+
+        builder.AddServiceDefaults("test-service");
+        using var provider = builder.Services.BuildServiceProvider();
+        using var loggerProvider = provider.GetRequiredService<LoggerProvider>();
+
+        // The SDK's LoggerProviderSdk exposes its processor publicly on an internal type,
+        // and the export processor keeps its exporter in a protected field — reflection is
+        // the only DI-level view of which exporter the logging pipeline actually got.
+        var processor = loggerProvider.GetType().GetProperty("Processor")!.GetValue(loggerProvider);
+        processor.Should().BeAssignableTo<BaseExportProcessor<LogRecord>>();
+        var exporter = typeof(BaseExportProcessor<LogRecord>)
+            .GetField("exporter", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(processor);
+
+        exporter!.GetType().Name.Should().Be("OtlpLogExporter",
+            "structured logs must leave the process over OTLP like metrics and traces do");
     }
 
     // ---- Health checks ----

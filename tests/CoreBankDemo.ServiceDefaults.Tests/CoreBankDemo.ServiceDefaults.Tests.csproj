@@ -10,4 +10,10 @@
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- ADR-022: the provisioned LGTM dashboard is checked against BusinessMetrics
+         instrument names so a renamed instrument fails the build, not a panel. -->
+    <Content Include="..\..\observability\grafana\dashboards\corebank.json" Link="Dashboards\corebank.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

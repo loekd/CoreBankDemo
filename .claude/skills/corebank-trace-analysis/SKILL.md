@@ -7,7 +7,7 @@ description: |
   - After a load test completes (or fails), to investigate what happened at the infrastructure level
   - When `get_assertion_results` returns failures and you need to understand why
   - When you want to find slow spans, high-latency payment flows, or exceptions during a test run
-  - When asked to analyze Jaeger traces, spans, or distributed tracing data for CoreBank or Payments
+  - When asked to analyze Tempo traces, spans, or distributed tracing data for CoreBank or Payments
 
   **When NOT to use:**
   - For business-level assertions (exactly-once, balance conservation) — use LoadTestSupport MCP tools instead
@@ -18,12 +18,12 @@ description: |
 ## Services in CoreBankDemo
 
 **Always call `list_services` first** to confirm the exact service names registered in the OTel backend. If `list_services` returns a connection error, report:
-> "Trace analysis skipped: OTel backend unavailable (Jaeger may have crashed)."
+> "Trace analysis skipped: OTel backend unavailable (LGTM container not running)."
 Then proceed directly to stopping the AppHosts. Do not spend turns troubleshooting an unavailable backend.
 
 The expected service names are:
 
-| Service | Jaeger name | Role |
+| Service | Service name | Role |
 |---|---|---|
 | Payments API | `CoreBank.PaymentsAPI` | Receives payment requests from k6 |
 | CoreBank API | `CoreBank.CoreBankAPI` | Processes transactions, updates balances |

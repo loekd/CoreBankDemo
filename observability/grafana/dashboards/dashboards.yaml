@@ -1,0 +1,15 @@
+# Grafana dashboard provisioning for the LGTM container (ADR-022). Both AppHosts
+# bind-mount this directory read-only; Grafana watches it, so edits to the JSON
+# load without a container restart, and allowUiUpdates lets panels be tweaked
+# live during rehearsal (those tweaks are lost on the next file change).
+apiVersion: 1
+
+providers:
+  - name: CoreBank
+    folder: CoreBank
+    type: file
+    allowUiUpdates: true
+    updateIntervalSeconds: 10
+    options:
+      path: /otel-lgtm/grafana/conf/provisioning/dashboards/custom
+      foldersFromFilesStructure: false

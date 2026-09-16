@@ -50,7 +50,7 @@ Everything runs locally with one command. Nothing here talks to a real bank.
      └──────────────┘                                          └──────────────┘
 
    Redis 7.4  — Dapr pub/sub broker and partition-lease store
-   Jaeger     — OTLP traces from every service and every Dapr sidecar
+   LGTM       — OTLP traces, logs and metrics from every service; traces from every Dapr sidecar
    Dashboard  — http://localhost:15888
 ```
 
@@ -82,7 +82,7 @@ distributed locking and partition ownership more than theoretical.
 ## Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- A container runtime (Docker or Podman) — PostgreSQL, Redis and Jaeger run as containers
+- A container runtime (Docker or Podman) — PostgreSQL, Redis and LGTM run as containers
 - [.NET Aspire CLI](https://learn.microsoft.com/dotnet/aspire/cli/overview) (`aspire`)
 - [Dapr CLI](https://docs.dapr.io/getting-started/install-dapr-cli/), initialized (`dapr init`)
 - [Dev Proxy 3.2.0](https://learn.microsoft.com/microsoft-cloud/dev/dev-proxy/) — required by the
@@ -97,17 +97,17 @@ dotnet tool restore          # required: Kiota generates the CoreBank client at 
 aspire run                   # uses aspire.config.json → CoreBankDemo.AppHost
 ```
 
-That starts PostgreSQL, Redis, Jaeger, both APIs with their Dapr sidecars, and Dev Proxy.
+That starts PostgreSQL, Redis, LGTM, both APIs with their Dapr sidecars, and Dev Proxy.
 
 | UI | URL |
 |---|---|
 | Aspire Dashboard | http://localhost:15888 |
-| Jaeger | http://localhost:16686 |
+| LGTM (Grafana, anonymous) | http://localhost:3000 — CoreBank dashboard at http://localhost:3000/d/corebank |
 | Payments API | http://127.0.0.1:5294 |
 | Core Bank API | http://127.0.0.1:5032 |
 | pgAdmin / RedisInsight | linked from the Aspire Dashboard |
 
-**Running the AppHost inside a container?** The Aspire Dashboard and the Jaeger UI bind every
+**Running the AppHost inside a container?** The Aspire Dashboard and the LGTM Grafana UI bind every
 interface (`0.0.0.0`) rather than loopback, so a host-side port publish can actually reach them. A
 devcontainer forwards them from the inside, where loopback would have been fine either way; a
 sandbox needs them published explicitly, e.g. `sbx ports <sandbox> --publish 15888:15888/tcp`. The
@@ -314,7 +314,9 @@ Scale is set in `CoreBankDemo.LoadTests/appsettings.json` (`TransactionCount`, `
 LoadTestSupport also exposes an **MCP server** at `http://localhost:5181/` for agent-driven
 orchestration — see `mcp-config.example.json` and
 [CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md). Full details in
-[CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md).
+[CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md). The `opentelemetry-mcp`
+(Tempo traces) and `grafana` (`mcp-grafana`: Prometheus, Loki, dashboards) servers in `.mcp.json`
+need `uvx` on `PATH`.
 
 ## Security note
 
@@ -332,12 +334,13 @@ OpenAPI contract at build time.
 **The AppHost won't start / `devproxy` not found**
 Either install Dev Proxy 3.2.0 on `PATH` or start with `aspire run -- --Features:UseDevProxy=false`.
 
-**No traces in Jaeger**
-Check that the `jaeger` container is running in the Aspire Dashboard; the OTLP endpoint is resolved
-from Aspire and injected as `JAEGER_OTLP_ENDPOINT`, so it is never a hardcoded port.
+**No telemetry in LGTM**
+Check that the `lgtm` container is running and healthy in the Aspire Dashboard; the OTLP endpoint is
+resolved from Aspire and injected as `OTLP_ENDPOINT`, so it is never a hardcoded port. The container
+is shared by both AppHosts under the fixed name `corebank-lgtm`.
 
-**Ports already in use** (5294, 5032, 8000, 15888, 16686, 5432, 6379)
-The PostgreSQL, Redis and Jaeger containers use `ContainerLifetime.Persistent` and survive an
+**Ports already in use** (5294, 5032, 8000, 15888, 3000, 3200, 4317, 5432, 6379)
+The PostgreSQL, Redis and LGTM containers use `ContainerLifetime.Persistent` and survive an
 AppHost stop by design. Stop the stragglers, or reset state by removing those containers.
 
 **Payments stay `Pending`**

@@ -1322,7 +1322,7 @@ public static class PresentationModelBuilder
         KnownResources.CoreBankApi => "cor",
         KnownResources.Postgres => "pg",
         KnownResources.Redis => "red",
-        KnownResources.Jaeger => "jae",
+        KnownResources.Lgtm => "lgtm",
         KnownResources.DevProxy => "dev",
         KnownResources.LoadTestSupport => "lts",
         KnownResources.LoadTestInitializer => "ini",
