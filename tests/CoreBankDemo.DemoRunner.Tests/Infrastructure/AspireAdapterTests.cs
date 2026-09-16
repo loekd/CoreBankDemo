@@ -530,7 +530,7 @@ public class AspireAdapterTests
           "resources": [
             {"name":"postgres-x","displayName":"postgres","resourceType":"Container","state":"Running","healthStatus":"Healthy"},
             {"name":"redis-x","displayName":"redis","resourceType":"Container","state":"Running","healthStatus":"Healthy"},
-            {"name":"jaeger-x","displayName":"jaeger","resourceType":"Container","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://localhost:16686"}]},
+            {"name":"lgtm-x","displayName":"lgtm","resourceType":"Container","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://localhost:3000"}]},
             {"name":"corebank-api-a","displayName":"corebank-api","resourceType":"Project","state":"Exited","healthStatus":"Unhealthy","urls":[{"url":"http://127.0.0.1:5032/swagger"}],"commands":{"start":{"state":"Enabled"},"restart":{"state":"Enabled"},"stop":{"state":"Enabled"}}},
             {"name":"payments-api-a","displayName":"payments-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5294/swagger"}]},
             {"name":"payments-api-b","displayName":"payments-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5294/swagger"}]}
@@ -544,7 +544,7 @@ public class AspireAdapterTests
           "resources": [
             {"name":"postgres-x","displayName":"postgres","resourceType":"Container","state":"Running","healthStatus":"Healthy"},
             {"name":"redis-x","displayName":"redis","resourceType":"Container","state":"Running","healthStatus":"Healthy"},
-            {"name":"jaeger-x","displayName":"jaeger","resourceType":"Container","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://localhost:16686"}]},
+            {"name":"lgtm-x","displayName":"lgtm","resourceType":"Container","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://localhost:3000"}]},
             {"name":"corebank-api-a","displayName":"corebank-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5032/swagger"}],"commands":{"restart":{"state":"Enabled"},"stop":{"state":"Enabled"}}},
             {"name":"corebank-api-b","displayName":"corebank-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5032/swagger"}],"commands":{"restart":{"state":"Enabled"},"stop":{"state":"Enabled"}}},
             {"name":"payments-api-a","displayName":"payments-api","resourceType":"Project","state":"Running","healthStatus":"Healthy","urls":[{"url":"http://127.0.0.1:5294/swagger"}]},

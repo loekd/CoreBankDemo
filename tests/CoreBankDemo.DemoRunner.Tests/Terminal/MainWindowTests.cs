@@ -602,7 +602,7 @@ public class MainWindowTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task OpenJaegerLink_AlwaysCopiesTheResolvedUrlToTheTerminalClipboard(bool osBrowserOpens)
+    public async Task OpenLgtmLink_AlwaysCopiesTheResolvedUrlToTheTerminalClipboard(bool osBrowserOpens)
     {
         // Copying always happens regardless of whether the OS-level browser
         // launch itself succeeded: there is essentially never a default
@@ -618,10 +618,10 @@ public class MainWindowTests
         var terminal = new StringWriter();
         window.TerminalOut = terminal;
 
-        await window.TriggerOpenKnownLinkForTestAsync("Jaeger", KnownLinks.Jaeger);
+        await window.TriggerOpenKnownLinkForTestAsync("LGTM", KnownLinks.Lgtm);
 
         terminal.ToString().Should().StartWith("]52;c;").And.EndWith("");
-        window.LastUiMessage.Should().Contain("terminal clipboard").And.Contain(EndpointResolver.LinkFor(KnownLinks.Jaeger));
+        window.LastUiMessage.Should().Contain("terminal clipboard").And.Contain(EndpointResolver.LinkFor(KnownLinks.Lgtm));
     }
 
     [Fact]

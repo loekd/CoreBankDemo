@@ -19,7 +19,7 @@ public static class KnownResources
     public const string CoreBankApi = "corebank-api";
     public const string Postgres = "postgres";
     public const string Redis = "redis";
-    public const string Jaeger = "jaeger";
+    public const string Lgtm = "lgtm";
     public const string DevProxy = "devproxy";
     public const string LoadTestSupport = "loadtest-support";
     public const string LoadTestInitializer = "loadtest-initializer";
@@ -34,7 +34,7 @@ public static class KnownResources
     /// conflict.
     /// </summary>
     public static readonly IReadOnlySet<string> PersistentInfrastructure = new HashSet<string>(
-        [Jaeger, Postgres, Redis],
+        [Lgtm, Postgres, Redis],
         StringComparer.Ordinal);
 
     public static readonly IReadOnlySet<string> ResourceCommandAllowList = new HashSet<string>(
@@ -43,7 +43,7 @@ public static class KnownResources
             CoreBankApi,
             Postgres,
             Redis,
-            Jaeger,
+            Lgtm,
             DevProxy,
             LoadTestSupport,
             K6,
@@ -53,10 +53,10 @@ public static class KnownResources
     public static IReadOnlySet<string> RequiredFor(TopologyProfile profile) => profile switch
     {
         TopologyProfile.Regular => new HashSet<string>(
-            [PaymentsApi, CoreBankApi, Postgres, Redis, Jaeger],
+            [PaymentsApi, CoreBankApi, Postgres, Redis, Lgtm],
             StringComparer.Ordinal),
         TopologyProfile.LoadTests => new HashSet<string>(
-            [PaymentsApi, CoreBankApi, Postgres, Redis, Jaeger, LoadTestSupport, LoadTestInitializer, K6],
+            [PaymentsApi, CoreBankApi, Postgres, Redis, Lgtm, LoadTestSupport, LoadTestInitializer, K6],
             StringComparer.Ordinal),
         _ => new HashSet<string>(StringComparer.Ordinal),
     };
@@ -70,13 +70,13 @@ public static class KnownResources
         {
             [PaymentsApi] = 5294,
             [CoreBankApi] = 5032,
-            [Jaeger] = 16686,
+            [Lgtm] = 3000,
         },
         TopologyProfile.LoadTests => new Dictionary<string, int>(StringComparer.Ordinal)
         {
             [PaymentsApi] = 5295,
             [CoreBankApi] = 5032,
-            [Jaeger] = 16686,
+            [Lgtm] = 3000,
             [LoadTestSupport] = 5181,
         },
         _ => new Dictionary<string, int>(StringComparer.Ordinal),
@@ -107,9 +107,9 @@ public static class KnownEndpoints
 public static class KnownLinks
 {
     public const string AspireDashboard = "aspire-dashboard";
-    public const string Jaeger = "jaeger";
+    public const string Lgtm = "lgtm";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(
-        [AspireDashboard, Jaeger],
+        [AspireDashboard, Lgtm],
         StringComparer.Ordinal);
 }

@@ -144,9 +144,9 @@ public sealed class MainWindow : Window
     private readonly object _activeActionsLock = new();
     private readonly HashSet<Task> _activeActions = [];
 
-    private readonly Label _topologyBar = new() { X = 1, Y = 0, Height = 1, Width = Dim.Fill(22) };
+    private readonly Label _topologyBar = new() { X = 1, Y = 0, Height = 1, Width = Dim.Fill(20) };
     private readonly Button _aspireDashboardButton = NewButton("Aspire");
-    private readonly Button _jaegerButton = NewButton("Jaeger");
+    private readonly Button _lgtmButton = NewButton("LGTM");
     // Dim.Fill() rather than Dim.Fill(3): the removed bottom band is where those three rows of
     // permanent chrome went, in all five workspaces (EXPERIENCE.md, Information Architecture).
     private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = RailWidthPreferred, Height = Dim.Fill(), Title = "WORKSPACES" };
@@ -418,22 +418,22 @@ public sealed class MainWindow : Window
         _faultsView = BuildFaultsView();
         _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView, _faultsView];
 
-        _aspireDashboardButton.X = Pos.AnchorEnd(21);
+        _aspireDashboardButton.X = Pos.AnchorEnd(19);
         _aspireDashboardButton.Y = 0;
-        _jaegerButton.X = Pos.AnchorEnd(10);
-        _jaegerButton.Y = 0;
+        _lgtmButton.X = Pos.AnchorEnd(8);
+        _lgtmButton.Y = 0;
         _aspireDashboardButton.Accepting += (_, e) =>
         {
             e.Handled = true;
             OpenKnownLink("Aspire dashboard", KnownLinks.AspireDashboard);
         };
-        _jaegerButton.Accepting += (_, e) =>
+        _lgtmButton.Accepting += (_, e) =>
         {
             e.Handled = true;
-            OpenKnownLink("Jaeger", KnownLinks.Jaeger);
+            OpenKnownLink("LGTM", KnownLinks.Lgtm);
         };
 
-        Add(_topologyBar, _aspireDashboardButton, _jaegerButton, _navigation, _content);
+        Add(_topologyBar, _aspireDashboardButton, _lgtmButton, _navigation, _content);
         UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
@@ -1606,7 +1606,7 @@ public sealed class MainWindow : Window
         RenderResourceControls(model);
         _runLoadButton.Enabled = model.CanUseLoadTest && _controller.CanRunLoadTest;
         _aspireDashboardButton.Enabled = _controller.State.Topology?.DashboardUrl is not null;
-        _jaegerButton.Enabled = _controller.State.Profile != TopologyProfile.None;
+        _lgtmButton.Enabled = _controller.State.Profile != TopologyProfile.None;
         _detailsButton.Enabled = true;
         _wrapButton.Enabled = true;
     }
@@ -2562,7 +2562,7 @@ public sealed class MainWindow : Window
 
     internal Button CopyButton => _copyButton;
     internal Button ClearEvidenceButton => _clearEvidenceButton;
-    internal Button JaegerButton => _jaegerButton;
+    internal Button LgtmButton => _lgtmButton;
     internal Button AspireDashboardButton => _aspireDashboardButton;
 
     internal TextField SuppliedKeyField => _suppliedKey;

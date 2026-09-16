@@ -44,9 +44,9 @@ public class EndpointResolverTests
     }
 
     [Fact]
-    public void LinkFor_AllowsOnlyAspireAndJaeger()
+    public void LinkFor_AllowsOnlyAspireAndLgtm()
     {
-        EndpointResolver.LinkFor(KnownLinks.Jaeger).Should().Contain("16686");
+        EndpointResolver.LinkFor(KnownLinks.Lgtm).Should().Be("http://localhost:3000/d/corebank");
         Action aspireRequiresLiveState = () => EndpointResolver.LinkFor(KnownLinks.AspireDashboard);
         aspireRequiresLiveState.Should().Throw<ArgumentOutOfRangeException>();
         Action arbitrary = () => EndpointResolver.LinkFor("https://example.com");
@@ -76,7 +76,7 @@ public class EndpointResolverTests
     [InlineData(KnownResources.PaymentsApi, TopologyProfile.LoadTests, "5295")]
     [InlineData(KnownResources.CoreBankApi, TopologyProfile.Regular, "5032")]
     [InlineData(KnownResources.LoadTestSupport, TopologyProfile.LoadTests, "5181")]
-    [InlineData(KnownResources.Jaeger, TopologyProfile.Regular, "16686")]
+    [InlineData(KnownResources.Lgtm, TopologyProfile.Regular, "3000/api/health")]
     [InlineData(KnownResources.Postgres, TopologyProfile.Regular, "5032")]
     [InlineData(KnownResources.Redis, TopologyProfile.Regular, "5032")]
     public void HealthUrlFor_AllKnownHttpProbesResolve(
@@ -85,6 +85,17 @@ public class EndpointResolverTests
         string expectedPort)
     {
         EndpointResolver.HealthUrlFor(resource, profile).Should().Contain(expectedPort);
+    }
+
+    /// <summary>
+    /// The LGTM container is persistent under both AppHosts, so Doctor's port checks must
+    /// know about port 3000 in the LoadTests profile as well, not only the Regular one.
+    /// </summary>
+    [Fact]
+    public void ProfilePorts_ListLgtmOnPort3000ForBothProfiles()
+    {
+        EndpointResolver.RegularProfilePorts.Should().Contain(KnownResources.Lgtm, 3000);
+        EndpointResolver.LoadTestProfilePorts.Should().Contain(KnownResources.Lgtm, 3000);
     }
 
     [Fact]

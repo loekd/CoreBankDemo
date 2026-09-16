@@ -1458,7 +1458,7 @@ public class OperatorConsoleControllerTests
         await controller.QueryOutcomeAsync("id", CancellationToken.None);
 
         var export = await controller.ExportEvidenceAsync(CancellationToken.None);
-        var opened = await controller.OpenKnownLinkAsync(KnownLinks.Jaeger, CancellationToken.None);
+        var opened = await controller.OpenKnownLinkAsync(KnownLinks.Lgtm, CancellationToken.None);
         var blocked = await controller.OpenKnownLinkAsync("https://arbitrary.example", CancellationToken.None);
 
         export.Succeeded.Should().BeTrue();
@@ -1466,7 +1466,7 @@ public class OperatorConsoleControllerTests
         opened.Succeeded.Should().BeTrue();
         blocked.Succeeded.Should().BeFalse();
         blocked.Url.Should().BeNull();
-        harness.Browser.Opened.Should().ContainSingle().Which.Should().Be(KnownLinks.Jaeger);
+        harness.Browser.Opened.Should().ContainSingle().Which.Should().Be(KnownLinks.Lgtm);
         harness.Browser.VerifiedUrls.Should().ContainSingle().Which.Should().BeNull();
     }
 
