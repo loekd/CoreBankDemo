@@ -248,7 +248,9 @@ Five workspaces, reachable with `1`–`5`:
    session config and then restarting the `devproxy` resource so it loads it — 3.2.0 cannot reload a
    changed config (ADR-019), so applying costs a brief proxy restart, which the workspace says up
    front. The checked-in Dev Proxy profile is never written to. Arming is a launch-time property set
-   in **Resources** before a start, and is **off by default**.
+   in **Resources** before a start, and is **on by default** (ADR-021) — Dev Proxy comes up ready
+   for the sliders, but every knob still starts at zero, so nothing is injected until you stage and
+   apply a level.
 
 `0` is panic-off — every fault knob to zero, applied immediately, from any workspace, without
 confirmation. `T` toggles the light/dark palette. `R` refreshes live Aspire state; `Q` quits, stopping only child processes this session

@@ -191,7 +191,7 @@ public class OperatorConsoleFaultTests
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
 
-        controller.State.FaultArmingRequested.Should().BeFalse("Dev Proxy is opt-in");
+        controller.SetArming(false).Succeeded.Should().BeTrue("the operator can still opt back out of the armed-by-default state");
         await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
 
         controller.State.FaultsArmed.Should().BeFalse();
@@ -374,6 +374,7 @@ public class OperatorConsoleFaultTests
     {
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
+        controller.SetArming(false);
         await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
 
         await controller.StopAsync(CancellationToken.None);
@@ -492,6 +493,7 @@ public class OperatorConsoleFaultTests
         var harness = new OperatorHarness();
         harness.Preflight.DevProxyAvailable = false;
         var controller = harness.CreateController();
+        controller.SetArming(false);
 
         var start = await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
 
@@ -651,6 +653,7 @@ public class OperatorConsoleFaultTests
     {
         var harness = new OperatorHarness();
         var controller = harness.CreateController();
+        controller.SetArming(false);
         await controller.StartAsync(TopologyProfile.Regular, CancellationToken.None);
         harness.Aspire.Commands.Clear();
 
