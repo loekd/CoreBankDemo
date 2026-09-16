@@ -110,6 +110,20 @@ internal sealed class TransactionExecutionHandler(
         // MessageRepositoryBase.StoreIfNewAsync's own store-operation
         // recording), so this is the only place these corebank-outbox
         // `added` operations are ever counted.
+        //
+        // The same holds for the corebank-inbox completion: this handler
+        // commits the row as Completed itself, on both the inline intake path
+        // and the background inbox processor path, so InboxProcessorBase's own
+        // MarkAsCompletedAsync always sees AlreadyTerminal and records nothing.
+        // Business success and business rejection both complete the row.
+        if (executionSucceeded is not null)
+        {
+            businessMetrics.RecordItemProcessed(
+                BusinessMetrics.StoreName.CoreBankInbox,
+                BusinessMetrics.StoreKind.Inbox,
+                BusinessMetrics.ItemOutcome.Completed);
+        }
+
         if (executionSucceeded is true)
         {
             businessMetrics.RecordTransactionProcessed(BusinessMetrics.TransactionProcessedOutcome.Completed);

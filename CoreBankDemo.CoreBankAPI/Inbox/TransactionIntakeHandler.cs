@@ -469,18 +469,6 @@ internal sealed class TransactionIntakeHandler(
             return new InlineAttempt(null, NotFirstYet: false);
         }
 
-        // The inline path completes the corebank-inbox row in place of the
-        // inbox processor, so it counts the item the same way
-        // InboxProcessorBase does; otherwise the row is "added" but never
-        // "completed" on the metrics.
-        if (claimed.Status == MessageConstants.Status.Completed)
-        {
-            businessMetrics.RecordItemProcessed(
-                BusinessMetrics.StoreName.CoreBankInbox,
-                BusinessMetrics.StoreKind.Inbox,
-                BusinessMetrics.ItemOutcome.Completed);
-        }
-
         if (claimed.Status != MessageConstants.Status.Completed ||
             !TryDeserializeResponse(claimed.ResponsePayload, out var response) ||
             response is null)

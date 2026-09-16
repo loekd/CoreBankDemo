@@ -64,6 +64,17 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
                 Equals(m.Tags["messaging.store.name"], "corebank-outbox") &&
                 Equals(m.Tags["outcome"], "added"))
             .Should().Be(3);
+        // The handler commits the inbox row as Completed itself, on both the
+        // inline and the background path, so it is the one place that can
+        // count the corebank-inbox completion.
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.items.processed")
+            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+            {
+                ["messaging.store.name"] = "corebank-inbox",
+                ["messaging.store.kind"] = "inbox",
+                ["outcome"] = "completed",
+            });
     }
 
     [Fact]
@@ -107,6 +118,10 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
                 m.InstrumentName == "corebankdemo.messaging.store.operations" &&
                 Equals(m.Tags["messaging.store.name"], "corebank-outbox"))
             .Should().Be(1);
+        // A business rejection still completes the inbox row.
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.items.processed")
+            .Which.Tags["outcome"].Should().Be("completed");
     }
 
     [Fact]
@@ -139,6 +154,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom during save");
 
         listener.Measurements.Should().NotContain(m => m.InstrumentName == "corebankdemo.transaction.processed");
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == "corebankdemo.messaging.items.processed");
         listener.Measurements.Count(m =>
                 m.InstrumentName == "corebankdemo.messaging.store.operations" &&
                 Equals(m.Tags["messaging.store.name"], "corebank-outbox") &&

@@ -453,18 +453,10 @@ public class TransactionIntakeHandlerTests
         result.Errors.Should().BeNull();
         _inboxStore.Verify(s => s.TryClaimByIdIfOldestAsync(stored!.Id, stored.PartitionId, It.IsAny<CancellationToken>()), Times.Once);
         _executionHandler.Verify(h => h.HandleAsync(stored!, It.IsAny<CancellationToken>()), Times.Once);
-        // The inline path completes the corebank-inbox row itself, so it must
-        // count the item exactly as InboxProcessorBase does for a background
-        // completion; otherwise the row is "in" but never "out".
+        // The execution handler counts the corebank-inbox completion (it
+        // commits the row on both paths); intake must not count it again.
         listener.Measurements
-            .Where(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
-            .Should().ContainSingle()
-            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
-            {
-                ["messaging.store.name"] = "corebank-inbox",
-                ["messaging.store.kind"] = "inbox",
-                ["outcome"] = "completed",
-            });
+            .Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
     }
 
     [Fact]
