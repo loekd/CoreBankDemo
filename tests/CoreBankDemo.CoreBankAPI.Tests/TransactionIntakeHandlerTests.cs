@@ -442,6 +442,7 @@ public class TransactionIntakeHandlerTests
                 m.ResponsePayload = JsonSerializer.Serialize(committedResponse);
             })
             .Returns(Task.CompletedTask);
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var handler = CreateHandler();
 
@@ -452,6 +453,18 @@ public class TransactionIntakeHandlerTests
         result.Errors.Should().BeNull();
         _inboxStore.Verify(s => s.TryClaimByIdIfOldestAsync(stored!.Id, stored.PartitionId, It.IsAny<CancellationToken>()), Times.Once);
         _executionHandler.Verify(h => h.HandleAsync(stored!, It.IsAny<CancellationToken>()), Times.Once);
+        // The inline path completes the corebank-inbox row itself, so it must
+        // count the item exactly as InboxProcessorBase does for a background
+        // completion; otherwise the row is "in" but never "out".
+        listener.Measurements
+            .Where(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Should().ContainSingle()
+            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+            {
+                ["messaging.store.name"] = "corebank-inbox",
+                ["messaging.store.kind"] = "inbox",
+                ["outcome"] = "completed",
+            });
     }
 
     [Fact]
@@ -568,6 +581,7 @@ public class TransactionIntakeHandlerTests
                 It.IsAny<CancellationToken>()))
             .Callback<InboxMessage, string, CancellationToken>((message, _, _) => message.Status = MessageConstants.Status.Pending)
             .ReturnsAsync(MessageTransitionOutcome.Applied);
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var handler = CreateHandler();
 
@@ -576,6 +590,8 @@ public class TransactionIntakeHandlerTests
         result.Outcome.Should().Be(TransactionIntakeOutcome.Accepted);
         result.Response!.Status.Should().Be(MessageConstants.Status.Pending);
         stored!.Status.Should().Be(MessageConstants.Status.Pending);
+        listener.Measurements
+            .Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
     }
 
     [Fact]

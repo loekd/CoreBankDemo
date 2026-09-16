@@ -381,6 +381,41 @@ public class InstantPaymentForwardingHandlerTests
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("settled");
+        // The instant rail completes the payments-outbox row in place of the
+        // outbox processor, so it counts the item the same way
+        // OutboxProcessorBase does.
+        listener.Measurements
+            .Where(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Should().ContainSingle()
+            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+            {
+                ["messaging.store.name"] = "payments-outbox",
+                ["messaging.store.kind"] = "outbox",
+                ["outcome"] = "completed",
+            });
+    }
+
+    [Fact]
+    public async Task ForwardAsync_does_not_count_an_item_when_the_row_was_already_terminal()
+    {
+        // Mirrors OutboxProcessorBase: an AlreadyTerminal transition means
+        // another path already completed the row and counted it.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        var processedAt = new DateTimeOffset(2026, 9, 2, 12, 0, 3, TimeSpan.Zero);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, processedAt));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.AlreadyTerminal);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(businessMetrics: businessMetrics);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Completed);
+        listener.Measurements
+            .Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
     }
 
     [Fact]
@@ -502,6 +537,9 @@ public class InstantPaymentForwardingHandlerTests
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("settled");
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags["outcome"].Should().Be("completion_persistence_failed");
     }
 
     // ---- spec: instant-rail-timeout-cancel -- attempts exhausted, still under the lock ----
