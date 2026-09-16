@@ -8,27 +8,46 @@ var builder = DistributedApplication.CreateBuilder(args);
 
 string daprComponentsPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "dapr", "components"));
 
-// Add Jaeger for distributed tracing
-var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0")
-    .WithHttpEndpoint(port: 16686, targetPort: 16686, name: "jaeger-ui")
+// Add the LGTM stack (OpenTelemetry Collector, Tempo, Loki, Prometheus, Grafana) for
+// traces, logs, and metrics. Both AppHosts declare this container identically under the
+// fixed name corebank-lgtm, so whichever starts reuses the running one and telemetry
+// history carries across (ADR-022): keep the two declarations byte-for-byte equivalent.
+var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
+    .WithContainerName("corebank-lgtm")
+    .WithHttpEndpoint(port: 3000, targetPort: 3000, name: "grafana")
     .WithEndpoint(port: 4317, targetPort: 4317, name: "otlp-grpc")
     .WithEndpoint(port: 4318, targetPort: 4318, name: "otlp-http")
-    .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true")
+    .WithHttpEndpoint(port: 3200, targetPort: 3200, name: "tempo")
     .WithEndpointProxySupport(false)
-    // Publish the Jaeger UI on every interface, not just loopback. Aspire binds a
+    // Publish the Grafana UI on every interface, not just loopback. Aspire binds a
     // container's host ports to `TargetHost`, which defaults to "localhost", so the
     // UI answered only on 127.0.0.1. That is invisible when the AppHost runs in a
     // devcontainer -- the editor forwards ports from the inside, where loopback is
     // fine -- and fatal when it runs directly in a sandbox, where the only way out
-    // is a host-side port publish that has to reach the sandbox's eth0. The OTLP
-    // endpoints below are deliberately left alone: only in-sandbox services dial
-    // them, and their resolved URL is handed to those services verbatim.
-    .WithEndpoint("jaeger-ui", endpoint => endpoint.TargetHost = "0.0.0.0")
+    // is a host-side port publish that has to reach the sandbox's eth0. The OTLP and
+    // Tempo endpoints below are deliberately left alone: only in-sandbox services and
+    // agent tooling dial them, and their resolved URL is handed to those verbatim.
+    .WithEndpoint("grafana", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithEnvironment("GF_AUTH_ANONYMOUS_ENABLED", "true")
+    .WithEnvironment("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
+    // Grafana reads provider YAML only from the top level of provisioning/dashboards,
+    // never from a subdirectory, so the provider file is mounted there separately and
+    // points at the dashboard directory mounted below.
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "grafana", "dashboards", "dashboards.yaml")),
+        "/otel-lgtm/grafana/conf/provisioning/dashboards/corebank.yaml",
+        isReadOnly: true)
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "grafana", "dashboards")),
+        "/otel-lgtm/grafana/conf/provisioning/dashboards/custom",
+        isReadOnly: true)
+    .WithVolume("corebank-lgtm-data", "/data")
+    .WithHttpHealthCheck("/api/health", endpointName: "grafana")
     .WithLifetime(ContainerLifetime.Persistent);
 
-// Resolve the host-visible Jaeger OTLP endpoint from Aspire.
+// Resolve the host-visible OTLP endpoint from Aspire.
 // This avoids hardcoding localhost:4317, which can be remapped to a dynamic host port.
-var jaegerOtlpGrpcEndpoint = jaeger.GetEndpoint("otlp-grpc");
+var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
 
 // Add PostgreSQL for Payments API and Core Bank API with fixed connection string and persistent lifetime
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
@@ -82,7 +101,7 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     .WithReference(redis)
     .WaitFor(redis)
     .WithHttpHealthCheck("/health")
-    .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
+    .WithEnvironment("OTLP_ENDPOINT", lgtmOtlpGrpcEndpoint)
     .WithDaprSidecar(opt =>
     {
         opt.WithOptions(new DaprSidecarOptions
@@ -92,13 +111,13 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
             SchedulerHostAddress = "", // Disable Dapr scheduler
             PlacementHostAddress = "", // Disable Dapr placement
             EnableApiLogging = true,
-            // Configure Dapr sidecar to send telemetry to Jaeger
+            // Configure Dapr sidecar to send telemetry to LGTM
             Config = Path.Combine(daprComponentsPath, "otel-config.yaml"),
         });
         opt.WithReference(pubsub);
     })
     .WithUrl("/swagger", "Swagger UI")
-    .WaitFor(jaeger)
+    .WaitFor(lgtm)
     .WaitFor(pubsub);
 
 // Payments API (Main Service) with Dapr sidecar
@@ -137,7 +156,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     .WaitFor(redis)
     .WithExternalHttpEndpoints()
     .WithHttpHealthCheck("/health")
-    .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
+    .WithEnvironment("OTLP_ENDPOINT", lgtmOtlpGrpcEndpoint)
     .WithUrl("/swagger", "Swagger UI")
     .WaitFor(coreBankApi)
     .WithDaprSidecar(opt =>
@@ -149,7 +168,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
             SchedulerHostAddress = "", // Disable Dapr scheduler
             PlacementHostAddress = "", // Disable Dapr placement
             EnableApiLogging = true,
-            // Configure Dapr sidecar to send telemetry to Jaeger
+            // Configure Dapr sidecar to send telemetry to LGTM
             Config = Path.Combine(daprComponentsPath, "otel-config.yaml"),
         });
         opt.WithReference(pubsub);

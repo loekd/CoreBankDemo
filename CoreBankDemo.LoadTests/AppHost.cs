@@ -8,13 +8,37 @@ var builder = DistributedApplication.CreateBuilder(args);
 var daprComponentsPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "dapr", "components-loadtest"));
 var k6ScriptPath = Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "k6"));
 
-var jaeger = builder.AddContainer("jaeger", "jaegertracing/all-in-one", "1.66.0")
-    .WithHttpEndpoint(port: 16686, targetPort: 16686, name: "jaeger-ui")
+// Shared with CoreBankDemo.AppHost: same container name, image, ports, mounts, and
+// volume, so both AppHosts reuse one persistent corebank-lgtm container (ADR-022).
+// Keep this declaration byte-for-byte equivalent to the one in CoreBankDemo.AppHost.
+var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
+    .WithContainerName("corebank-lgtm")
+    .WithHttpEndpoint(port: 3000, targetPort: 3000, name: "grafana")
     .WithEndpoint(port: 4317, targetPort: 4317, name: "otlp-grpc")
     .WithEndpoint(port: 4318, targetPort: 4318, name: "otlp-http")
-    .WithEnvironment("COLLECTOR_OTLP_ENABLED", "true")
-    .WithEndpointProxySupport(false);
-var jaegerOtlpGrpcEndpoint = jaeger.GetEndpoint("otlp-grpc");
+    .WithHttpEndpoint(port: 3200, targetPort: 3200, name: "tempo")
+    .WithEndpointProxySupport(false)
+    // Grafana UI on every interface so a sandbox port publish can reach it; see
+    // CoreBankDemo.AppHost/AppHost.cs for the reasoning.
+    .WithEndpoint("grafana", endpoint => endpoint.TargetHost = "0.0.0.0")
+    .WithEnvironment("GF_AUTH_ANONYMOUS_ENABLED", "true")
+    .WithEnvironment("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
+    // Grafana reads provider YAML only from the top level of provisioning/dashboards,
+    // never from a subdirectory, so the provider file is mounted there separately and
+    // points at the dashboard directory mounted below.
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "grafana", "dashboards", "dashboards.yaml")),
+        "/otel-lgtm/grafana/conf/provisioning/dashboards/corebank.yaml",
+        isReadOnly: true)
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "grafana", "dashboards")),
+        "/otel-lgtm/grafana/conf/provisioning/dashboards/custom",
+        isReadOnly: true)
+    .WithVolume("corebank-lgtm-data", "/data")
+    .WithHttpHealthCheck("/api/health", endpointName: "grafana")
+    .WithLifetime(ContainerLifetime.Persistent);
+
+var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
 
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
 var postgres = builder.AddPostgres("postgres", password: postgresPassword)
@@ -45,7 +69,7 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     .WithReference(redis)
     .WaitFor(redis)
     .WithEnvironment("ProcessorStartGate__Enabled", "true")
-    .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
+    .WithEnvironment("OTLP_ENDPOINT", lgtmOtlpGrpcEndpoint)
     .WithHttpHealthCheck("/health")
     .WithDaprSidecar(options =>
     {
@@ -60,7 +84,7 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
         });
         options.WithReference(pubsub);
     })
-    .WaitFor(jaeger)
+    .WaitFor(lgtm)
     .WaitFor(pubsub);
 
 // Opt-in latency injection (Features:UseDevProxy, default false). The profile
@@ -108,7 +132,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     .WithReference(coreBankApi)
     .WaitFor(coreBankApi)
     .WithEnvironment("ProcessorStartGate__Enabled", "true")
-    .WithEnvironment("JAEGER_OTLP_ENDPOINT", jaegerOtlpGrpcEndpoint)
+    .WithEnvironment("OTLP_ENDPOINT", lgtmOtlpGrpcEndpoint)
     .WithExternalHttpEndpoints()
     .WithEndpoint("http", endpoint => endpoint.Port = 5295)
     .WithHttpHealthCheck("/health")
@@ -125,7 +149,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
         });
         options.WithReference(pubsub);
     })
-    .WaitFor(jaeger)
+    .WaitFor(lgtm)
     .WaitFor(pubsub);
 
 if (devProxy is not null)
