@@ -221,6 +221,23 @@ public class BusinessMetricsTests
         });
     }
 
+    [Theory]
+    [InlineData(BusinessMetrics.ItemOutcome.Completed, "completed")]
+    [InlineData(BusinessMetrics.ItemOutcome.Cancelled, "cancelled")]
+    [InlineData(BusinessMetrics.ItemOutcome.RetryScheduled, "retry_scheduled")]
+    [InlineData(BusinessMetrics.ItemOutcome.TerminalFailed, "terminal_failed")]
+    [InlineData(BusinessMetrics.ItemOutcome.CompletionPersistenceFailed, "completion_persistence_failed")]
+    [InlineData(BusinessMetrics.ItemOutcome.RetryPersistenceFailed, "retry_persistence_failed")]
+    public void RecordItemProcessed_maps_every_outcome_to_its_stable_tag(BusinessMetrics.ItemOutcome outcome, string expectedTag)
+    {
+        using var metrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(metrics);
+
+        metrics.RecordItemProcessed(BusinessMetrics.StoreName.CoreBankInbox, BusinessMetrics.StoreKind.Inbox, outcome);
+
+        listener.Measurements.Should().ContainSingle().Which.Tags["outcome"].Should().Be(expectedTag);
+    }
+
     [Fact]
     public void RecordQueueDuration_records_the_elapsed_milliseconds_with_only_the_closed_set_tags()
     {

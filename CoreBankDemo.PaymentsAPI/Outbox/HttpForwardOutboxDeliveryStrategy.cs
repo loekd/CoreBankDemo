@@ -136,6 +136,13 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
                     message.IdempotencyKey,
                     transition);
             }
+            else
+            {
+                // The kernel's MarkAsCompletedAsync now finds the row terminal
+                // and counts nothing, so this is the row's only out.
+                businessMetrics.RecordItemProcessed(
+                    BusinessMetrics.StoreName.PaymentsOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.Cancelled);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

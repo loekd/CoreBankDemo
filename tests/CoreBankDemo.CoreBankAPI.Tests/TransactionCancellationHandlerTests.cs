@@ -4,6 +4,7 @@ using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -39,6 +40,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
     private readonly Mock<IInboxMessageStore<InboxMessage>> _inboxStore = new(MockBehavior.Strict);
     private readonly Mock<IOutboxEventEnqueuer> _enqueuer = new(MockBehavior.Strict);
     private readonly CoreBankDbContext _dbContext = CoreBankApiUnitTestSupport.DetachedDbContext();
+    private readonly BusinessMetrics _businessMetrics = new();
 
     /// <summary>Every event row the mocked enqueuer added, with the inbox ProcessedAt it saw at call time.</summary>
     private readonly List<(MessagingOutboxMessage Row, DateTime? InboxProcessedAt)> _enqueued = [];
@@ -73,7 +75,11 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             });
     }
 
-    public void Dispose() => _dbContext.Dispose();
+    public void Dispose()
+    {
+        _dbContext.Dispose();
+        _businessMetrics.Dispose();
+    }
 
     private TransactionCancellationHandler CreateHandler(int partitionCount = 4) =>
         new(_repository.Object,
@@ -82,7 +88,21 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             _dbContext,
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
+            _businessMetrics,
             NullLogger<TransactionCancellationHandler>.Instance);
+
+    /// <summary>
+    /// A committed cancel is the inbox row's out (<c>items.processed</c>
+    /// cancelled) and its <c>transaction.cancelled</c> event's in
+    /// (<c>store.operations</c> added), both exactly once.
+    /// </summary>
+    private static void ShouldHaveRecordedOneCommittedCancel(MetricsTestListener listener) =>
+        Describe(listener).Should().BeEquivalentTo(
+            $"{BusinessMetrics.MessagingItemsProcessedInstrumentName} corebank-inbox cancelled",
+            $"{BusinessMetrics.MessagingStoreOperationsInstrumentName} corebank-outbox added");
+
+    private static IEnumerable<string> Describe(MetricsTestListener listener) =>
+        listener.Measurements.Select(m => $"{m.InstrumentName} {m.Tags["messaging.store.name"]} {m.Tags["outcome"]}");
 
     private EntityState TrackedState(MessagingOutboxMessage row) => _dbContext.Entry(row).State;
 
@@ -376,6 +396,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
             .ReturnsAsync(existing);
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
@@ -384,6 +405,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         _inboxStore.VerifyNoOtherCalls();
         // Never: a replayed cancellation was published once already.
         _enqueuer.VerifyNoOtherCalls();
+        listener.Measurements.Should().BeEmpty("a replayed cancellation was counted when it committed");
     }
 
     [Fact]
@@ -433,6 +455,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             .Callback<InboxMessage, CancellationToken>((_, _) => enqueuedBeforeStore = _enqueued.Count == 1)
             .ReturnsAsync(true);
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
@@ -445,6 +468,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             It.IsAny<CancellationToken>()), Times.Once);
         inboxProcessedAt.Should().Be(_timeProvider.GetUtcNow().UtcDateTime, "the tombstone is stamped before the enqueue so EventOccurredAt = ProcessedAt");
         TrackedState(row).Should().Be(EntityState.Added, "a committed cancel keeps its event");
+        ShouldHaveRecordedOneCommittedCancel(listener);
     }
 
     [Fact]
@@ -462,6 +486,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
@@ -469,6 +494,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         var (row, _) = _enqueued.Should().ContainSingle().Subject;
         TrackedState(row).Should().Be(EntityState.Detached);
         _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+        listener.Measurements.Should().BeEmpty("only a committed cancel is counted");
     }
 
     [Fact]
@@ -479,11 +505,13 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new DbUpdateException("connection dropped"));
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var act = () => handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<DbUpdateException>().WithMessage("connection dropped");
         _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+        listener.Measurements.Should().BeEmpty("only a committed cancel is counted");
     }
 
     [Fact]
@@ -498,6 +526,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             .Callback<InboxMessage, string, CancellationToken>((_, _, _) => enqueuedBeforeMark = _enqueued.Count == 1)
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
@@ -508,6 +537,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             "a Pending row has no ProcessedAt yet, so the handler stamps the cancellation time before enqueuing");
         inboxProcessedAt.Should().Be(result.Response!.ProcessedAt.UtcDateTime, "the event and the cached payload carry the same instant");
         TrackedState(row).Should().Be(EntityState.Added);
+        ShouldHaveRecordedOneCommittedCancel(listener);
     }
 
     [Theory]
@@ -523,6 +553,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
             .Callback<InboxMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Processing)
             .ReturnsAsync(transition);
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
@@ -530,6 +561,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         var (row, _) = _enqueued.Should().ContainSingle().Subject;
         TrackedState(row).Should().Be(EntityState.Detached, "no committed cancel, no event");
         _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+        listener.Measurements.Should().BeEmpty("only a committed cancel is counted");
     }
 
     [Fact]
@@ -542,11 +574,13 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         _inboxStore.Setup(s => s.MarkAsCancelledAsync(existing, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new DbUpdateConcurrencyException("second conflict"));
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var act = () => handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<DbUpdateConcurrencyException>();
         _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().BeEmpty();
+        listener.Measurements.Should().BeEmpty("only a committed cancel is counted");
     }
 
     [Fact]
@@ -565,6 +599,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         _inboxStore.Setup(s => s.MarkAsCancelledAsync(winner, TransactionCancellationHandler.CancellationReason, It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         var handler = CreateHandler();
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var result = await handler.CancelAsync(Request(), TestContext.Current.CancellationToken);
 
@@ -573,6 +608,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         TrackedState(_enqueued[0].Row).Should().Be(EntityState.Detached, "the tombstone's event never committed");
         TrackedState(_enqueued[1].Row).Should().Be(EntityState.Added, "the pending cancel's event did");
         _dbContext.ChangeTracker.Entries<MessagingOutboxMessage>().Should().ContainSingle();
+        ShouldHaveRecordedOneCommittedCancel(listener); // never the lost tombstone too
     }
 
     [Fact]

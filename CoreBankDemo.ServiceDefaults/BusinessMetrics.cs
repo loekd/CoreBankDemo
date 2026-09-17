@@ -134,6 +134,7 @@ public sealed class BusinessMetrics : IDisposable
     public enum ItemOutcome
     {
         Completed,
+        Cancelled,
         RetryScheduled,
         TerminalFailed,
         CompletionPersistenceFailed,
@@ -383,6 +384,7 @@ public sealed class BusinessMetrics : IDisposable
     private static string ToTag(ItemOutcome outcome) => outcome switch
     {
         ItemOutcome.Completed => "completed",
+        ItemOutcome.Cancelled => "cancelled",
         ItemOutcome.RetryScheduled => "retry_scheduled",
         ItemOutcome.TerminalFailed => "terminal_failed",
         ItemOutcome.CompletionPersistenceFailed => "completion_persistence_failed",

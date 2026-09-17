@@ -379,7 +379,11 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", MessageConstants.Status.Cancelled, cancelledAt))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        _store.Setup(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
@@ -389,6 +393,16 @@ public class HttpForwardOutboxDeliveryStrategyTests
             Times.Once);
         JsonSerializer.Deserialize<TransactionSubmission>(message.ResponsePayload!)
             .Should().Be(new TransactionSubmission("forward-key", MessageConstants.Status.Cancelled, cancelledAt));
+        // The kernel's own MarkAsCompletedAsync then sees a terminal row and
+        // counts nothing, so this is the row's only out.
+        listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+            {
+                ["messaging.store.name"] = "payments-outbox",
+                ["messaging.store.kind"] = "outbox",
+                ["outcome"] = "cancelled",
+            });
     }
 
     [Fact]
@@ -406,12 +420,15 @@ public class HttpForwardOutboxDeliveryStrategyTests
         };
         _store.Setup(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("db unavailable"));
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
         await act.Should().NotThrowAsync();
         client.SubmitCalls.Should().ContainSingle("delivery itself is never re-invoked for a persistence failure");
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
     }
 
     [Theory]
@@ -427,11 +444,14 @@ public class HttpForwardOutboxDeliveryStrategyTests
         };
         _store.Setup(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(transition);
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
         await act.Should().NotThrowAsync();
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
     }
 
     [Fact]

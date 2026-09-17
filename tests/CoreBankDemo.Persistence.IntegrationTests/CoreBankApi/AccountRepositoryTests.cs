@@ -2,6 +2,8 @@ using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
 using CoreBankDemo.CoreBankAPI.Inbox;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Xunit;
 
 namespace CoreBankDemo.Persistence.IntegrationTests.CoreBankApi;
@@ -32,6 +34,28 @@ public class AccountRepositoryTests(PostgresContainerFixture fixture) : CoreBank
         var result = await repository.FindByAccountNumberAsync("NL00NONE0000000000", TestContext.Current.CancellationToken);
 
         result.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task LockForUpdateAsync_does_not_trigger_the_First_without_OrderBy_warning()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        // The production host logs this warning on every locked read; turning
+        // it into an exception here makes the query shape itself the assertion.
+        var options = new DbContextOptionsBuilder<CoreBankDbContext>()
+            .UseNpgsql(ConnectionString)
+            .ConfigureWarnings(warnings => warnings.Throw(CoreEventId.FirstWithoutOrderByAndFilterWarning))
+            .Options;
+        await using var context = new CoreBankDbContext(options);
+        var account = NewAccount("NL91ABNA0417164300");
+        context.Accounts.Add(account);
+        await context.SaveChangesAsync(ct);
+        await using var transaction = await context.Database.BeginTransactionAsync(ct);
+        var repository = new AccountRepository(context);
+
+        var result = await repository.LockForUpdateAsync(account.AccountNumber, ct);
+
+        result.Should().BeSameAs(account);
     }
 
     private static Account NewAccount(string accountNumber) => new()

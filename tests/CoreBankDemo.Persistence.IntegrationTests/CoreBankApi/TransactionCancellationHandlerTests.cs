@@ -207,6 +207,7 @@ public class TransactionCancellationHandlerTests(PostgresContainerFixture fixtur
             context,
             Options.Create(new InboxProcessingOptions { PartitionCount = 4, LockExpirySeconds = 30 }),
             _clock,
+            TestBusinessMetrics.Instance,
             NullLogger<TransactionCancellationHandler>.Instance);
 
     /// <summary>First lookup misses (as if the row did not exist yet); everything else is the real repository.</summary>
