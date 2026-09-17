@@ -36,6 +36,16 @@ public class CoreBankDashboardTests
     }
 
     [Fact]
+    public void Dashboard_links_to_the_traces_dashboard()
+    {
+        using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
+
+        dashboard.RootElement.GetProperty("links").EnumerateArray()
+            .Select(link => link.TryGetProperty("url", out var url) ? url.GetString() : null)
+            .Should().Contain("/d/corebank-traces", "the detailed dashboard offers a shortcut to the trace search");
+    }
+
+    [Fact]
     public void Every_corebankdemo_metric_the_dashboard_queries_is_a_BusinessMetrics_instrument()
     {
         var instrumentNames = typeof(BusinessMetrics)

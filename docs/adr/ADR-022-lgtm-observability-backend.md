@@ -41,6 +41,11 @@ Inbox/Outbox drain, and logs next to traces, in one UI.
   points at. A drift test in `CoreBankDemo.ServiceDefaults.Tests` asserts the uid and that
   every `corebankdemo_*` metric the dashboard queries maps to a `BusinessMetrics`
   instrument name.
+- **Traces dashboard as home page.** `observability/grafana/dashboards/corebank-traces.json`
+  (uid `corebank-traces`) is a Jaeger-style trace search: Service and Operation filters (from
+  Tempo span metrics), rate, errors and p95 for that operation, the matching end-to-end traces,
+  and Tempo's service map. Both AppHosts set `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` to the
+  provisioned file, so Grafana opens on it; a drift test checks the path in both AppHosts.
 - **Anonymous Admin access** (`GF_AUTH_ANONYMOUS_*`) so there is no login screen on stage;
   acceptable for a local development image. The Grafana UI binds `0.0.0.0` for the same
   sandbox port-publish reason the Jaeger UI did; OTLP (4317/4318) and Tempo (3200) stay on

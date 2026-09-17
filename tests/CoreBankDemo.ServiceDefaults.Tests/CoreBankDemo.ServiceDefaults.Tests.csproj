@@ -14,6 +14,11 @@
     <!-- ADR-022: the provisioned LGTM dashboard is checked against BusinessMetrics
          instrument names so a renamed instrument fails the build, not a panel. -->
     <Content Include="..\..\observability\grafana\dashboards\corebank.json" Link="Dashboards\corebank.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The traces dashboard is the Grafana home page; both AppHosts are linked so the
+         home-dashboard path they set is checked against the provisioned file name. -->
+    <Content Include="..\..\observability\grafana\dashboards\corebank-traces.json" Link="Dashboards\corebank-traces.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\CoreBankDemo.AppHost\AppHost.cs" Link="AppHosts\CoreBankDemo.AppHost\AppHost.cs" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\CoreBankDemo.LoadTests\AppHost.cs" Link="AppHosts\CoreBankDemo.LoadTests\AppHost.cs" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
