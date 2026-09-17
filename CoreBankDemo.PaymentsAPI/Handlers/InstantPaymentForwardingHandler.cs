@@ -518,9 +518,21 @@ internal sealed class InstantPaymentForwardingHandler(
         // recovery the "reply lost after commit" edge case already relies on
         // (the background processor's replay is absorbed by CoreBank's own
         // dedupe).
+        // The instant rail completes the payments-outbox row in place of the
+        // outbox processor, so it counts the item exactly as
+        // OutboxProcessorBase does: completed on an applied transition,
+        // nothing when the row was already terminal, and
+        // completion_persistence_failed when persisting throws.
         try
         {
-            await store.MarkAsCompletedAsync(claimed, cancellationToken).ConfigureAwait(false);
+            var transition = await store.MarkAsCompletedAsync(claimed, cancellationToken).ConfigureAwait(false);
+            if (transition != MessageTransitionOutcome.AlreadyTerminal)
+            {
+                businessMetrics.RecordItemProcessed(
+                    BusinessMetrics.StoreName.PaymentsOutbox,
+                    BusinessMetrics.StoreKind.Outbox,
+                    BusinessMetrics.ItemOutcome.Completed);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -532,6 +544,10 @@ internal sealed class InstantPaymentForwardingHandler(
                 ex,
                 "Failed to persist instant-rail completion for payment {IdempotencyKey} after a successful delivery; the row is left Processing for the background processor to complete once its claim goes stale",
                 payment.IdempotencyKey);
+            businessMetrics.RecordItemProcessed(
+                BusinessMetrics.StoreName.PaymentsOutbox,
+                BusinessMetrics.StoreKind.Outbox,
+                BusinessMetrics.ItemOutcome.CompletionPersistenceFailed);
         }
 
         // Only a terminal CoreBank status is a committed business outcome. A

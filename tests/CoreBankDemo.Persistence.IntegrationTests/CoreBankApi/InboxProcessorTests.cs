@@ -29,9 +29,13 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
     {
         await SeedAccountsAndMessageAsync();
 
-        using var services = BuildHandlerServices();
+        // Own instance, not TestBusinessMetrics.Instance: parallel tests share
+        // the static one and would leak their measurements into this listener.
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        using var services = BuildHandlerServices(businessMetrics: businessMetrics);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion);
+        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion, businessMetrics);
 
         await processor.StartAsync(TestContext.Current.CancellationToken);
         await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -65,6 +69,18 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
         outboxRows.Count(m => m.EventType == Constants.BalanceUpdated).Should().Be(2);
         outboxRows.Should().AllSatisfy(row =>
             row.EventOccurredAt.Should().Be(persistedMessage.ProcessedAt));
+        // TransactionExecutionHandler commits the row as Completed itself, so
+        // the processor's own MarkAsCompletedAsync sees AlreadyTerminal and
+        // records nothing: the handler must count the completion, exactly once.
+        listener.Measurements
+            .Where(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Should().ContainSingle()
+            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+            {
+                ["messaging.store.name"] = "corebank-inbox",
+                ["messaging.store.kind"] = "inbox",
+                ["outcome"] = "completed",
+            });
     }
 
     [Fact]
@@ -133,14 +149,15 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
 
     private InboxProcessor CreateProcessor(
         IServiceScopeFactory scopeFactory,
-        TaskCompletionSource completion) =>
+        TaskCompletionSource completion,
+        BusinessMetrics? businessMetrics = null) =>
         new(
             new SingleTickLockService(completion),
             scopeFactory,
             new ActivitySource(nameof(InboxProcessorTests)),
             TimeProvider,
             NullLogger<InboxProcessor>.Instance,
-            TestBusinessMetrics.Instance,
+            businessMetrics ?? TestBusinessMetrics.Instance,
             Options.Create(new InboxProcessingOptions
             {
                 PartitionCount = 1,
@@ -148,11 +165,13 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
                 PollingIntervalMs = 60000
             }));
 
-    private ServiceProvider BuildHandlerServices(Action<IServiceCollection>? overrideScopedServices = null)
+    private ServiceProvider BuildHandlerServices(
+        Action<IServiceCollection>? overrideScopedServices = null,
+        BusinessMetrics? businessMetrics = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(TimeProvider);
-        services.AddSingleton(TestBusinessMetrics.Instance);
+        services.AddSingleton(businessMetrics ?? TestBusinessMetrics.Instance);
         services.AddSingleton<IOptions<MessagingOutboxProcessingOptions>>(Options.Create(new MessagingOutboxProcessingOptions
         {
             PartitionCount = 4,
