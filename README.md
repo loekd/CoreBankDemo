@@ -102,7 +102,7 @@ That starts PostgreSQL, Redis, LGTM, both APIs with their Dapr sidecars, and Dev
 | UI | URL |
 |---|---|
 | Aspire Dashboard | http://localhost:15888 |
-| LGTM (Grafana, anonymous) | http://localhost:3000 — CoreBank dashboard at http://localhost:3000/d/corebank |
+| LGTM (Grafana, anonymous) | http://localhost:3000 — opens on the CoreBank Traces dashboard (trace search by service and operation, also at http://localhost:3000/d/corebank-traces); CoreBank dashboard at http://localhost:3000/d/corebank |
 | Payments API | http://127.0.0.1:5294 |
 | Core Bank API | http://127.0.0.1:5032 |
 | pgAdmin / RedisInsight | linked from the Aspire Dashboard |

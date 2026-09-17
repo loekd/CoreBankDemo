@@ -58,7 +58,7 @@ aspire run --project CoreBankDemo.AppHost -- --Features:UseDevProxy=true
 aspire run --project CoreBankDemo.LoadTests
 ```
 
-The Aspire Dashboard is available at `http://localhost:15888` and the LGTM Grafana UI at `http://localhost:3000` (CoreBank dashboard at `/d/corebank`, anonymous access).
+The Aspire Dashboard is available at `http://localhost:15888` and the LGTM Grafana UI at `http://localhost:3000` (opens on the CoreBank Traces dashboard, `/d/corebank-traces`; CoreBank dashboard at `/d/corebank`; anonymous access).
 
 A devcontainer configuration is provided in `.devcontainer/` for GitHub Codespaces or VS Code Remote Containers with all tools pre-installed.
 

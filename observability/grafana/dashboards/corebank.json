@@ -73,7 +73,17 @@
       }
     ]
   },
-  "links": [],
+  "links": [
+    {
+      "title": "CoreBank Traces",
+      "type": "link",
+      "url": "/d/corebank-traces",
+      "icon": "dashboard",
+      "tooltip": "Trace search by service and operation",
+      "targetBlank": false,
+      "keepTime": true
+    }
+  ],
   "panels": [
     {
       "id": 1,

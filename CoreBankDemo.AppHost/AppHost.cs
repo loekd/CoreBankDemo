@@ -30,6 +30,9 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
     .WithEndpoint("grafana", endpoint => endpoint.TargetHost = "0.0.0.0")
     .WithEnvironment("GF_AUTH_ANONYMOUS_ENABLED", "true")
     .WithEnvironment("GF_AUTH_ANONYMOUS_ORG_ROLE", "Admin")
+    // Open Grafana on the provisioned trace search (observability/grafana/dashboards/
+    // corebank-traces.json, mounted below) instead of Grafana's generic welcome page.
+    .WithEnvironment("GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH", "/otel-lgtm/grafana/conf/provisioning/dashboards/custom/corebank-traces.json")
     // Grafana reads provider YAML only from the top level of provisioning/dashboards,
     // never from a subdirectory, so the provider file is mounted there separately and
     // points at the dashboard directory mounted below.
