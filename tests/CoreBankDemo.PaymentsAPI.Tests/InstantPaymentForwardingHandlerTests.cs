@@ -82,6 +82,22 @@ public class InstantPaymentForwardingHandlerTests
             NullLogger<InstantPaymentForwardingHandler>.Instance,
             businessMetrics ?? _businessMetrics);
 
+    /// <summary>An applied cancel is the payments-outbox row's out, counted exactly once.</summary>
+    private static void ShouldHaveCountedOneCancelledItem(MetricsTestListener listener) =>
+        listener.Measurements
+            .Where(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Should().ContainSingle()
+            .Which.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+            {
+                ["messaging.store.name"] = "payments-outbox",
+                ["messaging.store.kind"] = "outbox",
+                ["outcome"] = "cancelled",
+            });
+
+    private static void ShouldNotHaveCountedAnyItem(MetricsTestListener listener) =>
+        listener.Measurements
+            .Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
+
     [Fact]
     public async Task ForwardAsync_rejects_a_null_payment()
     {
@@ -254,6 +270,7 @@ public class InstantPaymentForwardingHandlerTests
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("cancelled");
+        ShouldHaveCountedOneCancelledItem(listener);
     }
 
     [Theory]
@@ -261,6 +278,8 @@ public class InstantPaymentForwardingHandlerTests
     [InlineData(MessageTransitionOutcome.Conflicted)]
     public async Task ForwardAsync_defers_when_the_local_cancel_is_not_applied(MessageTransitionOutcome transition)
     {
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
         _lock.Acquired = false;
         _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageConstants.Status.Pending);
@@ -272,16 +291,20 @@ public class InstantPaymentForwardingHandlerTests
         _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
         var handler = CreateHandler(
             new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
-            timeProvider: clock);
+            businessMetrics,
+            clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred, "only an applied cancel is a provably dead row");
+        ShouldNotHaveCountedAnyItem(listener);
     }
 
     [Fact]
     public async Task ForwardAsync_defers_when_persisting_the_local_cancel_throws()
     {
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
         _lock.Acquired = false;
         _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageConstants.Status.Pending);
@@ -293,11 +316,13 @@ public class InstantPaymentForwardingHandlerTests
         _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
         var handler = CreateHandler(
             new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
-            timeProvider: clock);
+            businessMetrics,
+            clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        ShouldNotHaveCountedAnyItem(listener);
     }
 
     [Fact]
@@ -578,6 +603,7 @@ public class InstantPaymentForwardingHandlerTests
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("cancelled");
+        ShouldHaveCountedOneCancelledItem(listener);
     }
 
     [Theory]
@@ -708,11 +734,14 @@ public class InstantPaymentForwardingHandlerTests
             .ReturnsAsync(CancelledSubmission());
         _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(transition);
-        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 });
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 }, businessMetrics);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
+        ShouldNotHaveCountedAnyItem(listener);
     }
 
     [Fact]
@@ -727,7 +756,9 @@ public class InstantPaymentForwardingHandlerTests
             .ReturnsAsync(CancelledSubmission(cancelledAt));
         _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageTransitionOutcome.Applied);
-        var handler = CreateHandler();
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(businessMetrics: businessMetrics);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
@@ -735,6 +766,7 @@ public class InstantPaymentForwardingHandlerTests
         result.ProcessedAt.Should().Be(cancelledAt);
         _store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
         _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        ShouldHaveCountedOneCancelledItem(listener);
     }
 
     [Fact]

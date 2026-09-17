@@ -15,11 +15,14 @@ internal sealed class AccountRepository(CoreBankDbContext dbContext) : IAccountR
     /// real PostgreSQL with competing connections by
     /// <c>CoreBankDemo.Persistence.IntegrationTests</c>, never excluded from
     /// coverage and never re-routed through a provider-neutral load.
+    /// <c>SingleOrDefault</c>, not <c>FirstOrDefault</c>: the account number is
+    /// the primary key, and EF Core cannot see the raw SQL's filter, so
+    /// <c>First</c> would log a missing-OrderBy warning on every locked read.
     /// </summary>
     public Task<Account?> LockForUpdateAsync(string accountNumber, CancellationToken cancellationToken) =>
         dbContext.Accounts
             .FromSqlInterpolated($"SELECT * FROM \"Accounts\" WHERE \"AccountNumber\" = {accountNumber} FOR UPDATE")
-            .FirstOrDefaultAsync(cancellationToken);
+            .SingleOrDefaultAsync(cancellationToken);
 
     public Task<Account?> FindByAccountNumberAsync(string accountNumber, CancellationToken cancellationToken) =>
         dbContext.Accounts.FirstOrDefaultAsync(

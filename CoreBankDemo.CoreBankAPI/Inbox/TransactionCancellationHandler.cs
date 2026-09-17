@@ -3,6 +3,7 @@ using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -89,6 +90,7 @@ internal sealed class TransactionCancellationHandler(
     CoreBankDbContext dbContext,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
+    BusinessMetrics businessMetrics,
     ILogger<TransactionCancellationHandler> logger) : ITransactionCancellationHandler
 {
     /// <summary>Recorded as <c>LastError</c> on every row this handler cancels.</summary>
@@ -159,6 +161,7 @@ internal sealed class TransactionCancellationHandler(
 
         if (stored)
         {
+            RecordCommittedCancel();
             logger.LogInformation(
                 "Stored a Cancelled tombstone for transaction {TransactionId} in partition {PartitionId} with its transaction.cancelled event; the original command will replay it",
                 request.TransactionId,
@@ -303,6 +306,7 @@ internal sealed class TransactionCancellationHandler(
         switch (transition)
         {
             case MessageTransitionOutcome.Applied:
+                RecordCommittedCancel();
                 logger.LogInformation(
                     "Cancelled pending transaction {TransactionId} in partition {PartitionId} before execution and enqueued its transaction.cancelled event",
                     claimed.TransactionId,
@@ -318,6 +322,24 @@ internal sealed class TransactionCancellationHandler(
             default:
                 return InFlight(claimed);
         }
+    }
+
+    /// <summary>
+    /// Counts a committed cancel (tombstone or pending-row cancel): the inbox
+    /// row leaves as cancelled, and its <c>transaction.cancelled</c> event
+    /// enters the messaging outbox. <see cref="IOutboxEventEnqueuer"/> adds
+    /// the event row directly to the context, never through
+    /// <c>StoreIfNewAsync</c>'s own store-operation recording, so this is the
+    /// only place that <c>added</c> is counted (mirrors
+    /// <c>TransactionExecutionHandler</c>). A tombstone's inbox <c>added</c>
+    /// is already counted by <c>StoreIfNewAsync</c>.
+    /// </summary>
+    private void RecordCommittedCancel()
+    {
+        businessMetrics.RecordItemProcessed(
+            BusinessMetrics.StoreName.CoreBankInbox, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.Cancelled);
+        businessMetrics.RecordStoreOperation(
+            BusinessMetrics.StoreName.CoreBankOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Added);
     }
 
     /// <summary>

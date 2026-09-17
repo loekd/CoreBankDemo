@@ -503,13 +503,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (messaging_store_name) (rate(corebankdemo_messaging_items_processed_total{outcome=\"completed\", service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by (messaging_store_name) (rate(corebankdemo_messaging_items_processed_total{outcome=~\"completed|cancelled\", service_name=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "out {{messaging_store_name}}",
           "range": true,
           "refId": "B"
         }
       ],
-      "description": "Rows added versus rows completed, per store, whether a background processor or an inline path (instant-rail payments-outbox rows, corebank-inbox rows executed at intake) completed them. The dashed out-line meets the in-line once the backlog drains. Cancelled rows are not counted as out, so when faults cause cancellations, payments-outbox and corebank-inbox out stay below in by the number of cancelled payments."
+      "description": "Rows added versus rows completed or cancelled, per store, whether a background processor or an inline path (instant-rail payments-outbox rows, corebank-inbox rows executed at intake) finished them. The dashed out-line meets the in-line once the backlog drains. Rows that fail terminally are not counted as out."
     },
     {
       "id": 9,

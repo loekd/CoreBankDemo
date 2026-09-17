@@ -485,6 +485,8 @@ internal sealed class InstantPaymentForwardingHandler(
 
         logger.LogInformation(
             "Instant rail: payment {IdempotencyKey} cancelled ({Reason})", payment.IdempotencyKey, reason);
+        businessMetrics.RecordItemProcessed(
+            BusinessMetrics.StoreName.PaymentsOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.Cancelled);
         businessMetrics.RecordInstantPaymentDuration(
             BusinessMetrics.InstantPaymentOutcome.Cancelled, timeProvider.GetUtcNow() - startedAt);
         return new InstantForwardResult(InstantDeliveryOutcome.Cancelled, submission.ProcessedAt);
