@@ -53,14 +53,17 @@ public class CoreBankTracesDashboardTests
     }
 
     [Fact]
-    public void Dashboard_has_a_service_map()
+    public void Service_map_query_is_rendered_by_the_node_graph_panel()
     {
         using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
 
-        dashboard.RootElement.GetProperty("panels").EnumerateArray()
-            .Where(panel => panel.TryGetProperty("targets", out _))
-            .SelectMany(panel => panel.GetProperty("targets").EnumerateArray())
-            .Should().Contain(target => IsServiceMap(target));
+        var serviceMapPanels = dashboard.RootElement.GetProperty("panels").EnumerateArray()
+            .Where(panel => panel.TryGetProperty("targets", out var targets) && targets.EnumerateArray().Any(IsServiceMap))
+            .Select(panel => panel.GetProperty("type").GetString())
+            .ToList();
+
+        // Grafana panel plugin ids are case-sensitive: "nodegraph" renders "plugin not found".
+        serviceMapPanels.Should().ContainSingle().Which.Should().Be("nodeGraph");
     }
 
     [Theory]

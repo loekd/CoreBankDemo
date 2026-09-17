@@ -417,7 +417,7 @@
     },
     {
       "id": 6,
-      "type": "nodegraph",
+      "type": "nodeGraph",
       "title": "Service map",
       "description": "Calls between services in the selected time range, from Tempo's service graph. Database and Redis connections show as their host (localhost, 127.0.0.1).",
       "datasource": {
