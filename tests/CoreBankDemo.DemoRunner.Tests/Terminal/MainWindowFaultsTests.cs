@@ -48,7 +48,7 @@ public class MainWindowFaultsTests
         await ArmAsync(controller);
         window.RenderForTest();
 
-        window.VisiblePresetNames.Should().Equal("All off", "Regular profile");
+        window.VisiblePresetNames.Should().Equal("All off", "Regular profile", "Instant-rail jitter");
         window.TriggerPresetForTest(1);
         window.RenderForTest();
 
@@ -245,10 +245,10 @@ public class MainWindowFaultsTests
         using var window = CreateWindow(controller);
         await ArmAsync(controller);
 
-        window.ResizeForTest(56, 24);
+        window.ResizeForTest(72, 24);
         window.RenderForTest();
 
-        window.VisiblePresetNames.Should().Equal("All off", "Regular profile");
+        window.VisiblePresetNames.Should().Equal("All off", "Regular profile", "Instant-rail jitter");
         window.PresetLabelText.Should().NotContain("not shown");
     }
 
@@ -263,8 +263,8 @@ public class MainWindowFaultsTests
         window.ResizeForTest(45, 24);
         window.RenderForTest();
 
-        window.VisiblePresetNames.Should().NotContain("Regular profile");
-        window.PresetLabelText.Should().Contain("1 more preset not shown at this width");
+        window.VisiblePresetNames.Should().NotContain("Regular profile").And.NotContain("Instant-rail jitter");
+        window.PresetLabelText.Should().Contain("2 more presets not shown at this width");
     }
 
     [Fact]

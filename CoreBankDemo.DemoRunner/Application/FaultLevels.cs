@@ -95,6 +95,10 @@ public sealed record FaultLevels(
         [
             new FaultPreset("All off", AllZero),
             new FaultPreset("Regular profile", CheckedInDefaults(TopologyProfile.Regular)),
+            // Straddles the instant rail's 2.5 s attempt timeout: roughly one attempt in five
+            // overruns, so only the few payments where both attempts do end cancelled —
+            // about one or two in a burst of fifty.
+            new FaultPreset("Instant-rail jitter", new FaultLevels(5, 800, 3000, 0)),
         ],
         TopologyProfile.LoadTests =>
         [
