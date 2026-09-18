@@ -44,7 +44,7 @@ public class FaultLevelsTests
         var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
 
         var jitter = presets.Should().ContainSingle(preset => preset.Name == "Instant-rail jitter").Subject;
-        jitter.Levels.Should().Be(new FaultLevels(5, 800, 3000, 0));
+        jitter.Levels.Should().Be(new FaultLevels(5, 20, 2000, 0));
         jitter.Levels.Normalized().Should().Be(jitter.Levels, "a preset must land on reachable slider positions");
     }
 
