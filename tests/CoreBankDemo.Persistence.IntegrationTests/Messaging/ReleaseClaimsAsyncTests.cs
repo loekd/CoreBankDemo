@@ -81,6 +81,30 @@ public class ReleaseClaimsAsyncTests(PostgresContainerFixture fixture) : Messagi
     }
 
     [Fact]
+    public async Task A_row_loaded_by_a_different_context_is_attached_and_released()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        TestInboxMessage claimedElsewhere;
+        await using (var other = CreateContext())
+        {
+            claimedElsewhere = new TestInboxMessage { IdempotencyKey = "elsewhere", Status = MessageConstants.Status.Processing, RetryCount = 2 };
+            other.InboxMessages.Add(claimedElsewhere);
+            await other.SaveChangesAsync(ct);
+        }
+
+        await using var context = CreateContext();
+        var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+        context.Entry(claimedElsewhere).State.Should().Be(EntityState.Detached);
+
+        await repository.ReleaseClaimsAsync([claimedElsewhere], ct);
+
+        await using var verify = CreateContext();
+        var persisted = await verify.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == claimedElsewhere.Id, ct);
+        persisted.Status.Should().Be(MessageConstants.Status.Pending);
+        persisted.RetryCount.Should().Be(2);
+    }
+
+    [Fact]
     public async Task Rejects_a_null_list()
     {
         await using var context = CreateContext();

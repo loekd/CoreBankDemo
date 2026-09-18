@@ -764,6 +764,50 @@ public class InboxProcessorBaseTests
     }
 
     [Fact]
+    public async Task Cancellation_while_releasing_the_remainder_propagates_and_is_not_logged_as_a_release_failure()
+    {
+        using var cts = new CancellationTokenSource();
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ReleaseClaimsAsync(It.IsAny<IReadOnlyList<TestInboxMessage>>(), It.IsAny<CancellationToken>()))
+            .Returns<IReadOnlyList<TestInboxMessage>, CancellationToken>((_, ct) =>
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(ct);
+            });
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, TestBusinessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(cts.Token);
+
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to release")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "cancellation is not a release failure");
+        // The cancellation left ReleaseRemainderAsync: it reached the tick
+        // boundary, the only place that catches it.
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Error processing inbox partitions")),
+                It.IsAny<OperationCanceledException>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once);
+    }
+
+    [Fact]
     public async Task A_failure_while_releasing_the_remainder_never_escapes_the_tick()
     {
         var first = NewMessage("first");

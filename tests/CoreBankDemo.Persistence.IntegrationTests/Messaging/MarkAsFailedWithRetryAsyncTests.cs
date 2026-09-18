@@ -15,13 +15,13 @@ namespace CoreBankDemo.Persistence.IntegrationTests.Messaging;
 public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) : MessagingPostgresTestBase(fixture)
 {
     [Fact]
-    public async Task Retry_under_limit_returns_to_pending_and_increments_retry_count()
+    public async Task Retry_returns_to_pending_and_increments_retry_count()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
-        var message = new TestInboxMessage { IdempotencyKey = "under-limit", RetryCount = 2 };
+        var message = new TestInboxMessage { IdempotencyKey = "transient", RetryCount = 2 };
         context.InboxMessages.Add(message);
         await context.SaveChangesAsync(ct);
 

@@ -592,6 +592,38 @@ public class OutboxProcessorBaseTests
     }
 
     [Fact]
+    public async Task Failure_of_a_concurrently_terminal_row_records_no_item_metric_and_the_batch_continues()
+    {
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { first, second });
+        store.Setup(s => s.MarkAsFailedWithRetryAsync(first, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.AlreadyTerminal);
+        store.Setup(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(first, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        strategy.Setup(s => s.DeliverAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        // The first row is terminal already, so it is settled: nothing is
+        // counted for it, the batch goes on and nothing is released.
+        strategy.Verify(s => s.DeliverAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ReleaseClaimsAsync(It.IsAny<IReadOnlyList<TestOutboxEventMessage>>(), It.IsAny<CancellationToken>()), Times.Never);
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
+            .Which.Tags["outcome"].Should().Be("completed", "only the second row's completion is counted");
+    }
+
+    [Fact]
     public async Task Completion_persistence_failure_records_a_completion_persistence_failed_item_metric()
     {
         var message = NewMessage();
@@ -803,6 +835,49 @@ public class OutboxProcessorBaseTests
                 It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
             Times.Never,
             "a release failure is bookkeeping and must not escape to the partition's or the tick's catch-all");
+    }
+
+    [Fact]
+    public async Task Cancellation_while_releasing_the_remainder_propagates_and_is_not_logged_as_a_release_failure()
+    {
+        using var cts = new CancellationTokenSource();
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { first, second });
+        store.Setup(s => s.ReleaseClaimsAsync(It.IsAny<IReadOnlyList<TestOutboxEventMessage>>(), It.IsAny<CancellationToken>()))
+            .Returns<IReadOnlyList<TestOutboxEventMessage>, CancellationToken>((_, ct) =>
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(ct);
+            });
+        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
+        strategy.Setup(s => s.DeliverAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
+        var logger = new Mock<ILogger>();
+        var processor = new TestOutboxProcessor(
+            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
+            logger.Object, TestBusinessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(cts.Token);
+
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to release")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "cancellation is not a release failure");
+        // The cancellation left ReleaseRemainderAsync: it reached the tick
+        // boundary, the only place that catches it.
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Error processing outbox partitions")),
+                It.IsAny<OperationCanceledException>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once);
     }
 
     [Fact]
