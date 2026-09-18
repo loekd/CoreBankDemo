@@ -39,6 +39,16 @@ public class FaultLevelsTests
     }
 
     [Fact]
+    public void PresetsForRegular_OfferAnInstantRailJitterBandStraddlingTheAttemptTimeout()
+    {
+        var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
+
+        var jitter = presets.Should().ContainSingle(preset => preset.Name == "Instant-rail jitter").Subject;
+        jitter.Levels.Should().Be(new FaultLevels(5, 800, 3000, 0));
+        jitter.Levels.Normalized().Should().Be(jitter.Levels, "a preset must land on reachable slider positions");
+    }
+
+    [Fact]
     public void MatchingPresetName_IsNullOnceAnyKnobMovesOffThePreset()
     {
         var preset = FaultLevels.CheckedInDefaults(TopologyProfile.Regular);
