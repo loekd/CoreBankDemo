@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Deciders:** Architecture team
 **Superseded in part by:** ADR-008 removes the Dapr routing switch; DevProxy and k6 remain accepted
+**Superseded in part by:** ADR-023 — the checked-in errors file targets `/api/transactions/process`; PaymentsAPI no longer calls `/api/accounts/validate`
 
 ## Context
 
@@ -16,7 +17,7 @@ Use Microsoft DevProxy for fault injection between PaymentsAPI and CoreBankAPI, 
 ## Implementation
 
 - `CoreBankDemo.AppHost` conditionally adds DevProxy via `builder.AddDevProxyExecutable("devproxy")` when `Features:UseDevProxy` is enabled.
-- DevProxy config (`AppHost/devproxy/config/devproxyrc.json`) injects 503, 429, and 500 errors at a 5% rate on CoreBankAPI's `/api/accounts/validate` endpoint.
+- DevProxy config (`AppHost/devproxy/config/devproxyrc.json`) injects 503, 429, and 500 errors at a 5% rate on CoreBankAPI's `/api/transactions/process` endpoint (the error responses and their target URL live in `devproxy-errors.json` beside it). Until ADR-023 the target was `/api/accounts/validate`; PaymentsAPI no longer makes that call, so errors injected there would never be hit.
 - When DevProxy is active, PaymentsAPI routes HTTP through `HTTP_PROXY=http://127.0.0.1:8000` (Dapr is disabled to keep traffic routed through the proxy).
 - K6 script (`k6/script.js`) sends configurable transaction volume with 10% intentional retries, then asserts exactly-once delivery and balance conservation via the LoadTestSupport API.
 - The `CoreBankDemo.LoadTests` AppHost provides a disposable test infrastructure with its own databases, K6, and assertion endpoints.

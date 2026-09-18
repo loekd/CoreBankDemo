@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Deciders:** Architecture team
 **Superseded in part by:** ADR-008 and ADR-013 replace the named HTTP client implementation; the resilience-pipeline decision remains accepted
+**Superseded in part by:** ADR-023 removes the outbox/inbox tier's MaxRetryCount limit; rows are retried without limit.
 
 ## Context
 
@@ -18,7 +19,7 @@ Apply Polly retry policies via `Microsoft.Extensions.Http.Resilience` on all out
 - `Microsoft.Extensions.Http.Resilience` NuGet package is referenced in `CoreBankDemo.ServiceDefaults` and `CoreBankDemo.PaymentsAPI`.
 - `ServiceDefaults/Extensions.cs` calls `http.AddStandardResilienceHandler()` inside `ConfigureHttpClientDefaults`, which registers a Polly pipeline including retry on all `HttpClient` instances.
 - The Standard Resilience Handler retries on 5xx responses and network errors with exponential backoff (default: up to 3 attempts).
-- The Outbox/Inbox layer provides a second retry tier: if all HTTP-level retries are exhausted, `RetryCount` is incremented and the message is retried on the next processor cycle (up to `MaxRetryCount` = 5).
+- The Outbox/Inbox layer provides a second retry tier: if all HTTP-level retries are exhausted, `RetryCount` is incremented and the message is retried on the next processor cycle (without limit, ADR-023).
 - `HttpCoreBankApiClient` in PaymentsAPI benefits automatically — no retry code in the client itself.
 
 ## Consequences

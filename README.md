@@ -138,7 +138,9 @@ Idempotency-Key: demo-001
 ```
 
 - `scheme: "standard"` (or omitted) → **`202 Accepted`**, `Status: Pending`. The row is durable; the
-  background processor forwards it and retries up to 5 times before going terminally `Failed`.
+  background processor forwards it with a single `POST /api/transactions/process`; a delivery that
+  fails is retried on every poll tick without limit; a batch stops at its first failed row so nothing
+  overtakes it (ADR-023). Only Core Bank decides how a payment ends.
 - `scheme: "instant"` → a budgeted inline attempt (9 s budget, 2.5 s per attempt, max 2 attempts,
   1.5 s of the budget reserved for a cancel). A committed outcome answers **`200 OK`**. When the
   forward phase runs out, the payment is cancelled — locally if it never left PaymentsAPI, otherwise
@@ -345,8 +347,10 @@ AppHost stop by design. Stop the stragglers, or reset state by removing those co
 
 **Payments stay `Pending`**
 Look at the Payments API outbox processor logs in the dashboard. A high Dev Proxy error rate, a
-stopped Core Bank API, or a missing Redis lease will all park messages until the downstream returns;
-after 5 failed attempts a message goes terminally `Failed`.
+stopped Core Bank API, or a missing Redis lease will all park messages until the downstream returns.
+A message is retried on every poll tick without limit; a batch stops at its first failed row so
+nothing overtakes it (ADR-023). A row that can never succeed therefore blocks its partition until
+someone intervenes: look for a warning per attempt and a climbing `retry_scheduled` count.
 
 **Instant payments answer `504 Cancelled`**
 Not a fault in the demo: the instant rail's budget ran out before Core Bank confirmed anything, and

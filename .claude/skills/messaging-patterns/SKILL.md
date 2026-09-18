@@ -27,12 +27,15 @@ Never bypass the base classes and reimplement polling or locking logic.
 
 ```csharp
 MessageConstants.Status.Pending / Processing / Completed / Failed
+// Failed is no longer written as a row status (ADR-023); it stays the wire word
+// for a business rejection inside a response payload.
 
-MessageConstants.Defaults.MaxRetryCount       // 5
 MessageConstants.Defaults.BatchSize           // 10
 MessageConstants.Defaults.PollingInterval     // 5 s
 MessageConstants.Defaults.ProcessingTimeout  // 5 min
 ```
+
+There is no retry limit (`MaxRetryCount` was removed by ADR-023): a failed row returns to `Pending` and is retried on every poll tick without limit; a batch stops at its first failed row so nothing overtakes it. Never write `Failed` as a row status.
 
 ## Partition assignment
 

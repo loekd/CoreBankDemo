@@ -9,7 +9,8 @@ public static class MessageConstants
 {
     /// <summary>
     /// Message transport states (AD-11: transport states only — business
-    /// rejection is a successfully processed message, never <see cref="Failed"/>).
+    /// rejection is a successfully processed message, never <see cref="Failed"/>
+    /// as a row status).
     /// </summary>
     public static class Status
     {

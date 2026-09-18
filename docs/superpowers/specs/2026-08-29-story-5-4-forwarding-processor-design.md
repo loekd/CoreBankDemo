@@ -5,6 +5,7 @@
 > **Original date:** 2026-08-29
 > **Migrated from:** `docs/bmad/implementation-artifacts/spec-5-4-forwarding-processor.md` on 2026-09-10
 > **Related:** PR #2
+> **Superseded in part by:** [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md) — the destination-account validation call is removed.
 
 ## Intent
 

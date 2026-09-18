@@ -1,6 +1,6 @@
 # CoreBank is the only source of payment outcomes; infrastructure failures retry without limit
 
-> **Status:** Draft — awaiting review
+> **Status:** Implemented
 > **Kind:** design spec
 > **Original date:** 2026-09-18
 > **Related:** [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md); [ADR-020](../../adr/ADR-020-instant-rail-timeout-cancellation.md); [ADR-005](../../adr/ADR-005-resilience-testing-devproxy-k6.md); [story 5.4](2026-08-29-story-5-4-forwarding-processor-design.md); [constraints](../../constraints.md)
@@ -46,7 +46,7 @@ Letting PaymentsAPI announce the failure itself was considered and rejected: `Fa
 |---|---|---|---|
 | Infrastructure failure, standard rail | Submission answers `429`/`5xx`, times out, or throws | Row → `Pending`, `RetryCount + 1`; rest of the batch released to `Pending` untouched; retried next tick, without limit | Failure to record the retry: row stays `Processing`, reclaimed when stale (unchanged) |
 | Throttle window (the observed bug) | `429` for 60 s on every call | Every row stays in flight; all deliver after the window resets; console's `still moving` drains to zero | N/A |
-| Failure mid-batch | Rows 1–5 claimed, row 2 fails | Row 1 `Completed`; row 2 `Pending` (+1); rows 3–5 `Pending`, `RetryCount` unchanged; next tick claims row 2 first | Release conflicts with a concurrent claim → that row is left to its new owner, never forced |
+| Failure mid-batch | Rows 1–5 claimed, row 2 fails | Row 1 `Completed`; row 2 `Pending` (+1); rows 3–5 `Pending`, `RetryCount` unchanged; next tick claims row 2 first | Release conflicts with a concurrent claim → that row is left to its new owner, never forced; a row left `Processing` by a bookkeeping failure is only retried once its claim goes stale; released rows can pass it until then (ADR-023 Consequences) |
 | Row that can never succeed | Handler throws every time | Partition blocked until fixed; a warning per attempt and a climbing `retry_scheduled` count make it visible | Accepted consequence — no automatic give-up |
 | Unknown / inactive destination account | Valid request shape, account not in CoreBank | No pre-validation. CoreBank rejects at execution and publishes `transaction.failed`; Payments row `Completed` with a `Failed` payload; instant rail answers `200 Failed` | N/A |
 | Request rejected at the door | `POST /process` fails model validation, `TransactionId` usable | CoreBank stores a terminal inbox row (`Completed`, `Failed` response, validation errors as reason) + `transaction.failed` outbox row in one save, then answers `400` | Save fails → `503`, nothing recorded, caller retries |

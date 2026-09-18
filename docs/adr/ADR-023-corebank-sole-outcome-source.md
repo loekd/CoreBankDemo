@@ -1,12 +1,14 @@
 # ADR-023: CoreBank is the only source of payment outcomes; infrastructure failures retry without limit
 
 **Date:** 2026-09-18
-**Status:** Proposed
+**Status:** Accepted
 **Deciders:** Architecture team
 **Supersedes in part:**
 - Story 5.4's boundary "never skip the destination-account validation call before submission" — the call is removed.
 - ADR-005's fault target `/api/accounts/validate` — the checked-in errors file targets `/api/transactions/process`.
 - The kernel's retry limit (`MessageConstants.Defaults.MaxRetryCount`, terminal `Failed` at the limit) — removed for all four stores.
+- ADR-006's second retry tier "up to `MaxRetryCount` = 5" — the tier stays, the limit is removed.
+- Story 2.3's poison state (terminal `Failed` at the retry limit).
 - ADR-020's cancel matrix row "`Processing` / `Failed` → `409`" — a CoreBank inbox row can no longer become `Failed`; the row stays valid for databases that still hold such rows.
 
 Implementation spec: [`2026-09-18-corebank-sole-outcome-source-design.md`](../superpowers/specs/2026-09-18-corebank-sole-outcome-source-design.md).
@@ -51,10 +53,13 @@ or keeps trying.
 4. **`400` on submission is a verdict.** PaymentsAPI does not retry it: the row ends `Completed`
    with a `Failed` payload, the same shape an execution-time rejection already has. Every other
    failure — `429`, `408`, `401`, `403`, `404`, `5xx`, timeouts, transport exceptions — is retried.
-5. **CoreBank answers `400` only after recording the rejection.** A terminal inbox row and a
-   `transaction.failed` outbox row are committed in one save, modelled on the cancel tombstone. If
-   the save fails the answer is `503`. A request whose `TransactionId` is itself unusable cannot be
-   recorded and gets a plain `400`; PaymentsAPI cannot produce one.
+5. **CoreBank answers `400` only after recording the rejection.** The rejection is recorded by
+   `TransactionRejectionHandler` (`ITransactionRejectionHandler`), which the controller calls when
+   model validation fails: a terminal inbox row and a `transaction.failed` outbox row are committed
+   in one save, modelled on the cancel tombstone. If the save fails the answer is `503`. A request
+   whose `TransactionId` is itself unusable cannot be recorded and gets a plain `400`; PaymentsAPI
+   cannot produce one. When CoreBank already holds a row for the `TransactionId`, nothing is
+   written and the answer is a plain `400` as well; the existing row's outcome stands.
 6. **Internal failures are not bad requests.** The lost-store-race path on `process` and
    `StoreFailed` on `cancel` answer `503` instead of `400`.
 
@@ -93,3 +98,24 @@ or keeps trying.
 - The "Instant-rail jitter" preset is re-tuned (1200–3000 ms) because an attempt now makes one
   proxied call instead of two.
 - Hand-written store fakes must implement `ReleaseClaimsAsync`.
+- **Known ordering limitation.** "A batch stops at its first unsettled row" guarantees that no later
+  row is *attempted in that tick*, and that a row returned to `Pending` (the retry-scheduled path)
+  is first in line on the next tick. A row left `Processing` by a bookkeeping double fault —
+  delivery/handling failed *and* recording the retry failed, or delivery succeeded but recording
+  completion failed — is only picked up again once its claim goes stale (`ProcessingTimeout`,
+  5 minutes); until then the rows released behind it can pass it. Accepted: it needs two faults at
+  once, in the completion case the row was in fact delivered first, and a "claim only the
+  contiguous prefix" rule would collide with the instant rail's `HoldUntil` design (held instant
+  rows deliberately let standard rows pass).
+- **A `400` verdict is a succeeded delivery on the metrics.** `corebankdemo.messaging.deliveries`
+  counts a `Rejected` submission as `succeeded` (the command was delivered and answered), in line
+  with story 6.5's rule never to count a business rejection as a transport failure.
+- **A recorded rejection is counted like any other completed inbox row.**
+  `TransactionRejectionHandler` records inbox `items.processed` (`completed`) and corebank-outbox
+  `added`, the same pair the cancel tombstone and the execution handler record, so the in/out
+  panels stay balanced.
+- **Legacy `Failed` CoreBank inbox rows now replay `503`** (they used to replay `400`). PaymentsAPI
+  retries that without limit, and the HTTP resilience pipeline counts 5xx toward its circuit
+  breaker. Only databases that already hold such rows are affected; fresh and demo databases hold
+  none. The demo's databases are disposable (`EnsureCreated`, no migrations); recreating the
+  database clears them.
