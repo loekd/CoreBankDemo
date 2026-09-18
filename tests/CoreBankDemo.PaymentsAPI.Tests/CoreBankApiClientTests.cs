@@ -277,6 +277,7 @@ public class CoreBankApiClientTests
         var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Rejected);
+        result.StatusCode.Should().Be(400);
     }
 
     [Theory]

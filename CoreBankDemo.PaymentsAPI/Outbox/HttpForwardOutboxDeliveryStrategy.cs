@@ -236,7 +236,9 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
             BusinessMetrics.DeliveryDirection.Sent,
             BusinessMetrics.Transport.Http,
             BusinessMetrics.MessageType.TransactionCommand,
-            submission.Outcome == CoreBankClientOutcome.Success
+            // A 400 verdict was delivered and answered: a business rejection
+            // is never counted as a transport failure (story 6.5, ADR-023).
+            submission.Outcome is CoreBankClientOutcome.Success or CoreBankClientOutcome.Rejected
                 ? BusinessMetrics.DeliveryOutcome.Succeeded
                 : BusinessMetrics.DeliveryOutcome.Failed);
 

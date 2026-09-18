@@ -25,6 +25,8 @@ internal interface ICoreBankApiClient
     /// A non-standard <see cref="TransactionSubmissionRequest.Priority"/> is
     /// carried as <c>X-Payment-Priority</c> so CoreBankAPI queues the command
     /// at the same priority; the standard rail never sends that header.
+    /// A <c>400</c> is reported as <see cref="CoreBankClientOutcome.Rejected"/>
+    /// -- CoreBank's verdict on the payment, never a retry (ADR-023).
     /// </summary>
     Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
         TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false);
@@ -41,9 +43,10 @@ internal interface ICoreBankApiClient
     /// <see cref="CoreBankClientOutcome.Conflict"/> is CoreBank's <c>409</c>
     /// (in flight or terminally failed -- not cancellable), with the reported
     /// status in <see cref="CoreBankResult{T}.Value"/>. Everything else is a
-    /// <see cref="CoreBankClientOutcome.Retry"/> classification exactly as for
-    /// <see cref="ProcessTransactionAsync"/>. Carries <c>X-Payment-Priority</c>
-    /// under the same rule as the submission call.
+    /// <see cref="CoreBankClientOutcome.Retry"/> classification -- including a
+    /// <c>400</c>, which only <see cref="ProcessTransactionAsync"/> reports as
+    /// <see cref="CoreBankClientOutcome.Rejected"/>. Carries
+    /// <c>X-Payment-Priority</c> under the same rule as the submission call.
     /// </summary>
     Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
         TransactionSubmissionRequest request, CancellationToken cancellationToken);

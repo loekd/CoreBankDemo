@@ -509,11 +509,29 @@ public class HttpForwardOutboxDeliveryStrategyTests
         var client = new FakeCoreBankApiClient { SubmitResult = CoreBankResult<TransactionSubmission>.Rejected(400) };
         var strategy = new HttpForwardOutboxDeliveryStrategy(
             client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var message = Message();
 
-        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+        var act = () => strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
 
         await act.Should().NotThrowAsync();
+        client.SubmitCalls.Should().ContainSingle();
+        message.ResponsePayload.Should().NotBeNull();
         _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_records_a_succeeded_delivery_metric_for_a_rejected_outcome()
+    {
+        var client = new FakeCoreBankApiClient { SubmitResult = CoreBankResult<TransactionSubmission>.Rejected(400) };
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(
+            client, _store.Object, businessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+
+        await strategy.ForwardAsync(Message(), executeInline: false, TestContext.Current.CancellationToken);
+
+        listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.messaging.deliveries")
+            .Which.Tags["outcome"].Should().Be("succeeded");
     }
 
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient
