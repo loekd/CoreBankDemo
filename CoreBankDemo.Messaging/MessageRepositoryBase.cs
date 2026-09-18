@@ -321,12 +321,15 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// persist nothing. <c>Status</c> is a concurrency token (see
     /// <see cref="ConfigureConcurrencyToken"/>); a conflicting concurrent
     /// change (e.g. a concurrent claim) is retried exactly once against the
-    /// row's current database values before giving up.
+    /// row's current database values before giving up. A conflict the save
+    /// reports on a different tracked row is not this row's conflict: that
+    /// row is reloaded, which drops its stale pending change, and this row's
+    /// transition is saved once more.
     /// </summary>
     /// <exception cref="ArgumentNullException"><paramref name="message"/> or <paramref name="errorMessage"/> is <see langword="null"/>.</exception>
     /// <exception cref="DbUpdateConcurrencyException">
-    /// The retried save still conflicted with a second concurrent change to
-    /// <paramref name="message"/>'s row; propagates unchanged.
+    /// The retried save conflicted again, on <paramref name="message"/>'s row
+    /// or on another tracked row; propagates unchanged.
     /// </exception>
     public virtual async Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
         TMessage message, string errorMessage, CancellationToken cancellationToken = default)
@@ -341,6 +344,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             // increment. A Cancelled row is terminal too: a late "release the
             // claim" after a cancel must never revive it to Pending (spec:
             // instant-rail-timeout-cancel).
+            StopTrackingTerminalRow(message);
             return MessageTransitionOutcome.AlreadyTerminal;
         }
 
@@ -358,29 +362,90 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         {
             await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
-        catch (DbUpdateConcurrencyException)
+        catch (DbUpdateConcurrencyException ex)
         {
-            // Lost the race against a concurrent change to this row's Status
-            // (e.g. a concurrent claim). Reload the row's current database
-            // values — this overwrites our speculative, now-stale mutation —
-            // and retry the transition exactly once against them. A second
-            // conflict is treated as a genuine anomaly and propagates.
-            await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
-
-            if (IsTerminal(message))
+            // A conflict on another tracked row is not this row's conflict:
+            // its stale pending change is dropped and this row's transition,
+            // still applied, is saved again below.
+            if (await ReloadForeignEntriesAsync(ex, message, cancellationToken).ConfigureAwait(false))
             {
-                // The concurrent change already drove this row to a terminal
-                // state (Completed, or Cancelled by the instant rail; legacy
-                // Failed rows are terminal too) — nothing further for this
-                // call to do.
-                return MessageTransitionOutcome.AlreadyTerminal;
+                // Lost the race against a concurrent change to this row's
+                // Status (e.g. a concurrent claim). Reload the row's current
+                // database values — this overwrites our speculative, now-stale
+                // mutation — and retry the transition exactly once against
+                // them.
+                await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+
+                if (IsTerminal(message))
+                {
+                    // The concurrent change already drove this row to a
+                    // terminal state (Completed, or Cancelled by the instant
+                    // rail; legacy Failed rows are terminal too) — nothing
+                    // further for this call to do.
+                    return MessageTransitionOutcome.AlreadyTerminal;
+                }
+
+                ApplyFailureTransition(message, errorMessage);
             }
 
-            ApplyFailureTransition(message, errorMessage);
+            // Retried exactly once. A second conflict is treated as a genuine
+            // anomaly and propagates.
             await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
 
         return MessageTransitionOutcome.Applied;
+    }
+
+    /// <summary>
+    /// Stops tracking a row that was already terminal when a transition was
+    /// asked for (ADR-023 final review). A handler may commit a claimed row
+    /// through its own <see cref="DbContext"/> while this context still tracks
+    /// the same instance: CoreBank's <c>TransactionExecutionHandler</c>
+    /// attaches the row the inbox processor claimed and commits it as
+    /// <c>Completed</c> itself. This context then holds a <c>Processing</c>
+    /// snapshot next to a <c>Completed</c> current value, and every later
+    /// <see cref="DbContext.SaveChangesAsync(CancellationToken)"/> here would
+    /// resend <c>UPDATE ... WHERE "Status" = 'Processing'</c> for it and fail
+    /// with a <see cref="DbUpdateConcurrencyException"/> — so the retry of the
+    /// next row and the release of the rows behind it would both be lost. A
+    /// terminal row is never written by this base again, so it needs no
+    /// further tracking here.
+    /// </summary>
+    private void StopTrackingTerminalRow(TMessage message)
+    {
+        var entry = DbContext.Entry(message);
+        if (entry.State != EntityState.Detached)
+        {
+            entry.State = EntityState.Detached;
+        }
+    }
+
+    /// <summary>
+    /// Sorts out whose conflict <paramref name="exception"/> reports. Every
+    /// conflicting entry other than <paramref name="messageInHand"/> is
+    /// foreign — a tracked row whose pending change the database has just
+    /// refused as stale — and is reloaded, which drops that pending change
+    /// and writes nothing, so the caller can save the row in hand again. The
+    /// row in hand is left untouched: what its own conflict means is for the
+    /// calling transition to decide.
+    /// </summary>
+    /// <returns><see langword="true"/> when <paramref name="messageInHand"/> itself conflicted.</returns>
+    private static async Task<bool> ReloadForeignEntriesAsync(
+        DbUpdateConcurrencyException exception, TMessage messageInHand, CancellationToken cancellationToken)
+    {
+        var messageInHandConflicted = false;
+        foreach (var entry in exception.Entries)
+        {
+            if (ReferenceEquals(entry.Entity, messageInHand))
+            {
+                messageInHandConflicted = true;
+                continue;
+            }
+
+            await entry.ReloadAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return messageInHandConflicted;
     }
 
     private static void ApplyFailureTransition(TMessage message, string errorMessage)
@@ -434,6 +499,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             // report for a row that is already in a terminal state must be a
             // no-op, never re-stamping ProcessedAt or reviving a row that a
             // concurrent caller already drove to terminal Failed.
+            StopTrackingTerminalRow(message);
             return MessageTransitionOutcome.AlreadyTerminal;
         }
 
@@ -526,6 +592,7 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
         if (IsTerminal(message))
         {
+            StopTrackingTerminalRow(message);
             return MessageTransitionOutcome.AlreadyTerminal;
         }
 
@@ -596,16 +663,40 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
             message.Status = MessageConstants.Status.Pending;
 
-            try
+            // One save per row: Status is the concurrency token, so a row
+            // another writer moved must not roll the others back.
+            for (var attempt = 1; ; attempt++)
             {
-                // One save per row: Status is the concurrency token, so a row
-                // another writer moved must not roll the others back.
-                await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (DbUpdateConcurrencyException)
-            {
-                // Someone else owns this row now. Take their values and leave it.
-                await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    // Deliberate: this save also flushes whatever else is still
+                    // pending in this context. When the retry or the completion
+                    // of the row the batch stopped at could not be persisted for
+                    // a reason other than a concurrency conflict, that row is
+                    // still modified here and may be persisted now after all —
+                    // it ends Pending with RetryCount + 1, or Completed —
+                    // although *_persistence_failed was already recorded for
+                    // it. That end state is the desired one.
+                    await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+                catch (DbUpdateConcurrencyException ex)
+                {
+                    // A conflict on another tracked row is not this row's
+                    // conflict: that row's stale pending change is dropped and
+                    // this row's release is saved once more.
+                    var releasedRowConflicted = await ReloadForeignEntriesAsync(ex, message, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (releasedRowConflicted || attempt == 2)
+                    {
+                        // Someone else owns this row now, or it could not be
+                        // released within one retry. Take the database's values
+                        // and leave it; a row that is still Processing is
+                        // reclaimed once its claim goes stale.
+                        await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+                        break;
+                    }
+                }
             }
         }
     }

@@ -179,6 +179,45 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         lockService.LockNames.Should().Contain("payments-outbox-partition-3");
     }
 
+    /// <summary>
+    /// ADR-023 on real PostgreSQL: a batch stops at its first failed row. The
+    /// row that failed records its retry and goes back to <c>Pending</c>; the
+    /// rows claimed behind it are released untouched and never submitted, so
+    /// nothing overtakes the failed row.
+    /// </summary>
+    [Fact]
+    public async Task A_batch_stops_at_its_first_failed_row_and_releases_the_rows_behind_it()
+    {
+        await using var store = CreateStore();
+        await SeedOrderedAsync(store, partitionId: 0, keys: ["batch-1", "batch-2", "batch-3", "batch-4", "batch-5"]);
+        var client = new UnavailableForOneTransactionCoreBankApiClient("batch-2");
+        using var services = BuildServices(store, client);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var processor = CreateProcessor(
+            services.GetRequiredService<IServiceScopeFactory>(), new SingleTickLockService(completion));
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        await using var verifyContext = store.CreateContext();
+        var rows = await verifyContext.OutboxMessages
+            .AsNoTracking()
+            .ToDictionaryAsync(m => m.TransactionId, TestContext.Current.CancellationToken);
+        rows["batch-1"].Status.Should().Be(MessageConstants.Status.Completed);
+        rows["batch-2"].Status.Should().Be(MessageConstants.Status.Pending);
+        rows["batch-2"].RetryCount.Should().Be(1);
+        rows["batch-2"].LastError.Should().Contain("503");
+        foreach (var key in new[] { "batch-3", "batch-4", "batch-5" })
+        {
+            rows[key].Status.Should().Be(MessageConstants.Status.Pending);
+            rows[key].RetryCount.Should().Be(0);
+            rows[key].LastError.Should().BeNull();
+        }
+
+        client.SubmittedTransactionIds.Should().Equal("batch-1", "batch-2");
+    }
+
     private static ServiceProvider BuildServices(PaymentsStore store, ICoreBankApiClient client)
     {
         var services = new ServiceCollection();
@@ -288,6 +327,39 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             Interlocked.Increment(ref _submitAttempts);
             return Task.FromResult(CoreBankResult<TransactionSubmission>.Retry(
                 CoreBankRetryReason.TransportRejection, 503));
+        }
+
+        public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
+            string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+    }
+
+    /// <summary>
+    /// Fake <see cref="ICoreBankApiClient"/> that submits successfully except
+    /// for one TransactionId, which is a transport rejection (503).
+    /// </summary>
+    private sealed class UnavailableForOneTransactionCoreBankApiClient(string unavailableTransactionId) : ICoreBankApiClient
+    {
+        private readonly ConcurrentQueue<string> _submittedTransactionIds = new();
+
+        public IReadOnlyList<string> SubmittedTransactionIds => _submittedTransactionIds.ToArray();
+
+        public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
+            string accountNumber, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
+        {
+            _submittedTransactionIds.Enqueue(request.TransactionId);
+            return Task.FromResult(request.TransactionId == unavailableTransactionId
+                ? CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.TransportRejection, 503)
+                : CoreBankResult<TransactionSubmission>.Success(
+                    new TransactionSubmission(request.TransactionId, "Completed", DateTimeOffset.UtcNow)));
         }
 
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(

@@ -121,7 +121,52 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
         outboxCount.Should().Be(0);
     }
 
-    private async Task SeedAccountsAndMessageAsync()
+    /// <summary>
+    /// ADR-023 final review. <see cref="TransactionExecutionHandler"/> commits
+    /// the row as <c>Completed</c> through its own <see cref="CoreBankDbContext"/>
+    /// while the partition's context still tracks the same instance with a
+    /// <c>Processing</c> snapshot. That handler-committed row must not poison
+    /// the partition context's later saves: the failure behind it still has to
+    /// record its retry, and the rows claimed behind that still have to be
+    /// released.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_after_a_handler_committed_success_still_records_the_retry_and_releases_the_rest()
+    {
+        const string failingTransactionId = "txn-2";
+        await SeedAccountsAndMessagesAsync(
+            NewMessage("txn-1", 10m, TimeSpan.FromSeconds(-3)),
+            NewMessage(failingTransactionId, 10m, TimeSpan.FromSeconds(-2)),
+            NewMessage("txn-3", 10m, TimeSpan.FromSeconds(-1)));
+
+        using var services = BuildHandlerServices(decorateHandler: scopedServices =>
+            scopedServices.AddScoped<IInboxMessageHandler<InboxMessage>>(sp =>
+                new ThrowingForOneTransactionHandler(
+                    sp.GetRequiredService<TransactionExecutionHandler>(), failingTransactionId)));
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var processor = CreateProcessor(services.GetRequiredService<IServiceScopeFactory>(), completion);
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        await using var verifyContext = CreateContext();
+        var rows = await verifyContext.InboxMessages
+            .AsNoTracking()
+            .ToDictionaryAsync(m => m.TransactionId, TestContext.Current.CancellationToken);
+
+        rows["txn-1"].Status.Should().Be(MessageConstants.Status.Completed);
+        rows[failingTransactionId].Status.Should().Be(MessageConstants.Status.Pending);
+        rows[failingTransactionId].RetryCount.Should().Be(1);
+        rows[failingTransactionId].LastError.Should().Be("boom for txn-2");
+        rows["txn-3"].Status.Should().Be(MessageConstants.Status.Pending);
+        rows["txn-3"].RetryCount.Should().Be(0);
+        rows["txn-3"].LastError.Should().BeNull();
+    }
+
+    private Task SeedAccountsAndMessageAsync() => SeedAccountsAndMessagesAsync(NewMessage());
+
+    private async Task SeedAccountsAndMessagesAsync(params InboxMessage[] messages)
     {
         await using var context = CreateContext();
         context.Accounts.AddRange(
@@ -143,7 +188,7 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
                 IsActive = true,
                 CreatedAt = TimeProvider.GetUtcNow().UtcDateTime
             });
-        context.InboxMessages.Add(NewMessage());
+        context.InboxMessages.AddRange(messages);
         await context.SaveChangesAsync(TestContext.Current.CancellationToken);
     }
 
@@ -167,7 +212,8 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
 
     private ServiceProvider BuildHandlerServices(
         Action<IServiceCollection>? overrideScopedServices = null,
-        BusinessMetrics? businessMetrics = null)
+        BusinessMetrics? businessMetrics = null,
+        Action<IServiceCollection>? decorateHandler = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<TimeProvider>(TimeProvider);
@@ -185,23 +231,25 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
         services.AddScoped<ITransactionExecutor, InProcessTransactionExecutor>();
         services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
         overrideScopedServices?.Invoke(services);
-        services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionExecutionHandler>();
+        services.AddScoped<TransactionExecutionHandler>();
+        services.AddScoped<IInboxMessageHandler<InboxMessage>>(sp => sp.GetRequiredService<TransactionExecutionHandler>());
+        decorateHandler?.Invoke(services);
 
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
-    private InboxMessage NewMessage() => new()
+    private InboxMessage NewMessage(string transactionId = TransactionId, decimal amount = 50m, TimeSpan receivedAtOffset = default) => new()
     {
         Id = Guid.NewGuid(),
-        IdempotencyKey = TransactionId,
-        TransactionId = TransactionId,
+        IdempotencyKey = transactionId,
+        TransactionId = transactionId,
         FromAccount = FromAccount,
         ToAccount = ToAccount,
-        Amount = 50m,
+        Amount = amount,
         Currency = "EUR",
         PartitionId = 0,
         Status = MessageConstants.Status.Pending,
-        ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime,
+        ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime + receivedAtOffset,
         TraceParent = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
         TraceState = "congo=t61rcWkgMzE"
     };
@@ -256,6 +304,20 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
                 fromAccount.Balance,
                 toAccount.Balance);
         }
+    }
+
+    /// <summary>
+    /// Delegates to the real <see cref="TransactionExecutionHandler"/> except
+    /// for one TransactionId, whose handling throws before anything is written.
+    /// </summary>
+    private sealed class ThrowingForOneTransactionHandler(
+        IInboxMessageHandler<InboxMessage> inner,
+        string failingTransactionId) : IInboxMessageHandler<InboxMessage>
+    {
+        public Task HandleAsync(InboxMessage message, CancellationToken cancellationToken = default) =>
+            message.TransactionId == failingTransactionId
+                ? throw new InvalidOperationException($"boom for {failingTransactionId}")
+                : inner.HandleAsync(message, cancellationToken);
     }
 
     private sealed class ThrowingAfterFirstAddOutboxEventEnqueuer(CoreBankDbContext dbContext) : IOutboxEventEnqueuer
