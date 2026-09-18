@@ -59,6 +59,7 @@ public class TransactionRejectionHandlerTests(PostgresContainerFixture fixture) 
             context,
             Options.Create(new InboxProcessingOptions { PartitionCount = 4, LockExpirySeconds = 30 }),
             _clock,
+            TestBusinessMetrics.Instance,
             NullLogger<TransactionRejectionHandler>.Instance);
 
     [Fact]

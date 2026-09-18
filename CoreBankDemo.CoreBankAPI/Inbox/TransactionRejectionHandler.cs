@@ -3,6 +3,7 @@ using System.Text.Json;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
@@ -36,8 +37,13 @@ public interface ITransactionRejectionHandler
 /// <see cref="TransactionCancellationHandler"/>'s tombstone: a terminal inbox
 /// row carrying a <c>Failed</c> response, and its <c>transaction.failed</c>
 /// event, committed by <c>StoreIfNewAsync</c>'s single <c>SaveChanges</c>.
-/// A <c>400</c> therefore always has a published outcome behind it -- the
-/// caller was told "no" by the only service that announces outcomes.
+/// A <c>400</c> therefore has a published outcome behind it whenever the
+/// rejection was <see cref="TransactionRejectionOutcome.Recorded"/>.
+/// <see cref="TransactionRejectionOutcome.AlreadyKnown"/> means CoreBank
+/// already holds a row for the id and that row's own outcome stands;
+/// <see cref="TransactionRejectionOutcome.NotRecordable"/> is a plain
+/// <c>400</c> for a request with no usable id (unreachable from PaymentsAPI,
+/// which always sends one).
 /// </summary>
 internal sealed class TransactionRejectionHandler(
     IInboxMessageRepository repository,
@@ -45,6 +51,7 @@ internal sealed class TransactionRejectionHandler(
     CoreBankDbContext dbContext,
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
+    BusinessMetrics businessMetrics,
     ILogger<TransactionRejectionHandler> logger) : ITransactionRejectionHandler
 {
     private const int MaxTransactionIdLength = 100;
@@ -60,6 +67,8 @@ internal sealed class TransactionRejectionHandler(
         var transactionId = request?.TransactionId;
         if (string.IsNullOrWhiteSpace(transactionId) || transactionId.Length > MaxTransactionIdLength)
         {
+            logger.LogInformation("Rejected a request that carries no usable TransactionId; there is nothing to record the rejection under");
+            Activity.Current?.SetTag("outcome", "not_recordable");
             return TransactionRejectionOutcome.NotRecordable;
         }
 
@@ -72,6 +81,11 @@ internal sealed class TransactionRejectionHandler(
                 .ConfigureAwait(false);
             if (existing is not null)
             {
+                logger.LogInformation(
+                    "Rejection of transaction {TransactionId} not recorded; CoreBank already holds a {Status} row for it and that row stands",
+                    transactionId,
+                    existing.Status);
+                Activity.Current?.SetTag("outcome", "already_known");
                 return TransactionRejectionOutcome.AlreadyKnown;
             }
 
@@ -105,9 +119,14 @@ internal sealed class TransactionRejectionHandler(
             {
                 // Lost the unique-key race: the winner's row is authoritative.
                 DetachPendingEvents(transactionId);
+                logger.LogInformation(
+                    "Lost the rejection store race for transaction {TransactionId}; the winner's row stands and nothing was recorded",
+                    transactionId);
+                Activity.Current?.SetTag("outcome", "already_known");
                 return TransactionRejectionOutcome.AlreadyKnown;
             }
 
+            RecordCommittedRejection();
             logger.LogInformation(
                 "Recorded the rejection of transaction {TransactionId} with its transaction.failed event: {Reason}",
                 transactionId, reason);
@@ -116,14 +135,35 @@ internal sealed class TransactionRejectionHandler(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            DetachPendingEvents(transactionId);
             throw;
         }
         catch (Exception ex)
         {
             DetachPendingEvents(transactionId);
             logger.LogWarning(ex, "Could not record the rejection of transaction {TransactionId}", transactionId);
+            Activity.Current?.SetTag("outcome", "store_failed");
             return TransactionRejectionOutcome.StoreFailed;
         }
+    }
+
+    /// <summary>
+    /// Counts a committed rejection: the inbox row leaves as completed (what
+    /// <c>TransactionExecutionHandler</c> records for a business rejection,
+    /// which also ends <c>Completed</c>), and its <c>transaction.failed</c>
+    /// event enters the messaging outbox. <see cref="IOutboxEventEnqueuer"/>
+    /// adds the event row directly to the context, never through
+    /// <c>StoreIfNewAsync</c>'s own store-operation recording, so this is the
+    /// only place that <c>added</c> is counted (mirrors
+    /// <see cref="TransactionCancellationHandler"/>). The inbox row's
+    /// <c>added</c> is already counted by <c>StoreIfNewAsync</c>.
+    /// </summary>
+    private void RecordCommittedRejection()
+    {
+        businessMetrics.RecordItemProcessed(
+            BusinessMetrics.StoreName.CoreBankInbox, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.Completed);
+        businessMetrics.RecordStoreOperation(
+            BusinessMetrics.StoreName.CoreBankOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Added);
     }
 
     private static string Clamp(string? value) =>

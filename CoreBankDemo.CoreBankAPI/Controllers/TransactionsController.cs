@@ -122,8 +122,9 @@ public class TransactionsController(
     /// <c>Cancelled</c> response when the command is provably dead, or the
     /// committed <see cref="TransactionResponse"/> when CoreBank already
     /// executed it; <c>409</c> carries the current status when the row cannot
-    /// be cancelled (in flight); <c>503</c> when the tombstone could not be
-    /// stored. Never touches the ledger.
+    /// be cancelled (in flight, or a legacy terminally <c>Failed</c> row);
+    /// <c>503</c> when the tombstone could not be stored. Never touches the
+    /// ledger.
     /// </summary>
     [HttpPost("cancel")]
     public async Task<IActionResult> CancelTransaction(

@@ -4,6 +4,7 @@ using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.ServiceDefaults;
 using CoreBankDemo.ServiceDefaults.CloudEventTypes;
 using CoreBankDemo.ServiceDefaults.Configuration;
 using Microsoft.EntityFrameworkCore;
@@ -37,6 +38,7 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
     private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
     private readonly Mock<IOutboxEventEnqueuer> _enqueuer = new(MockBehavior.Strict);
     private readonly CoreBankDbContext _dbContext = CoreBankApiUnitTestSupport.DetachedDbContext();
+    private readonly BusinessMetrics _businessMetrics = new();
 
     /// <summary>What happened, in order: <c>enqueue</c> and <c>store</c>.</summary>
     private readonly List<string> _calls = [];
@@ -73,7 +75,11 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
             });
     }
 
-    public void Dispose() => _dbContext.Dispose();
+    public void Dispose()
+    {
+        _dbContext.Dispose();
+        _businessMetrics.Dispose();
+    }
 
     private TransactionRejectionHandler CreateHandler(int partitionCount = 4) =>
         new(_repository.Object,
@@ -81,7 +87,11 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
             _dbContext,
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
+            _businessMetrics,
             NullLogger<TransactionRejectionHandler>.Instance);
+
+    private static IEnumerable<string> Describe(MetricsTestListener listener) =>
+        listener.Measurements.Select(m => $"{m.InstrumentName} {m.Tags["messaging.store.name"]} {m.Tags["outcome"]}");
 
     private static TransactionRequest Request() => new(FromAccount, ToAccount, 0m, "EUR", TransactionId);
 
@@ -107,10 +117,17 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
     {
         SetUpNoExistingRow();
         var stored = SetUpStore(stored: true);
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var outcome = await CreateHandler().RejectAsync(Request(), Errors, TestContext.Current.CancellationToken);
 
         outcome.Should().Be(TransactionRejectionOutcome.Recorded);
+        // The rejected row leaves the inbox as completed (what the execution
+        // handler records for a business rejection) and its transaction.failed
+        // event enters the messaging outbox, both exactly once.
+        Describe(listener).Should().BeEquivalentTo(
+            $"{BusinessMetrics.MessagingItemsProcessedInstrumentName} corebank-inbox completed",
+            $"{BusinessMetrics.MessagingStoreOperationsInstrumentName} corebank-outbox added");
         _calls.Should().Equal(["enqueue", "store"], "StoreIfNewAsync's single save must carry the event row");
         var now = _timeProvider.GetUtcNow();
         var row = stored()!;
@@ -181,10 +198,12 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
                 Status = MessageConstants.Status.Pending,
                 ReceivedAt = _timeProvider.GetUtcNow().UtcDateTime
             });
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var outcome = await CreateHandler().RejectAsync(Request(), Errors, TestContext.Current.CancellationToken);
 
         outcome.Should().Be(TransactionRejectionOutcome.AlreadyKnown);
+        listener.Measurements.Should().BeEmpty();
         _enqueued.Should().BeEmpty();
         _repository.Verify(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
     }
@@ -194,10 +213,12 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
     {
         SetUpNoExistingRow();
         SetUpStore(stored: false);
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var outcome = await CreateHandler().RejectAsync(Request(), Errors, TestContext.Current.CancellationToken);
 
         outcome.Should().Be(TransactionRejectionOutcome.AlreadyKnown);
+        listener.Measurements.Should().BeEmpty();
         _dbContext.Entry(_enqueued.Single().Row).State.Should().Be(EntityState.Detached);
     }
 
@@ -207,10 +228,12 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
         SetUpNoExistingRow();
         _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("db down"));
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var outcome = await CreateHandler().RejectAsync(Request(), Errors, TestContext.Current.CancellationToken);
 
         outcome.Should().Be(TransactionRejectionOutcome.StoreFailed);
+        listener.Measurements.Should().BeEmpty();
         _dbContext.Entry(_enqueued.Single().Row).State.Should().Be(EntityState.Detached);
     }
 
@@ -257,19 +280,24 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
     }
 
     [Fact]
-    public async Task RejectAsync_propagates_caller_cancellation_unchanged()
+    public async Task RejectAsync_propagates_caller_cancellation_unchanged_and_drops_its_event()
     {
         using var cts = new CancellationTokenSource();
-        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
-            .Returns<string, CancellationToken>((_, _) =>
+        SetUpNoExistingRow();
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Returns<InboxMessage, CancellationToken>((_, _) =>
             {
                 cts.Cancel();
-                return Task.FromException<InboxMessage?>(new OperationCanceledException(cts.Token));
+                return Task.FromException<bool>(new OperationCanceledException(cts.Token));
             });
+        using var listener = new MetricsTestListener(_businessMetrics);
 
         var act = () => CreateHandler().RejectAsync(Request(), Errors, cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
+        listener.Measurements.Should().BeEmpty();
+        _dbContext.Entry(_enqueued.Single().Row).State.Should().Be(
+            EntityState.Detached, "the event of a rejection that never committed must not ride along on a later save");
     }
 
     [Theory]
@@ -278,10 +306,13 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
     [InlineData("   ")]
     public async Task RejectAsync_cannot_record_a_request_without_a_usable_transaction_id(string? transactionId)
     {
+        using var listener = new MetricsTestListener(_businessMetrics);
+
         var outcome = await CreateHandler().RejectAsync(
             new TransactionRequest(FromAccount, ToAccount, 10m, "EUR", transactionId!), Errors, TestContext.Current.CancellationToken);
 
         outcome.Should().Be(TransactionRejectionOutcome.NotRecordable);
+        listener.Measurements.Should().BeEmpty();
         _repository.VerifyNoOtherCalls();
         _enqueued.Should().BeEmpty();
     }
