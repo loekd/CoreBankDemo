@@ -94,7 +94,7 @@
       "post": {
         "operationId": "ProcessTransaction",
         "summary": "Submits a transaction for idempotent processing.",
-        "description": "202 covers both a freshly-accepted transaction and an in-flight duplicate reporting current status; 200 covers a completed duplicate replaying its cached response; 400 covers both request-shape validation failures and a terminal transport failure for the referenced transaction.",
+        "description": "202 covers both a freshly-accepted transaction and an in-flight duplicate reporting current status; 200 covers a completed duplicate replaying its cached response; 400 is CoreBank's verdict on a request it rejects: the rejection is recorded and published as transaction.failed before the answer is given (ADR-023); 503 means an internal failure prevented CoreBank from recording its answer, and the caller retries.",
         "tags": ["Transactions"],
         "requestBody": {
           "required": true,
@@ -128,7 +128,15 @@
             }
           },
           "400": {
-            "description": "Request-shape validation failure, or a terminal transport failure for the referenced transaction.",
+            "description": "The request was rejected. The rejection is recorded and published as transaction.failed before this answer is given (ADR-023)",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "An internal failure prevented CoreBank from recording its answer; retry",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ErrorResponse" }
@@ -142,7 +150,7 @@
       "post": {
         "operationId": "CancelTransaction",
         "summary": "Withdraws a submitted transaction before it executes (instant rail, ADR-020).",
-        "description": "The body is the original TransactionRequest. 200 with status Cancelled means the command is provably dead: a Cancelled tombstone was stored before the original arrived (a late original replays it and never executes), a still-Pending inbox row was cancelled, or an earlier cancel is replayed. 200 with status Completed or Failed means CoreBank already executed the command and reports that committed outcome instead. 409 means the row cannot be cancelled (Processing under a live claim, or terminally Failed) and carries its current status. 400 covers request-shape validation failures. A cancel never moves the ledger. It publishes exactly one com.corebank.transaction.cancelled event for every cancellation it commits (a stored tombstone or a cancelled pending command), enqueued atomically with the cancel, and none for a replayed cancellation.",
+        "description": "The body is the original TransactionRequest. 200 with status Cancelled means the command is provably dead: a Cancelled tombstone was stored before the original arrived (a late original replays it and never executes), a still-Pending inbox row was cancelled, or an earlier cancel is replayed. 200 with status Completed or Failed means CoreBank already executed the command and reports that committed outcome instead. 409 means the row cannot be cancelled (Processing under a live claim, or terminally Failed) and carries its current status. 400 covers request-shape validation failures. 503 means the tombstone could not be stored; retry. A cancel never moves the ledger. It publishes exactly one com.corebank.transaction.cancelled event for every cancellation it commits (a stored tombstone or a cancelled pending command), enqueued atomically with the cancel, and none for a replayed cancellation.",
         "tags": ["Transactions"],
         "requestBody": {
           "required": true,
@@ -171,6 +179,14 @@
           },
           "400": {
             "description": "Request-shape validation failure.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "An internal failure prevented CoreBank from recording its answer; retry",
             "content": {
               "application/json": {
                 "schema": { "$ref": "#/components/schemas/ErrorResponse" }

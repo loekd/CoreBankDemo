@@ -18,6 +18,7 @@ namespace CoreBankDemo.CoreBankAPI.Controllers;
 public class TransactionsController(
     ITransactionIntakeHandler handler,
     ITransactionCancellationHandler cancellationHandler,
+    ITransactionRejectionHandler rejectionHandler,
     BusinessMetrics businessMetrics) : ControllerBase
 {
     /// <summary>
@@ -41,8 +42,15 @@ public class TransactionsController(
     {
         if (!ModelState.IsValid)
         {
-            var errors = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage);
-            return BadRequest(new { Errors = errors });
+            var errors = ModelState.Values.SelectMany(v => v.Errors).Select(e => e.ErrorMessage).ToArray();
+
+            // ADR-023: a 400 is a verdict, so it is recorded and published
+            // (transaction.failed, one save) before it is given. If that
+            // cannot be done the honest answer is 503 -- the caller retries.
+            var rejection = await rejectionHandler.RejectAsync(request, errors, cancellationToken);
+            return rejection == TransactionRejectionOutcome.StoreFailed
+                ? ServiceUnavailable(["The rejection could not be recorded; retry"])
+                : BadRequest(new { Errors = errors });
         }
 
         var executeInline = string.Equals(
@@ -103,7 +111,7 @@ public class TransactionsController(
             TransactionIntakeOutcome.InFlight =>
                 Accepted($"/api/transactions/{request.TransactionId}", result.Response),
             TransactionIntakeOutcome.TransportFailed =>
-                BadRequest(new { Errors = result.Errors }),
+                ServiceUnavailable(result.Errors),
             _ => throw new InvalidOperationException($"Unhandled transaction intake outcome: {result.Outcome}")
         };
     }
@@ -114,7 +122,8 @@ public class TransactionsController(
     /// <c>Cancelled</c> response when the command is provably dead, or the
     /// committed <see cref="TransactionResponse"/> when CoreBank already
     /// executed it; <c>409</c> carries the current status when the row cannot
-    /// be cancelled (in flight or terminally failed). Never touches the ledger.
+    /// be cancelled (in flight); <c>503</c> when the tombstone could not be
+    /// stored. Never touches the ledger.
     /// </summary>
     [HttpPost("cancel")]
     public async Task<IActionResult> CancelTransaction(
@@ -133,7 +142,7 @@ public class TransactionsController(
             TransactionCancellationOutcome.Cancelled => Ok(result.Response),
             TransactionCancellationOutcome.AlreadyCommitted => Ok(result.Response),
             TransactionCancellationOutcome.InFlight => Conflict(result.Response),
-            TransactionCancellationOutcome.StoreFailed => BadRequest(new { Errors = result.Errors }),
+            TransactionCancellationOutcome.StoreFailed => ServiceUnavailable(result.Errors),
             _ => throw new InvalidOperationException($"Unhandled transaction cancellation outcome: {result.Outcome}")
         };
     }
@@ -152,6 +161,10 @@ public class TransactionsController(
             ? Ok(result.CachedResponse)
             : Ok(result.StatusResponse);
     }
+
+    /// <summary>An internal failure is not a bad request (ADR-023): the caller is asked to retry.</summary>
+    private ObjectResult ServiceUnavailable(IEnumerable<string>? errors) =>
+        StatusCode(StatusCodes.Status503ServiceUnavailable, new { Errors = errors ?? [] });
 
     private int ReadPriorityHeader() =>
         int.TryParse(
