@@ -272,11 +272,53 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
             return;
         }
 
-        // Sequential, oldest-first, per the batch's own ordering — preserves
-        // per-key ordering within a partition (AD-4).
-        foreach (var message in claimed)
+        // Sequential, oldest-first (AD-4). ADR-023: the batch stops at the
+        // first row that did not reach a terminal state -- a later row must
+        // never overtake it -- and the rows claimed behind it go back to
+        // Pending untouched, so the unsettled row is first in line next tick.
+        for (var index = 0; index < claimed.Count; index++)
         {
-            await ProcessMessageAsync(message, store, deliveryStrategy, cancellationToken).ConfigureAwait(false);
+            var settled = await ProcessMessageAsync(claimed[index], store, deliveryStrategy, cancellationToken)
+                .ConfigureAwait(false);
+            if (settled)
+            {
+                continue;
+            }
+
+            await ReleaseRemainderAsync(store, claimed, index + 1, partitionId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+    }
+
+    private async Task ReleaseRemainderAsync(
+        IOutboxMessageStore<TMessage> store,
+        IReadOnlyList<TMessage> claimed,
+        int firstUnattempted,
+        int partitionId,
+        CancellationToken cancellationToken)
+    {
+        var remainder = claimed.Skip(firstUnattempted).Where(m => m is not null).ToList();
+        if (remainder.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await store.ReleaseClaimsAsync(remainder, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Bookkeeping only: the rows stay Processing and are reclaimed
+            // once their claim goes stale. Must never escape the tick.
+            _logger.LogWarning(
+                ex,
+                "Failed to release {Count} unattempted outbox claims in partition {PartitionId}; they will be reclaimed once stale",
+                remainder.Count, partitionId);
         }
     }
 
@@ -300,7 +342,11 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
     /// what must never happen is reporting the wrong reason a message didn't
     /// reach <c>Completed</c>).
     /// </summary>
-    private async Task ProcessMessageAsync(
+    /// <returns>
+    /// <c>true</c> only when the row reached a terminal state; <c>false</c>
+    /// stops the batch (ADR-023).
+    /// </returns>
+    private async Task<bool> ProcessMessageAsync(
         TMessage message,
         IOutboxMessageStore<TMessage> store,
         IOutboxDeliveryStrategy<TMessage> deliveryStrategy,
@@ -342,7 +388,7 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
                     message, ex.Message, cancellationToken).ConfigureAwait(false);
                 if (transition == MessageTransitionOutcome.AlreadyTerminal)
                 {
-                    return;
+                    return true;
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -357,9 +403,9 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
                 // Recording the retry is itself bookkeeping, separate from the
                 // delivery failure already logged above — e.g. a transient DB
                 // conflict while persisting the retry. This must never escape
-                // ProcessMessageAsync: doing so would abort the rest of this
-                // partition's batch for the tick, leaving the remaining
-                // claimed messages undelivered. The message is left in its
+                // ProcessMessageAsync: doing so would skip releasing the rows
+                // claimed behind this one. The batch stops here (ADR-023) --
+                // this row is unsettled. The message is left in its
                 // current claimed (Processing) state and will be naturally
                 // reclaimed once its claim goes stale (story 2.3's
                 // ProcessingTimeout mechanism).
@@ -369,14 +415,14 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
                     message.Id, message.IdempotencyKey, message.PartitionId);
                 _businessMetrics.RecordItemProcessed(
                     StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.RetryPersistenceFailed);
-                return;
+                return false;
             }
 
             // ADR-023: a failed row always goes back to Pending.
             _businessMetrics.RecordItemProcessed(
                 StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.RetryScheduled);
 
-            return;
+            return false;
         }
 
         try
@@ -384,7 +430,7 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
             var transition = await store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
             if (transition == MessageTransitionOutcome.AlreadyTerminal)
             {
-                return;
+                return true;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -412,10 +458,11 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
                 message.Id, message.IdempotencyKey, message.PartitionId);
             _businessMetrics.RecordItemProcessed(
                 StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.CompletionPersistenceFailed);
-            return;
+            return false;
         }
 
         _businessMetrics.RecordItemProcessed(StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.Completed);
+        return true;
     }
 
     /// <summary>
