@@ -80,6 +80,7 @@ public class CoreBankClientRegistrationTests
     public async Task AddCoreBankApiClient_call_flows_through_the_composed_http_pipeline()
     {
         const string accountNumber = "NL91ABNA0417164300";
+        var createdAt = new DateTimeOffset(2026, 8, 20, 9, 0, 0, TimeSpan.Zero);
         var services = new ServiceCollection();
 
         services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
@@ -88,10 +89,18 @@ public class CoreBankClientRegistrationTests
         services.AddHttpClient(CoreBankClientServiceCollectionExtensions.HttpClientName)
             .ConfigurePrimaryHttpMessageHandler(() => new StubHttpMessageHandler(request =>
             {
-                request.RequestUri!.AbsolutePath.Should().Be("/api/accounts/validate");
+                request.RequestUri!.AbsolutePath.Should().Be($"/api/accounts/{accountNumber}");
                 return new HttpResponseMessage(HttpStatusCode.OK)
                 {
-                    Content = JsonContent.Create(new { accountNumber, isValid = true })
+                    Content = JsonContent.Create(new
+                    {
+                        accountNumber,
+                        accountHolderName = "Jane Doe",
+                        balance = 100m,
+                        currency = "EUR",
+                        isActive = true,
+                        createdAt
+                    })
                 };
             }));
 
@@ -99,10 +108,10 @@ public class CoreBankClientRegistrationTests
         using var scope = provider.CreateScope();
         var client = scope.ServiceProvider.GetRequiredService<ICoreBankApiClient>();
 
-        var result = await client.ValidateAccountAsync(accountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(accountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Success);
-        result.Value.Should().Be(new AccountValidation(accountNumber, true, null, null));
+        result.Value.Should().Be(new AccountDetails(accountNumber, "Jane Doe", 100m, "EUR", true, createdAt, null));
     }
 
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> respond)

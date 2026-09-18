@@ -42,36 +42,6 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// </summary>
 internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBankApiClient
 {
-    public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-        string accountNumber, CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(accountNumber);
-
-        return ExecuteAsync(
-            async ct =>
-            {
-                var body = new GeneratedModels.AccountValidationRequest { AccountNumber = accountNumber };
-                var response = await client.Api.Accounts.Validate
-                    .PostAsync(body, ConfigureTraceContext, ct)
-                    .ConfigureAwait(false);
-
-                if (response?.AccountNumber is null
-                    || response.IsValid is null
-                    || IsBlank(response.AccountNumber)
-                    || IsMismatchedIdentifier(accountNumber, response.AccountNumber))
-                {
-                    return null;
-                }
-
-                return new AccountValidation(
-                    response.AccountNumber,
-                    response.IsValid.Value,
-                    response.AccountHolderName,
-                    response.Balance);
-            },
-            cancellationToken);
-    }
-
     public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
         string accountNumber, CancellationToken cancellationToken)
     {

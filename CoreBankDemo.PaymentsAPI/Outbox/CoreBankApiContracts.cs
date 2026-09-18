@@ -106,16 +106,6 @@ internal sealed record CoreBankResult<T>
 }
 
 /// <summary>
-/// Application-owned mirror of CoreBankAPI's <c>AccountValidationResponse</c>
-/// (frozen wire shape: <c>CoreBankDemo.CoreBankAPI/Models/AccountValidationResponse.cs</c>).
-/// </summary>
-internal sealed record AccountValidation(
-    string AccountNumber,
-    bool IsValid,
-    string? AccountHolderName,
-    decimal? Balance);
-
-/// <summary>
 /// Application-owned mirror of CoreBankAPI's <c>AccountDetailsResponse</c>
 /// (frozen wire shape: <c>CoreBankDemo.CoreBankAPI/Models/AccountDetailsResponse.cs</c>).
 /// </summary>

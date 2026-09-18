@@ -3,7 +3,7 @@
   "errors": [
     {
       "request": {
-        "url": "http://127.0.0.1:5032/api/accounts/validate",
+        "url": "http://127.0.0.1:5032/api/transactions/process",
         "method": "POST"
       },
       "responses": [

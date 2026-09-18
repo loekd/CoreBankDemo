@@ -305,8 +305,8 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
     /// Builds the errors file covering <b>the same URL surface the profile's other plugins
     /// watch</b>. The checked-in errors file is a read-only preset source for the response
     /// bodies only: copying it verbatim would scope injection to
-    /// <c>POST /api/accounts/validate</c>, which no request the console makes passes through,
-    /// so the error knob could be raised but never observed.
+    /// <c>POST /api/transactions/process</c> alone, a narrower surface than the profile's
+    /// other plugins watch, so the error knob would not cover the calls the others do.
     /// </summary>
     private string BuildErrorsFile(TopologyProfile profile, JsonArray watched)
     {
