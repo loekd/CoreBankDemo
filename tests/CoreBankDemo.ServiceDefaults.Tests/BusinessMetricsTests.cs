@@ -209,7 +209,7 @@ public class BusinessMetricsTests
         using var listener = new MetricsTestListener(metrics);
 
         metrics.RecordItemProcessed(
-            BusinessMetrics.StoreName.PaymentsOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.TerminalFailed);
+            BusinessMetrics.StoreName.PaymentsOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.RetryScheduled);
 
         var measurement = listener.Measurements.Should().ContainSingle().Which;
         measurement.InstrumentName.Should().Be(BusinessMetrics.MessagingItemsProcessedInstrumentName);
@@ -217,7 +217,7 @@ public class BusinessMetricsTests
         {
             ["messaging.store.name"] = "payments-outbox",
             ["messaging.store.kind"] = "outbox",
-            ["outcome"] = "terminal_failed",
+            ["outcome"] = "retry_scheduled",
         });
     }
 
@@ -225,7 +225,6 @@ public class BusinessMetricsTests
     [InlineData(BusinessMetrics.ItemOutcome.Completed, "completed")]
     [InlineData(BusinessMetrics.ItemOutcome.Cancelled, "cancelled")]
     [InlineData(BusinessMetrics.ItemOutcome.RetryScheduled, "retry_scheduled")]
-    [InlineData(BusinessMetrics.ItemOutcome.TerminalFailed, "terminal_failed")]
     [InlineData(BusinessMetrics.ItemOutcome.CompletionPersistenceFailed, "completion_persistence_failed")]
     [InlineData(BusinessMetrics.ItemOutcome.RetryPersistenceFailed, "retry_persistence_failed")]
     public void RecordItemProcessed_maps_every_outcome_to_its_stable_tag(BusinessMetrics.ItemOutcome outcome, string expectedTag)

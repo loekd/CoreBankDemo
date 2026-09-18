@@ -560,7 +560,7 @@ public class OutboxProcessorBaseTests
     }
 
     [Fact]
-    public async Task Delivery_failure_below_max_retry_records_a_retry_scheduled_item_metric()
+    public async Task Delivery_failure_records_a_retry_scheduled_item_metric()
     {
         var message = NewMessage();
         message.RetryCount = 0;
@@ -585,35 +585,6 @@ public class OutboxProcessorBaseTests
 
         listener.Measurements.Should().ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
             .Which.Tags["outcome"].Should().Be("retry_scheduled");
-    }
-
-    [Fact]
-    public async Task Delivery_failure_at_max_retry_records_a_terminal_failed_item_metric_exactly_once()
-    {
-        var message = NewMessage();
-        message.RetryCount = MessageConstants.Defaults.MaxRetryCount - 1;
-        var store = new Mock<IOutboxMessageStore<TestOutboxEventMessage>>();
-        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)new[] { message });
-        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestOutboxEventMessage>)Array.Empty<TestOutboxEventMessage>());
-        store.Setup(s => s.MarkAsFailedWithRetryAsync(message, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<TestOutboxEventMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Failed)
-            .ReturnsAsync(MessageTransitionOutcome.Applied);
-        var strategy = new Mock<IOutboxDeliveryStrategy<TestOutboxEventMessage>>();
-        strategy.Setup(s => s.DeliverAsync(message, It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("boom"));
-        var businessMetrics = new BusinessMetrics();
-        using var listener = new MetricsTestListener(businessMetrics);
-        var processor = new TestOutboxProcessor(
-            store.Object, new AlwaysAcquiringLockService(), strategy.Object, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), businessMetrics, new OutboxProcessorOptions { PartitionCount = 1 });
-
-        await processor.RunTickAsync(CancellationToken.None);
-
-        listener.Measurements.Should()
-            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
-            .Which.Tags["outcome"].Should().Be("terminal_failed");
     }
 
     [Fact]

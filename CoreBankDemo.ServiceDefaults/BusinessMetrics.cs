@@ -136,7 +136,6 @@ public sealed class BusinessMetrics : IDisposable
         Completed,
         Cancelled,
         RetryScheduled,
-        TerminalFailed,
         CompletionPersistenceFailed,
         RetryPersistenceFailed
     }
@@ -386,7 +385,6 @@ public sealed class BusinessMetrics : IDisposable
         ItemOutcome.Completed => "completed",
         ItemOutcome.Cancelled => "cancelled",
         ItemOutcome.RetryScheduled => "retry_scheduled",
-        ItemOutcome.TerminalFailed => "terminal_failed",
         ItemOutcome.CompletionPersistenceFailed => "completion_persistence_failed",
         ItemOutcome.RetryPersistenceFailed => "retry_persistence_failed",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)

@@ -17,7 +17,7 @@ public interface IMessage
     /// <summary>When the message reached a terminal successful state (UTC).</summary>
     DateTime? ProcessedAt { get; set; }
 
-    /// <summary>Transport delivery attempts so far; terminal Failed at <see cref="MessageConstants.Defaults.MaxRetryCount"/>.</summary>
+    /// <summary>Transport delivery attempts so far. Diagnostic only: a row is retried without limit (ADR-023).</summary>
     int RetryCount { get; set; }
 
     /// <summary>Last transport error observed, if any.</summary>

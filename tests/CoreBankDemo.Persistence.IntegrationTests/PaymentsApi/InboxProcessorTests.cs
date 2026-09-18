@@ -153,12 +153,12 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
     }
 
     [Fact]
-    public async Task StartAsync_at_the_retry_limit_marks_an_unsupported_event_terminally_failed()
+    public async Task StartAsync_keeps_retrying_an_unsupported_event_past_five_attempts()
     {
         await using var store = CreateStore();
         await using var seedContext = store.CreateContext();
         var message = NewMessage("txn-poison", "com.corebank.unsupported.type", "p0");
-        message.RetryCount = MessageConstants.Defaults.MaxRetryCount - 1;
+        message.RetryCount = 41;
         seedContext.InboxMessages.Add(message);
         await seedContext.SaveChangesAsync(TestContext.Current.CancellationToken);
 
@@ -176,8 +176,8 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
         var persisted = await verifyContext.InboxMessages
             .AsNoTracking()
             .SingleAsync(m => m.TransactionId == "txn-poison", TestContext.Current.CancellationToken);
-        persisted.Status.Should().Be(MessageConstants.Status.Failed);
-        persisted.RetryCount.Should().Be(MessageConstants.Defaults.MaxRetryCount);
+        persisted.Status.Should().Be(MessageConstants.Status.Pending);
+        persisted.RetryCount.Should().Be(42);
         persisted.ProcessedAt.Should().BeNull();
     }
 

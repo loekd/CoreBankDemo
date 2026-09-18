@@ -496,7 +496,7 @@ public class InboxProcessorBaseTests
     }
 
     [Fact]
-    public async Task Handler_failure_below_max_retry_records_a_retry_scheduled_item_metric()
+    public async Task Handler_failure_records_a_retry_scheduled_item_metric()
     {
         var message = NewMessage();
         message.RetryCount = 0;
@@ -525,37 +525,7 @@ public class InboxProcessorBaseTests
     }
 
     [Fact]
-    public async Task Handler_failure_at_max_retry_records_a_terminal_failed_item_metric_exactly_once()
-    {
-        var message = NewMessage();
-        message.RetryCount = MessageConstants.Defaults.MaxRetryCount - 1;
-        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
-        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
-        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
-        store.Setup(s => s.MarkAsFailedWithRetryAsync(message, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<TestInboxMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Failed)
-            .ReturnsAsync(MessageTransitionOutcome.Applied);
-        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
-        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("boom"));
-        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
-        var businessMetrics = new BusinessMetrics();
-        using var listener = new MetricsTestListener(businessMetrics);
-        var processor = new TestInboxProcessor(
-            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), businessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
-
-        await processor.RunTickAsync(CancellationToken.None);
-
-        listener.Measurements.Should()
-            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
-            .Which.Tags["outcome"].Should().Be("terminal_failed");
-    }
-
-    [Fact]
-    public async Task Concurrent_terminal_failure_records_no_second_terminal_failed_metric()
+    public async Task Failure_of_a_concurrently_terminal_row_records_no_item_metric()
     {
         var message = NewMessage();
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();

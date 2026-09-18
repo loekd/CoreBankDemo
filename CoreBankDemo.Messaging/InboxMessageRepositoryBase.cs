@@ -38,7 +38,6 @@ public abstract class InboxMessageRepositoryBase<TMessage, TDbContext>
         InboxMessages
             .Where(m =>
                 m.PartitionId == partitionId &&
-                m.RetryCount < MessageConstants.Defaults.MaxRetryCount &&
                 (holdCutoff == null || m.HoldUntil == null || m.HoldUntil <= holdCutoff) &&
                 (m.Status == MessageConstants.Status.Pending ||
                  (m.Status == MessageConstants.Status.Processing && m.ReceivedAt < staleThreshold)))

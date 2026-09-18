@@ -181,10 +181,10 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// by the store's ordering timestamp (<c>ReceivedAt</c> for inbox,
     /// <c>CreatedAt</c> for outbox): rows that are <c>Pending</c>, or
     /// <c>Processing</c> rows whose ordering timestamp is older than
-    /// <paramref name="staleThreshold"/> (stale-claim reclaim, AD-3), excluding
-    /// poisoned rows (<c>RetryCount &gt;= MaxRetryCount</c>). Implemented by the
-    /// inbox/outbox base — this base class does not know the concrete ordering
-    /// timestamp property.
+    /// <paramref name="staleThreshold"/> (stale-claim reclaim, AD-3). Legacy
+    /// <c>Failed</c> rows are never claimable; <c>RetryCount</c> does not limit
+    /// a claim (ADR-023). Implemented by the inbox/outbox base — this base
+    /// class does not know the concrete ordering timestamp property.
     /// </summary>
     /// <param name="partitionId">The partition to query.</param>
     /// <param name="staleThreshold">Processing rows older than this are reclaimable.</param>
@@ -307,18 +307,14 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     }
 
     /// <summary>
-    /// Transport-failure retry/poison transition (AD-11: the ONLY path that
-    /// ever writes terminal <see cref="MessageConstants.Status.Failed"/> —
-    /// business rejections never call this method; they store a Completed row
-    /// with a cached failure payload instead, per stories 4.x). Increments
-    /// <paramref name="message"/>'s <c>RetryCount</c> and sets
-    /// <paramref name="errorMessage"/> as <c>LastError</c>; below
-    /// <see cref="MessageConstants.Defaults.MaxRetryCount"/> the row goes back
-    /// to <c>Pending</c> for another attempt, at the limit it becomes terminal
-    /// <c>Failed</c>. A <paramref name="message"/> that is already terminal
-    /// <c>Failed</c> is left untouched (no-op) — otherwise a repeat call on the
-    /// same poisoned row would keep incrementing <c>RetryCount</c> past
-    /// <see cref="MessageConstants.Defaults.MaxRetryCount"/> forever. A
+    /// Transport-failure retry transition (AD-11: business rejections never
+    /// call this method; they store a Completed row with a cached failure
+    /// payload instead, per stories 4.x). Sets <paramref name="errorMessage"/>
+    /// as <c>LastError</c>. Always returns the row to <c>Pending</c> and
+    /// increments <c>RetryCount</c>; never writes <c>Failed</c> (ADR-023). A
+    /// <paramref name="message"/> that is already terminal (a legacy
+    /// <c>Failed</c> row, <c>Completed</c> or <c>Cancelled</c>) is left
+    /// untouched (no-op). A
     /// <paramref name="message"/> not currently tracked by this repository's
     /// <see cref="DbContext"/> (e.g. loaded via a different context instance)
     /// is attached first — otherwise <c>SaveChangesAsync</c> would silently
@@ -340,11 +336,11 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
         if (IsTerminal(message))
         {
-            // Already terminal — a repeat report of failure for a row that has
-            // already been given up on must be a no-op, not another
-            // RetryCount increment past MaxRetryCount. A Cancelled row is
-            // terminal too: a late "release the claim" after a cancel must
-            // never revive it to Pending (spec: instant-rail-timeout-cancel).
+            // Already terminal — a report of failure for a legacy Failed row
+            // (or a Completed one) must be a no-op, not another RetryCount
+            // increment. A Cancelled row is terminal too: a late "release the
+            // claim" after a cancel must never revive it to Pending (spec:
+            // instant-rail-timeout-cancel).
             return MessageTransitionOutcome.AlreadyTerminal;
         }
 
@@ -374,9 +370,9 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             if (IsTerminal(message))
             {
                 // The concurrent change already drove this row to a terminal
-                // state (Failed via another caller's retry hitting
-                // MaxRetryCount, Completed, or Cancelled by the instant rail)
-                // — nothing further for this call to do.
+                // state (Completed, or Cancelled by the instant rail; legacy
+                // Failed rows are terminal too) — nothing further for this
+                // call to do.
                 return MessageTransitionOutcome.AlreadyTerminal;
             }
 
@@ -389,11 +385,12 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
 
     private static void ApplyFailureTransition(TMessage message, string errorMessage)
     {
+        // ADR-023: an infrastructure failure is never given up on. RetryCount
+        // keeps counting for diagnostics only; the row always goes back to
+        // Pending and is first in line again on the next poll tick.
         message.RetryCount += 1;
         message.LastError = errorMessage;
-        message.Status = message.RetryCount >= MessageConstants.Defaults.MaxRetryCount
-            ? MessageConstants.Status.Failed
-            : MessageConstants.Status.Pending;
+        message.Status = MessageConstants.Status.Pending;
     }
 
     /// <summary>

@@ -372,19 +372,9 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                 return;
             }
 
-            // MarkAsFailedWithRetryAsync mutates message.Status in place
-            // (ApplyFailureTransition) before returning normally, so its
-            // post-call value is authoritative: Failed means this call was
-            // the one that hit MaxRetryCount (recorded exactly once, since a
-            // row already Failed is never re-claimed — see
-            // GetClaimableMessagesQuery's RetryCount filter), anything else
-            // means it went back to Pending for another attempt.
+            // ADR-023: a failed row always goes back to Pending.
             _businessMetrics.RecordItemProcessed(
-                StoreName,
-                BusinessMetrics.StoreKind.Inbox,
-                message.Status == MessageConstants.Status.Failed
-                    ? BusinessMetrics.ItemOutcome.TerminalFailed
-                    : BusinessMetrics.ItemOutcome.RetryScheduled);
+                StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.RetryScheduled);
 
             return;
         }

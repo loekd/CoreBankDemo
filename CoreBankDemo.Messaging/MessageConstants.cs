@@ -17,7 +17,7 @@ public static class MessageConstants
         public const string Processing = "Processing";
         public const string Completed = "Completed";
 
-        /// <summary>Terminal: transport gave up after <see cref="Defaults.MaxRetryCount"/>.</summary>
+        /// <summary>Wire word for a business rejection inside a response payload. No longer written as a row status (ADR-023); legacy rows that carry it stay terminal.</summary>
         public const string Failed = "Failed";
 
         /// <summary>
@@ -48,9 +48,6 @@ public static class MessageConstants
     /// </summary>
     public static class Defaults
     {
-        /// <summary>Maximum number of retry attempts before terminal <see cref="Status.Failed"/>.</summary>
-        public const int MaxRetryCount = 5;
-
         /// <summary>Number of messages claimed in a single batch.</summary>
         public const int BatchSize = 10;
 

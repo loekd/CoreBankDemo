@@ -83,16 +83,17 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
 
 
     [Fact]
-    public async Task Excludes_poisoned_and_other_partition_outbox_rows()
+    public async Task Claims_a_pending_outbox_row_however_often_it_has_been_retried()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         var repository = new TestOutboxEventMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
-        context.OutboxEventMessages.Add(new TestOutboxEventMessage
+        var retriedOften = new TestOutboxEventMessage
         {
-            IdempotencyKey = "poisoned", EventType = "Debited", RetryCount = MessageConstants.Defaults.MaxRetryCount,
-        });
+            IdempotencyKey = "poisoned", EventType = "Debited", RetryCount = 500,
+        };
+        context.OutboxEventMessages.Add(retriedOften);
         context.OutboxEventMessages.Add(new TestOutboxEventMessage
         {
             IdempotencyKey = "other-partition", EventType = "Debited", PartitionId = 3,
@@ -101,7 +102,8 @@ public class ClaimBatchForPartitionAsyncOutboxTests(PostgresContainerFixture fix
 
         var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
 
-        claimed.Should().BeEmpty();
+        claimed.Should().ContainSingle("the other-partition row stays excluded")
+            .Which.Id.Should().Be(retriedOften.Id);
     }
 
     [Fact]

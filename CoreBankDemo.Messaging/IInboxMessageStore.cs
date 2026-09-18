@@ -33,9 +33,9 @@ public interface IInboxMessageStore<TMessage>
         TMessage message, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Handler-failure retry/poison transition: retries below
-    /// <see cref="MessageConstants.Defaults.MaxRetryCount"/>, terminal
-    /// <see cref="MessageConstants.Status.Failed"/> at the limit. See
+    /// Handler-failure retry transition. Always returns the row to
+    /// <c>Pending</c> and increments <c>RetryCount</c>; never writes
+    /// <c>Failed</c> (ADR-023). See
     /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.MarkAsFailedWithRetryAsync"/>.
     /// </summary>
     Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
