@@ -143,6 +143,10 @@ public class OutboxProcessorBaseTests
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException("Not exercised by the outbox processor.");
 
+        public Task ReleaseClaimsAsync(
+            IReadOnlyList<TestOutboxEventMessage> messages,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
         public Task<TestOutboxEventMessage?> TryClaimByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.FromResult<TestOutboxEventMessage?>(null);
 

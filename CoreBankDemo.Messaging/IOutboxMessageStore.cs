@@ -56,6 +56,15 @@ public interface IOutboxMessageStore<TMessage>
         TMessage message, string reason, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Returns rows this caller claimed but never attempted to <c>Pending</c>,
+    /// exactly as they were: <c>RetryCount</c> and <c>LastError</c> untouched
+    /// (ADR-023 -- a batch stops at its first failed row). Rows that are not
+    /// <c>Processing</c>, and rows another writer has changed since they were
+    /// claimed, are skipped; nothing is ever forced.
+    /// </summary>
+    Task ReleaseClaimsAsync(IReadOnlyList<TMessage> messages, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Claims exactly the row identified by <paramref name="id"/>, if it is
     /// currently <c>Pending</c> — the instant-payment-rail inline delivery
     /// path's claim (spec: add-instant-payment-rail): reuses the same

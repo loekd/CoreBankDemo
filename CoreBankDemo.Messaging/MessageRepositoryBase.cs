@@ -576,6 +576,40 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
         message.LastError = reason;
     }
 
+    /// <inheritdoc cref="IOutboxMessageStore{TMessage}.ReleaseClaimsAsync"/>
+    public virtual async Task ReleaseClaimsAsync(
+        IReadOnlyList<TMessage> messages, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+
+        foreach (var message in messages)
+        {
+            if (message is null || message.Status != MessageConstants.Status.Processing)
+            {
+                continue;
+            }
+
+            if (DbContext.Entry(message).State == EntityState.Detached)
+            {
+                DbContext.Attach(message);
+            }
+
+            message.Status = MessageConstants.Status.Pending;
+
+            try
+            {
+                // One save per row: Status is the concurrency token, so a row
+                // another writer moved must not roll the others back.
+                await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // Someone else owns this row now. Take their values and leave it.
+                await DbContext.Entry(message).ReloadAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     /// <summary>
     /// Claims exactly the row identified by <paramref name="id"/> if it is
     /// currently <c>Pending</c> (spec: add-instant-payment-rail's inline
