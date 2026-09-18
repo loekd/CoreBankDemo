@@ -776,13 +776,35 @@ public class InboxProcessorBaseTests
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
         var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
+        var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
             new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), TestBusinessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
+            logger.Object, TestBusinessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
 
         var act = async () => await processor.RunTickAsync(CancellationToken.None);
 
         await act.Should().NotThrowAsync("unreleased rows are reclaimed once their claim goes stale");
+        // The tick's outer catch blocks would also swallow the exception, so
+        // not throwing proves nothing on its own: the release failure must be
+        // handled where it happens, as one distinct warning, and must never
+        // surface as a lock-service or tick-level error.
+        logger.Verify(l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to release")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once,
+            "the release failure must be logged distinctly by ReleaseRemainderAsync");
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) =>
+                    state.ToString()!.Contains("Lock service failed") || state.ToString()!.Contains("Error processing")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "a release failure is bookkeeping and must not escape to the partition's or the tick's catch-all");
     }
 
     [Fact]
@@ -805,7 +827,6 @@ public class InboxProcessorBaseTests
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("boom"));
-        handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
@@ -818,7 +839,7 @@ public class InboxProcessorBaseTests
             "a MarkAsFailedWithRetryAsync failure after a handler failure must never escape the tick");
         store.Verify(s => s.MarkAsFailedWithRetryAsync(first, "boom", It.IsAny<CancellationToken>()), Times.Once);
         handler.Verify(h => h.HandleAsync(second, It.IsAny<CancellationToken>()), Times.Never,
-            "the failed row is stuck Processing until its claim goes stale; nothing may overtake it");
+            "the row behind the unsettled one is not attempted in this tick; it is released instead");
         store.Verify(s => s.ReleaseClaimsAsync(
             It.Is<IReadOnlyList<TestInboxMessage>>(rows => rows.Count == 1 && rows[0] == second),
             It.IsAny<CancellationToken>()), Times.Once);

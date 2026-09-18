@@ -273,9 +273,14 @@ public abstract class OutboxProcessorBase<TMessage> : BackgroundService
         }
 
         // Sequential, oldest-first (AD-4). ADR-023: the batch stops at the
-        // first row that did not reach a terminal state -- a later row must
-        // never overtake it -- and the rows claimed behind it go back to
-        // Pending untouched, so the unsettled row is first in line next tick.
+        // first row that did not reach a terminal state, so no later row is
+        // attempted in this tick, and the rows claimed behind it go back to
+        // Pending untouched. When the unsettled row itself went back to
+        // Pending (the retry-scheduled path) it is first in line next tick.
+        // A row left Processing by a bookkeeping failure (the retry or the
+        // completion could not be persisted) is only picked up again once its
+        // claim goes stale; until then the released rows can pass it -- a
+        // known limitation documented in ADR-023.
         for (var index = 0; index < claimed.Count; index++)
         {
             var settled = await ProcessMessageAsync(claimed[index], store, deliveryStrategy, cancellationToken)
