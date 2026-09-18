@@ -193,6 +193,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
                 client,
                 sp.GetRequiredService<IOutboxMessageStore<OutboxMessage>>(),
                 TestBusinessMetrics.Instance,
+                sp.GetRequiredService<TimeProvider>(),
                 NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance));
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }

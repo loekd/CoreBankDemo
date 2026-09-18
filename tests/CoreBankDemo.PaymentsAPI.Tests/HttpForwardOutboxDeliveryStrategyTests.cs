@@ -41,7 +41,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", "Pending", DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         var act = () => strategy.DeliverAsync(message, cancellation.Token);
@@ -67,7 +67,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", "Completed", DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -90,7 +90,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             SubmitResult = CoreBankResult<TransactionSubmission>.Retry(reason, statusCode)
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -114,7 +114,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             SubmitThrows = expected
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
@@ -135,7 +135,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         };
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         await strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -159,7 +159,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         };
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -178,7 +178,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(submission)
         };
-        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var result = await strategy.ForwardAsync(Message(), executeInline: true, TestContext.Current.CancellationToken);
 
@@ -197,7 +197,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(submission)
         };
-        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
         message.ResponsePayload.Should().BeNull();
 
@@ -216,7 +216,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(submission)
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
@@ -232,7 +232,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             SubmitResult = CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.Timeout)
         };
-        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         var act = () => strategy.ForwardAsync(message, executeInline: true, TestContext.Current.CancellationToken);
@@ -249,7 +249,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", "Pending", DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         await strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -276,7 +276,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
@@ -302,9 +302,10 @@ public class HttpForwardOutboxDeliveryStrategyTests
     public async Task DeliverAsync_does_not_report_a_delivery_failure_when_persisting_the_replayed_cancellation_throws()
     {
         // Review finding: a throw here must never reach the kernel as a
-        // delivery failure -- that would burn a retry, redeliver, get
-        // 200/Cancelled again and could drive a provably cancelled command
-        // to terminal Failed. The row is left Processing for stale reclaim.
+        // delivery failure -- that would schedule a retry, redeliver and get
+        // 200/Cancelled again, so a provably cancelled command would be
+        // retried instead of cancelled (the kernel never writes Failed,
+        // ADR-023). The row is left Processing for stale reclaim.
         var client = new FakeCoreBankApiClient
         {
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
@@ -314,7 +315,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             .ThrowsAsync(new InvalidOperationException("db unavailable"));
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -337,7 +338,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             .ReturnsAsync(transition);
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, businessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -361,7 +362,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
                 ct.ThrowIfCancellationRequested();
                 return MessageTransitionOutcome.Applied;
             });
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         var act = () => strategy.DeliverAsync(Message(), cancellation.Token);
 
@@ -379,7 +380,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             SubmitResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", status, DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
 
         await strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
 
@@ -395,7 +396,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             CancelResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", MessageConstants.Status.Cancelled, cancelledAt))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
         message.Priority = MessageConstants.Priority.Instant;
         using var cancellation = new CancellationTokenSource();
@@ -419,7 +420,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             CancelResult = CoreBankResult<TransactionSubmission>.Success(
                 new TransactionSubmission("forward-key", MessageConstants.Status.Completed, DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         var answer = await strategy.CancelAsync(message, TestContext.Current.CancellationToken);
@@ -436,7 +437,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
             CancelResult = CoreBankResult<TransactionSubmission>.Conflict(
                 new TransactionSubmission("forward-key", MessageConstants.Status.Processing, DateTimeOffset.UtcNow))
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         var answer = await strategy.CancelAsync(message, TestContext.Current.CancellationToken);
@@ -456,7 +457,7 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             CancelResult = CoreBankResult<TransactionSubmission>.Retry(Enum.Parse<CoreBankRetryReason>(reasonName), statusCode)
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         var message = Message();
 
         var answer = await strategy.CancelAsync(message, TestContext.Current.CancellationToken);
@@ -473,12 +474,46 @@ public class HttpForwardOutboxDeliveryStrategyTests
         {
             CancelThrows = new OperationCanceledException(cancellation.Token)
         };
-        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
         await cancellation.CancelAsync();
 
         var act = () => strategy.CancelAsync(Message(), cancellation.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task ForwardAsync_returns_a_failed_submission_for_a_rejected_outcome_and_never_throws()
+    {
+        var now = new DateTimeOffset(2026, 9, 18, 10, 0, 0, TimeSpan.Zero);
+        var clock = new Mock<TimeProvider>();
+        clock.Setup(c => c.GetUtcNow()).Returns(now);
+        var client = new FakeCoreBankApiClient
+        {
+            SubmitResult = CoreBankResult<TransactionSubmission>.Rejected(400)
+        };
+        var strategy = new HttpForwardOutboxDeliveryStrategy(
+            client, _store.Object, BusinessMetrics, clock.Object, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var message = Message();
+
+        var submission = await strategy.ForwardAsync(message, executeInline: false, TestContext.Current.CancellationToken);
+
+        submission.Should().Be(new TransactionSubmission(message.TransactionId, MessageConstants.Status.Failed, now));
+        message.ResponsePayload.Should().Be(System.Text.Json.JsonSerializer.Serialize(submission),
+            "a duplicate replay must recover the rejection from the cached payload");
+    }
+
+    [Fact]
+    public async Task DeliverAsync_completes_normally_for_a_rejected_outcome_so_the_kernel_never_retries_it()
+    {
+        var client = new FakeCoreBankApiClient { SubmitResult = CoreBankResult<TransactionSubmission>.Rejected(400) };
+        var strategy = new HttpForwardOutboxDeliveryStrategy(
+            client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+
+        var act = () => strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+
+        await act.Should().NotThrowAsync();
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient

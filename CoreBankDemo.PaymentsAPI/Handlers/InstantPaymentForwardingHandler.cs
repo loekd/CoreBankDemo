@@ -386,8 +386,8 @@ internal sealed class InstantPaymentForwardingHandler(
                 // through the same transport-failure transition the
                 // background processor uses, so the row is picked up by the
                 // next poll tick -- never left claimed, never marked
-                // terminally Failed by this call alone (MaxRetryCount is
-                // still enforced by the shared kernel path).
+                // terminally Failed by this call alone (the kernel never
+                // gives a row up, ADR-023).
                 await ReleaseClaimAsync(payment, claimed, cancellationToken).ConfigureAwait(false);
                 return Deferred(startedAt);
         }

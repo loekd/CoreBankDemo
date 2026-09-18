@@ -249,10 +249,47 @@ public class CoreBankApiClientTests
     }
 
     [Fact]
-    public async Task ProcessTransactionAsync_treats_400_transport_failure_as_retry_without_throwing()
+    public async Task ProcessTransactionAsync_maps_400_to_rejected_never_a_retry()
     {
         using var handler = new FakeHttpMessageHandler((_, _) =>
-            JsonResponse(HttpStatusCode.BadRequest, new { errors = new[] { "Transaction failed" } }));
+            JsonResponse(HttpStatusCode.BadRequest, new { errors = new[] { "Amount must be between 0.01 and 1,000,000" } }));
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(
+            AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Rejected);
+        result.StatusCode.Should().Be(400);
+        result.Value.Should().BeNull();
+        result.RetryReason.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_maps_a_400_with_an_unreadable_body_to_rejected_too()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("not json", System.Text.Encoding.UTF8, "application/json") });
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(
+            AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Rejected);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task ProcessTransactionAsync_keeps_every_other_failure_status_a_retry(HttpStatusCode status)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) => JsonResponse(status, new { errors = new[] { "x" } }));
         var client = CreateClient(handler);
         var request = new TransactionSubmissionRequest(
             AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
@@ -260,8 +297,7 @@ public class CoreBankApiClientTests
         var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
-        result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
-        result.StatusCode.Should().Be(400);
+        result.StatusCode.Should().Be((int)status);
     }
 
     [Fact]
