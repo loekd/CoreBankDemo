@@ -37,7 +37,7 @@ Letting PaymentsAPI announce the failure itself was considered and rejected: `Fa
 - Write `Failed` as a kernel row status. (`MessageConstants.Status.Failed` stays: it is also the wire word for a business rejection inside a response payload.)
 - Revive, migrate or delete rows that are already `Failed` in existing databases; `IsTerminal` keeps recognising them.
 - Let a later row overtake a failed one in the same partition and priority.
-- Overwrite an existing CoreBank inbox row with a rejection record; an existing row always decides the answer.
+- Overwrite an existing CoreBank inbox row with a rejection record; the existing row's outcome stands and the malformed request gets a plain `400`.
 - Remove `POST /api/accounts/validate` from CoreBankAPI — it is part of the external contract (`docs/constraints.md` §2).
 
 ## I/O & Edge-Case Matrix
@@ -50,7 +50,7 @@ Letting PaymentsAPI announce the failure itself was considered and rejected: `Fa
 | Row that can never succeed | Handler throws every time | Partition blocked until fixed; a warning per attempt and a climbing `retry_scheduled` count make it visible | Accepted consequence — no automatic give-up |
 | Unknown / inactive destination account | Valid request shape, account not in CoreBank | No pre-validation. CoreBank rejects at execution and publishes `transaction.failed`; Payments row `Completed` with a `Failed` payload; instant rail answers `200 Failed` | N/A |
 | Request rejected at the door | `POST /process` fails model validation, `TransactionId` usable | CoreBank stores a terminal inbox row (`Completed`, `Failed` response, validation errors as reason) + `transaction.failed` outbox row in one save, then answers `400` | Save fails → `503`, nothing recorded, caller retries |
-| Rejected at the door, id already known | A row for that `TransactionId` exists | The existing row decides the answer as for any duplicate; nothing is written | N/A |
+| Rejected at the door, id already known | A row for that `TransactionId` exists | Plain `400`; nothing is written; the existing row's own outcome stands (from PaymentsAPI a TransactionId's request never changes, so a known id that is rejected now *is* the recorded rejection) | N/A |
 | Rejected at the door, unusable id | `TransactionId` missing or longer than 100 | Plain `400`, nothing recorded. Unreachable from PaymentsAPI (same id rules); only a hand-written request gets here | N/A |
 | Rejected values do not fit the table | Account longer than 50, amount beyond `numeric(18,2)`, currency not 3 chars | Stored fields are truncated or zeroed; the reason carries the real validation errors | N/A |
 | PaymentsAPI receives `400` on submission | Any rail | Client outcome `Rejected`; strategy returns a `Failed` submission without throwing; kernel marks the row `Completed`; no retry; instant rail answers `200 Failed` and records the `Rejected` metric outcome | N/A |

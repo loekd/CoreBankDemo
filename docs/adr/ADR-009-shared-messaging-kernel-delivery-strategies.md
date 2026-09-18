@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Deciders:** Architecture team
 **Supersedes:** Transport-specific processor loops described or implied by earlier implementation notes
+**Superseded in part by:** ADR-023 — removes poison handling from the kernel; a failed row is retried without limit, never marked `Failed`, and a batch stops at its first failed row
 
 ## Context
 
@@ -25,7 +26,7 @@ Inbox business handling similarly enters through `IInboxMessageHandler<TMessage>
 - `CoreBankDemo.Messaging/IInboxMessageHandler.cs` is the Inbox application seam.
 - `CoreBankDemo.CoreBankAPI/Outbox/DaprOutboxDeliveryStrategy.cs` adapts the CoreBank messaging outbox to `IEventPublisher`.
 - PaymentsAPI's forwarding strategy is added by Story 5.4 behind the same port.
-- Kernel tests prove partition isolation, retry/poison transitions, cancellation, repository failures, and scope disposal without live infrastructure.
+- Kernel tests prove partition isolation, retry transitions (there is no poison transition since ADR-023: a row is retried without limit), cancellation, repository failures, and scope disposal without live infrastructure.
 
 ## Consequences
 

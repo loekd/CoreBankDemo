@@ -10,10 +10,11 @@ namespace CoreBankDemo.Messaging;
 /// and <see cref="OutboxMessageRepositoryBase{TMessage,TDbContext}"/> (story 2.2):
 /// race-safe <see cref="StoreIfNewAsync"/> (insert-then-catch, never
 /// check-then-insert — AD-4) plus the entity-configuration hook each concrete
-/// store uses to declare its dedupe unique index. Claiming, retry/poison
-/// handling, and the processor-facing query methods described in the epic-2
-/// legacy reference are added by later stories (2.3+) — this base intentionally
-/// stops at the store.
+/// store uses to declare its dedupe unique index. Later stories (2.3+) added
+/// claiming, the processor-facing transitions and the query methods. There
+/// is no poison handling (ADR-023): a failed row is retried without limit
+/// and never marked <c>Failed</c>, so a deterministic failure blocks its
+/// partition until it is fixed.
 /// </summary>
 public abstract class MessageRepositoryBase<TMessage, TDbContext>
     where TMessage : class, IMessage
@@ -476,8 +477,8 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// <paramref name="message"/> whose current <c>Status</c> is already
     /// terminal (<c>Completed</c>, <c>Failed</c> or <c>Cancelled</c>) is left untouched
     /// (no-op) rather than re-stamping <c>ProcessedAt</c> or, worse, reviving
-    /// a row a concurrent caller already drove to terminal <c>Failed</c> (e.g.
-    /// its retries were exhausted) back to <c>Completed</c>. Checked both
+    /// a terminal row back to <c>Completed</c> (only a legacy row can be
+    /// <c>Failed</c>: since ADR-023 the kernel never writes it). Checked both
     /// before the first save attempt and again after a reload in the
     /// concurrency-conflict retry branch, since a concurrent change observed
     /// only via that reload could itself have been the one that made the row
@@ -521,8 +522,8 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
             if (IsTerminal(message))
             {
                 // The concurrent change already drove this row to a terminal
-                // state (Completed by another caller, or Failed via retry
-                // exhaustion) — nothing further for this call to do.
+                // state (Completed by another caller, or Cancelled) — nothing
+                // further for this call to do.
                 return MessageTransitionOutcome.AlreadyTerminal;
             }
 

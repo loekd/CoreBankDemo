@@ -79,9 +79,9 @@ internal interface ICoreBankTransactionForwarder
 /// Throws for every other outcome — a <see cref="CoreBankClientOutcome.Retry"/>
 /// from the submission — so <c>OutboxProcessorBase&lt;TMessage&gt;</c>'s
 /// existing <c>MarkAsFailedWithRetryAsync</c> path handles it exactly like
-/// any other delivery failure: the row is retried with backoff, without
-/// limit, and never becomes terminally <c>Failed</c> (ADR-023). Never adds
-/// retry logic of its own.
+/// any other delivery failure: the row goes back to <c>Pending</c> and is
+/// retried on a later poll tick, without limit, and never becomes terminally
+/// <c>Failed</c> (ADR-023). Never adds retry logic of its own.
 /// </para>
 ///
 /// <para>

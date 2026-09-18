@@ -339,8 +339,9 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     /// which flips an already-handled message back to <c>Pending</c> and
     /// burns a <c>RetryCount</c> for a bookkeeping failure that has nothing to
     /// do with handling — causing a redelivery of a message that already
-    /// succeeded, and risking the message going terminally <c>Failed</c> purely
-    /// from repeated completion-persistence hiccups. That violates AD-11's
+    /// succeeded, on every poll tick for as long as the completion cannot be
+    /// persisted (ADR-023: a row that reports a failure is retried without
+    /// limit and never marked <c>Failed</c>). That violates AD-11's
     /// exactly-once handling-OUTCOME contract (handling may be re-attempted;
     /// what must never happen is reporting the wrong reason a message didn't
     /// reach <c>Completed</c>).

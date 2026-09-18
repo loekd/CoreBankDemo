@@ -22,8 +22,9 @@ namespace CoreBankDemo.PaymentsAPI.Handlers;
 /// only observes. A malformed payload (invalid JSON or a JSON <c>null</c>)
 /// or a stored event type outside the four shared constants throws, so the
 /// kernel (<see cref="InboxProcessorBase{TMessage}"/>) records the normal
-/// retry/poison transition -- this handler itself decides nothing about
-/// <see cref="InboxMessage.Status"/>.
+/// retry transition -- retried without limit, never poisoned (ADR-023), so
+/// such a row blocks its partition until it is fixed -- and this handler
+/// itself decides nothing about <see cref="InboxMessage.Status"/>.
 /// </summary>
 internal sealed class TransactionEventHandler(
     ILogger<TransactionEventHandler> logger,
@@ -72,8 +73,9 @@ internal sealed class TransactionEventHandler(
                 // one of the four shared constants above, so reaching here
                 // means either the shared constants changed underneath this
                 // handler or the row was corrupted; either way this is a
-                // handler defect the kernel must retry/poison, never a
-                // silently accepted no-op.
+                // handler defect the kernel must retry (without limit, never
+                // poisoned: it blocks its partition until fixed -- ADR-023),
+                // never a silently accepted no-op.
                 throw new InvalidOperationException(
                     $"Unsupported stored transaction-events type '{message.EventType}' for inbox message {message.Id}.");
         }
@@ -150,9 +152,9 @@ internal sealed class TransactionEventHandler(
         {
             // Only the wire word Cancelled may become a cached committed
             // outcome: anything else on a transaction.cancelled event is a
-            // producer defect the kernel must retry/poison, never a status
-            // this handler forwards into the payment row (same philosophy as
-            // the unsupported-type arm).
+            // producer defect the kernel must retry (without limit, never
+            // poisoned -- ADR-023), never a status this handler forwards into
+            // the payment row (same philosophy as the unsupported-type arm).
             throw new InvalidOperationException(
                 $"transaction.cancelled event for transaction '{payload.TransactionId}' (inbox message {message.Id}) carries status '{payload.Status}' instead of '{MessageConstants.Status.Cancelled}'.");
         }

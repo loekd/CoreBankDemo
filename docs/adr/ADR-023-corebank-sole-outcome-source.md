@@ -85,7 +85,9 @@ or keeps trying.
 - **A row that can never succeed blocks its partition until someone intervenes.** Previously it was
   skipped after five tries. It is visible — a warning per attempt, a climbing `retry_scheduled`
   count — but nothing gives up automatically. An operator can end a stuck payment through CoreBank's
-  existing cancel endpoint.
+  existing cancel endpoint: the cancellation ends a stuck CoreBank inbox row directly, and it ends a
+  stuck PaymentsAPI outbox row only once that row's submission reaches CoreBank again and replays
+  the cancellation. It does not help while CoreBank is unreachable.
 - A `transaction.failed` event now has two causes: a rejection at execution and a rejection at the
   door. Consumers already treat the event as "rejected"; the reason text tells them apart.
 - An unknown destination account on the instant rail now answers `200 Failed` instead of
@@ -100,20 +102,27 @@ or keeps trying.
 - Hand-written store fakes must implement `ReleaseClaimsAsync`.
 - **Known ordering limitation.** "A batch stops at its first unsettled row" guarantees that no later
   row is *attempted in that tick*, and that a row returned to `Pending` (the retry-scheduled path)
-  is first in line on the next tick. A row left `Processing` by a bookkeeping double fault —
-  delivery/handling failed *and* recording the retry failed, or delivery succeeded but recording
-  completion failed — is only picked up again once its claim goes stale (`ProcessingTimeout`,
-  5 minutes); until then the rows released behind it can pass it. Accepted: it needs two faults at
-  once, in the completion case the row was in fact delivered first, and a "claim only the
-  contiguous prefix" rule would collide with the instant rail's `HoldUntil` design (held instant
-  rows deliberately let standard rows pass).
+  is first in line on the next tick. A row left `Processing` by a bookkeeping failure —
+  delivery/handling failed and the retry could not be recorded, or delivery/handling succeeded and
+  the completion could not be recorded — is only picked up again once its claim goes stale
+  (`ProcessingTimeout`, 5 minutes); until then the rows released behind it can pass it. A row
+  reclaimed after going stale is re-stamped to the claim time (`SetOrderingTimestamp`), so it
+  re-queues behind rows that arrived before the reclaim, and rows re-stamped in one claim tie and
+  fall back to `Id` order. Accepted: it needs a bookkeeping failure on top of the delivery or
+  handling outcome, in the completion case the row was in fact delivered first, and a "claim only
+  the contiguous prefix" rule would collide with the instant rail's `HoldUntil` design (held
+  instant rows deliberately let standard rows pass). When the bookkeeping failed for a reason other
+  than a concurrency conflict, the unsaved change is still pending in the partition's context and
+  the release of the rows behind it may persist it after all: the row then ends `Pending` with its
+  retry counted, or `Completed`, although `retry_persistence_failed` or
+  `completion_persistence_failed` was already recorded. That end state is the desired one.
 - **A `400` verdict is a succeeded delivery on the metrics.** `corebankdemo.messaging.deliveries`
   counts a `Rejected` submission as `succeeded` (the command was delivered and answered), in line
   with story 6.5's rule never to count a business rejection as a transport failure.
 - **A recorded rejection is counted like any other completed inbox row.**
   `TransactionRejectionHandler` records inbox `items.processed` (`completed`) and corebank-outbox
-  `added`, the same pair the cancel tombstone and the execution handler record, so the in/out
-  panels stay balanced.
+  `added`, the same two instruments the cancel tombstone and the execution handler record (the
+  tombstone's item outcome is `cancelled`), so the in/out panels stay balanced.
 - **Legacy `Failed` CoreBank inbox rows now replay `503`** (they used to replay `400`). PaymentsAPI
   retries that without limit, and the HTTP resilience pipeline counts 5xx toward its circuit
   breaker. Only databases that already hold such rows are affected; fresh and demo databases hold

@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Deciders:** Architecture team
 **Superseded in part by:** ADR-009 replaces the older processor generic shape/path with the shared kernel and delivery-strategy design
+**Superseded in part by:** ADR-023 — removes the `MaxRetryCount` limit; a failed delivery is retried without limit and the kernel never marks a row `Failed`
 
 ## Context
 
@@ -19,7 +20,7 @@ Use the Transactional Outbox pattern: write the business state and the outbound 
 - `PaymentsAPI.PaymentsController` writes an `OutboxMessage` atomically when accepting a payment — the HTTP response is `202 Accepted` immediately.
 - `PaymentsAPI.OutboxProcessor` picks up pending messages and calls CoreBankAPI's `/api/transactions/process`.
 - `CoreBankAPI.MessagingOutboxProcessor` publishes domain events (TransactionCompleted, BalanceUpdated) to Dapr pub/sub after committing the transaction.
-- Failed deliveries increment `RetryCount`; messages exceeding `MaxRetryCount` (5) are marked Failed.
+- Failed deliveries increment `RetryCount` and return the message to `Pending`. There is no retry limit and no message is marked `Failed` (ADR-023; until then, messages exceeding `MaxRetryCount` (5) were marked `Failed`). A batch stops at its first failed message, so a delivery that can never succeed blocks its partition until it is fixed.
 
 ## Consequences
 

@@ -14,8 +14,8 @@ namespace CoreBankDemo.PaymentsAPI.Inbox;
 /// <see cref="LockNamePrefix"/> and the validated
 /// <see cref="InboxProcessingOptions"/>-to-<see cref="InboxProcessorOptions"/>
 /// mapping. Never reimplements polling, partition fan-out, locking,
-/// claiming, retry, poison classification, completion, or trace restoration
-/// (boundaries).
+/// claiming, retry (without limit, never poisoned -- ADR-023), completion,
+/// or trace restoration (boundaries).
 /// </summary>
 public class InboxProcessor : InboxProcessorBase<InboxMessage>
 {

@@ -10,7 +10,8 @@ namespace CoreBankDemo.Messaging;
 /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.ConfigureDedupeIndex"/>
 /// to declare whether the store dedupes on the idempotency key alone (command
 /// store) or a composite event identity (event store — AD-4). Claiming and
-/// retry/poison handling land in story 2.3; implements
+/// the retry transition came with story 2.3 (a failed row is retried without
+/// limit and never poisoned -- ADR-023); implements
 /// <see cref="IInboxMessageStore{TMessage}"/> (story 2.5) — the narrow port
 /// <see cref="InboxProcessorBase{TMessage}"/> depends on — via the members
 /// already inherited from <see cref="MessageRepositoryBase{TMessage,TDbContext}"/>.

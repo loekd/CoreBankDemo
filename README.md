@@ -138,9 +138,9 @@ Idempotency-Key: demo-001
 ```
 
 - `scheme: "standard"` (or omitted) → **`202 Accepted`**, `Status: Pending`. The row is durable; the
-  background processor forwards it with a single `POST /api/transactions/process`; a delivery that
-  fails is retried on every poll tick without limit; a batch stops at its first failed row so nothing
-  overtakes it (ADR-023). Only Core Bank decides how a payment ends.
+  background processor forwards it with a single `POST /api/transactions/process`. A delivery that
+  fails is retried on every poll tick without limit, and a batch stops at its first failed row so
+  nothing overtakes it (ADR-023). Only Core Bank decides how a payment ends.
 - `scheme: "instant"` → a budgeted inline attempt (9 s budget, 2.5 s per attempt, max 2 attempts,
   1.5 s of the budget reserved for a cancel). A committed outcome answers **`200 OK`**. When the
   forward phase runs out, the payment is cancelled — locally if it never left PaymentsAPI, otherwise

@@ -112,8 +112,8 @@ public class PaymentsController(
     /// the persisted delivery outcome (<see cref="ResolveDeliveredResponse"/>),
     /// never the raw kernel column, which is transport-state-only and never
     /// distinguishes a business success from a business rejection (AD-11;
-    /// review loop 1) -- a terminal <c>Failed</c> row (transport permanently
-    /// exhausted via <c>MarkAsFailedWithRetryAsync</c>) replays <c>202</c>
+    /// review loop 1) -- a terminal <c>Failed</c> row (only a legacy row can
+    /// be <c>Failed</c>: since ADR-023 the kernel never writes it) replays <c>202</c>
     /// with the wire word <c>Failed</c>, never masked as still-in-flight -- a
     /// <c>Cancelled</c> row replays <c>504</c> with the wire word
     /// <c>Cancelled</c> and its persisted cancellation timestamp (spec:
