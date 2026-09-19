@@ -33,9 +33,9 @@ public interface IInboxMessageStore<TMessage>
         TMessage message, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Handler-failure retry/poison transition: retries below
-    /// <see cref="MessageConstants.Defaults.MaxRetryCount"/>, terminal
-    /// <see cref="MessageConstants.Status.Failed"/> at the limit. See
+    /// Handler-failure retry transition. Always returns the row to
+    /// <c>Pending</c> and increments <c>RetryCount</c>; never writes
+    /// <c>Failed</c> (ADR-023). See
     /// <see cref="MessageRepositoryBase{TMessage,TDbContext}.MarkAsFailedWithRetryAsync"/>.
     /// </summary>
     Task<MessageTransitionOutcome> MarkAsFailedWithRetryAsync(
@@ -56,6 +56,15 @@ public interface IInboxMessageStore<TMessage>
     /// </summary>
     Task<MessageTransitionOutcome> MarkAsCancelledAsync(
         TMessage message, string reason, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns rows this caller claimed but never attempted to <c>Pending</c>,
+    /// exactly as they were: <c>RetryCount</c> and <c>LastError</c> untouched
+    /// (ADR-023 -- a batch stops at its first failed row). Rows that are not
+    /// <c>Processing</c>, and rows another writer has moved to a different
+    /// status since they were claimed, are skipped; nothing is ever forced.
+    /// </summary>
+    Task ReleaseClaimsAsync(IReadOnlyList<TMessage> messages, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Claims exactly the row identified by <paramref name="id"/>, if it is

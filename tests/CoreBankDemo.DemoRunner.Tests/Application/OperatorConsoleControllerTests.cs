@@ -935,6 +935,81 @@ public class OperatorConsoleControllerTests
     }
 
     [Fact]
+    public async Task Burst_EvidenceDetailNamesEveryCancelledPayment_ApartFromFailures()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"),
+            Payment(PaymentOutcome.TransportFailure, 0, null, "connection refused"),
+            Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        await controller.RunBurstAsync(InstantPayment, 3, 1, CancellationToken.None);
+
+        var keys = harness.Payments.Submissions.Select(submission => submission.IdempotencyKey!).ToList();
+        var detail = controller.State.Evidence.Last(record => record.Kind == EvidenceKind.Burst).Detail;
+        var lines = detail.Split(Environment.NewLine);
+        // A local cancel never reaches CoreBank, so no transaction.cancelled event will ever
+        // name it: the burst's own record is the only place these ids can appear.
+        lines.Should().Contain($"{keys[0]}: 504 Cancelled — nothing executed, safe to retry with a new key");
+        lines.Should().Contain(line => line.StartsWith($"{keys[1]}: "));
+        lines.Should().NotContain(line => line.StartsWith($"{keys[2]}: "), "a completed payment is neither a failure nor a withdrawal");
+        Array.IndexOf(lines, "Cancelled (1):").Should().BeGreaterThan(Array.IndexOf(lines, "Failed (1):"),
+            "failures come first: they are the ones that need attention");
+    }
+
+    [Fact]
+    public async Task Burst_EveryWithdrawnPaymentGetsItsOwnEvidenceRow_BecauseNoEventWillEverNameIt()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"),
+            Payment(PaymentOutcome.Completed, 200, "Completed"),
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"));
+
+        await controller.RunBurstAsync(InstantPayment, 3, 1, CancellationToken.None);
+
+        var keys = harness.Payments.Submissions.Select(submission => submission.IdempotencyKey!).ToList();
+        var rows = controller.State.Evidence.Where(record => record.Kind == EvidenceKind.Payment).ToList();
+        rows.Select(row => row.TransactionId).Should().Equal([keys[0], keys[2]],
+            "only a withdrawal gets a row: a completed burst payment is named by CoreBank's own events");
+        rows.Should().AllSatisfy(row =>
+        {
+            row.StatusCode.Should().Be(504);
+            row.Summary.Should().Be("504 Cancelled — the instant rail timed out and withdrew the payment; nothing executed, a retry with a new key is safe");
+            row.Succeeded.Should().BeTrue("a withdrawal is the rail's own proven answer, never a failure (ADR-020)");
+            row.Method.Should().Be("POST");
+        });
+        rows[0].Detail.Should().Contain(keys[0]);
+        controller.State.Evidence.Last().Kind.Should().Be(EvidenceKind.Burst, "the burst's own record still closes the run");
+    }
+
+    [Fact]
+    public async Task Burst_WithdrawnPaymentRow_NeverStealsTheDetailsPaneFromWhatTheOperatorIsReading()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"),
+            Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        await controller.RunBurstAsync(InstantPayment, 2, 1, CancellationToken.None);
+
+        var withdrawn = controller.State.Evidence.Single(record => record.Kind == EvidenceKind.Payment);
+        controller.State.SelectedEvidence?.Sequence.Should().NotBe(withdrawn.Sequence,
+            "the burst's own record is what the operator asked for; a withdrawal row arrives unasked");
+    }
+
+    [Fact]
+    public async Task Burst_EvidenceDetailHasNoHeadings_WhenNothingFailedOrWasCancelled()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        await controller.RunBurstAsync(InstantPayment, 1, 1, CancellationToken.None);
+
+        controller.State.Evidence.Last(record => record.Kind == EvidenceKind.Burst).Detail.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Payment_WrongStatusForRail_IsReportedAsTransportFailure()
     {
         var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);

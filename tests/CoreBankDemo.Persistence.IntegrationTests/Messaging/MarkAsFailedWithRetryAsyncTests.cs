@@ -9,19 +9,19 @@ namespace CoreBankDemo.Persistence.IntegrationTests.Messaging;
 /// <summary>
 /// <c>MarkAsFailedWithRetryAsync</c> on <see cref="InboxMessageRepositoryBase{TMessage,TDbContext}"/>
 /// / <see cref="OutboxMessageRepositoryBase{TMessage,TDbContext}"/> (story 2.3):
-/// retry-under-limit vs. terminal-poison-at-limit, per AD-11 (transport-only —
-/// this method never encodes business rejection).
+/// always back to <c>Pending</c> however often the row has failed (ADR-023),
+/// per AD-11 (transport-only — this method never encodes business rejection).
 /// </summary>
 public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) : MessagingPostgresTestBase(fixture)
 {
     [Fact]
-    public async Task Retry_under_limit_returns_to_pending_and_increments_retry_count()
+    public async Task Retry_returns_to_pending_and_increments_retry_count()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
-        var message = new TestInboxMessage { IdempotencyKey = "under-limit", RetryCount = 2 };
+        var message = new TestInboxMessage { IdempotencyKey = "transient", RetryCount = 2 };
         context.InboxMessages.Add(message);
         await context.SaveChangesAsync(ct);
 
@@ -38,28 +38,24 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
     }
 
     [Fact]
-    public async Task Retry_at_limit_becomes_terminal_failed()
+    public async Task Retry_far_past_five_attempts_still_returns_to_pending()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
-        var message = new TestInboxMessage
-        {
-            IdempotencyKey = "at-limit",
-            RetryCount = MessageConstants.Defaults.MaxRetryCount - 1,
-        };
+        var message = new TestInboxMessage { IdempotencyKey = "never-given-up", RetryCount = 41 };
         context.InboxMessages.Add(message);
         await context.SaveChangesAsync(ct);
 
         await repository.MarkAsFailedWithRetryAsync(message, "still failing", ct);
 
-        message.Status.Should().Be(MessageConstants.Status.Failed);
-        message.RetryCount.Should().Be(MessageConstants.Defaults.MaxRetryCount);
+        message.Status.Should().Be(MessageConstants.Status.Pending);
+        message.RetryCount.Should().Be(42);
         message.LastError.Should().Be("still failing");
 
         var reloaded = await context.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct);
-        reloaded.Status.Should().Be(MessageConstants.Status.Failed);
+        reloaded.Status.Should().Be(MessageConstants.Status.Pending, "the kernel never writes Failed (ADR-023)");
     }
 
     [Fact]
@@ -73,7 +69,7 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
         {
             IdempotencyKey = "already-failed",
             Status = MessageConstants.Status.Failed,
-            RetryCount = MessageConstants.Defaults.MaxRetryCount,
+            RetryCount = 5,
             LastError = "original failure",
         };
         context.InboxMessages.Add(message);
@@ -82,12 +78,12 @@ public class MarkAsFailedWithRetryAsyncTests(PostgresContainerFixture fixture) :
         await repository.MarkAsFailedWithRetryAsync(message, "another transport error", ct);
 
         message.Status.Should().Be(MessageConstants.Status.Failed);
-        message.RetryCount.Should().Be(MessageConstants.Defaults.MaxRetryCount,
+        message.RetryCount.Should().Be(5,
             "a repeat call on a terminal Failed row must not increment RetryCount further");
         message.LastError.Should().Be("original failure", "a no-op must not overwrite LastError either");
 
         var reloaded = await context.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct);
-        reloaded.RetryCount.Should().Be(MessageConstants.Defaults.MaxRetryCount);
+        reloaded.RetryCount.Should().Be(5);
         reloaded.LastError.Should().Be("original failure");
     }
 

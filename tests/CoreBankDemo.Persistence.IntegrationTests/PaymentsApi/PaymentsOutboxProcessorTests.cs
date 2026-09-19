@@ -60,11 +60,11 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
     }
 
     [Fact]
-    public async Task StartAsync_when_destination_account_is_invalid_applies_the_kernel_retry_transition()
+    public async Task StartAsync_when_submission_is_a_retry_outcome_applies_the_kernel_retry_transition()
     {
         await using var store = CreateStore();
         await SeedAsync(store, "payment-2", partitionId: 0);
-        var client = new InvalidAccountCoreBankApiClient();
+        var client = new UnavailableCoreBankApiClient();
         using var services = BuildServices(store, client);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var processor = CreateProcessor(
@@ -80,8 +80,8 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             .SingleAsync(TestContext.Current.CancellationToken);
         row.Status.Should().Be(MessageConstants.Status.Pending);
         row.RetryCount.Should().Be(1);
-        row.LastError.Should().NotBeNullOrWhiteSpace();
-        client.SubmitAttempted.Should().BeFalse();
+        row.LastError.Should().Contain("503");
+        client.SubmitAttempts.Should().Be(1);
     }
 
     [Fact]
@@ -118,15 +118,12 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         elapsedBetweenTicks.Should().BeLessThan(TimeSpan.FromMilliseconds(500));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task StopAsync_during_delivery_leaves_the_claimed_row_processing_without_a_retry(
-        bool cancelDuringSubmission)
+    [Fact]
+    public async Task StopAsync_during_delivery_leaves_the_claimed_row_processing_without_a_retry()
     {
         await using var store = CreateStore();
         await SeedAsync(store, "payment-cancelled", partitionId: 0);
-        var client = new CancellationBlockingCoreBankApiClient(cancelDuringSubmission);
+        var client = new CancellationBlockingCoreBankApiClient();
         using var services = BuildServices(store, client);
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var processor = CreateProcessor(
@@ -182,6 +179,45 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         lockService.LockNames.Should().Contain("payments-outbox-partition-3");
     }
 
+    /// <summary>
+    /// ADR-023 on real PostgreSQL: a batch stops at its first failed row. The
+    /// row that failed records its retry and goes back to <c>Pending</c>; the
+    /// rows claimed behind it are released untouched and never submitted, so
+    /// nothing overtakes the failed row.
+    /// </summary>
+    [Fact]
+    public async Task A_batch_stops_at_its_first_failed_row_and_releases_the_rows_behind_it()
+    {
+        await using var store = CreateStore();
+        await SeedOrderedAsync(store, partitionId: 0, keys: ["batch-1", "batch-2", "batch-3", "batch-4", "batch-5"]);
+        var client = new UnavailableForOneTransactionCoreBankApiClient("batch-2");
+        using var services = BuildServices(store, client);
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var processor = CreateProcessor(
+            services.GetRequiredService<IServiceScopeFactory>(), new SingleTickLockService(completion));
+
+        await processor.StartAsync(TestContext.Current.CancellationToken);
+        await completion.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await processor.StopAsync(TestContext.Current.CancellationToken);
+
+        await using var verifyContext = store.CreateContext();
+        var rows = await verifyContext.OutboxMessages
+            .AsNoTracking()
+            .ToDictionaryAsync(m => m.TransactionId, TestContext.Current.CancellationToken);
+        rows["batch-1"].Status.Should().Be(MessageConstants.Status.Completed);
+        rows["batch-2"].Status.Should().Be(MessageConstants.Status.Pending);
+        rows["batch-2"].RetryCount.Should().Be(1);
+        rows["batch-2"].LastError.Should().Contain("503");
+        foreach (var key in new[] { "batch-3", "batch-4", "batch-5" })
+        {
+            rows[key].Status.Should().Be(MessageConstants.Status.Pending);
+            rows[key].RetryCount.Should().Be(0);
+            rows[key].LastError.Should().BeNull();
+        }
+
+        client.SubmittedTransactionIds.Should().Equal("batch-1", "batch-2");
+    }
+
     private static ServiceProvider BuildServices(PaymentsStore store, ICoreBankApiClient client)
     {
         var services = new ServiceCollection();
@@ -196,6 +232,7 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
                 client,
                 sp.GetRequiredService<IOutboxMessageStore<OutboxMessage>>(),
                 TestBusinessMetrics.Instance,
+                sp.GetRequiredService<TimeProvider>(),
                 NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance));
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
@@ -245,17 +282,12 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         await context.SaveChangesAsync(TestContext.Current.CancellationToken);
     }
 
-    /// <summary>Fake <see cref="ICoreBankApiClient"/> that always validates and submits successfully.</summary>
+    /// <summary>Fake <see cref="ICoreBankApiClient"/> that always submits successfully.</summary>
     private sealed class RecordingCoreBankApiClient : ICoreBankApiClient
     {
         private readonly ConcurrentQueue<string> _submittedTransactionIds = new();
 
         public IReadOnlyList<string> SubmittedTransactionIds => _submittedTransactionIds.ToArray();
-
-        public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-            string accountNumber, CancellationToken cancellationToken) =>
-            Task.FromResult(CoreBankResult<AccountValidation>.Success(
-                new AccountValidation(accountNumber, true, null, null)));
 
         public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
             string accountNumber, CancellationToken cancellationToken) =>
@@ -278,15 +310,12 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             throw new NotSupportedException("Not used by the forwarding processor.");
     }
 
-    /// <summary>Fake <see cref="ICoreBankApiClient"/> whose destination account is always invalid.</summary>
-    private sealed class InvalidAccountCoreBankApiClient : ICoreBankApiClient
+    /// <summary>Fake <see cref="ICoreBankApiClient"/> whose every submission is a transport rejection (503).</summary>
+    private sealed class UnavailableCoreBankApiClient : ICoreBankApiClient
     {
-        public bool SubmitAttempted { get; private set; }
+        private int _submitAttempts;
 
-        public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-            string accountNumber, CancellationToken cancellationToken) =>
-            Task.FromResult(CoreBankResult<AccountValidation>.Success(
-                new AccountValidation(accountNumber, false, null, null)));
+        public int SubmitAttempts => Volatile.Read(ref _submitAttempts);
 
         public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
             string accountNumber, CancellationToken cancellationToken) =>
@@ -295,9 +324,9 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
         public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
             TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
         {
-            SubmitAttempted = true;
-            return Task.FromResult(CoreBankResult<TransactionSubmission>.Success(
-                new TransactionSubmission(request.TransactionId, "Completed", DateTimeOffset.UtcNow)));
+            Interlocked.Increment(ref _submitAttempts);
+            return Task.FromResult(CoreBankResult<TransactionSubmission>.Retry(
+                CoreBankRetryReason.TransportRejection, 503));
         }
 
         public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
@@ -309,24 +338,43 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             throw new NotSupportedException("Not used by the forwarding processor.");
     }
 
-    private sealed class CancellationBlockingCoreBankApiClient(bool cancelDuringSubmission)
-        : ICoreBankApiClient
+    /// <summary>
+    /// Fake <see cref="ICoreBankApiClient"/> that submits successfully except
+    /// for one TransactionId, which is a transport rejection (503).
+    /// </summary>
+    private sealed class UnavailableForOneTransactionCoreBankApiClient(string unavailableTransactionId) : ICoreBankApiClient
+    {
+        private readonly ConcurrentQueue<string> _submittedTransactionIds = new();
+
+        public IReadOnlyList<string> SubmittedTransactionIds => _submittedTransactionIds.ToArray();
+
+        public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
+            string accountNumber, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> ProcessTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken, bool executeInline = false)
+        {
+            _submittedTransactionIds.Enqueue(request.TransactionId);
+            return Task.FromResult(request.TransactionId == unavailableTransactionId
+                ? CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.TransportRejection, 503)
+                : CoreBankResult<TransactionSubmission>.Success(
+                    new TransactionSubmission(request.TransactionId, "Completed", DateTimeOffset.UtcNow)));
+        }
+
+        public Task<CoreBankResult<TransactionStatus>> GetTransactionStatusAsync(
+            string idempotencyKey, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+
+        public Task<CoreBankResult<TransactionSubmission>> CancelTransactionAsync(
+            TransactionSubmissionRequest request, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("Not used by the forwarding processor.");
+    }
+
+    private sealed class CancellationBlockingCoreBankApiClient : ICoreBankApiClient
     {
         public TaskCompletionSource CallStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public async Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-            string accountNumber, CancellationToken cancellationToken)
-        {
-            if (!cancelDuringSubmission)
-            {
-                CallStarted.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-            }
-
-            return CoreBankResult<AccountValidation>.Success(
-                new AccountValidation(accountNumber, true, null, null));
-        }
 
         public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
             string accountNumber, CancellationToken cancellationToken) =>
@@ -383,11 +431,6 @@ public class PaymentsOutboxProcessorTests(PostgresContainerFixture fixture) : Pa
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public IReadOnlyList<string> SubmittedTransactionIds => _submittedTransactionIds.ToArray();
-
-        public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-            string accountNumber, CancellationToken cancellationToken) =>
-            Task.FromResult(CoreBankResult<AccountValidation>.Success(
-                new AccountValidation(accountNumber, true, null, null)));
 
         public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
             string accountNumber, CancellationToken cancellationToken) =>

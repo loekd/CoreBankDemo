@@ -21,9 +21,12 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// <see cref="CoreBankClientOutcome.Success"/>; every non-2xx response (the
 /// generated client throws <see cref="ApiException"/> for those), empty or
 /// malformed required success data, a timeout, or any other exception is
-/// <see cref="CoreBankClientOutcome.Retry"/> — with one documented exception,
-/// the cancellation's <c>409</c>, which is CoreBank's own answer and is
-/// classified as <see cref="CoreBankClientOutcome.Conflict"/> — this adapter never retries
+/// <see cref="CoreBankClientOutcome.Retry"/> — with two documented exceptions,
+/// each CoreBank's own answer rather than a transport fault: the
+/// cancellation's <c>409</c>, classified as
+/// <see cref="CoreBankClientOutcome.Conflict"/>, and the submission's
+/// <c>400</c>, classified as <see cref="CoreBankClientOutcome.Rejected"/>
+/// (ADR-023) — this adapter never retries
 /// anything itself, it only classifies the outcome for a future delivery
 /// strategy (story 5.4) to act on. Each retry outcome preserves *why* it
 /// happened via <see cref="CoreBankRetryReason"/>, and a non-2xx response
@@ -42,35 +45,7 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// </summary>
 internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBankApiClient
 {
-    public Task<CoreBankResult<AccountValidation>> ValidateAccountAsync(
-        string accountNumber, CancellationToken cancellationToken)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(accountNumber);
-
-        return ExecuteAsync(
-            async ct =>
-            {
-                var body = new GeneratedModels.AccountValidationRequest { AccountNumber = accountNumber };
-                var response = await client.Api.Accounts.Validate
-                    .PostAsync(body, ConfigureTraceContext, ct)
-                    .ConfigureAwait(false);
-
-                if (response?.AccountNumber is null
-                    || response.IsValid is null
-                    || IsBlank(response.AccountNumber)
-                    || IsMismatchedIdentifier(accountNumber, response.AccountNumber))
-                {
-                    return null;
-                }
-
-                return new AccountValidation(
-                    response.AccountNumber,
-                    response.IsValid.Value,
-                    response.AccountHolderName,
-                    response.Balance);
-            },
-            cancellationToken);
-    }
+    private const int BadRequest = 400;
 
     public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
         string accountNumber, CancellationToken cancellationToken)
@@ -147,7 +122,10 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
 
                 return ToSubmission(request.TransactionId, response?.TransactionId, response?.Status, response?.ProcessedAt);
             },
-            cancellationToken);
+            cancellationToken,
+            // ADR-023: a 400 to a submission is CoreBank's verdict on the
+            // payment, never a transport fault -- for this operation only.
+            badRequestIsVerdict: true);
     }
 
     /// <summary>
@@ -267,7 +245,8 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
     private static async Task<CoreBankResult<T>> ExecuteAsync<T>(
         Func<CancellationToken, Task<T?>> operation,
         CancellationToken cancellationToken,
-        Func<ApiException, CoreBankResult<T>?>? classifyApiException = null)
+        Func<ApiException, CoreBankResult<T>?>? classifyApiException = null,
+        bool badRequestIsVerdict = false)
         where T : class
     {
         var statusCapture = LastResponseStatusHandler.BeginCapture();
@@ -288,7 +267,7 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
         {
             var statusCode = statusCapture.StatusCode;
             return statusCode is >= 400 and <= 599
-                ? CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, statusCode)
+                ? RejectionOrRetry<T>(statusCode, badRequestIsVerdict)
                 : CoreBankResult<T>.Retry(CoreBankRetryReason.MalformedResponse);
         }
         catch (ApiException ex)
@@ -300,7 +279,7 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
             // generated client already surfaces on the base ApiException
             // type, never the generated error body.
             return classifyApiException?.Invoke(ex)
-                ?? CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, ex.ResponseStatusCode);
+                ?? RejectionOrRetry<T>(ex.ResponseStatusCode, badRequestIsVerdict);
         }
         catch (TimeoutRejectedException)
         {
@@ -329,10 +308,23 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
             // isn't lost to a generic TransportException.
             var statusCode = statusCapture.StatusCode;
             return statusCode is >= 400 and <= 599
-                ? CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, statusCode)
+                ? RejectionOrRetry<T>(statusCode, badRequestIsVerdict)
                 : CoreBankResult<T>.Retry(CoreBankRetryReason.TransportException);
         }
     }
+
+    /// <summary>
+    /// Classifies a status-bearing non-2xx answer. Only an operation that
+    /// opted in (<paramref name="badRequestIsVerdict"/> -- the transaction
+    /// submission, ADR-023) reads a <c>400</c> as CoreBank's verdict; every
+    /// other status, and a <c>400</c> to any other operation, stays a
+    /// <see cref="CoreBankRetryReason.TransportRejection"/> retry.
+    /// </summary>
+    private static CoreBankResult<T> RejectionOrRetry<T>(int? statusCode, bool badRequestIsVerdict)
+        where T : class =>
+        badRequestIsVerdict && statusCode == BadRequest
+            ? CoreBankResult<T>.Rejected(BadRequest)
+            : CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, statusCode);
 
     /// <summary>
     /// A required response string that is missing entirely already fails an

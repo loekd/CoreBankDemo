@@ -474,7 +474,7 @@ public class DevProxySessionConfigWriterTests : IDisposable
         var request = entries[0].GetProperty("request");
         request.GetProperty("url").GetString().Should().Be(
             "http://127.0.0.1:5032/api/*",
-            "scoping injection to POST /api/accounts/validate would make the error knob unobservable");
+            "scoping injection to POST /api/transactions/process alone would not cover the surface the other plugins watch");
         request.TryGetProperty("method", out _).Should().BeFalse("every verb the surface serves is eligible");
         // The shipped response bodies are still the preset source.
         entries[0].GetProperty("responses")[0].GetProperty("body").GetProperty("error").GetString()
@@ -539,7 +539,7 @@ public class DevProxySessionConfigWriterTests : IDisposable
         {
           "errors": [
             {
-              "request": { "url": "http://127.0.0.1:5032/api/accounts/validate", "method": "POST" },
+              "request": { "url": "http://127.0.0.1:5032/api/transactions/process", "method": "POST" },
               "responses": [ { "statusCode": 503, "body": { "error": "Service temporarily unavailable" } } ]
             }
           ]

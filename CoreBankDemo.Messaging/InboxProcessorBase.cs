@@ -258,21 +258,64 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
             return;
         }
 
-        // Sequential, oldest-first, per the batch's own ordering — preserves
-        // per-key ordering within a partition (AD-4).
-        foreach (var message in claimed)
+        // Sequential, oldest-first (AD-4). ADR-023: the batch stops at the
+        // first row that did not reach a terminal state, so no later row is
+        // attempted in this tick, and the rows claimed behind it go back to
+        // Pending untouched. When the unsettled row itself went back to
+        // Pending (the retry-scheduled path) it is first in line next tick.
+        // A row left Processing by a bookkeeping failure (the retry or the
+        // completion could not be persisted) is only picked up again once its
+        // claim goes stale; until then the released rows can pass it -- a
+        // known limitation documented in ADR-023.
+        for (var index = 0; index < claimed.Count; index++)
         {
-            // Defensive, mirroring the null-batch guard above: a misbehaving
-            // IInboxMessageStore implementation returning a non-null list
-            // that contains a null element must not NRE its way into a
-            // masked, generic tick-level error log line — skip it and keep
-            // processing the rest of the batch.
+            var message = claimed[index];
+            // Defensive: a null element from a misbehaving store is skipped.
             if (message is null)
             {
                 continue;
             }
 
-            await ProcessMessageAsync(store, message, cancellationToken).ConfigureAwait(false);
+            var settled = await ProcessMessageAsync(store, message, cancellationToken).ConfigureAwait(false);
+            if (settled)
+            {
+                continue;
+            }
+
+            await ReleaseRemainderAsync(store, claimed, index + 1, partitionId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+    }
+
+    private async Task ReleaseRemainderAsync(
+        IInboxMessageStore<TMessage> store,
+        IReadOnlyList<TMessage> claimed,
+        int firstUnattempted,
+        int partitionId,
+        CancellationToken cancellationToken)
+    {
+        var remainder = claimed.Skip(firstUnattempted).Where(m => m is not null).ToList();
+        if (remainder.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await store.ReleaseClaimsAsync(remainder, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Bookkeeping only: the rows stay Processing and are reclaimed
+            // once their claim goes stale. Must never escape the tick.
+            _logger.LogWarning(
+                ex,
+                "Failed to release {Count} unattempted inbox claims in partition {PartitionId}; they will be reclaimed once stale",
+                remainder.Count, partitionId);
         }
     }
 
@@ -296,13 +339,18 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
     /// which flips an already-handled message back to <c>Pending</c> and
     /// burns a <c>RetryCount</c> for a bookkeeping failure that has nothing to
     /// do with handling — causing a redelivery of a message that already
-    /// succeeded, and risking the message going terminally <c>Failed</c> purely
-    /// from repeated completion-persistence hiccups. That violates AD-11's
+    /// succeeded, on every poll tick for as long as the completion cannot be
+    /// persisted (ADR-023: a row that reports a failure is retried without
+    /// limit and never marked <c>Failed</c>). That violates AD-11's
     /// exactly-once handling-OUTCOME contract (handling may be re-attempted;
     /// what must never happen is reporting the wrong reason a message didn't
     /// reach <c>Completed</c>).
     /// </summary>
-    private async Task ProcessMessageAsync(IInboxMessageStore<TMessage> store, TMessage message, CancellationToken cancellationToken)
+    /// <returns>
+    /// <c>true</c> only when the row reached a terminal state; <c>false</c>
+    /// stops the batch (ADR-023).
+    /// </returns>
+    private async Task<bool> ProcessMessageAsync(IInboxMessageStore<TMessage> store, TMessage message, CancellationToken cancellationToken)
     {
         using var activity = StartDispatchActivity(message);
 
@@ -342,7 +390,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                     message, ex.Message, cancellationToken).ConfigureAwait(false);
                 if (transition == MessageTransitionOutcome.AlreadyTerminal)
                 {
-                    return;
+                    return true;
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -357,9 +405,9 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                 // Recording the retry is itself bookkeeping, separate from the
                 // handler failure already logged above — e.g. a transient DB
                 // conflict while persisting the retry. This must never escape
-                // ProcessMessageAsync: doing so would abort the rest of this
-                // partition's batch for the tick, leaving the remaining
-                // claimed messages undispatched. The message is left in its
+                // ProcessMessageAsync: doing so would skip releasing the rows
+                // claimed behind this one. The batch stops here (ADR-023) --
+                // this row is unsettled. The message is left in its
                 // current claimed (Processing) state and will be naturally
                 // reclaimed once its claim goes stale (story 2.3's
                 // ProcessingTimeout mechanism).
@@ -369,24 +417,14 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                     message.Id, message.IdempotencyKey, message.PartitionId);
                 _businessMetrics.RecordItemProcessed(
                     StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.RetryPersistenceFailed);
-                return;
+                return false;
             }
 
-            // MarkAsFailedWithRetryAsync mutates message.Status in place
-            // (ApplyFailureTransition) before returning normally, so its
-            // post-call value is authoritative: Failed means this call was
-            // the one that hit MaxRetryCount (recorded exactly once, since a
-            // row already Failed is never re-claimed — see
-            // GetClaimableMessagesQuery's RetryCount filter), anything else
-            // means it went back to Pending for another attempt.
+            // ADR-023: a failed row always goes back to Pending.
             _businessMetrics.RecordItemProcessed(
-                StoreName,
-                BusinessMetrics.StoreKind.Inbox,
-                message.Status == MessageConstants.Status.Failed
-                    ? BusinessMetrics.ItemOutcome.TerminalFailed
-                    : BusinessMetrics.ItemOutcome.RetryScheduled);
+                StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.RetryScheduled);
 
-            return;
+            return false;
         }
 
         try
@@ -394,7 +432,7 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
             var transition = await store.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
             if (transition == MessageTransitionOutcome.AlreadyTerminal)
             {
-                return;
+                return true;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -422,10 +460,11 @@ public abstract class InboxProcessorBase<TMessage> : BackgroundService
                 message.Id, message.IdempotencyKey, message.PartitionId);
             _businessMetrics.RecordItemProcessed(
                 StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.CompletionPersistenceFailed);
-            return;
+            return false;
         }
 
         _businessMetrics.RecordItemProcessed(StoreName, BusinessMetrics.StoreKind.Inbox, BusinessMetrics.ItemOutcome.Completed);
+        return true;
     }
 
     /// <summary>

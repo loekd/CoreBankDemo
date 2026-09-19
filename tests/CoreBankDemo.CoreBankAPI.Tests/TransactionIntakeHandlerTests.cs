@@ -587,44 +587,6 @@ public class TransactionIntakeHandlerTests
     }
 
     [Fact]
-    public async Task ProcessAsync_reports_transport_failed_when_inline_execution_throws_and_retries_are_exhausted()
-    {
-        // Patch 3 regression test: when MarkAsFailedWithRetryAsync drives the
-        // claimed row to terminal Failed (retries exhausted), ProcessAsync
-        // must reflect that -- not the generic Accepted/Pending response it
-        // would otherwise return whenever TryExecuteInlineAsync returns null.
-        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
-            .ReturnsAsync((InboxMessage?)null);
-        InboxMessage? stored = null;
-        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
-            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
-            .ReturnsAsync(true);
-        SetUpSuccessfulClaimOf(() => stored);
-        _executionHandler
-            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("ledger transaction rolled back"));
-        _inboxStore.Setup(s => s.MarkAsFailedWithRetryAsync(
-                It.IsAny<InboxMessage>(),
-                "ledger transaction rolled back",
-                It.IsAny<CancellationToken>()))
-            .Callback<InboxMessage, string, CancellationToken>((message, error, _) =>
-            {
-                message.Status = MessageConstants.Status.Failed;
-                message.LastError = error;
-            })
-            .ReturnsAsync(MessageTransitionOutcome.Applied);
-
-        var handler = CreateHandler();
-
-        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
-
-        result.Outcome.Should().Be(TransactionIntakeOutcome.TransportFailed);
-        result.Response.Should().BeNull();
-        result.Errors.Should().Equal("ledger transaction rolled back");
-        stored!.Status.Should().Be(MessageConstants.Status.Failed);
-    }
-
-    [Fact]
     public async Task ProcessAsync_returns_the_inline_completed_result_when_lock_ownership_is_lost_after_execution_commits()
     {
         // Patch 1 regression test: ExecuteWithLockAsync returns false both

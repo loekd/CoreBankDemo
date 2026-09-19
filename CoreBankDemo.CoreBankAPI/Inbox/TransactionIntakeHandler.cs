@@ -280,12 +280,11 @@ internal sealed class TransactionIntakeHandler(
     /// </summary>
     /// <returns>
     /// The <see cref="TransactionIntakeOutcome.InlineCompleted"/> result when
-    /// execution committed; a <see cref="TransactionIntakeOutcome.TransportFailed"/>
-    /// result when execution threw and that failure drove the row to a
-    /// terminal <c>Failed</c> state (retries exhausted); <see langword="null"/>
+    /// execution committed; <see langword="null"/>
     /// when the claim could not be won (a concurrent background batch claim
-    /// already owns the row), execution threw but the row was left retryable
-    /// (not yet terminal), or, defensively, when it returned without a
+    /// already owns the row), execution threw (ADR-023: the row goes back to
+    /// <c>Pending</c> for the inbox processor, never to a terminal
+    /// <c>Failed</c>), or, defensively, when it returned without a
     /// deserializable cached response. Note that a non-null result is
     /// returned even when the partition lock's ownership was lost mid-flight
     /// (<see cref="IDistributedLockService.ExecuteWithLockAsync"/> reports
@@ -443,29 +442,7 @@ internal sealed class TransactionIntakeHandler(
                 ex.Message,
                 cancellationToken).ConfigureAwait(false);
 
-            // MarkAsFailedWithRetryAsync mutates claimed.Status in place
-            // (MessageRepositoryBase.ApplyFailureTransition) before returning
-            // normally, so its post-call value is authoritative: Failed means
-            // this call was the one that hit MaxRetryCount -- the row is now
-            // terminal and the caller must be told so (matching
-            // BuildIntakeResultForExisting's Failed branch) instead of
-            // ProcessAsync falling through to the generic Accepted/Pending
-            // response for a row that will never be retried again.
-            if (claimed.Status == MessageConstants.Status.Failed)
-            {
-                logger.LogInformation(
-                    "Transaction {TransactionId} exhausted retries during inline execution and is now terminally failed",
-                    claimed.TransactionId);
-                Activity.Current?.SetTag("outcome", "transport_failed");
-                businessMetrics.RecordTransactionIntake(BusinessMetrics.TransactionIntakeOutcome.TransportFailed);
-                return new InlineAttempt(
-                    new TransactionIntakeResult(
-                        TransactionIntakeOutcome.TransportFailed,
-                        null,
-                        [claimed.LastError ?? ex.Message]),
-                    NotFirstYet: false);
-            }
-
+            // ADR-023: the row is back at Pending; the inbox processor retries it.
             return new InlineAttempt(null, NotFirstYet: false);
         }
 

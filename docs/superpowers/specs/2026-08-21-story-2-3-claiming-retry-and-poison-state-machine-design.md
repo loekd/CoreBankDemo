@@ -5,6 +5,7 @@
 > **Original date:** 2026-08-21
 > **Migrated from:** `docs/bmad/implementation-artifacts/spec-2-3-claiming-retry-and-poison-state-machine.md` on 2026-09-10
 > **Related:** PR #2
+> **Superseded in part by:** [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md) — the poison state is gone: a row is never given up on.
 
 
 ## Intent

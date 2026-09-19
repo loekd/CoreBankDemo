@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 namespace CoreBankDemo.PaymentsAPI.Outbox;
 
 /// <summary>
-/// Reusable validate-then-submit sequence against CoreBankAPI (spec:
+/// Reusable submission sequence against CoreBankAPI (spec:
 /// add-instant-payment-rail's code map: "reuse the existing claim, deliver
 /// and complete paths for the inline attempt ... do not copy it"). Extracted
 /// from <see cref="HttpForwardOutboxDeliveryStrategy"/> so the instant-rail
@@ -24,14 +24,16 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 internal interface ICoreBankTransactionForwarder
 {
     /// <summary>
-    /// Validates <paramref name="message"/>'s destination account, then
-    /// submits it. <paramref name="executeInline"/> carries
-    /// <c>X-Execute-Mode: inline</c> on the submission call only. Returns the
+    /// Submits <paramref name="message"/> directly, without validating its
+    /// destination account first (ADR-023). <paramref name="executeInline"/>
+    /// carries <c>X-Execute-Mode: inline</c> on the submission call. Returns the
     /// submission on success (AD-11: any 2xx, including a business rejection
     /// -- CoreBank's <c>TransactionResponse.Status</c> distinguishes those,
-    /// not this method's return path). Throws on any transport failure --
-    /// never a business-rejection outcome, see AD-11 -- so a caller inherits
-    /// the exact same retry-outcome classification
+    /// not this method's return path). A <c>400</c> is CoreBank's verdict
+    /// too (ADR-023, <see cref="CoreBankClientOutcome.Rejected"/>): it
+    /// returns a <c>Failed</c> submission instead of throwing. Throws on any
+    /// transport failure -- never a business-rejection outcome, see AD-11 --
+    /// so a caller inherits the exact same retry-outcome classification
     /// <see cref="HttpForwardOutboxDeliveryStrategy.DeliverAsync"/> already
     /// has.
     /// </summary>
@@ -53,32 +55,38 @@ internal interface ICoreBankTransactionForwarder
 }
 
 /// <summary>
-/// Forwards a stored payment to CoreBankAPI (story 5.4): validates the
-/// destination account, then submits the transaction, using the sole
+/// Forwards a stored payment to CoreBankAPI (story 5.4) using the sole
 /// application-owned port <see cref="ICoreBankApiClient"/> (story 5.3).
+/// Submits the transaction directly. There is no destination-account
+/// pre-validation (ADR-023): CoreBank checks both accounts when it executes
+/// the transaction, and that check is the only authoritative one -- an
+/// unknown or inactive account comes back as a committed business rejection
+/// (<c>transaction.failed</c>), never as a delivery failure.
 /// Mirrors <c>CoreBankDemo.CoreBankAPI.Outbox.DaprOutboxDeliveryStrategy</c>'s
 /// shape exactly — this strategy only decides delivery, never retry/backoff/
 /// terminal-failure classification (that stays kernel-owned in
 /// <c>OutboxProcessorBase&lt;TMessage&gt;</c>, AD-11).
 ///
 /// <para>
-/// Returns normally only when both calls report
+/// Returns normally only when the submission reports
 /// <see cref="CoreBankClientOutcome.Success"/> — including a 200 duplicate-
 /// accept replay from <see cref="ICoreBankApiClient.ProcessTransactionAsync"/>,
 /// which <see cref="KiotaCoreBankApiClient"/> already classifies as
-/// <see cref="CoreBankClientOutcome.Success"/> (story 5.3's Design Notes).
+/// <see cref="CoreBankClientOutcome.Success"/> (story 5.3's Design Notes) —
+/// or <see cref="CoreBankClientOutcome.Rejected"/>: a <c>400</c> is
+/// CoreBank's verdict (ADR-023), so the row completes with a cached
+/// <c>Failed</c> payload, exactly like a rejection at execution.
 /// Throws for every other outcome — a <see cref="CoreBankClientOutcome.Retry"/>
-/// from either call, or a <see cref="CoreBankClientOutcome.Success"/>
-/// validation whose <see cref="AccountValidation.IsValid"/> is
-/// <see langword="false"/> — so <c>OutboxProcessorBase&lt;TMessage&gt;</c>'s
-/// existing <c>MarkAsFailedWithRetryAsync</c>/terminal-<c>Failed</c>-at-
-/// <c>MaxRetryCount</c> path handles it exactly like any other delivery
-/// failure. Never adds retry logic of its own.
+/// from the submission — so <c>OutboxProcessorBase&lt;TMessage&gt;</c>'s
+/// existing <c>MarkAsFailedWithRetryAsync</c> path handles it exactly like
+/// any other delivery failure: the row goes back to <c>Pending</c> and is
+/// retried on a later poll tick, without limit, and never becomes terminally
+/// <c>Failed</c> (ADR-023). Never adds retry logic of its own.
 /// </para>
 ///
 /// <para>
 /// The delivery sequence itself has no <c>try</c>/<c>catch</c>: an
-/// <see cref="OperationCanceledException"/> raised by either
+/// <see cref="OperationCanceledException"/> raised by the
 /// <see cref="ICoreBankApiClient"/> call (caller-requested cancellation) is
 /// never caught here, so it propagates unchanged to
 /// <c>OutboxProcessorBase&lt;TMessage&gt;</c>, which treats it as ordinary
@@ -92,6 +100,7 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
     ICoreBankApiClient client,
     IOutboxMessageStore<OutboxMessage> store,
     BusinessMetrics businessMetrics,
+    TimeProvider timeProvider,
     ILogger<HttpForwardOutboxDeliveryStrategy> logger)
     : IOutboxDeliveryStrategy<OutboxMessage>, ICoreBankTransactionForwarder
 {
@@ -120,10 +129,11 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
         // failure classification (the same defect class review loop 2 guards
         // for completion persistence): delivery succeeded, so a failure here
         // must not be reported to the kernel as a delivery failure -- that
-        // would burn a retry, redeliver, get 200/Cancelled again, and could
-        // drive a provably cancelled command to terminal Failed. The row is
-        // left exactly as claiming left it (Processing) to be reclaimed once
-        // stale; CoreBank's replay is idempotent. Caller cancellation still
+        // would schedule a retry, redeliver and get 200/Cancelled again, so a
+        // provably cancelled command would be retried instead of cancelled
+        // (the kernel never writes Failed, ADR-023). The row is left exactly
+        // as claiming left it (Processing) to be reclaimed once stale;
+        // CoreBank's replay is idempotent. Caller cancellation still
         // propagates.
         try
         {
@@ -203,28 +213,6 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
     public async Task<TransactionSubmission> ForwardAsync(
         OutboxMessage message, bool executeInline, CancellationToken cancellationToken)
     {
-        var validation = await client
-            .ValidateAccountAsync(message.ToAccount, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (validation.Outcome != CoreBankClientOutcome.Success)
-        {
-            throw RetryOutcomeException(
-                "Destination account validation", validation.RetryReason, validation.StatusCode);
-        }
-
-        // A successful (2xx) validation call whose body says the account is
-        // invalid is a successful business response, not a transport
-        // failure (AD-11) -- but it is not a deliverable destination either,
-        // so forwarding must not proceed to submission. Per the spec's
-        // Boundaries, this is never anything other than a retry-then-
-        // eventually-Failed outcome, decided here and left to the kernel.
-        if (!validation.Value!.IsValid)
-        {
-            throw new InvalidOperationException(
-                $"Destination account '{message.ToAccount}' failed validation (IsValid=false).");
-        }
-
         var submission = await client
             .ProcessTransactionAsync(
                 new TransactionSubmissionRequest(
@@ -239,9 +227,7 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
             .ConfigureAwait(false);
 
         // Story 6.5: this is the sole concrete HTTP-send boundary for the
-        // transaction command (account validation is a different message
-        // shape, outside the closed message-type vocabulary, so it is never
-        // tagged here). Recorded after the attempt's outcome is known, before
+        // transaction command. Recorded after the attempt's outcome is known, before
         // throwing on failure -- never for a caller-cancelled attempt, since
         // an OperationCanceledException raised by ProcessTransactionAsync
         // itself propagates straight out of the awaited call above without
@@ -250,9 +236,26 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
             BusinessMetrics.DeliveryDirection.Sent,
             BusinessMetrics.Transport.Http,
             BusinessMetrics.MessageType.TransactionCommand,
-            submission.Outcome == CoreBankClientOutcome.Success
+            // A 400 verdict was delivered and answered: a business rejection
+            // is never counted as a transport failure (story 6.5, ADR-023).
+            submission.Outcome is CoreBankClientOutcome.Success or CoreBankClientOutcome.Rejected
                 ? BusinessMetrics.DeliveryOutcome.Succeeded
                 : BusinessMetrics.DeliveryOutcome.Failed);
+
+        // ADR-023: a 400 is CoreBank's verdict, recorded and published by
+        // CoreBank before it answered. It is a business rejection, not a
+        // delivery failure (AD-11): the row completes with a Failed payload,
+        // exactly like a rejection at execution, and is never retried.
+        if (submission.Outcome == CoreBankClientOutcome.Rejected)
+        {
+            logger.LogInformation(
+                "CoreBank rejected transaction {TransactionId} with status {StatusCode}; completing the row with a Failed outcome",
+                message.TransactionId, submission.StatusCode);
+            var rejected = new TransactionSubmission(
+                message.TransactionId, MessageConstants.Status.Failed, timeProvider.GetUtcNow());
+            message.ResponsePayload = JsonSerializer.Serialize(rejected);
+            return rejected;
+        }
 
         if (submission.Outcome != CoreBankClientOutcome.Success)
         {

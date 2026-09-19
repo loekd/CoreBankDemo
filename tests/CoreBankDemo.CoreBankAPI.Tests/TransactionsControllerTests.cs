@@ -28,13 +28,14 @@ public class TransactionsControllerTests
 
     private readonly Mock<ITransactionIntakeHandler> _handler = new(MockBehavior.Strict);
     private readonly Mock<ITransactionCancellationHandler> _cancellationHandler = new(MockBehavior.Strict);
+    private readonly Mock<ITransactionRejectionHandler> _rejectionHandler = new();
     private readonly BusinessMetrics _businessMetrics = new();
 
     private static TransactionRequest ValidRequest() => new(FromAccount, ToAccount, 50m, "EUR", TransactionId);
 
     private TransactionsController CreateController()
     {
-        var controller = new TransactionsController(_handler.Object, _cancellationHandler.Object, _businessMetrics)
+        var controller = new TransactionsController(_handler.Object, _cancellationHandler.Object, _rejectionHandler.Object, _businessMetrics)
         {
             ControllerContext = new ControllerContext
             {
@@ -58,6 +59,41 @@ public class TransactionsControllerTests
         errors.Should().BeEquivalentTo(["Amount is required", "Currency is required"]);
 
         _handler.VerifyNoOtherCalls();
+    }
+
+    [Theory]
+    [InlineData(TransactionRejectionOutcome.Recorded)]
+    [InlineData(TransactionRejectionOutcome.AlreadyKnown)]
+    [InlineData(TransactionRejectionOutcome.NotRecordable)]
+    public async Task ProcessTransaction_with_invalid_model_state_answers_400_once_the_rejection_is_settled(
+        TransactionRejectionOutcome outcome)
+    {
+        var request = new TransactionRequest("NL91ABNA0417164300", "NL20INGB0001234567", 0m, "EUR", "txn-bad");
+        _rejectionHandler
+            .Setup(h => h.RejectAsync(request, It.Is<IReadOnlyList<string>>(e => e.Contains("Amount out of range")), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(outcome);
+        var controller = CreateController();
+        controller.ModelState.AddModelError("Amount", "Amount out of range");
+
+        var result = await controller.ProcessTransaction(request, TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<BadRequestObjectResult>();
+        _handler.Verify(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), It.IsAny<bool>(), It.IsAny<int>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ProcessTransaction_answers_503_when_the_rejection_could_not_be_recorded()
+    {
+        var request = new TransactionRequest("NL91ABNA0417164300", "NL20INGB0001234567", 0m, "EUR", "txn-bad");
+        _rejectionHandler
+            .Setup(h => h.RejectAsync(request, It.IsAny<IReadOnlyList<string>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(TransactionRejectionOutcome.StoreFailed);
+        var controller = CreateController();
+        controller.ModelState.AddModelError("Amount", "Amount out of range");
+
+        var result = await controller.ProcessTransaction(request, TestContext.Current.CancellationToken);
+
+        result.Should().BeOfType<ObjectResult>().Which.StatusCode.Should().Be(StatusCodes.Status503ServiceUnavailable);
     }
 
     [Fact]
@@ -108,7 +144,7 @@ public class TransactionsControllerTests
     }
 
     [Fact]
-    public async Task ProcessTransaction_maps_transport_failed_outcome_to_bad_request_with_errors()
+    public async Task ProcessTransaction_answers_503_with_errors_for_the_transport_failed_outcome()
     {
         _handler.Setup(h => h.ProcessAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new TransactionIntakeResult(TransactionIntakeOutcome.TransportFailed, null, ["boom"]));
@@ -117,8 +153,9 @@ public class TransactionsControllerTests
 
         var result = await controller.ProcessTransaction(ValidRequest(), TestContext.Current.CancellationToken);
 
-        var badRequest = result.Should().BeOfType<BadRequestObjectResult>().Subject;
-        GetErrors(badRequest.Value).Should().Equal("boom");
+        var unavailable = result.Should().BeOfType<ObjectResult>().Subject;
+        unavailable.StatusCode.Should().Be(StatusCodes.Status503ServiceUnavailable);
+        GetErrors(unavailable.Value).Should().Equal("boom");
     }
 
     // ---- Story 6.5: business metrics ----
@@ -332,7 +369,7 @@ public class TransactionsControllerTests
     }
 
     [Fact]
-    public async Task CancelTransaction_maps_store_failed_to_bad_request_with_errors()
+    public async Task CancelTransaction_answers_503_with_errors_when_the_tombstone_could_not_be_stored()
     {
         _cancellationHandler
             .Setup(h => h.CancelAsync(It.IsAny<TransactionRequest>(), It.IsAny<CancellationToken>(), MessageConstants.Priority.Standard))
@@ -341,7 +378,9 @@ public class TransactionsControllerTests
 
         var result = await controller.CancelTransaction(ValidRequest(), TestContext.Current.CancellationToken);
 
-        GetErrors(result.Should().BeOfType<BadRequestObjectResult>().Subject.Value).Should().Equal("boom");
+        var unavailable = result.Should().BeOfType<ObjectResult>().Subject;
+        unavailable.StatusCode.Should().Be(StatusCodes.Status503ServiceUnavailable);
+        GetErrors(unavailable.Value).Should().Equal("boom");
     }
 
     [Theory]

@@ -34,7 +34,16 @@ internal enum CoreBankClientOutcome
     /// a lie -- <see cref="CoreBankResult{T}.Value"/> carries the current
     /// status CoreBankAPI reported, for the caller's diagnostics only.
     /// </summary>
-    Conflict
+    Conflict,
+
+    /// <summary>
+    /// CoreBankAPI answered <c>400</c> to a transaction submission (ADR-023):
+    /// its verdict on the request, recorded and published by CoreBank as
+    /// <c>transaction.failed</c> before it answered. Retrying can never
+    /// succeed. Carries no value -- the client contract never exposes response
+    /// bodies; the reason travels with CoreBank's event.
+    /// </summary>
+    Rejected
 }
 
 /// <summary>
@@ -65,12 +74,14 @@ internal enum CoreBankRetryReason
 /// returns. <see cref="Value"/> is populated when <see cref="Outcome"/>
 /// is <see cref="CoreBankClientOutcome.Success"/> (and, carrying the reported
 /// current state, for <see cref="CoreBankClientOutcome.Conflict"/>). <see cref="RetryReason"/>
-/// and <see cref="StatusCode"/> are populated only when <see cref="Outcome"/>
-/// is <see cref="CoreBankClientOutcome.Retry"/>; <see cref="StatusCode"/> is
-/// further only ever set for <see cref="CoreBankRetryReason.TransportRejection"/>
-/// (the frozen wire status CoreBankAPI actually returned) — never a
+/// is populated only when <see cref="Outcome"/> is
+/// <see cref="CoreBankClientOutcome.Retry"/>; <see cref="StatusCode"/> is
+/// only ever the frozen wire status CoreBankAPI actually returned — for a
+/// <see cref="CoreBankRetryReason.TransportRejection"/> retry, a
+/// <see cref="CoreBankClientOutcome.Conflict"/> (<c>409</c>) or a
+/// <see cref="CoreBankClientOutcome.Rejected"/> (<c>400</c>) — never a
 /// response body or generated error type. The primary constructor is
-/// private: <see cref="Success"/> and <see cref="Retry"/> are the only ways
+/// private: the static factories below are the only ways
 /// to build one, so a contradictory state (e.g. <see cref="Success"/> with a
 /// <see cref="RetryReason"/>, or <see cref="Outcome"/> disagreeing with
 /// <see cref="Value"/>) cannot be constructed. Still a normal
@@ -103,17 +114,11 @@ internal sealed record CoreBankResult<T>
     /// <summary>A <c>409</c> answer whose body <paramref name="value"/> is the current state CoreBankAPI reported.</summary>
     public static CoreBankResult<T> Conflict(T value) =>
         new(CoreBankClientOutcome.Conflict, value, retryReason: null, statusCode: 409);
-}
 
-/// <summary>
-/// Application-owned mirror of CoreBankAPI's <c>AccountValidationResponse</c>
-/// (frozen wire shape: <c>CoreBankDemo.CoreBankAPI/Models/AccountValidationResponse.cs</c>).
-/// </summary>
-internal sealed record AccountValidation(
-    string AccountNumber,
-    bool IsValid,
-    string? AccountHolderName,
-    decimal? Balance);
+    /// <summary>A <c>400</c> answer to a transaction submission: CoreBank's verdict, never retried (ADR-023).</summary>
+    public static CoreBankResult<T> Rejected(int statusCode) =>
+        new(CoreBankClientOutcome.Rejected, value: default, retryReason: null, statusCode);
+}
 
 /// <summary>
 /// Application-owned mirror of CoreBankAPI's <c>AccountDetailsResponse</c>

@@ -8,15 +8,16 @@ This document is the guardrail contract for every design spec, plan and implemen
 2. **Zero message loss** — every accepted payment reaches a terminal state; total submitted == total processed.
 3. **Balance conservation** — the sum of the 10 load-test account balances is constant (10 × €10,000,000).
 4. **Terminal-state completeness** — zero `Failed` and zero `Pending`/`Processing` messages after drain.
-5. **Per-key ordering** — messages with the same idempotency key partition are processed in order; one partition is processed by at most one worker at a time.
+5. **Per-key ordering** — messages with the same idempotency key partition are processed in order; one partition is processed by at most one worker at a time. A batch stops at the first row that does not reach a terminal state and releases the rows claimed behind it, so ordering holds with faults on (ADR-023).
 
 ## 2. External contract (same externally observable behavior as `main`)
 
 - **PaymentsAPI** (ports 5294, load-test 5295)
   - `POST /api/payments` → validate → store in Outbox (idempotent on `Idempotency-Key` header, GUID generated if absent) → `202 Accepted`; duplicate key → `202` referencing the existing record.
+  - Forwards with a single `POST /api/transactions/process`; there is no destination-account pre-validation (ADR-023).
   - Consumes Dapr CloudEvents from topic `transaction-events` at `/events/transactions/{completed|failed|balance-updated|cancelled|unknown}` into an Inbox (`cancelled` per ADR-020's addendum).
 - **CoreBankAPI** (port 5032)
-  - `POST /api/transactions/process` → validate → dedupe by `TransactionId` → Inbox row → `202`; duplicates replay cached `ResponsePayload`.
+  - `POST /api/transactions/process` → validate → dedupe by `TransactionId` → Inbox row → `202`; duplicates replay cached `ResponsePayload`. `400` is answered only after the rejection is recorded and its `transaction.failed` event enqueued in the same save; an internal failure answers `503` (ADR-023). Two rejections have nothing new to record and get a plain `400`: a request whose `TransactionId` is unusable, and a request whose `TransactionId` CoreBank already holds a row for (that row's outcome stands).
   - `GET /api/transactions/{idempotencyKey}`, `POST /api/accounts/validate`, `GET /api/accounts/{accountNumber}`.
   - Publishes `TransactionCompleted`/`TransactionFailed` + 2× `BalanceUpdated` CloudEvents per transaction, and one `TransactionCancelled` per CoreBank-side cancellation (ADR-020 addendum), via Dapr pubsub `pubsub`, topic `transaction-events`.
 - **LoadTestSupport** (port 5181): reset/drain/assert API + MCP server (`reset_database`, `poll_until_drained`, `get_assertion_results`, inbox/outbox inspection).

@@ -21,7 +21,6 @@ public class MessageConstantsTests
     [Fact]
     public void Default_limits_are_verbatim_legacy_values()
     {
-        MessageConstants.Defaults.MaxRetryCount.Should().Be(5);
         MessageConstants.Defaults.BatchSize.Should().Be(10);
         MessageConstants.Defaults.ProcessingTimeout.Should().Be(TimeSpan.FromMinutes(5));
         MessageConstants.Defaults.PollingInterval.Should().Be(TimeSpan.FromSeconds(5));

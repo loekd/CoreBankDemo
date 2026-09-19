@@ -175,7 +175,7 @@ The solution uses a shared `CoreBankDemo.Messaging` library to provide reusable 
 **Key Features:**
 - Generic implementations supporting any message type and DbContext
 - Partitioned processing with distributed locking (via Dapr)
-- Automatic retry logic with exponential backoff
+- Automatic retry without limit: a failed row returns to `Pending` and is retried on the next poll tick; a batch stops at its first failed row so nothing overtakes it (ADR-023). Backoff lives one layer down, in the HTTP resilience pipeline (ADR-006)
 - OpenTelemetry tracing integration
 - Configurable via `InboxProcessingOptions` and `OutboxProcessingOptions`
 
@@ -184,10 +184,9 @@ The solution uses a shared `CoreBankDemo.Messaging` library to provide reusable 
 Status.Pending      // "Pending"
 Status.Processing   // "Processing"
 Status.Completed    // "Completed"
-Status.Failed       // "Failed"
+Status.Failed       // "Failed" -- wire word for a business rejection in a response payload; no longer written as a row status (ADR-023)
 Status.Cancelled    // "Cancelled" -- terminal; instant rail withdrew the command before execution (ADR-020)
 
-Defaults.MaxRetryCount       // 5 attempts
 Defaults.BatchSize           // 10 messages per batch
 Defaults.ProcessingTimeout   // 5 minutes
 Defaults.PollingInterval     // 5 seconds
@@ -207,9 +206,10 @@ Defaults.PollingInterval     // 5 seconds
 4. OutboxProcessor background service:
    - Polls every 5 seconds
    - Processes messages in partition order
-   - Validates account with CoreBankAPI
-   - Processes transaction with CoreBankAPI
-   - Updates status to Completed/Failed
+   - Submits the transaction to CoreBankAPI (a single call; no account pre-validation, ADR-023)
+   - Updates status to Completed; a failed delivery returns the row to Pending and is retried
+     on every poll tick without limit; a batch stops at its first failed row so nothing
+     overtakes it (ADR-023)
 ```
 
 **Key Classes:**
@@ -315,10 +315,9 @@ Defaults.PollingInterval     // 5 seconds
 3. OutboxProcessor - Background Processing
    - Query pending messages for all partitions
    - For each message (in order per partition):
-     a. Validate toAccount via CoreBankAPI
-     b. POST to CoreBankAPI /api/transactions/process
+     a. POST to CoreBankAPI /api/transactions/process
         (includes IdempotencyKey from outbox)
-     c. Update OutboxMessage status to Completed
+     b. Update OutboxMessage status to Completed
 
 4. CoreBankAPI - Transaction Processing
    - Check InboxMessage for IdempotencyKey
@@ -369,7 +368,7 @@ Defaults.PollingInterval     // 5 seconds
 - ProcessedAt (datetime, nullable)
 - RetryCount (int)
 - LastError (string, nullable)
-- Status (string: Pending|Processing|Completed|Failed|Cancelled — Cancelled is terminal, written only by the instant rail's cancellation path, ADR-020)
+- Status (string: Pending|Processing|Completed|Failed|Cancelled — Cancelled is terminal, written only by the instant rail's cancellation path, ADR-020) (`Failed` is no longer written as a row status, ADR-023)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
 ```
@@ -385,7 +384,7 @@ Defaults.PollingInterval     // 5 seconds
 - ProcessedAt (datetime, nullable)
 - RetryCount (int)
 - LastError (string, nullable)
-- Status (string: Pending|Processing|Completed|Failed)
+- Status (string: Pending|Processing|Completed|Failed) (`Failed` is no longer written as a row status, ADR-023)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
 ```
@@ -418,7 +417,7 @@ Defaults.PollingInterval     // 5 seconds
 - ProcessedAt (datetime, nullable)
 - RetryCount (int)
 - LastError (string, nullable)
-- Status (string: Pending|Processing|Completed|Failed|Cancelled — Cancelled is terminal, written only by the instant rail's cancellation path, ADR-020)
+- Status (string: Pending|Processing|Completed|Failed|Cancelled — Cancelled is terminal, written only by the instant rail's cancellation path, ADR-020) (`Failed` is no longer written as a row status, ADR-023)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
 ```
@@ -433,7 +432,7 @@ Defaults.PollingInterval     // 5 seconds
 - ProcessedAt (datetime, nullable)
 - RetryCount (int)
 - LastError (string, nullable)
-- Status (string: Pending|Processing|Completed|Failed)
+- Status (string: Pending|Processing|Completed|Failed) (`Failed` is no longer written as a row status, ADR-023)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
 ```

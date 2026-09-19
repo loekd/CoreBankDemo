@@ -54,6 +54,7 @@ builder.Services.AddScoped<IInboxMessageRepository>(sp => sp.GetRequiredService<
 builder.Services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());
 builder.Services.AddScoped<ITransactionIntakeHandler, TransactionIntakeHandler>();
 builder.Services.AddScoped<ITransactionCancellationHandler, TransactionCancellationHandler>();
+builder.Services.AddScoped<ITransactionRejectionHandler, TransactionRejectionHandler>();
 builder.Services.AddScoped<ITransactionExecutor, TransactionExecutor>();
 builder.Services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
 builder.Services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionExecutionHandler>();

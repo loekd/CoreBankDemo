@@ -237,7 +237,7 @@ public sealed class AssertEndpointsIntegrationTests(PostgresContainerFixture fix
         await using var coreBank = CreateCoreBankContext();
         await using var payments = CreatePaymentsContext();
         var failed = CoreBankInbox("core-inbox-failed", MessageConstants.Status.Failed);
-        failed.RetryCount = MessageConstants.Defaults.MaxRetryCount;
+        failed.RetryCount = 5;
         failed.LastError = "transport exhausted";
         coreBank.InboxMessages.Add(failed);
         await coreBank.SaveChangesAsync(cancellationToken);

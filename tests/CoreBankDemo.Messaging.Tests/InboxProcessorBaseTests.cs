@@ -496,7 +496,7 @@ public class InboxProcessorBaseTests
     }
 
     [Fact]
-    public async Task Handler_failure_below_max_retry_records_a_retry_scheduled_item_metric()
+    public async Task Handler_failure_records_a_retry_scheduled_item_metric()
     {
         var message = NewMessage();
         message.RetryCount = 0;
@@ -525,37 +525,7 @@ public class InboxProcessorBaseTests
     }
 
     [Fact]
-    public async Task Handler_failure_at_max_retry_records_a_terminal_failed_item_metric_exactly_once()
-    {
-        var message = NewMessage();
-        message.RetryCount = MessageConstants.Defaults.MaxRetryCount - 1;
-        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
-        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { message });
-        store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
-        store.Setup(s => s.MarkAsFailedWithRetryAsync(message, It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<TestInboxMessage, string, CancellationToken>((m, _, _) => m.Status = MessageConstants.Status.Failed)
-            .ReturnsAsync(MessageTransitionOutcome.Applied);
-        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
-        handler.Setup(h => h.HandleAsync(message, It.IsAny<CancellationToken>()))
-            .ThrowsAsync(new InvalidOperationException("boom"));
-        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
-        var businessMetrics = new BusinessMetrics();
-        using var listener = new MetricsTestListener(businessMetrics);
-        var processor = new TestInboxProcessor(
-            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
-            NullLoggerLike(), businessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
-
-        await processor.RunTickAsync(CancellationToken.None);
-
-        listener.Measurements.Should()
-            .ContainSingle(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName)
-            .Which.Tags["outcome"].Should().Be("terminal_failed");
-    }
-
-    [Fact]
-    public async Task Concurrent_terminal_failure_records_no_second_terminal_failed_metric()
+    public async Task Failure_of_a_concurrently_terminal_row_records_no_item_metric()
     {
         var message = NewMessage();
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
@@ -745,18 +715,19 @@ public class InboxProcessorBaseTests
     }
 
     [Fact]
-    public async Task Handler_failure_on_one_message_still_lets_the_tick_continue_to_the_next_message()
+    public async Task Handler_failure_stops_the_batch_and_releases_the_rows_behind_it()
     {
         var first = NewMessage("first");
         var second = NewMessage("second");
+        var third = NewMessage("third");
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
         store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second, third });
         store.Setup(s => s.ClaimBatchForPartitionAsync(It.Is<int>(p => p != 0), It.IsAny<int>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IReadOnlyList<TestInboxMessage>)Array.Empty<TestInboxMessage>());
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
-        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
-        handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
         var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var processor = new TestInboxProcessor(
             new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
@@ -764,18 +735,130 @@ public class InboxProcessorBaseTests
 
         await processor.RunTickAsync(CancellationToken.None);
 
-        store.Verify(s => s.MarkAsFailedWithRetryAsync(first, "boom", It.IsAny<CancellationToken>()), Times.Once);
-        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.MarkAsCompletedAsync(first, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.MarkAsFailedWithRetryAsync(second, "boom", It.IsAny<CancellationToken>()), Times.Once);
+        handler.Verify(h => h.HandleAsync(third, It.IsAny<CancellationToken>()), Times.Never);
+        store.Verify(s => s.ReleaseClaimsAsync(
+            It.Is<IReadOnlyList<TestInboxMessage>>(rows => rows.Count == 1 && rows[0] == third),
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task Handler_failure_followed_by_a_MarkAsFailedWithRetryAsync_failure_does_not_escape_the_tick_and_the_next_message_still_dispatches()
+    public async Task A_batch_that_fully_succeeds_releases_nothing()
     {
-        // The real bug this guards: a transient DB conflict while persisting
-        // the retry (MarkAsFailedWithRetryAsync itself throwing) must not
-        // escape ProcessMessageAsync — that would abort the rest of this
-        // partition's batch for the tick, leaving later claimed messages
-        // never dispatched.
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
+        var processor = new TestInboxProcessor(
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            NullLoggerLike(), TestBusinessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(CancellationToken.None);
+
+        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+        store.Verify(s => s.ReleaseClaimsAsync(It.IsAny<IReadOnlyList<TestInboxMessage>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Cancellation_while_releasing_the_remainder_propagates_and_is_not_logged_as_a_release_failure()
+    {
+        using var cts = new CancellationTokenSource();
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ReleaseClaimsAsync(It.IsAny<IReadOnlyList<TestInboxMessage>>(), It.IsAny<CancellationToken>()))
+            .Returns<IReadOnlyList<TestInboxMessage>, CancellationToken>((_, ct) =>
+            {
+                cts.Cancel();
+                throw new OperationCanceledException(ct);
+            });
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, TestBusinessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
+
+        await processor.RunTickAsync(cts.Token);
+
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to release")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "cancellation is not a release failure");
+        // The cancellation left ReleaseRemainderAsync: it reached the tick
+        // boundary, the only place that catches it.
+        logger.Verify(l => l.Log(
+                LogLevel.Error,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Error processing inbox partitions")),
+                It.IsAny<OperationCanceledException>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task A_failure_while_releasing_the_remainder_never_escapes_the_tick()
+    {
+        var first = NewMessage("first");
+        var second = NewMessage("second");
+        var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
+        store.Setup(s => s.ClaimBatchForPartitionAsync(0, It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IReadOnlyList<TestInboxMessage>)new[] { first, second });
+        store.Setup(s => s.ReleaseClaimsAsync(It.IsAny<IReadOnlyList<TestInboxMessage>>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("db down"));
+        var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
+        handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("boom"));
+        var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
+        var logger = new Mock<ILogger>();
+        var processor = new TestInboxProcessor(
+            new AlwaysAcquiringLockService(), scopeFactory, ActivitySource, TimeProvider.System,
+            logger.Object, TestBusinessMetrics, new InboxProcessorOptions { PartitionCount = 1 });
+
+        var act = async () => await processor.RunTickAsync(CancellationToken.None);
+
+        await act.Should().NotThrowAsync("unreleased rows are reclaimed once their claim goes stale");
+        // The tick's outer catch blocks would also swallow the exception, so
+        // not throwing proves nothing on its own: the release failure must be
+        // handled where it happens, as one distinct warning, and must never
+        // surface as a lock-service or tick-level error.
+        logger.Verify(l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) => state.ToString()!.Contains("Failed to release")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once,
+            "the release failure must be logged distinctly by ReleaseRemainderAsync");
+        logger.Verify(l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((state, _) =>
+                    state.ToString()!.Contains("Lock service failed") || state.ToString()!.Contains("Error processing")),
+                It.IsAny<Exception>(),
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never,
+            "a release failure is bookkeeping and must not escape to the partition's or the tick's catch-all");
+    }
+
+    [Fact]
+    public async Task Handler_failure_followed_by_a_MarkAsFailedWithRetryAsync_failure_does_not_escape_the_tick_and_the_batch_stops()
+    {
+        // A transient DB conflict while persisting the retry
+        // (MarkAsFailedWithRetryAsync itself throwing) must not escape
+        // ProcessMessageAsync as an exception. ADR-023: the batch stops
+        // there -- the failed row is unsettled, so the rows claimed behind it
+        // are released rather than dispatched past it.
         var first = NewMessage("first");
         var second = NewMessage("second");
         var store = new Mock<IInboxMessageStore<TestInboxMessage>>();
@@ -788,7 +871,6 @@ public class InboxProcessorBaseTests
         var handler = new Mock<IInboxMessageHandler<TestInboxMessage>>();
         handler.Setup(h => h.HandleAsync(first, It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("boom"));
-        handler.Setup(h => h.HandleAsync(second, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         var scopeFactory = new FakeServiceScopeFactory(() => store.Object, () => handler.Object);
         var logger = new Mock<ILogger>();
         var processor = new TestInboxProcessor(
@@ -800,9 +882,11 @@ public class InboxProcessorBaseTests
         await act.Should().NotThrowAsync(
             "a MarkAsFailedWithRetryAsync failure after a handler failure must never escape the tick");
         store.Verify(s => s.MarkAsFailedWithRetryAsync(first, "boom", It.IsAny<CancellationToken>()), Times.Once);
-        handler.Verify(h => h.HandleAsync(second, It.IsAny<CancellationToken>()), Times.Once,
-            "the tick must continue to the next message in the batch despite the retry-persistence failure");
-        store.Verify(s => s.MarkAsCompletedAsync(second, It.IsAny<CancellationToken>()), Times.Once);
+        handler.Verify(h => h.HandleAsync(second, It.IsAny<CancellationToken>()), Times.Never,
+            "the row behind the unsettled one is not attempted in this tick; it is released instead");
+        store.Verify(s => s.ReleaseClaimsAsync(
+            It.Is<IReadOnlyList<TestInboxMessage>>(rows => rows.Count == 1 && rows[0] == second),
+            It.IsAny<CancellationToken>()), Times.Once);
         logger.Verify(l => l.Log(
                 It.IsAny<LogLevel>(),
                 It.IsAny<EventId>(),

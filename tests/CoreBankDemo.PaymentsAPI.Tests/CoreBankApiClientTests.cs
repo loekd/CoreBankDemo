@@ -27,90 +27,6 @@ public class CoreBankApiClientTests
     private const string AccountNumber = "NL91ABNA0417164300";
 
     [Fact]
-    public async Task ValidateAccountAsync_maps_2xx_body_to_success()
-    {
-        using var handler = new FakeHttpMessageHandler((request, _) =>
-        {
-            request.Method.Should().Be(HttpMethod.Post);
-            request.RequestUri!.AbsolutePath.Should().Be("/api/accounts/validate");
-            using var body = ReadJson(request);
-            body.RootElement.GetProperty("accountNumber").GetString().Should().Be(AccountNumber);
-            return JsonResponse(HttpStatusCode.OK, new
-            {
-                accountNumber = AccountNumber,
-                isValid = true,
-                accountHolderName = "Jane Doe",
-                balance = 123.45m
-            });
-        });
-        var client = CreateClient(handler);
-
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
-
-        result.Outcome.Should().Be(CoreBankClientOutcome.Success);
-        result.Value.Should().Be(new AccountValidation(AccountNumber, true, "Jane Doe", 123.45m));
-    }
-
-    [Fact]
-    public async Task ValidateAccountAsync_treats_4xx_as_retry_without_throwing()
-    {
-        using var handler = new FakeHttpMessageHandler((_, _) =>
-            JsonResponse(HttpStatusCode.BadRequest, new { errors = new[] { "AccountNumber is required" } }));
-        var client = CreateClient(handler);
-
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
-
-        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
-        result.Value.Should().BeNull();
-        result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
-        result.StatusCode.Should().Be(400);
-    }
-
-    [Fact]
-    public async Task ValidateAccountAsync_treats_malformed_success_body_as_retry()
-    {
-        using var handler = new FakeHttpMessageHandler((_, _) => JsonResponse(HttpStatusCode.OK, new { }));
-        var client = CreateClient(handler);
-
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
-
-        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
-        result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
-        result.StatusCode.Should().BeNull();
-    }
-
-    [Fact]
-    public async Task ValidateAccountAsync_treats_whitespace_only_account_number_as_retry()
-    {
-        // Present but blank required string data is just as malformed as a
-        // missing field entirely (edge-case matrix).
-        using var handler = new FakeHttpMessageHandler((_, _) =>
-            JsonResponse(HttpStatusCode.OK, new { accountNumber = "   ", isValid = true }));
-        var client = CreateClient(handler);
-
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
-
-        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
-        result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
-        result.StatusCode.Should().BeNull();
-    }
-
-    [Theory]
-    [InlineData(null)]
-    [InlineData("")]
-    [InlineData("   ")]
-    public async Task ValidateAccountAsync_rejects_missing_account_number(string? accountNumber)
-    {
-        using var handler = new FakeHttpMessageHandler((_, _) =>
-            throw new InvalidOperationException("invalid input must not reach the transport"));
-        var client = CreateClient(handler);
-
-        var act = () => client.ValidateAccountAsync(accountNumber!, TestContext.Current.CancellationToken);
-
-        await act.Should().ThrowAsync<ArgumentException>();
-    }
-
-    [Fact]
     public async Task GetAccountDetailsAsync_maps_2xx_body_to_success()
     {
         var createdAt = new DateTimeOffset(2026, 8, 20, 9, 0, 0, TimeSpan.Zero);
@@ -333,10 +249,48 @@ public class CoreBankApiClientTests
     }
 
     [Fact]
-    public async Task ProcessTransactionAsync_treats_400_transport_failure_as_retry_without_throwing()
+    public async Task ProcessTransactionAsync_maps_400_to_rejected_never_a_retry()
     {
         using var handler = new FakeHttpMessageHandler((_, _) =>
-            JsonResponse(HttpStatusCode.BadRequest, new { errors = new[] { "Transaction failed" } }));
+            JsonResponse(HttpStatusCode.BadRequest, new { errors = new[] { "Amount must be between 0.01 and 1,000,000" } }));
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(
+            AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Rejected);
+        result.StatusCode.Should().Be(400);
+        result.Value.Should().BeNull();
+        result.RetryReason.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_maps_a_400_with_an_unreadable_body_to_rejected_too()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("not json", System.Text.Encoding.UTF8, "application/json") });
+        var client = CreateClient(handler);
+        var request = new TransactionSubmissionRequest(
+            AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
+
+        var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Rejected);
+        result.StatusCode.Should().Be(400);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.NotFound)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task ProcessTransactionAsync_keeps_every_other_failure_status_a_retry(HttpStatusCode status)
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) => JsonResponse(status, new { errors = new[] { "x" } }));
         var client = CreateClient(handler);
         var request = new TransactionSubmissionRequest(
             AccountNumber, "NL20INGB0001234567", 100m, "EUR", "txn-1");
@@ -344,8 +298,7 @@ public class CoreBankApiClientTests
         var result = await client.ProcessTransactionAsync(request, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
-        result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
-        result.StatusCode.Should().Be(400);
+        result.StatusCode.Should().Be((int)status);
     }
 
     [Fact]
@@ -650,7 +603,7 @@ public class CoreBankApiClientTests
 
     [Theory]
     [InlineData("{")]
-    [InlineData("{\"accountNumber\":[],\"isValid\":true}")]
+    [InlineData("{\"accountNumber\":[],\"isActive\":true}")]
     public async Task Call_treats_malformed_2xx_json_as_malformed_response(string responseBody)
     {
         using var handler = new FakeHttpMessageHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
@@ -659,7 +612,7 @@ public class CoreBankApiClientTests
         });
         var client = CreateClient(handler);
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.MalformedResponse);
@@ -676,7 +629,7 @@ public class CoreBankApiClientTests
             });
         var client = CreateClient(handler);
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
@@ -689,7 +642,7 @@ public class CoreBankApiClientTests
     [InlineData("\"just a json string, not the expected object\"")]
     public async Task Call_preserves_http_status_even_when_mapped_error_body_is_empty_or_malformed(string errorBody)
     {
-        // 400 is a mapped ErrorResponse for ValidateAccountAsync (per
+        // 400 is a mapped ErrorResponse for GetAccountDetailsAsync (per
         // corebank-api.json); the point of this test is that the *status
         // code* classification must not depend on that body actually
         // deserializing (frozen matrix: "preserve status/diagnostic context
@@ -702,7 +655,7 @@ public class CoreBankApiClientTests
         });
         var client = CreateClient(handler);
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
@@ -721,7 +674,7 @@ public class CoreBankApiClientTests
             throw new TimeoutRejectedException("The operation didn't complete within the allowed timeout."));
         var client = CreateClient(handler);
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.Timeout);
@@ -735,7 +688,7 @@ public class CoreBankApiClientTests
             throw new HttpRequestException("connection reset"));
         var client = CreateClient(handler);
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.TransportException);
@@ -753,7 +706,7 @@ public class CoreBankApiClientTests
             throw new TaskCanceledException("timed out", new TimeoutException()));
         var client = CreateClient(handler);
 
-        var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+        var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.Timeout);
@@ -772,21 +725,9 @@ public class CoreBankApiClientTests
         using var cts = new CancellationTokenSource();
         await cts.CancelAsync();
 
-        var act = () => client.ValidateAccountAsync(AccountNumber, cts.Token);
+        var act = () => client.GetAccountDetailsAsync(AccountNumber, cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
-    }
-
-    [Fact]
-    public async Task Call_propagates_current_traceparent_and_tracestate_when_activity_present()
-    {
-        await AssertTraceContextAsync(
-            new { accountNumber = AccountNumber, isValid = true },
-            async (client, ct) =>
-            {
-                var result = await client.ValidateAccountAsync(AccountNumber, ct);
-                result.Outcome.Should().Be(CoreBankClientOutcome.Success);
-            });
     }
 
     [Fact]
@@ -854,12 +795,16 @@ public class CoreBankApiClientTests
                 return JsonResponse(HttpStatusCode.OK, new
                 {
                     accountNumber = AccountNumber,
-                    isValid = true
+                    accountHolderName = "Jane Doe",
+                    balance = 100m,
+                    currency = "EUR",
+                    isActive = true,
+                    createdAt = new DateTimeOffset(2026, 8, 20, 9, 0, 0, TimeSpan.Zero)
                 });
             });
             var client = CreateClient(handler);
 
-            var result = await client.ValidateAccountAsync(AccountNumber, TestContext.Current.CancellationToken);
+            var result = await client.GetAccountDetailsAsync(AccountNumber, TestContext.Current.CancellationToken);
 
             result.Outcome.Should().Be(CoreBankClientOutcome.Success);
         }

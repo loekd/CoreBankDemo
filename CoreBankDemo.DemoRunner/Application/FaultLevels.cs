@@ -95,11 +95,11 @@ public sealed record FaultLevels(
         [
             new FaultPreset("All off", AllZero),
             new FaultPreset("Regular profile", CheckedInDefaults(TopologyProfile.Regular)),
-            // An instant attempt makes two proxied calls (validate, then submit), each delayed
-            // on its own, so the band only has to let their sum pass the rail's 2.5 s attempt
-            // timeout now and then: a handful of payments in a burst of fifty overrun both
-            // attempts, and about half of those end cancelled.
-            new FaultPreset("Instant-rail jitter", new FaultLevels(5, 800, 3000, 0)),
+            // An instant attempt makes one proxied call (ADR-023 removed the pre-validation),
+            // so the band itself has to straddle the rail's 2.5 s attempt timeout: about one
+            // attempt in four overruns, a few payments in a burst of fifty overrun both, and
+            // roughly half of those end cancelled.
+            new FaultPreset("Instant-rail jitter", new FaultLevels(5, 1200, 3000, 0)),
         ],
         TopologyProfile.LoadTests =>
         [

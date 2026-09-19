@@ -1241,6 +1241,7 @@ public sealed class OperatorConsoleController
         var cancelled = 0;
         var sent = 0;
         var failures = new ConcurrentQueue<string>();
+        var withdrawals = new ConcurrentQueue<string>();
 
         try
         {
@@ -1313,6 +1314,11 @@ public sealed class OperatorConsoleController
                             // and the key is safe to retry. Tallied on the HTTP leg, never
                             // added to `failures`, never counted toward the proven leg.
                             Interlocked.Increment(ref cancelled);
+                            // Named on the burst's own record because nothing else will name
+                            // it: a payment withdrawn before it left PaymentsAPI never reaches
+                            // CoreBank, so no transaction.cancelled event follows (ADR-020).
+                            withdrawals.Enqueue($"{key}: {result.StatusCode} Cancelled — nothing executed, safe to retry with a new key");
+                            AddWithdrawnBurstPaymentRow(provenance, key, result);
                             break;
                         default:
                             Interlocked.Increment(ref failed);
@@ -1358,7 +1364,7 @@ public sealed class OperatorConsoleController
                 // The HTTP leg is what the API answered; the proven leg is what the broadcast
                 // confirmed, and it keeps moving after this record is written.
                 + $" Proven so far: settled {final.Settled}, rejected {final.Rejected}, awaiting {final.Awaiting}.";
-            AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), string.Join(Environment.NewLine, failures), !final.Cancelled && final.Failed == 0);
+            AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), BurstDetail(failures, withdrawals), !final.Cancelled && final.Failed == 0);
             EndMutation();
         }
 
@@ -1986,7 +1992,7 @@ public sealed class OperatorConsoleController
                 PaymentOutcome.Ambiguous => "Ambiguous — not yet reconciled; Resend is unsafe",
                 PaymentOutcome.Completed => $"{safeResult.StatusCode} Completed",
                 PaymentOutcome.Failed => $"{safeResult.StatusCode} Failed",
-                PaymentOutcome.Cancelled => $"{safeResult.StatusCode} Cancelled — the instant rail timed out and withdrew the payment; nothing executed, a retry with a new key is safe",
+                PaymentOutcome.Cancelled => WithdrawnSummary(safeResult.StatusCode),
                 _ => safeResult.ErrorSummary ?? safeResult.Outcome.ToString(),
             };
             AddEvidence(
@@ -2602,6 +2608,56 @@ public sealed class OperatorConsoleController
             ErrorReason = failed.ErrorReason,
             Note = failureContradicts ? $"HTTP proved {payment.HttpOutcome}, broadcast says Failed" : null,
         };
+    }
+
+    /// <summary>One wording for a 504 Cancelled row, whether the payment was sent alone or in a burst.</summary>
+    private static string WithdrawnSummary(int statusCode) =>
+        $"{statusCode} Cancelled — the instant rail timed out and withdrew the payment; nothing executed, a retry with a new key is safe";
+
+    /// <summary>
+    /// The one exception to "a burst's payments stay row-less". Every other burst payment is
+    /// named in the feed by CoreBank's own events; a payment the rail withdrew before it left
+    /// PaymentsAPI produces none (ADR-020), so without this row it would be the only outcome
+    /// the console never shows. Worded and shaped like a single payment's 504 row, and never
+    /// selected: the operator asked for the burst, not for this.
+    /// </summary>
+    private void AddWithdrawnBurstPaymentRow(EvidenceProvenance provenance, string key, PaymentResult result) =>
+        AddEvidence(
+            provenance,
+            EvidenceKind.Payment,
+            WithdrawnSummary(result.StatusCode),
+            "POST",
+            KnownEndpoints.PaymentsSubmit,
+            result.StatusCode,
+            result.Duration,
+            $"Idempotency {IdempotencyMode.Generated}: {key}{Environment.NewLine}"
+            + (result.Body ?? result.ErrorSummary ?? string.Empty),
+            succeeded: true,
+            transactionId: key,
+            select: false,
+            exchange: result.Exchange);
+
+    /// <summary>
+    /// The burst record's detail: the requests that failed, then the payments the rail withdrew,
+    /// each under its own heading so a withdrawal is never read as a failure. Empty when the
+    /// burst had neither.
+    /// </summary>
+    private static string BurstDetail(IReadOnlyCollection<string> failures, IReadOnlyCollection<string> withdrawals)
+    {
+        var lines = new List<string>();
+        if (failures.Count > 0)
+        {
+            lines.Add($"Failed ({failures.Count}):");
+            lines.AddRange(failures.Order(StringComparer.Ordinal));
+        }
+
+        if (withdrawals.Count > 0)
+        {
+            lines.Add($"Cancelled ({withdrawals.Count}):");
+            lines.AddRange(withdrawals.Order(StringComparer.Ordinal));
+        }
+
+        return string.Join(Environment.NewLine, lines);
     }
 
     /// <summary>

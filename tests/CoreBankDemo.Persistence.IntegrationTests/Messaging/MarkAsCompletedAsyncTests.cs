@@ -136,7 +136,7 @@ public class MarkAsCompletedAsyncTests(PostgresContainerFixture fixture) : Messa
             IdempotencyKey = "already-failed",
             EventType = "Debited",
             Status = MessageConstants.Status.Failed,
-            RetryCount = MessageConstants.Defaults.MaxRetryCount,
+            RetryCount = 5,
             LastError = "gave up",
         };
         context.OutboxEventMessages.Add(message);

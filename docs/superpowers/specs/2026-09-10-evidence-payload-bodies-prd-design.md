@@ -39,6 +39,11 @@ Three things are missing, and each one blocks a beat of the live demo:
 - No new workspace, no new keystroke, no new banking-service surface.
 - Burst payments stay row-less. A burst's outcomes are counted, not followed — the existing
   design decision stands, and 500 burst payments do not become 500 payload-carrying records.
+  One exception (2026-09-19): a burst payment the instant rail withdrew (`504 Cancelled`) gets
+  its own row. Every other burst payment is named in the feed by CoreBank's events; a payment
+  withdrawn before it left PaymentsAPI produces none (ADR-020), so without the row it would be
+  the only outcome the console never shows. The burst's own record also lists the withdrawn
+  ids in its detail.
 
 ## Users
 

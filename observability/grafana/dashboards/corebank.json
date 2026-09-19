@@ -651,7 +651,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (messaging_store_name, outcome) (rate(corebankdemo_messaging_items_processed_total{outcome=~\"retry_scheduled|terminal_failed|completion_persistence_failed|retry_persistence_failed\", service_name=~\"$service\"}[$__rate_interval]))",
+          "expr": "sum by (messaging_store_name, outcome) (rate(corebankdemo_messaging_items_processed_total{outcome=~\"retry_scheduled|completion_persistence_failed|retry_persistence_failed\", service_name=~\"$service\"}[$__rate_interval]))",
           "legendFormat": "{{messaging_store_name}} {{outcome}}",
           "range": true,
           "refId": "A"

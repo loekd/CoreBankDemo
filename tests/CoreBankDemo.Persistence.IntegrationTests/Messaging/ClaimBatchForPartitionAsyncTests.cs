@@ -46,23 +46,24 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     }
 
     [Fact]
-    public async Task Excludes_poisoned_rows_at_max_retry_count()
+    public async Task Claims_a_pending_row_however_often_it_has_been_retried()
     {
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
 
-        var poisoned = new TestInboxMessage
+        var retriedOften = new TestInboxMessage
         {
-            IdempotencyKey = "poisoned",
-            RetryCount = MessageConstants.Defaults.MaxRetryCount,
+            IdempotencyKey = "retried-often",
+            PartitionId = 0,
+            RetryCount = 500,
         };
-        context.InboxMessages.Add(poisoned);
+        context.InboxMessages.Add(retriedOften);
         await context.SaveChangesAsync(ct);
 
-        var claimed = await repository.ClaimBatchForPartitionAsync(partitionId: 0, batchSize: 10, ct);
+        var claimed = await repository.ClaimBatchForPartitionAsync(0, 10, ct);
 
-        claimed.Should().BeEmpty();
+        claimed.Should().ContainSingle().Which.Id.Should().Be(retriedOften.Id);
     }
 
     [Fact]
@@ -70,7 +71,7 @@ public class ClaimBatchForPartitionAsyncTests(PostgresContainerFixture fixture) 
     {
         // spec: instant-rail-timeout-cancel -- a Cancelled row is terminal and
         // must never be claimed by the background processor, even though it
-        // is under MaxRetryCount and sits in the claimable partition.
+        // sits in the claimable partition.
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         var repository = new TestInboxMessageRepository(context, TimeProvider, TestBusinessMetrics.Instance);
