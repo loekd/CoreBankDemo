@@ -935,6 +935,40 @@ public class OperatorConsoleControllerTests
     }
 
     [Fact]
+    public async Task Burst_EvidenceDetailNamesEveryCancelledPayment_ApartFromFailures()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(
+            Payment(PaymentOutcome.Cancelled, 504, "Cancelled"),
+            Payment(PaymentOutcome.TransportFailure, 0, null, "connection refused"),
+            Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        await controller.RunBurstAsync(InstantPayment, 3, 1, CancellationToken.None);
+
+        var keys = harness.Payments.Submissions.Select(submission => submission.IdempotencyKey!).ToList();
+        var detail = controller.State.Evidence.Last(record => record.Kind == EvidenceKind.Burst).Detail;
+        var lines = detail.Split(Environment.NewLine);
+        // A local cancel never reaches CoreBank, so no transaction.cancelled event will ever
+        // name it: the burst's own record is the only place these ids can appear.
+        lines.Should().Contain($"{keys[0]}: 504 Cancelled — nothing executed, safe to retry with a new key");
+        lines.Should().Contain(line => line.StartsWith($"{keys[1]}: "));
+        lines.Should().NotContain(line => line.StartsWith($"{keys[2]}: "), "a completed payment is neither a failure nor a withdrawal");
+        Array.IndexOf(lines, "Cancelled (1):").Should().BeGreaterThan(Array.IndexOf(lines, "Failed (1):"),
+            "failures come first: they are the ones that need attention");
+    }
+
+    [Fact]
+    public async Task Burst_EvidenceDetailHasNoHeadings_WhenNothingFailedOrWasCancelled()
+    {
+        var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);
+        harness.Payments.Queue(Payment(PaymentOutcome.Completed, 200, "Completed"));
+
+        await controller.RunBurstAsync(InstantPayment, 1, 1, CancellationToken.None);
+
+        controller.State.Evidence.Last(record => record.Kind == EvidenceKind.Burst).Detail.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Payment_WrongStatusForRail_IsReportedAsTransportFailure()
     {
         var (controller, harness) = await AttachedControllerAsync(TopologyProfile.Regular);

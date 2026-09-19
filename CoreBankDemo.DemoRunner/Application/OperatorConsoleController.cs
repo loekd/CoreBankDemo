@@ -1241,6 +1241,7 @@ public sealed class OperatorConsoleController
         var cancelled = 0;
         var sent = 0;
         var failures = new ConcurrentQueue<string>();
+        var withdrawals = new ConcurrentQueue<string>();
 
         try
         {
@@ -1313,6 +1314,10 @@ public sealed class OperatorConsoleController
                             // and the key is safe to retry. Tallied on the HTTP leg, never
                             // added to `failures`, never counted toward the proven leg.
                             Interlocked.Increment(ref cancelled);
+                            // Named on the burst's own record because nothing else will name
+                            // it: a payment withdrawn before it left PaymentsAPI never reaches
+                            // CoreBank, so no transaction.cancelled event follows (ADR-020).
+                            withdrawals.Enqueue($"{key}: {result.StatusCode} Cancelled — nothing executed, safe to retry with a new key");
                             break;
                         default:
                             Interlocked.Increment(ref failed);
@@ -1358,7 +1363,7 @@ public sealed class OperatorConsoleController
                 // The HTTP leg is what the API answered; the proven leg is what the broadcast
                 // confirmed, and it keeps moving after this record is written.
                 + $" Proven so far: settled {final.Settled}, rejected {final.Rejected}, awaiting {final.Awaiting}.";
-            AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), string.Join(Environment.NewLine, failures), !final.Cancelled && final.Failed == 0);
+            AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), BurstDetail(failures, withdrawals), !final.Cancelled && final.Failed == 0);
             EndMutation();
         }
 
@@ -2602,6 +2607,29 @@ public sealed class OperatorConsoleController
             ErrorReason = failed.ErrorReason,
             Note = failureContradicts ? $"HTTP proved {payment.HttpOutcome}, broadcast says Failed" : null,
         };
+    }
+
+    /// <summary>
+    /// The burst record's detail: the requests that failed, then the payments the rail withdrew,
+    /// each under its own heading so a withdrawal is never read as a failure. Empty when the
+    /// burst had neither.
+    /// </summary>
+    private static string BurstDetail(IReadOnlyCollection<string> failures, IReadOnlyCollection<string> withdrawals)
+    {
+        var lines = new List<string>();
+        if (failures.Count > 0)
+        {
+            lines.Add($"Failed ({failures.Count}):");
+            lines.AddRange(failures.Order(StringComparer.Ordinal));
+        }
+
+        if (withdrawals.Count > 0)
+        {
+            lines.Add($"Cancelled ({withdrawals.Count}):");
+            lines.AddRange(withdrawals.Order(StringComparer.Ordinal));
+        }
+
+        return string.Join(Environment.NewLine, lines);
     }
 
     /// <summary>
