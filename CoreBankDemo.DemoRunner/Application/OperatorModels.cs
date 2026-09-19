@@ -428,7 +428,16 @@ public sealed record EvidenceRecord(
     // sites attach one; a burst or a load workflow is an aggregate over many and attaches none.
     HttpExchange? Exchange = null,
     // The CloudEvent this record is about, as delivered. Only ever on an OutcomeEvent record.
-    CloudEventRecord? Event = null);
+    CloudEventRecord? Event = null,
+    // What the Evidence list row says (EvidenceTitles). Display-only: Summary stays the whole
+    // sentence for the Details pane, the status line and the export. Null only on a record
+    // built outside the controller, where the row falls back to Summary. Neither this nor
+    // Account is exported: the session export is the facts, and these are how a row words them.
+    [property: System.Text.Json.Serialization.JsonIgnore] string? Title = null,
+    // The account the row names after its title: the creditor on every transaction record,
+    // the updated account on a balance leg. Null where the console cannot know it -- an event
+    // for a payment it never sent, or one it remembers by id only.
+    [property: System.Text.Json.Serialization.JsonIgnore] string? Account = null);
 
 /// <summary>
 /// One <c>com.corebank.account.balance.updated</c> leg. Two per settlement, none per

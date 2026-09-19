@@ -69,7 +69,6 @@ public sealed record FaultsViewModel(
 public sealed record EvidenceRowViewModel(
     long Sequence,
     string Summary,
-    string Provenance,
     bool Succeeded);
 
 /// <summary>
@@ -245,9 +244,8 @@ public static class PresentationModelBuilder
                 // rather than replacing it -- swallowing the glyph made a failed inbound event
                 // indistinguishable from a settled one.
                 record.Kind == EvidenceKind.OutcomeEvent
-                    ? $"< {StatusGlyph(record.Succeeded)} {RowSummary(record.Summary)}"
-                    : $"  {StatusGlyph(record.Succeeded)} {RowSummary(record.Summary)}",
-                $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}{FaultProvenance(record)}",
+                    ? $"< {StatusGlyph(record.Succeeded)} {RowTitle(record)}"
+                    : $"  {StatusGlyph(record.Succeeded)} {RowTitle(record)}",
                 record.Succeeded))
             .ToList();
 
@@ -290,7 +288,7 @@ public static class PresentationModelBuilder
         var faults = BuildFaults(state, now);
         var announcement = Announcement(state);
         var profile = KnownTopologyProfiles.DisplayName(state.Profile);
-        var topologyBar = $"{profile} · {state.Ownership} · generation {state.RunGeneration} · "
+        var topologyBar = $"{profile} · {state.Ownership} · "
             + $"{faults.ChipSymbol} {faults.ChipLabel} · {resourceSummary}";
 
         return new OperatorPresentationModel(
@@ -743,28 +741,21 @@ public static class PresentationModelBuilder
             : $"{shortfall} {noun} unknown outcomes — see Evidence";
     }
 
-    private static string FaultProvenance(EvidenceRecord record) =>
-        record.FaultLevels is { } levels ? $" · faults {levels}" : string.Empty;
-
     /// <summary>
-    /// A list row shows the summary up to its first em dash and no further. Sixty-four of this
-    /// console's summaries are a verdict, an em dash and a trailing clause; the clause is what
-    /// makes the list unreadable from the back of a room. The whole summary survives untouched
-    /// on the record, in the Details pane, in the status line and in the export — only this one
-    /// projection is short.
+    /// What a list row says: the record's title (<see cref="EvidenceTitles"/>) and, where the
+    /// record names one, the account. The whole summary survives untouched on the record, in
+    /// the Details pane, in the status line and in the export — only this one projection is
+    /// short. A record with no title of its own is one whose summary already is one.
+    /// <para>
+    /// The row carries nothing after it. Topology, time and the fault levels a record was
+    /// captured under are the Details header's to state: appended to a row they ran it off the
+    /// edge of a list that is well under half the screen wide.
+    /// </para>
     /// </summary>
-    internal static string RowSummary(string summary)
+    internal static string RowTitle(EvidenceRecord record)
     {
-        var dash = summary.IndexOf('\u2014');
-        if (dash <= 0)
-        {
-            return summary;
-        }
-
-        // A cut that leaves nothing identifies nothing: a row of a gutter marker and a glyph is
-        // worse than a long one, so a summary that opens with its clause keeps all of itself.
-        var head = summary[..dash].TrimEnd();
-        return head.Length == 0 ? summary : head;
+        var title = record.Title ?? record.Summary;
+        return record.Account is { Length: > 0 } account ? $"{title} {account}" : title;
     }
 
     /// <summary>
@@ -922,7 +913,7 @@ public static class PresentationModelBuilder
         var lines = new List<string>
         {
             record.Summary,
-            $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Timestamp:HH:mm:ss}",
+            $"{KnownTopologyProfiles.DisplayName(record.Profile)} · {record.Timestamp:HH:mm:ss}",
             $"{record.Method} {record.Target}",
             $"HTTP {record.StatusCode?.ToString() ?? "n/a"} · {record.Duration.TotalMilliseconds:F0} ms",
             $"Faults: {FaultProvenanceDetail(record)}",
