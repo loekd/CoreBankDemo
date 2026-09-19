@@ -1318,6 +1318,7 @@ public sealed class OperatorConsoleController
                             // it: a payment withdrawn before it left PaymentsAPI never reaches
                             // CoreBank, so no transaction.cancelled event follows (ADR-020).
                             withdrawals.Enqueue($"{key}: {result.StatusCode} Cancelled — nothing executed, safe to retry with a new key");
+                            AddWithdrawnBurstPaymentRow(provenance, key, result);
                             break;
                         default:
                             Interlocked.Increment(ref failed);
@@ -1991,7 +1992,7 @@ public sealed class OperatorConsoleController
                 PaymentOutcome.Ambiguous => "Ambiguous — not yet reconciled; Resend is unsafe",
                 PaymentOutcome.Completed => $"{safeResult.StatusCode} Completed",
                 PaymentOutcome.Failed => $"{safeResult.StatusCode} Failed",
-                PaymentOutcome.Cancelled => $"{safeResult.StatusCode} Cancelled — the instant rail timed out and withdrew the payment; nothing executed, a retry with a new key is safe",
+                PaymentOutcome.Cancelled => WithdrawnSummary(safeResult.StatusCode),
                 _ => safeResult.ErrorSummary ?? safeResult.Outcome.ToString(),
             };
             AddEvidence(
@@ -2608,6 +2609,33 @@ public sealed class OperatorConsoleController
             Note = failureContradicts ? $"HTTP proved {payment.HttpOutcome}, broadcast says Failed" : null,
         };
     }
+
+    /// <summary>One wording for a 504 Cancelled row, whether the payment was sent alone or in a burst.</summary>
+    private static string WithdrawnSummary(int statusCode) =>
+        $"{statusCode} Cancelled — the instant rail timed out and withdrew the payment; nothing executed, a retry with a new key is safe";
+
+    /// <summary>
+    /// The one exception to "a burst's payments stay row-less". Every other burst payment is
+    /// named in the feed by CoreBank's own events; a payment the rail withdrew before it left
+    /// PaymentsAPI produces none (ADR-020), so without this row it would be the only outcome
+    /// the console never shows. Worded and shaped like a single payment's 504 row, and never
+    /// selected: the operator asked for the burst, not for this.
+    /// </summary>
+    private void AddWithdrawnBurstPaymentRow(EvidenceProvenance provenance, string key, PaymentResult result) =>
+        AddEvidence(
+            provenance,
+            EvidenceKind.Payment,
+            WithdrawnSummary(result.StatusCode),
+            "POST",
+            KnownEndpoints.PaymentsSubmit,
+            result.StatusCode,
+            result.Duration,
+            $"Idempotency {IdempotencyMode.Generated}: {key}{Environment.NewLine}"
+            + (result.Body ?? result.ErrorSummary ?? string.Empty),
+            succeeded: true,
+            transactionId: key,
+            select: false,
+            exchange: result.Exchange);
 
     /// <summary>
     /// The burst record's detail: the requests that failed, then the payments the rail withdrew,
