@@ -6,6 +6,7 @@ using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.App;
 using Terminal.Gui.Drawing;
 using Terminal.Gui.Input;
+using Terminal.Gui.ViewBase;
 using Xunit;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
@@ -91,6 +92,34 @@ public class EvidencePaneRenderTests
             "the pane is the same surface as the rest of the workspace, not a dimmed variant");
     }
 
+    /// <summary>
+    /// The list is read as it is drawn, not as it is modelled: a row is a short title and the
+    /// account, nothing after them -- and it fits the list without being cut. Asserting the title
+    /// field alone once passed while the drawn line still ran off the list's edge.
+    /// </summary>
+    [Fact]
+    public async Task TheEvidenceList_DrawsEveryRowWhole_WithNoFaultLevelsAndNoGeneration()
+    {
+        using var app = TerminalAppFactory.CreateHeadless(140, 40);
+        OperatorTheme.Register(ThemeMode.Dark);
+        using var window = await EvidenceWindowAsync(app);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(140, 40);
+        window.RenderForTest();
+        app.LayoutAndDraw(true);
+
+        var rows = AsDrawn(app, window.EvidenceList).Where(line => line.Length > 0).ToList();
+
+        rows.Should().HaveCount(window.EvidenceRowCount);
+        rows[0].Should().Be("  ● Transaction pending NL20INGB0001234567");
+        rows.Should().OnlyContain(row => !row.Contains("faults") && !row.Contains("generation") && !row.Contains('—'));
+        rows.Should().OnlyContain(
+            row => row.Length < window.EvidenceList.Frame.Width,
+            "a row that reaches the list's edge has been cut");
+    }
+
     /// <summary>A console holding one payment record that carries a full HTTP exchange.</summary>
     private static async Task<MainWindow> EvidenceWindowAsync(IApplication app, ThemeMode theme = ThemeMode.Dark)
     {
@@ -121,9 +150,11 @@ public class EvidencePaneRenderTests
         """{"transactionId":"tx-8821","status":"Pending","note":"long enough that the column can scroll"}""";
 
     /// <summary>Reads the RESPONSE column's cells straight off the driver's screen buffer.</summary>
-    private static List<string> ResponseColumnAsDrawn(IApplication app, MainWindow window)
+    private static List<string> ResponseColumnAsDrawn(IApplication app, MainWindow window) =>
+        AsDrawn(app, window.EvidenceResponsePane);
+
+    private static List<string> AsDrawn(IApplication app, View pane)
     {
-        var pane = window.EvidenceResponsePane;
         var origin = pane.FrameToScreen();
         var contents = app.Driver!.Contents!;
         var lines = new List<string>();

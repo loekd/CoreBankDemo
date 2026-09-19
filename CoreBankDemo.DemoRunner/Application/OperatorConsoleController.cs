@@ -302,6 +302,7 @@ public sealed class OperatorConsoleController
                         AddEvidence(
                             Provenance(refreshContext),
                             EvidenceKind.Topology,
+                            EvidenceTitles.StaleOwnershipNotCleared,
                             $"Failed to clear stale {state.Ownership} ownership for {refreshContext.Profile}",
                             "aspire ps --format Json",
                             refreshContext.Profile.ToString(),
@@ -326,6 +327,7 @@ public sealed class OperatorConsoleController
                 AddEvidence(
                     Provenance(refreshContext),
                     EvidenceKind.Topology,
+                    EvidenceTitles.AppHostDisappeared,
                     $"{state.Ownership} AppHost disappeared",
                     "aspire ps --format Json",
                     refreshContext.Profile.ToString(),
@@ -373,7 +375,7 @@ public sealed class OperatorConsoleController
                 && !snapshot.IsAwaitingConfirmation
                 && _time.GetUtcNow() - snapshot.CapturedAt <= _options.SnapshotFreshness,
             StatusLine = snapshot.IsReachable
-                ? $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {current.Ownership} · generation {current.RunGeneration}"
+                ? $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {current.Ownership}"
                 : $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · Unreachable — {snapshot.ErrorSummary}",
         });
 
@@ -429,14 +431,14 @@ public sealed class OperatorConsoleController
                 var detail = JournalText.Bound(_processes.GetRecentOutput(handle));
                 await _processes.StopOwnedAsync(handle, CancellationToken.None);
                 _ownedHandle = null;
-                AddEvidence(EvidenceKind.Topology, $"Start {profile} timed out", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), detail, false);
+                AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Start {profile} timed out", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), detail, false);
                 return CommandResult.Rejected($"Timed out waiting for {profile}. {detail}");
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
             await AdoptFaultStateAsync(profile, armFaults, ct);
             await StartOutcomeFeedAsync(profile, ct);
-            AddEvidence(EvidenceKind.Topology, $"Started {profile} as Owned", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
+            AddEvidence(EvidenceKind.Topology, EvidenceTitles.Started(profile), $"Started {profile} as Owned", $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} started and verified.");
         }
         catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or System.ComponentModel.Win32Exception)
@@ -455,7 +457,7 @@ public sealed class OperatorConsoleController
                 }
             }
 
-            AddEvidence(EvidenceKind.Topology, $"Start {profile} failed", handle is null ? "aspire start" : $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), error, false);
+            AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Start {profile} failed", handle is null ? "aspire start" : $"aspire start --apphost {handle.ProjectPath}", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), error, false);
             return CommandResult.Rejected(error);
         }
         finally
@@ -486,14 +488,14 @@ public sealed class OperatorConsoleController
             var snapshot = await _aspire.GetSnapshotAsync(profile, ct);
             if (!snapshot.IsReady)
             {
-                AddEvidence(EvidenceKind.Topology, $"Attach {profile} rejected", "aspire describe", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.ErrorSummary ?? "Fingerprint mismatch.", false);
+                AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Attach {profile} rejected", "aspire describe", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.ErrorSummary ?? "Fingerprint mismatch.", false);
                 return CommandResult.Rejected(snapshot.ErrorSummary ?? "The running graph does not match the known profile.");
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Attached);
             await AdoptFaultStateAsync(profile, armed: false, ct);
             await StartOutcomeFeedAsync(profile, ct);
-            AddEvidence(EvidenceKind.Topology, $"Attached to {profile}", "aspire describe", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
+            AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Attached to {profile}", "aspire describe", profile.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"{profile} attached as unowned.");
         }
         finally
@@ -529,14 +531,14 @@ public sealed class OperatorConsoleController
                 // failure or an "aspire ps" timeout -- this must surface as a
                 // Rejected result the UI can display, like every other
                 // failure path in this controller, not propagate uncaught.
-                AddEvidence(EvidenceKind.Topology, $"Stop {state.Profile} failed", $"aspire stop --apphost {ownedHandle.ProjectPath}", state.Profile.ToString(), null, TimeSpanSince(mutation.StartedAt), ex.Message, false);
+                AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Stop {state.Profile} failed", $"aspire stop --apphost {ownedHandle.ProjectPath}", state.Profile.ToString(), null, TimeSpanSince(mutation.StartedAt), ex.Message, false);
                 return CommandResult.Rejected(ex.Message);
             }
 
             var stoppedProfile = state.Profile;
             await StopOutcomeFeedAsync(CancellationToken.None);
             await DeleteSessionFaultConfigAsync(stoppedProfile, state.FaultsArmed, CancellationToken.None);
-            AddEvidence(EvidenceKind.Topology, $"Stopped {stoppedProfile}", $"aspire stop --apphost {ownedHandle.ProjectPath}", stoppedProfile.ToString(), null, TimeSpanSince(mutation.StartedAt), stop.Detail, true);
+            AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Stopped {stoppedProfile}", $"aspire stop --apphost {ownedHandle.ProjectPath}", stoppedProfile.ToString(), null, TimeSpanSince(mutation.StartedAt), stop.Detail, true);
             _ownedHandle = null;
             _debouncer.Reset();
             Update(current => current with
@@ -617,7 +619,7 @@ public sealed class OperatorConsoleController
                     TrackedPayments = [],
                     Feed = OutcomeFeedStatus.NotStarted,
                     LastLoadResult = null,
-                    LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for the new generation."),
+                    LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for the new topology."),
                     FaultsArmed = false,
                     AppliedFaults = null,
                     StagedFaults = null,
@@ -640,14 +642,14 @@ public sealed class OperatorConsoleController
             {
                 await _processes.StopOwnedAsync(targetHandle, CancellationToken.None);
                 _ownedHandle = null;
-                AddEvidence(EvidenceKind.Topology, $"Switch to {target} timed out", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), JournalText.Bound(_processes.GetRecentOutput(targetHandle)), false);
+                AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Switch to {target} timed out", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), JournalText.Bound(_processes.GetRecentOutput(targetHandle)), false);
                 return CommandResult.Rejected($"Timed out switching to {target}.");
             }
 
             ActivateTopology(snapshot, TopologyOwnership.Owned);
             await AdoptFaultStateAsync(target, armTargetFaults, ct);
             await StartOutcomeFeedAsync(target, ct);
-            AddEvidence(EvidenceKind.Topology, $"Switched to {target}", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
+            AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Switched to {target}", $"aspire start --apphost {targetHandle.ProjectPath}", target.ToString(), null, TimeSpanSince(mutation.StartedAt), snapshot.Fingerprint, true);
             return CommandResult.Ok($"Switched to {target}.");
         }
         catch (Exception ex) when (ex is InvalidOperationException or TimeoutException)
@@ -666,7 +668,7 @@ public sealed class OperatorConsoleController
                 }
             }
 
-            AddEvidence(EvidenceKind.Topology, $"Switch to {target} failed", "aspire stop + aspire start", target.ToString(), null, TimeSpanSince(mutation.StartedAt), error, false);
+            AddEvidence(EvidenceKind.Topology, EvidenceTitles.SameAsSummary, $"Switch to {target} failed", "aspire stop + aspire start", target.ToString(), null, TimeSpanSince(mutation.StartedAt), error, false);
             return CommandResult.Rejected(error);
         }
         finally
@@ -703,7 +705,7 @@ public sealed class OperatorConsoleController
             var dispatch = await _aspire.ExecuteResourceCommandAsync(state.Profile, resourceName, command, ct);
             if (dispatch.Status == ResourceDispatchStatus.Rejected)
             {
-                AddEvidence(EvidenceKind.Resource, $"{command} {resourceName} rejected", $"aspire resource {resourceName} {command.ToString().ToLowerInvariant()}", resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, false);
+                AddEvidence(EvidenceKind.Resource, EvidenceTitles.SameAsSummary, $"{command} {resourceName} rejected", $"aspire resource {resourceName} {command.ToString().ToLowerInvariant()}", resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, false);
                 return CommandResult.Rejected(dispatch.Detail);
             }
 
@@ -720,6 +722,7 @@ public sealed class OperatorConsoleController
                 });
                 AddEvidence(
                     EvidenceKind.Resource,
+                    EvidenceTitles.SameAsSummary,
                     dispatch.Status == ResourceDispatchStatus.Partial
                         ? $"{command} {resourceName} partially applied"
                         : $"{command} {resourceName} ambiguous",
@@ -746,7 +749,7 @@ public sealed class OperatorConsoleController
                 var summary = wait.Partial
                     ? $"{command} {resourceName} partially resolved"
                     : $"{command} {resourceName} ambiguous";
-                AddEvidence(EvidenceKind.Resource, summary, ExactResourceCommands(command, dispatch.AffectedInstances, []), resourceName, null, TimeSpanSince(mutation.StartedAt), wait.Detail, false);
+                AddEvidence(EvidenceKind.Resource, EvidenceTitles.SameAsSummary, summary, ExactResourceCommands(command, dispatch.AffectedInstances, []), resourceName, null, TimeSpanSince(mutation.StartedAt), wait.Detail, false);
                 return CommandResult.Rejected(
                     wait.Partial
                         ? $"Partial mutation: {wait.Detail} Refresh is required before further mutation."
@@ -754,7 +757,7 @@ public sealed class OperatorConsoleController
             }
 
             Update(current => current with { Topology = wait.Snapshot });
-            AddEvidence(EvidenceKind.Resource, $"{command} {resourceName} confirmed", ExactResourceCommands(command, dispatch.AffectedInstances, []), resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, true);
+            AddEvidence(EvidenceKind.Resource, EvidenceTitles.SameAsSummary, $"{command} {resourceName} confirmed", ExactResourceCommands(command, dispatch.AffectedInstances, []), resourceName, null, TimeSpanSince(mutation.StartedAt), dispatch.Detail, true);
             return CommandResult.Ok($"{resourceName}: {command} confirmed by Aspire.");
         }
         finally
@@ -873,7 +876,7 @@ public sealed class OperatorConsoleController
                     payment.TransactionId),
                 ct);
 
-            var (summary, message, succeeded) = ApplyCancellation(
+            var (title, summary, message, succeeded) = ApplyCancellation(
                 context,
                 payment.TransactionId,
                 result,
@@ -881,6 +884,7 @@ public sealed class OperatorConsoleController
             AddEvidence(
                 provenance,
                 EvidenceKind.Payment,
+                title,
                 summary,
                 "POST",
                 KnownEndpoints.TransactionCancel,
@@ -889,7 +893,8 @@ public sealed class OperatorConsoleController
                 result.Body ?? result.ErrorSummary ?? string.Empty,
                 succeeded,
                 transactionId: payment.TransactionId,
-                exchange: result.Exchange);
+                exchange: result.Exchange,
+                account: payment.ToAccount);
             return succeeded ? CommandResult.Ok(message) : CommandResult.Rejected(message);
         }
         finally
@@ -975,7 +980,7 @@ public sealed class OperatorConsoleController
     /// stops a resolved cancellation's final clock reading <c>0s</c> for ever, since CoreBank
     /// publishes nothing at all for a replayed cancellation.
     /// </param>
-    private (string Summary, string Message, bool Succeeded) ApplyCancellation(
+    private (string Title, string Summary, string Message, bool Succeeded) ApplyCancellation(
         OperationContext context,
         string transactionId,
         PaymentCancellationResult result,
@@ -994,6 +999,7 @@ public sealed class OperatorConsoleController
                     Note = "withdrawn before execution · no money moved",
                 });
                 return (
+                    EvidenceTitles.TransactionCancelled,
                     $"{result.StatusCode} Cancelled — withdrawn before execution; no money moved, safe to retry with a new key",
                     "200 Cancelled — withdrawn before execution · no money moved · safe to retry with a new key",
                     true);
@@ -1009,6 +1015,7 @@ public sealed class OperatorConsoleController
                     Note = "too late to cancel — the bank had already executed it",
                 });
                 return (
+                    EvidenceTitles.CancelTooLate,
                     $"{result.StatusCode} {result.Status} — too late to cancel; the bank had already executed it",
                     $"too late to cancel — the bank had already executed it ({result.Status})",
                     true);
@@ -1023,6 +1030,7 @@ public sealed class OperatorConsoleController
                     Note = $"the bank reports status {result.Status}",
                 });
                 return (
+                    EvidenceTitles.CancelRefused,
                     $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
                     $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
                     false);
@@ -1031,6 +1039,7 @@ public sealed class OperatorConsoleController
                 // The refusal was about this instant, not about the payment: it is left exactly
                 // where it was and the action slot returns to Cancel payment.
                 return (
+                    EvidenceTitles.CancelRefused,
                     $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
                     $"cancel refused ({result.StatusCode}) — the bank reports status {result.Status}",
                     false);
@@ -1044,6 +1053,7 @@ public sealed class OperatorConsoleController
                         ? "the cancel request did not complete"
                         : $"CoreBankAPI answered HTTP {result.StatusCode}");
                 return (
+                    EvidenceTitles.CancelFailed,
                     $"cancel failed — {detail}",
                     $"cancel failed — {detail}. The payment is left exactly as it was.",
                     false);
@@ -1131,6 +1141,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             provenance,
             EvidenceKind.OutcomeQuery,
+            result.Succeeded ? EvidenceTitles.OutcomeQueried : EvidenceTitles.OutcomeQueryFailed,
             result.Succeeded ? $"Outcome query returned HTTP {result.StatusCode}" : "Outcome query failed",
             "GET",
             result.Target,
@@ -1138,7 +1149,11 @@ public sealed class OperatorConsoleController
             result.Duration,
             result.Body ?? result.ErrorSummary ?? string.Empty,
             result.Succeeded,
-            exchange: result.Exchange);
+            exchange: result.Exchange,
+            // Known only for a payment this console still tracks; a bare id names no creditor.
+            account: state.TrackedPayments.FirstOrDefault(payment =>
+                payment.TransactionId == transactionIdOrKey.Trim()
+                || payment.IdempotencyKey == transactionIdOrKey.Trim())?.ToAccount);
         return result with { Duration = result.Duration == TimeSpan.Zero ? TimeSpanSince(startedAt) : result.Duration };
     }
 
@@ -1159,6 +1174,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             Provenance(context),
             EvidenceKind.Inspection,
+            EvidenceTitles.SameAsSummary,
             result.Succeeded ? $"Inspected {endpointId}" : $"Inspection failed: {endpointId}",
             "GET",
             result.Target,
@@ -1292,7 +1308,7 @@ public sealed class OperatorConsoleController
                         // ResolveTrackedPayment), where both records can be kept side by side.
                         if (result.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed)
                         {
-                            _burstTransactions[burstTransactionId] = new BurstTransaction(burstNumber);
+                            _burstTransactions[burstTransactionId] = new BurstTransaction(burstNumber, template.ToAccount);
                             ResolveBufferedBurstEvents(burstTransactionId, burstNumber);
                         }
                         else
@@ -1318,7 +1334,7 @@ public sealed class OperatorConsoleController
                             // it: a payment withdrawn before it left PaymentsAPI never reaches
                             // CoreBank, so no transaction.cancelled event follows (ADR-020).
                             withdrawals.Enqueue($"{key}: {result.StatusCode} Cancelled — nothing executed, safe to retry with a new key");
-                            AddWithdrawnBurstPaymentRow(provenance, key, result);
+                            AddWithdrawnBurstPaymentRow(provenance, key, result, template.ToAccount);
                             break;
                         default:
                             Interlocked.Increment(ref failed);
@@ -1364,7 +1380,10 @@ public sealed class OperatorConsoleController
                 // The HTTP leg is what the API answered; the proven leg is what the broadcast
                 // confirmed, and it keeps moving after this record is written.
                 + $" Proven so far: settled {final.Settled}, rejected {final.Rejected}, awaiting {final.Awaiting}.";
-            AddEvidence(provenance, EvidenceKind.Burst, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), BurstDetail(failures, withdrawals), !final.Cancelled && final.Failed == 0);
+            var title = final.Cancelled
+                ? EvidenceTitles.BurstCancelled(final.Sent, count)
+                : EvidenceTitles.BurstFinished(final.Sent, count);
+            AddEvidence(provenance, EvidenceKind.Burst, title, summary, "POST", KnownEndpoints.PaymentsSubmit, null, TimeSpanSince(mutation.StartedAt), BurstDetail(failures, withdrawals), !final.Cancelled && final.Failed == 0);
             EndMutation();
         }
 
@@ -1538,13 +1557,14 @@ public sealed class OperatorConsoleController
             AddEvidence(
                 Provenance(context),
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultsDiscarded,
                 $"{action} discarded — the topology changed while the config was being written",
                 "WRITE",
                 result.Path,
                 null,
                 TimeSpanSince(startedAt),
-                $"Captured for {context.Profile} generation {context.RunGeneration}; "
-                + $"now {State.Profile} generation {State.RunGeneration}.",
+                $"Captured for a {context.Profile} topology that has since been stopped or switched; "
+                + $"now {State.Profile}.",
                 false);
             return CommandResult.Rejected(
                 "The topology changed while the fault config was being written; no level was applied to it.");
@@ -1563,6 +1583,7 @@ public sealed class OperatorConsoleController
             AddEvidence(
                 Provenance(context),
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultsNotApplied,
                 $"{action} failed — no level reached the proxy",
                 "WRITE",
                 result.Path,
@@ -1584,13 +1605,14 @@ public sealed class OperatorConsoleController
             AddEvidence(
                 Provenance(context),
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultsDiscarded,
                 $"{action} discarded — the topology changed while the Dev Proxy was restarting",
                 RestartCommandText,
                 KnownResources.DevProxy,
                 null,
                 TimeSpanSince(startedAt),
-                $"Captured for {context.Profile} generation {context.RunGeneration}; "
-                + $"now {State.Profile} generation {State.RunGeneration}.",
+                $"Captured for a {context.Profile} topology that has since been stopped or switched; "
+                + $"now {State.Profile}.",
                 false);
             return CommandResult.Rejected(
                 "The topology changed while the Dev Proxy was restarting; no level was applied to it.");
@@ -1608,6 +1630,7 @@ public sealed class OperatorConsoleController
             AddEvidence(
                 Provenance(context),
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultsWrittenNotInForce,
                 $"{action} written but not in force — the Dev Proxy did not restart",
                 RestartCommandText,
                 KnownResources.DevProxy,
@@ -1632,6 +1655,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             new EvidenceProvenance(context.Profile, context.RunGeneration, applied.IsAllZero ? null : applied),
             EvidenceKind.Fault,
+            applied.IsAllZero ? EvidenceTitles.FaultsOff : EvidenceTitles.FaultsApplied,
             applied.IsAllZero
                 ? $"{action} — every knob at zero, nothing is being injected"
                 : $"{action} — {applied}; applied, not yet observed in traffic",
@@ -1708,6 +1732,7 @@ public sealed class OperatorConsoleController
         {
             AddEvidence(
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultConfigResetFailed,
                 "Could not reset the generated Dev Proxy session config before arming",
                 "WRITE",
                 reset.Path,
@@ -1742,6 +1767,7 @@ public sealed class OperatorConsoleController
         {
             AddEvidence(
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultConfigDeleteFailed,
                 "Could not remove the generated Dev Proxy session config — it will shadow the checked-in profile",
                 "DELETE",
                 deleted.Path,
@@ -1775,6 +1801,7 @@ public sealed class OperatorConsoleController
         {
             AddEvidence(
                 EvidenceKind.Fault,
+                EvidenceTitles.FaultLevelsUnreadable,
                 "Could not read the Dev Proxy levels in force — showing the checked-in defaults",
                 "READ",
                 read.Path,
@@ -1826,6 +1853,7 @@ public sealed class OperatorConsoleController
             AddEvidence(
                 provenance,
                 EvidenceKind.LoadTest,
+                result.AllPassed ? EvidenceTitles.LoadTestPassed : EvidenceTitles.LoadTestFailed,
                 result.AllPassed ? "Load workflow passed" : $"Load workflow did not pass at {result.FinalPhase}",
                 "accepted load workflow",
                 "Reset → Run → Wait → Assert → Investigate",
@@ -1848,6 +1876,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             Provenance(state),
             EvidenceKind.Export,
+            result.Succeeded ? EvidenceTitles.EvidenceExported : EvidenceTitles.EvidenceExportFailed,
             result.Succeeded ? "Session evidence exported" : "Evidence export failed",
             "WRITE",
             result.Path,
@@ -1995,9 +2024,21 @@ public sealed class OperatorConsoleController
                 PaymentOutcome.Cancelled => WithdrawnSummary(safeResult.StatusCode),
                 _ => safeResult.ErrorSummary ?? safeResult.Outcome.ToString(),
             };
+            var title = safeResult.Outcome switch
+            {
+                PaymentOutcome.Pending => EvidenceTitles.TransactionPending,
+                PaymentOutcome.Ambiguous => EvidenceTitles.TransactionOutcomeUnknown,
+                PaymentOutcome.Completed => EvidenceTitles.TransactionCompleted,
+                PaymentOutcome.Failed => EvidenceTitles.TransactionFailed,
+                PaymentOutcome.Cancelled => EvidenceTitles.TransactionCancelled,
+                // A transport failure or an answer the rail's contract does not allow: the request
+                // may well have been sent, so the row claims an error and nothing more.
+                _ => EvidenceTitles.PaymentError,
+            };
             AddEvidence(
                 provenance,
                 EvidenceKind.Payment,
+                isResend ? EvidenceTitles.Resend(title) : title,
                 isResend ? $"Resend same key · {summary}" : summary,
                 "POST",
                 KnownEndpoints.PaymentsSubmit,
@@ -2007,7 +2048,8 @@ public sealed class OperatorConsoleController
                 + (safeResult.Body ?? safeResult.ErrorSummary ?? string.Empty),
                 safeResult.Outcome is PaymentOutcome.Pending or PaymentOutcome.Completed or PaymentOutcome.Failed or PaymentOutcome.Cancelled,
                 transactionId: safeResult.TransactionId,
-                exchange: safeResult.Exchange);
+                exchange: safeResult.Exchange,
+                account: submission.Request.ToAccount);
             return safeResult;
         }
         finally
@@ -2232,6 +2274,7 @@ public sealed class OperatorConsoleController
                 AddEvidence(
                     FeedProvenance(context),
                     EvidenceKind.OutcomeEvent,
+                    EvidenceTitles.FeedReconnectGaveUp,
                     OutcomeFeedNarrative.ReconnectExhausted(_feedReconnectAttempts),
                     "SUBSCRIBE",
                     OutcomeEventTypes.Topic,
@@ -2273,6 +2316,7 @@ public sealed class OperatorConsoleController
         {
             AddEvidence(
                 EvidenceKind.OutcomeEvent,
+                EvidenceTitles.SidecarStopFailed,
                 "The console's own Dapr sidecar did not stop cleanly",
                 "STOP",
                 OutcomeEventTypes.Topic,
@@ -2336,17 +2380,17 @@ public sealed class OperatorConsoleController
             return state with { Feed = status, TrackedPayments = payments, Burst = burst };
         });
 
-        var (summary, succeeded) = status.State switch
+        var (title, summary, succeeded) = status.State switch
         {
             OutcomeFeedState.Listening when status.GapStart is not null || status.GapEnd is not null =>
-                (OutcomeFeedNarrative.ListeningAgain(status.GapStart, status.GapEnd), true),
+                (EvidenceTitles.FeedListeningAgain, OutcomeFeedNarrative.ListeningAgain(status.GapStart, status.GapEnd), true),
             OutcomeFeedState.Listening =>
-                (OutcomeFeedNarrative.ListeningSince(status.ListeningSince), true),
+                (EvidenceTitles.FeedListening, OutcomeFeedNarrative.ListeningSince(status.ListeningSince), true),
             OutcomeFeedState.Lost =>
-                (OutcomeFeedNarrative.FeedLost(status.LostAt, withdrawn), false),
+                (EvidenceTitles.FeedLost, OutcomeFeedNarrative.FeedLost(status.LostAt, withdrawn), false),
             OutcomeFeedState.Unavailable =>
-                (OutcomeFeedNarrative.Unavailable(status.Detail), false),
-            _ => (string.Empty, true),
+                (EvidenceTitles.FeedUnavailable, OutcomeFeedNarrative.Unavailable(status.Detail), false),
+            _ => (string.Empty, string.Empty, true),
         };
         if (summary.Length == 0)
         {
@@ -2356,6 +2400,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             FeedProvenance(context),
             EvidenceKind.OutcomeEvent,
+            title,
             summary,
             "SUBSCRIBE",
             OutcomeEventTypes.Topic,
@@ -2390,9 +2435,10 @@ public sealed class OperatorConsoleController
 
         var observedAt = _time.GetUtcNow();
         var attribution = EventAttribution.Unattributed;
+        string? creditorAccount = null;
         if (outcomeEvent.TransactionId is { Length: > 0 } transactionId)
         {
-            attribution = AttributeEvent(outcomeEvent, transactionId, observedAt, context);
+            (attribution, creditorAccount) = AttributeEvent(outcomeEvent, transactionId, observedAt, context);
         }
         else
         {
@@ -2408,6 +2454,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             FeedProvenance(context),
             EvidenceKind.OutcomeEvent,
+            EventTitle(outcomeEvent, attribution),
             EventSummary(outcomeEvent, attribution),
             // The meta line always prints the CloudEvent type verbatim and the transaction id.
             outcomeEvent.EventType,
@@ -2428,7 +2475,10 @@ public sealed class OperatorConsoleController
             outcomeEvent.TransactionId,
             // Never steals the Details pane from a record the operator is reading.
             select: false,
-            cloudEvent: outcomeEvent.Envelope);
+            cloudEvent: outcomeEvent.Envelope,
+            // A balance leg names the account it moved; every other event names the creditor of
+            // the payment it belongs to, where this console still knows it.
+            account: outcomeEvent.BalanceUpdated?.AccountNumber ?? creditorAccount);
     }
 
     /// <summary>
@@ -2437,13 +2487,14 @@ public sealed class OperatorConsoleController
     /// <see cref="OnOutcomeEventReceived"/> so that the id guard reads as one decision -- an
     /// event without an id enters none of this.
     /// </summary>
-    private EventAttribution AttributeEvent(
+    private (EventAttribution Attribution, string? CreditorAccount) AttributeEvent(
         OutcomeEvent outcomeEvent,
         string transactionId,
         DateTimeOffset observedAt,
         OperationContext context)
     {
         var attribution = EventAttribution.Unattributed;
+        string? creditorAccount = null;
         Update(state =>
         {
             var index = IndexOfTrackedPayment(state, transactionId);
@@ -2453,6 +2504,7 @@ public sealed class OperatorConsoleController
             }
 
             attribution = EventAttribution.Tracked;
+            creditorAccount = state.TrackedPayments[index].ToAccount;
             var payments = state.TrackedPayments.ToList();
             payments[index] = ResolveTrackedPayment(payments[index], outcomeEvent, observedAt);
             return state with { TrackedPayments = payments };
@@ -2462,6 +2514,7 @@ public sealed class OperatorConsoleController
             && _burstTransactions.TryGetValue(transactionId, out var burstTransaction))
         {
             attribution = EventAttribution.Tracked;
+            creditorAccount = burstTransaction.CreditorAccount;
             CountForBurst(outcomeEvent, burstTransaction, context);
         }
 
@@ -2479,7 +2532,7 @@ public sealed class OperatorConsoleController
             RememberUnmatchedEvent(outcomeEvent, transactionId);
         }
 
-        return attribution;
+        return (attribution, creditorAccount);
     }
 
     private static TimeSpan DeliveryDelta(OutcomeEvent outcomeEvent, DateTimeOffset observedAt) =>
@@ -2621,10 +2674,15 @@ public sealed class OperatorConsoleController
     /// the console never shows. Worded and shaped like a single payment's 504 row, and never
     /// selected: the operator asked for the burst, not for this.
     /// </summary>
-    private void AddWithdrawnBurstPaymentRow(EvidenceProvenance provenance, string key, PaymentResult result) =>
+    private void AddWithdrawnBurstPaymentRow(
+        EvidenceProvenance provenance,
+        string key,
+        PaymentResult result,
+        string creditorAccount) =>
         AddEvidence(
             provenance,
             EvidenceKind.Payment,
+            EvidenceTitles.TransactionCancelled,
             WithdrawnSummary(result.StatusCode),
             "POST",
             KnownEndpoints.PaymentsSubmit,
@@ -2635,7 +2693,8 @@ public sealed class OperatorConsoleController
             succeeded: true,
             transactionId: key,
             select: false,
-            exchange: result.Exchange);
+            exchange: result.Exchange,
+            account: creditorAccount);
 
     /// <summary>
     /// The burst record's detail: the requests that failed, then the payments the rail withdrew,
@@ -2833,6 +2892,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             FeedProvenance(context),
             EvidenceKind.OutcomeEvent,
+            EvidenceTitles.EarlyOutcomeMatched,
             $"{transactionId} attributed — its broadcast outcome arrived before this console's own submission response",
             buffered[0].EventType,
             transactionId,
@@ -2841,7 +2901,8 @@ public sealed class OperatorConsoleController
             "Correlated within this session; no event from before the subscription started was used.",
             true,
             transactionId,
-            select: false);
+            select: false,
+            account: submission.Request.ToAccount);
     }
 
     /// <summary>
@@ -3029,11 +3090,8 @@ public sealed class OperatorConsoleController
     /// console" label when it matched nothing. Dropping an unattributed event would make the
     /// feed a lie by omission; attributing it would make it a lie outright.
     /// <para>
-    /// Punctuation is load-bearing, because a list row is cut at the first em dash: <c> · </c>
-    /// separates one piece of identity from the next, and <c> — </c> only ever introduces the
-    /// explaining clause a row is allowed to drop. An em dash placed before the transaction id
-    /// would take the id off every row and make a tracked, a retired and an unattributed event
-    /// read identically -- which is the lie by omission this method exists to prevent.
+    /// This is the sentence the Details pane, the status line and the export carry. The list
+    /// row says less on purpose (<see cref="EventTitle"/>), so the attribution lives here.
     /// </para>
     /// </summary>
     private static string EventSummary(OutcomeEvent outcomeEvent, EventAttribution attribution)
@@ -3085,6 +3143,21 @@ public sealed class OperatorConsoleController
 
         return clauses.Count == 0 ? identity : $"{identity} — {string.Join(" · ", clauses)}";
     }
+
+    /// <summary>
+    /// What the list row says for one arriving event. The attribution never reaches the row:
+    /// whether the payment is tracked, retired or a stranger's is the Details pane's to say.
+    /// </summary>
+    private static string EventTitle(OutcomeEvent outcomeEvent, EventAttribution attribution) =>
+        attribution == EventAttribution.Unreadable
+            ? IsKnownEventType(outcomeEvent.EventType)
+                ? EvidenceTitles.EventWithoutTransactionId
+                : EvidenceTitles.UnknownEvent(outcomeEvent.EventType)
+        : outcomeEvent.Completed is not null ? EvidenceTitles.TransactionSettled
+        : outcomeEvent.Failed is not null ? EvidenceTitles.TransactionRejected
+        : outcomeEvent.Cancelled is not null ? EvidenceTitles.TransactionCancelled
+        : outcomeEvent.BalanceUpdated is not null ? EvidenceTitles.BalanceUpdated
+        : EvidenceTitles.UnknownEvent(outcomeEvent.EventType);
 
     /// <summary>
     /// The verb, taken from the typed payload the parse produced rather than from the type
@@ -3211,11 +3284,14 @@ public sealed class OperatorConsoleController
     /// A burst transaction and whether its proven-leg counter has already moved. Dapr delivery
     /// is at-least-once, so a redelivered terminal event must not be counted twice.
     /// </summary>
-    private sealed class BurstTransaction(int burstNumber)
+    private sealed class BurstTransaction(int burstNumber, string creditorAccount)
     {
         private int _resolved;
 
         public int BurstNumber { get; } = burstNumber;
+
+        /// <summary>Every payment of a burst shares its template's creditor; the row names it.</summary>
+        public string CreditorAccount { get; } = creditorAccount;
 
         public bool TryMarkResolved() => Interlocked.CompareExchange(ref _resolved, 1, 0) == 0;
     }
@@ -3392,14 +3468,14 @@ public sealed class OperatorConsoleController
             TrackedPayments = [],
             Feed = OutcomeFeedStatus.NotStarted,
             LastLoadResult = null,
-            LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for this generation."),
+            LoadProgress = new LoadWorkflowProgress(LoadWorkflowPhase.NotStarted, TimeSpan.Zero, "Not run for this topology."),
             FaultsArmed = false,
             AppliedFaults = null,
             StagedFaults = null,
             FaultsAppliedAt = null,
             FaultsObserved = false,
             FaultDetail = string.Empty,
-            StatusLine = $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {ownership} · generation {state.RunGeneration + 1}",
+            StatusLine = $"{KnownTopologyProfiles.DisplayName(snapshot.Profile)} · {ownership}",
         });
     }
 
@@ -3502,6 +3578,7 @@ public sealed class OperatorConsoleController
     {
         AddEvidence(
             kind,
+            EvidenceTitles.Refused(action),
             $"{action} refused — {reason}",
             "(refused by the console)",
             target,
@@ -3524,6 +3601,7 @@ public sealed class OperatorConsoleController
 
     private void AddEvidence(
         EvidenceKind kind,
+        string? title,
         string summary,
         string method,
         string target,
@@ -3537,6 +3615,7 @@ public sealed class OperatorConsoleController
         AddEvidence(
             Provenance(state),
             kind,
+            title,
             summary,
             method,
             target,
@@ -3555,6 +3634,7 @@ public sealed class OperatorConsoleController
     private void AddEvidence(
         EvidenceProvenance provenance,
         EvidenceKind kind,
+        string? title,
         string summary,
         string method,
         string target,
@@ -3565,7 +3645,8 @@ public sealed class OperatorConsoleController
         string? transactionId = null,
         bool select = true,
         HttpExchange? exchange = null,
-        CloudEventRecord? cloudEvent = null)
+        CloudEventRecord? cloudEvent = null,
+        string? account = null)
     {
         Update(state =>
         {
@@ -3586,7 +3667,9 @@ public sealed class OperatorConsoleController
                 provenance.Faults,
                 transactionId,
                 exchange,
-                cloudEvent);
+                cloudEvent,
+                title,
+                account);
             records.Add(record);
             if (records.Count > _options.MaximumEvidenceRecords)
             {
@@ -3608,7 +3691,7 @@ public sealed class OperatorConsoleController
                 // record) but never rewrites the mutation status line under the operator --
                 // that line belongs to what the operator is doing.
                 StatusLine = select
-                    ? $"{KnownTopologyProfiles.DisplayName(record.Profile)} · generation {record.RunGeneration} · {record.Summary}"
+                    ? $"{KnownTopologyProfiles.DisplayName(record.Profile)} · {record.Summary}"
                     : state.StatusLine,
             };
         });

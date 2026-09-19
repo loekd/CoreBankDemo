@@ -205,7 +205,8 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.Evidence.Single().Provenance.Should().Contain("LoadTests · generation 4");
+        model.SelectedEvidencePane.Header.Should().Contain("LoadTests · ")
+            .And.NotContain("generation", "the run generation is bookkeeping, not something a room reads");
         model.SelectedEvidencePane.Left.Should().Contain("raw", "a load workflow keeps its investigation detail");
         model.SelectedEvidencePane.Right.Should().BeNull("a load workflow is an aggregate, not one exchange");
         model.LoadResults.Should().Contain(value => value.Contains("Inline instant settlement"));
@@ -810,13 +811,15 @@ public class PresentationModelBuilderTests
             TimeSpan.Zero,
             "detail",
             true,
-            TransactionId: "tx-8821");
+            TransactionId: "tx-8821",
+            Title: EvidenceTitles.TransactionSettled,
+            Account: "2002");
         var state = Listening() with { Evidence = [record] };
 
         // The inbound marker sits left of the status gutter rather than replacing it, so a
         // failed inbound event still reads as failed.
         PresentationModelBuilder.Build(state, Now).Evidence.Single().Summary
-            .Should().Be("< ● Settled · tx-8821", "the row keeps its identity; only a clause is droppable");
+            .Should().Be("< ● Transaction settled 2002", "the row is the title and the creditor account, nothing else");
     }
 
     [Fact]
@@ -993,31 +996,58 @@ public class PresentationModelBuilderTests
     }
 
     [Fact]
-    public void EvidencePane_LongSummary_IsCutOnTheRowAndWholeEverywhereElse()
+    public void Build_EvidenceRow_ShowsTheTitleAndTheDetailsPaneKeepsTheWholeSummary()
     {
         var record = PaymentRecord(null) with
         {
             Summary = "202 Pending — no committed outcome yet",
+            Title = EvidenceTitles.TransactionPending,
+            Account = "2002",
         };
         var state = OperatorConsoleState.Empty with { Evidence = [record], SelectedEvidence = record };
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.Evidence.Single().Summary.Should().Be("  ● 202 Pending");
+        model.Evidence.Single().Summary.Should().Be("  ● Transaction pending 2002");
         model.SelectedEvidencePane.Header.Should().Contain("202 Pending — no committed outcome yet");
     }
 
     [Fact]
-    public void RowSummary_WithoutAnEmDash_IsUnchanged() =>
-        PresentationModelBuilder.RowSummary("Inspected payments.outbox").Should().Be("Inspected payments.outbox");
+    public void Build_EvidenceRowWithoutAnAccount_IsTheBareTitle()
+    {
+        var record = PaymentRecord(null) with { Title = EvidenceTitles.FeedLost };
+        var state = OperatorConsoleState.Empty with { Evidence = [record] };
 
-    [Theory]
-    [InlineData("— nothing before the dash")]
-    [InlineData("   — only blank before the dash")]
-    public void RowSummary_WithNothingBeforeTheEmDash_KeepsTheWholeSummary(string summary) =>
-        // A row cut down to a gutter marker and a status glyph identifies nothing at all, which
-        // is worse than the long row truncation exists to shorten.
-        PresentationModelBuilder.RowSummary(summary).Should().Be(summary);
+        PresentationModelBuilder.Build(state, Now).Evidence.Single().Summary.Should().Be("  ● Feed lost");
+    }
+
+    [Fact]
+    public void Build_EvidenceRowWithoutATitle_FallsBackToTheWholeSummary()
+    {
+        var record = PaymentRecord(null) with { Summary = "202 Pending — no committed outcome yet" };
+        var state = OperatorConsoleState.Empty with { Evidence = [record] };
+
+        PresentationModelBuilder.Build(state, Now).Evidence.Single().Summary
+            .Should().Be("  ● 202 Pending — no committed outcome yet");
+    }
+
+    [Fact]
+    public void Build_NeverDisplaysTheRunGeneration()
+    {
+        var record = PaymentRecord(null);
+        var state = OperatorConsoleState.Empty with
+        {
+            RunGeneration = 7,
+            Evidence = [record],
+            SelectedEvidence = record,
+        };
+
+        var model = PresentationModelBuilder.Build(state, Now);
+
+        model.Evidence.Single().Summary.Should().NotContain("generation");
+        model.SelectedEvidencePane.Header.Should().NotContain("generation");
+        model.TopologyBar.Should().NotContain("generation");
+    }
 
     private static HttpExchange Exchange() => new(
         "POST",

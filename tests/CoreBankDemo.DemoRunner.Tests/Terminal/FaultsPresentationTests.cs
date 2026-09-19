@@ -91,11 +91,9 @@ public class FaultsPresentationTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        var renderedUnderFaults = model.Evidence.Single(row => row.Sequence == 2);
-        renderedUnderFaults.Provenance.Should().Contain("faults error rate 40%").And.Contain("800–2000 ms");
-
-        var renderedQuiet = model.Evidence.Single(row => row.Sequence == 1);
-        renderedQuiet.Provenance.Should().NotContain("faults");
+        // A list row never carries the levels: they were most of its width, and the Details pane
+        // states them for the one record being read.
+        model.Evidence.Should().OnlyContain(row => !row.Summary.Contains("faults"));
 
         // Detail is projected on demand for the record being read, not carried on every row, so
         // the per-record stamping is asserted against that projection directly. Both records are
