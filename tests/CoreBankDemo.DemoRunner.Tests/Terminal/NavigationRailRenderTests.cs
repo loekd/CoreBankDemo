@@ -63,7 +63,7 @@ public class NavigationRailRenderTests
 
         var contents = app.Driver!.Contents!;
         var rows = new List<string>();
-        // Rail rows start below the window border, the topology bar and the rail's own
+        // Rail rows start below the window border, the top button row and the rail's own
         // border; column 2 is the first cell inside the rail.
         for (var row = 3; row < 3 + 10; row++)
         {

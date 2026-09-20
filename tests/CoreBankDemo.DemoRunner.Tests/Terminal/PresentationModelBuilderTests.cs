@@ -56,7 +56,6 @@ public class PresentationModelBuilderTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.TopologyBar.Should().Contain("Regular").And.Contain("Attached");
         model.Resources.Should().Contain(row => row.Name == KnownResources.CoreBankApi && row.Symbol == "●" && row.NextAction == "Stop");
         model.Resources.Should().Contain(row => row.Name == KnownResources.PaymentsApi && row.Symbol == "○" && row.NextAction == "Start");
         model.Resources.Should().Contain(row => row.Name == KnownResources.Redis && row.State == "Unreachable" && !row.CanMutate);
@@ -1046,7 +1045,6 @@ public class PresentationModelBuilderTests
 
         model.Evidence.Single().Summary.Should().NotContain("generation");
         model.SelectedEvidencePane.Header.Should().NotContain("generation");
-        model.TopologyBar.Should().NotContain("generation");
     }
 
     private static HttpExchange Exchange() => new(

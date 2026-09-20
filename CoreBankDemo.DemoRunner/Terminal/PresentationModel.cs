@@ -172,7 +172,6 @@ public sealed record StillOpenRowViewModel(
 }
 
 public sealed record OperatorPresentationModel(
-    string TopologyBar,
     IReadOnlyList<NavigationItemViewModel> Navigation,
     WorkspaceKind ActiveWorkspace,
     IReadOnlyList<ResourceRowViewModel> Resources,
@@ -282,17 +281,10 @@ public static class PresentationModelBuilder
             .Select(payment => BuildStillOpenRow(payment, card.TransactionId, now))
             .ToList();
 
-        var resourceSummary = resources.Count == 0
-            ? "resources ○ Unknown"
-            : string.Join(" ", resources.Select(resource => $"{Abbreviate(resource.Name)} {resource.Symbol}"));
         var faults = BuildFaults(state, now);
         var announcement = Announcement(state);
-        var profile = KnownTopologyProfiles.DisplayName(state.Profile);
-        var topologyBar = $"{profile} · {state.Ownership} · "
-            + $"{faults.ChipSymbol} {faults.ChipLabel} · {resourceSummary}";
 
         return new OperatorPresentationModel(
-            topologyBar,
             Enum.GetValues<WorkspaceKind>().Select((workspace, index) =>
                 new NavigationItemViewModel(workspace, (index + 1).ToString(), NavigationLabel(workspace), state.ActiveWorkspace == workspace)).ToList(),
             state.ActiveWorkspace,
@@ -1305,19 +1297,5 @@ public static class PresentationModelBuilder
         WorkspaceKind.LoadTest => "Load Test",
         WorkspaceKind.Faults => "Faults",
         _ => workspace.ToString(),
-    };
-
-    private static string Abbreviate(string resourceName) => resourceName switch
-    {
-        KnownResources.PaymentsApi => "pay",
-        KnownResources.CoreBankApi => "cor",
-        KnownResources.Postgres => "pg",
-        KnownResources.Redis => "red",
-        KnownResources.Lgtm => "lgtm",
-        KnownResources.DevProxy => "dev",
-        KnownResources.LoadTestSupport => "lts",
-        KnownResources.LoadTestInitializer => "ini",
-        KnownResources.K6 => "k6",
-        _ => resourceName.Length <= 3 ? resourceName : resourceName[..3],
     };
 }

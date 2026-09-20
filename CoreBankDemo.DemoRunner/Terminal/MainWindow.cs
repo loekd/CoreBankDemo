@@ -144,7 +144,6 @@ public sealed class MainWindow : Window
     private readonly object _activeActionsLock = new();
     private readonly HashSet<Task> _activeActions = [];
 
-    private readonly Label _topologyBar = new() { X = 1, Y = 0, Height = 1, Width = Dim.Fill(20) };
     private readonly Button _aspireDashboardButton = NewButton("Aspire");
     private readonly Button _lgtmButton = NewButton("LGTM");
     // Dim.Fill() rather than Dim.Fill(3): the removed bottom band is where those three rows of
@@ -433,7 +432,7 @@ public sealed class MainWindow : Window
             OpenKnownLink("LGTM", KnownLinks.Lgtm);
         };
 
-        Add(_topologyBar, _aspireDashboardButton, _lgtmButton, _navigation, _content);
+        Add(_aspireDashboardButton, _lgtmButton, _navigation, _content);
         UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
@@ -1545,7 +1544,6 @@ public sealed class MainWindow : Window
 
     private void Render(OperatorPresentationModel model)
     {
-        _topologyBar.Text = model.TopologyBar;
         MountWorkspace(model.ActiveWorkspace);
         UpdateNavigationText();
 
