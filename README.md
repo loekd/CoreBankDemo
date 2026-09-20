@@ -262,8 +262,8 @@ destructive actions open a modal with **Cancel** focused, and the layout stays u
 Evidence is session-local and is never restored on relaunch. Each record is stamped with the fault
 levels in force when it was captured, so a `202 Pending` or a `504 Cancelled` observed under injected
 latency is never confused with one observed under none. The console reports `Applied — not yet observed in traffic`
-until its own traffic actually carries an applied level; only then does the topology bar read
-`Faults in force`, and a restart that fails leaves the levels reported as *not* applied.
+until its own traffic actually carries an applied level, and a restart that fails leaves the
+levels reported as *not* applied.
 
 If the console is unavailable, the `.http` files remain the supported fallback — banking behavior is
 identical either way.

@@ -17,7 +17,6 @@ public class FaultsPresentationTests
 
         model.Faults.ChipSymbol.Should().Be("-");
         model.Faults.ChipLabel.Should().Be("Faults unavailable");
-        model.TopologyBar.Should().Contain("- Faults unavailable");
         model.Faults.Available.Should().BeFalse();
         model.Faults.DisabledReason.Should().NotBeNullOrWhiteSpace();
         model.Faults.CanApply.Should().BeFalse();
@@ -126,7 +125,6 @@ public class FaultsPresentationTests
 
         model.Faults.ChipSymbol.Should().Be("·");
         model.Faults.ChipLabel.Should().Be("Armed");
-        model.TopologyBar.Should().Contain("· Armed");
     }
 
     [Fact]
