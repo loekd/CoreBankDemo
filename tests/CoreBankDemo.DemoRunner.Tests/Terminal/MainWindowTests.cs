@@ -730,6 +730,28 @@ public class MainWindowTests
 
 
     [Fact]
+    public async Task InstantAnswered202_DrawsTheDeferralOnTheCard()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "payment-id", "tx-8821", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+
+        await controller.SubmitPaymentAsync(
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Instant),
+            IdempotencyMode.Generated,
+            null,
+            CancellationToken.None);
+        window.RenderForTest();
+
+        window.FocusCard.StateWord.Should().Be("AWAITING SETTLEMENT");
+        window.CardClosingLabel.Text.Should().Contain("not settled instantly — background delivery continues");
+    }
+
+    [Fact]
     public async Task ArrivingOutcome_ResolvesThePaymentRowInPlaceWithoutMovingTheList()
     {
         var harness = new OperatorHarness();

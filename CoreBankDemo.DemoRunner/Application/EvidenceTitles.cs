@@ -13,6 +13,7 @@ public static class EvidenceTitles
 {
     // --- Transactions: every one of these rows also names the creditor account ---------------
     public const string TransactionPending = "Transaction pending";
+    public const string InstantDeferred = "Instant deferred";
     public const string TransactionCompleted = "Transaction completed";
     public const string TransactionFailed = "Transaction failed";
     public const string TransactionCancelled = "Transaction cancelled";
@@ -68,8 +69,13 @@ public static class EvidenceTitles
 
     public static string Started(TopologyProfile profile) => $"Started {profile}";
 
-    /// <summary><c>Transaction completed</c> resent under the same key reads <c>Resend completed</c>.</summary>
-    public static string Resend(string title) => title.Replace("Transaction", "Resend", StringComparison.Ordinal);
+    /// <summary>
+    /// <c>Transaction completed</c> resent under the same key reads <c>Resend completed</c>, and
+    /// <c>Instant deferred</c> reads <c>Resend deferred</c>.
+    /// </summary>
+    public static string Resend(string title) => title
+        .Replace("Transaction", "Resend", StringComparison.Ordinal)
+        .Replace("Instant", "Resend", StringComparison.Ordinal);
 
     public static string UnknownEvent(string eventType) =>
         eventType is { Length: > 0 } ? $"Unknown event {eventType}" : "Unknown event";
