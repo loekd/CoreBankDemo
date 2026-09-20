@@ -754,9 +754,8 @@ public class OperatorConsoleControllerTests
         var record = controller.State.Evidence.Last();
         record.Kind.Should().Be(EvidenceKind.OutcomeEvent);
         record.Summary.Should().StartWith("Withdrawn · transaction-id").And.Contain("Reason: budget exhausted");
-        PresentationModelBuilder.RowSummary(record.Summary).Should().Be(
-            "Withdrawn · transaction-id",
-            "the row keeps the verb and the id and drops only the clause");
+        record.Title.Should().Be(EvidenceTitles.TransactionCancelled);
+        record.Account.Should().Be(InstantPayment.ToAccount, "every transaction row names the creditor");
         record.Detail.Should().Contain("Status: Cancelled").And.Contain("Reason: budget exhausted");
         record.Succeeded.Should().BeTrue("a cancellation is the rail's own proven answer, like a 504 Cancelled");
     }
@@ -1748,10 +1747,10 @@ public class OperatorConsoleControllerTests
         var unattributed = controller.State.Evidence.Single(record =>
             record.Kind == EvidenceKind.OutcomeEvent && record.Summary.Contains("Unattributed"));
         unattributed.Summary.Should().StartWith("Settled · tx-9004 · Unattributed");
-        // The whole point of the label survives the row cut: a tracked, a retired and an
-        // unattributed event must never read identically from the back of a room.
-        PresentationModelBuilder.RowSummary(unattributed.Summary)
-            .Should().Be("Settled · tx-9004 · Unattributed");
+        // The row is the bare title: a payment this console never sent has no creditor it can
+        // name, and the Details pane still says it was unattributed.
+        unattributed.Title.Should().Be(EvidenceTitles.TransactionSettled);
+        unattributed.Account.Should().BeNull();
     }
 
     [Theory]
@@ -2275,10 +2274,11 @@ public class OperatorConsoleControllerTests
 
         controller.State.Evidence.Should().Contain(record =>
             record.TransactionId == "tx-0" && record.Summary.Contains("submitted earlier this session"));
-        PresentationModelBuilder.RowSummary(
-                controller.State.Evidence.Single(record =>
-                    record.TransactionId == "tx-0" && record.Kind == EvidenceKind.OutcomeEvent).Summary)
-            .Should().Be("Settled · tx-0 · Seen earlier", "a retired event still names itself on the row");
+        var retired = controller.State.Evidence.Single(record =>
+            record.TransactionId == "tx-0" && record.Kind == EvidenceKind.OutcomeEvent);
+        retired.Summary.Should().StartWith("Settled · tx-0 · Seen earlier");
+        retired.Title.Should().Be(EvidenceTitles.TransactionSettled);
+        retired.Account.Should().BeNull("a retired payment is remembered by id only");
         controller.State.Evidence.Should().NotContain(record =>
             record.TransactionId == "tx-0" && record.Summary.Contains("was not submitted from this console"));
     }

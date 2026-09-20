@@ -1567,7 +1567,7 @@ public sealed class MainWindow : Window
         {
             _evidenceBinding.Bind(model.Evidence.Count == 0
                 ? ["○ No actions yet this session"]
-                : [.. model.Evidence.Select(row => $"{row.Summary} · {row.Provenance}")]);
+                : [.. model.Evidence.Select(row => row.Summary)]);
         }
         finally
         {
