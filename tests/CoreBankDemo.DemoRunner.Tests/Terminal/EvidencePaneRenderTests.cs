@@ -121,7 +121,29 @@ public class EvidencePaneRenderTests
     }
 
     /// <summary>A console holding one payment record that carries a full HTTP exchange.</summary>
-    private static async Task<MainWindow> EvidenceWindowAsync(IApplication app, ThemeMode theme = ThemeMode.Dark)
+    /// <summary>An instant <c>202</c> never reads as the standard rail's routine one.</summary>
+    [Fact]
+    public async Task TheEvidenceList_DrawsAnInstant202AsDeferred()
+    {
+        using var app = TerminalAppFactory.CreateHeadless(140, 40);
+        OperatorTheme.Register(ThemeMode.Dark);
+        using var window = await EvidenceWindowAsync(app, rail: PaymentRail.Instant);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 140, 40);
+        window.HandleKeyForTest(Key.D3);
+        window.ResizeForTest(140, 40);
+        window.RenderForTest();
+        app.LayoutAndDraw(true);
+
+        var rows = AsDrawn(app, window.EvidenceList).Where(line => line.Length > 0).ToList();
+
+        rows[0].Should().Be("  ● Instant deferred NL20INGB0001234567");
+    }
+
+    private static async Task<MainWindow> EvidenceWindowAsync(
+        IApplication app,
+        ThemeMode theme = ThemeMode.Dark,
+        PaymentRail rail = PaymentRail.Standard)
     {
         var harness = new OperatorHarness();
         harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
@@ -140,7 +162,7 @@ public class EvidencePaneRenderTests
                 [new EvidenceHeader("Content-Type", "application/json")],
                 Body)));
         await controller.SubmitPaymentAsync(
-            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", PaymentRail.Standard),
+            new PaymentRequest("NL91ABNA0417164300", "NL20INGB0001234567", 250m, "EUR", rail),
             IdempotencyMode.Generated, null, CancellationToken.None);
         return new MainWindow(
             app, controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false, theme: theme);

@@ -2015,8 +2015,15 @@ public sealed class OperatorConsoleController
             } : state);
             TrackSubmittedPayment(context, submission, safeResult, pendingId);
 
+            // A 202 is the standard rail's normal answer and the instant rail's exception: the rail
+            // could neither settle the payment nor prove its withdrawal (ADR-020), so the record
+            // says what became of it. Never a failure -- the background rail still delivers it.
+            var instantDeferred = submission.Request.Rail == PaymentRail.Instant
+                && safeResult.Outcome == PaymentOutcome.Pending;
             var summary = safeResult.Outcome switch
             {
+                PaymentOutcome.Pending when instantDeferred =>
+                    $"{safeResult.StatusCode} Pending — not settled instantly, no committed outcome yet; background delivery continues",
                 PaymentOutcome.Pending => $"{safeResult.StatusCode} Pending — no committed outcome yet",
                 PaymentOutcome.Ambiguous => "Ambiguous — not yet reconciled; Resend is unsafe",
                 PaymentOutcome.Completed => $"{safeResult.StatusCode} Completed",
@@ -2026,6 +2033,7 @@ public sealed class OperatorConsoleController
             };
             var title = safeResult.Outcome switch
             {
+                PaymentOutcome.Pending when instantDeferred => EvidenceTitles.InstantDeferred,
                 PaymentOutcome.Pending => EvidenceTitles.TransactionPending,
                 PaymentOutcome.Ambiguous => EvidenceTitles.TransactionOutcomeUnknown,
                 PaymentOutcome.Completed => EvidenceTitles.TransactionCompleted,

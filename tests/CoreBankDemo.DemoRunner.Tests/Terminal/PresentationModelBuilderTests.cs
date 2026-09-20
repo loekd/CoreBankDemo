@@ -751,6 +751,40 @@ public class PresentationModelBuilderTests
     }
 
     /// <summary>
+    /// An instant <c>202</c> is the rail's exception, not its normal answer, so the card says what
+    /// became of the payment instead of letting the room read an open-ended wait as a hang. The
+    /// state stays AWAITING SETTLEMENT: a missed budget is not an outcome.
+    /// </summary>
+    [Fact]
+    public void Build_InstantAnswered202_SaysBackgroundDeliveryContinues()
+    {
+        var card = PresentationModelBuilder.Build(Listening(Submitted() with { Rail = PaymentRail.Instant }), Now).FocusCard;
+
+        card.StateWord.Should().Be("AWAITING SETTLEMENT");
+        card.Closing.Should().Equal(
+            "submitted ──▶ HTTP 202 Pending ──▶ waiting for the bank",
+            "not settled instantly — background delivery continues");
+    }
+
+    [Fact]
+    public void Build_InstantStillUnanswered_DoesNotClaimTheRailDeferred()
+    {
+        var inFlight = Submitted() with { Rail = PaymentRail.Instant, AwaitingResponse = true, HttpStatusCode = 0 };
+
+        var card = PresentationModelBuilder.Build(Listening(inFlight), Now).FocusCard;
+
+        card.Closing.Should().Equal("waiting for the bank to answer");
+    }
+
+    [Fact]
+    public void Build_StandardAnswered202_KeepsItsSingleLine()
+    {
+        var card = PresentationModelBuilder.Build(Listening(Submitted()), Now).FocusCard;
+
+        card.Closing.Should().Equal("submitted ──▶ HTTP 202 Pending ──▶ waiting for the bank");
+    }
+
+    /// <summary>
     /// On dispatch the card's <i>action slot</i> — never its state — re-states itself, while the
     /// payment's own state and clock stay exactly as they were: asking is not an outcome.
     /// </summary>

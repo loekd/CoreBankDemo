@@ -21,7 +21,7 @@ public class OperatorConsoleEvidenceTitleTests
     private static readonly PaymentRequest InstantPayment = new(Debtor, Creditor, 250m, "EUR", PaymentRail.Instant);
 
     [Theory]
-    [InlineData(PaymentOutcome.Pending, 202, EvidenceTitles.TransactionPending)]
+    [InlineData(PaymentOutcome.Pending, 202, EvidenceTitles.InstantDeferred)]
     [InlineData(PaymentOutcome.Completed, 200, EvidenceTitles.TransactionCompleted)]
     [InlineData(PaymentOutcome.Failed, 200, EvidenceTitles.TransactionFailed)]
     [InlineData(PaymentOutcome.Rejected, 400, EvidenceTitles.PaymentError)]
@@ -40,6 +40,27 @@ public class OperatorConsoleEvidenceTitleTests
         record.Title.Should().NotMatchRegex(@"\d", "a status code is the Details pane's to show");
     }
 
+    /// <summary>
+    /// A <c>202</c> is the standard rail's normal answer and the instant rail's exception: the
+    /// rail could neither settle nor withdraw the payment. The two never read the same.
+    /// </summary>
+    [Fact]
+    public async Task Submit_Pending_ReadsDifferentlyPerRail()
+    {
+        var (controller, harness) = await AttachedAsync();
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202), Payment(PaymentOutcome.Pending, 202) with { TransactionId = "tx-8822" });
+
+        await controller.SubmitPaymentAsync(InstantPayment with { Rail = PaymentRail.Standard }, IdempotencyMode.Supplied, "tx-8821", CancellationToken.None);
+        var standard = controller.State.Evidence.Last(row => row.Kind == EvidenceKind.Payment);
+        await controller.SubmitPaymentAsync(InstantPayment, IdempotencyMode.Supplied, "tx-8822", CancellationToken.None);
+        var instant = controller.State.Evidence.Last(row => row.Kind == EvidenceKind.Payment);
+
+        standard.Title.Should().Be(EvidenceTitles.TransactionPending);
+        standard.Summary.Should().Be("202 Pending — no committed outcome yet");
+        instant.Title.Should().Be(EvidenceTitles.InstantDeferred);
+        instant.Summary.Should().Be("202 Pending — not settled instantly, no committed outcome yet; background delivery continues");
+    }
+
     [Fact]
     public async Task Resend_PrefixesTheTitle()
     {
@@ -52,6 +73,17 @@ public class OperatorConsoleEvidenceTitleTests
         var record = controller.State.Evidence.Last(row => row.Kind == EvidenceKind.Payment);
         record.Title.Should().Be("Resend completed");
         record.Account.Should().Be(Creditor);
+    }
+
+    [Fact]
+    public async Task Resend_OfADeferredInstantPayment_StillReadsAsAResend()
+    {
+        var (controller, harness) = await SubmittedAsync();
+        harness.Payments.Queue(Payment(PaymentOutcome.Pending, 202));
+
+        await controller.ResendLastPaymentAsync(CancellationToken.None);
+
+        controller.State.Evidence.Last(row => row.Kind == EvidenceKind.Payment).Title.Should().Be("Resend deferred");
     }
 
     [Theory]

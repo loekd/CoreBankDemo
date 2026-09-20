@@ -495,13 +495,18 @@ public static class PresentationModelBuilder
             // Under injected faults a long wait is the expected result, so the card names the
             // condition rather than letting the audience read the delay as a defect.
             default:
-                return ("~", "AWAITING SETTLEMENT",
-                [
-                    (payment.AwaitingResponse
+                var waiting = (payment.AwaitingResponse
                         ? "waiting for the bank to answer"
                         : $"submitted ──▶ {http} ──▶ waiting for the bank")
-                    + AwaitingQualifier(state),
-                ]);
+                    + AwaitingQualifier(state);
+
+                // An instant 202 is the rail's exception, not its normal answer: without this line
+                // an open-ended wait on the instant rail reads as a hang. Not an outcome, so the
+                // state word stays.
+                return ("~", "AWAITING SETTLEMENT",
+                    payment is { Rail: PaymentRail.Instant, AwaitingResponse: false, HttpOutcome: PaymentOutcome.Pending }
+                        ? [waiting, InstantDeferredLine]
+                        : [waiting]);
         }
     }
 
@@ -621,6 +626,8 @@ public static class PresentationModelBuilder
 
     private static string LastFour(string account) =>
         account.Length <= 4 ? account : $"…{account[^4..]}";
+
+    private const string InstantDeferredLine = "not settled instantly — background delivery continues";
 
     private const string OutcomeQueryRemedy =
         "Look up outcome is read-only and never blocked — it is the way forward from here.";
