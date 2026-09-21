@@ -49,60 +49,63 @@ public class CoreBankTracesDashboardTests
     }
 
     [Fact]
-    public void Every_BusinessMetrics_instrument_is_charted()
+    public void Today_row_shows_the_three_flow_totals_in_flow_order()
     {
-        var charted = PanelQueries()
-            .SelectMany(expr => DashboardQueries.MetricReference.Matches(expr).Select(match => match.Value))
-            .Select(DashboardQueries.ToInstrumentName)
-            .ToHashSet(StringComparer.Ordinal);
-
-        charted.Should().BeEquivalentTo(DashboardQueries.InstrumentNames(),
-            "the custom metrics section charts every instrument on the business meter, and nothing that is not one");
-    }
-
-    [Fact]
-    public void Every_custom_metric_query_filters_on_each_tag_it_splits_by()
-    {
-        var queries = PanelQueries()
-            .Where(query => DashboardQueries.MetricReference.IsMatch(query))
+        var titles = DailyTotals()
+            .OrderBy(panel => panel.GetProperty("gridPos").GetProperty("x").GetInt32())
+            .Select(panel => panel.GetProperty("title").GetString())
             .ToList();
 
-        queries.Should().NotBeEmpty();
-        foreach (var query in queries)
-        {
-            var tags = SplitBy.Match(query).Groups["labels"].Value
-                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Where(label => label != "le")
-                .ToList();
+        titles.Should().Equal(["Payments received", "Transactions processed", "Messages sent"],
+            "the row reads left to right as the payment flows: stored in the Payments outbox, executed once, result event published");
+    }
 
-            tags.Should().NotBeEmpty($"'{query}' splits its series by the instrument's tags");
-            foreach (var tag in tags)
-            {
-                TagFilters.Should().ContainKey(tag, $"'{query}' splits by '{tag}', which needs a filter");
-                query.Should().Contain($"{tag}=~\"${TagFilters[tag]}\"",
-                    $"the '{TagFilters[tag]}' filter applies to every panel split by '{tag}'");
-            }
-        }
+    [Theory]
+    [InlineData("Payments received", "corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}")]
+    [InlineData("Transactions processed", "corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}")]
+    [InlineData("Messages sent", "corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}")]
+    public void Daily_total_counts_one_per_payment_since_midnight(string title, string selector)
+    {
+        var panel = DailyTotals().Should()
+            .ContainSingle(candidate => candidate.GetProperty("title").GetString() == title).Subject;
+
+        panel.GetProperty("type").GetString().Should().Be("stat", "a daily total is one big number, not a chart");
+        panel.GetProperty("timeFrom").GetString().Should().Be("now/d",
+            "the tile counts today so far while the trace panels keep the dashboard's own range");
+        // Scoped to the service that owns the number: any other process exporting to the same
+        // collector (a test run's "test-service", say) must not move a tile.
+        // Not increase(): it skips a series' first sample, and a business counter first
+        // appears already counting, so increase() under-reports and the tiles stop lining up.
+        // Every process is its own service_instance_id series that never resets, so the last
+        // value each reported today, less what it already had at midnight, is exact.
+        var today = $"last_over_time({selector}[$__range])";
+        panel.GetProperty("targets").EnumerateArray().Select(QueryOf).Should()
+            .Equal([$"sum(({today} - ({selector} offset $__range)) or {today}) or vector(0)"],
+                "each tile is one exact count that lines up with its neighbours unless there is an outage");
     }
 
     [Fact]
-    public void Every_tag_filter_is_an_optional_multi_select()
+    public void Every_custom_metric_queried_is_a_BusinessMetrics_instrument()
+    {
+        var queried = PanelQueries()
+            .SelectMany(expr => DashboardQueries.MetricReference.Matches(expr).Select(match => match.Value))
+            .Select(DashboardQueries.ToInstrumentName)
+            .ToList();
+
+        queried.Should().NotBeEmpty();
+        queried.Should().BeSubsetOf(DashboardQueries.InstrumentNames(),
+            "a renamed instrument must fail the build instead of leaving a tile at 0 on stage");
+    }
+
+    [Fact]
+    public void Only_the_trace_filters_remain()
     {
         using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
-        var variables = dashboard.RootElement.GetProperty("templating").GetProperty("list").EnumerateArray()
-            .ToDictionary(variable => variable.GetProperty("name").GetString()!);
 
-        foreach (var name in TagFilters.Values)
-        {
-            variables.Should().ContainKey(name);
-            var variable = variables[name];
-            variable.GetProperty("multi").GetBoolean().Should().BeTrue($"'{name}' can select several values");
-            variable.GetProperty("includeAll").GetBoolean().Should().BeTrue($"'{name}' is optional");
-            variable.GetProperty("allValue").GetString().Should().Be(".*",
-                $"'{name}' left on All also matches series without that tag");
-            variable.GetProperty("current").GetProperty("value").EnumerateArray().Select(value => value.GetString())
-                .Should().Equal(["$__all"], $"'{name}' starts unfiltered");
-        }
+        var variables = dashboard.RootElement.GetProperty("templating").GetProperty("list").EnumerateArray()
+            .Select(variable => variable.GetProperty("name").GetString());
+
+        variables.Should().Equal(["service", "operation"], "the daily totals take no filters");
     }
 
     [Fact]
@@ -133,19 +136,16 @@ public class CoreBankTracesDashboardTests
             "the home dashboard is the provisioned traces dashboard file inside the container");
     }
 
-    private static readonly Regex SplitBy = new(@"by \((?<labels>[^)]*)\)", RegexOptions.Compiled);
-
-    /// <summary>Metric tag (Prometheus label) to the dashboard variable that filters it.</summary>
-    private static readonly Dictionary<string, string> TagFilters = new(StringComparer.Ordinal)
+    /// <summary>Every panel that queries the business meter.</summary>
+    private static List<JsonElement> DailyTotals()
     {
-        ["outcome"] = "outcome",
-        ["payment_scheme"] = "payment_scheme",
-        ["messaging_store_name"] = "store_name",
-        ["messaging_store_kind"] = "store_kind",
-        ["messaging_direction"] = "direction",
-        ["messaging_message_type"] = "message_type",
-        ["messaging_transport"] = "transport",
-    };
+        using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
+        return dashboard.RootElement.GetProperty("panels").EnumerateArray()
+            .Where(panel => panel.TryGetProperty("targets", out var targets)
+                && targets.EnumerateArray().Any(target => !IsServiceMap(target) && DashboardQueries.MetricReference.IsMatch(QueryOf(target))))
+            .Select(panel => panel.Clone())
+            .ToList();
+    }
 
     /// <summary>The PromQL and TraceQL of every panel target, leaving out the service map query.</summary>
     private static List<string> PanelQueries()

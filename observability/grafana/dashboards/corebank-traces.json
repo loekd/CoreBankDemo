@@ -1,7 +1,7 @@
 {
   "uid": "corebank-traces",
   "title": "CoreBank Traces",
-  "description": "Jaeger-style trace search: pick a service and operation, see its rate, errors and p95 from span metrics, the matching end-to-end traces, and the service map. Grafana's home page (ADR-022).",
+  "description": "Jaeger-style trace search: pick a service and operation, see its rate, errors and p95 from span metrics, the matching end-to-end traces, and the service map. Below that, today's totals for the payment flow. Grafana's home page (ADR-022).",
   "tags": [
     "corebank"
   ],
@@ -102,223 +102,6 @@
           "selected": true,
           "text": "POST api/Payments",
           "value": "POST api/Payments"
-        },
-        "options": []
-      },
-      {
-        "name": "outcome",
-        "label": "Outcome",
-        "description": "Custom metrics: the outcome tag. Each instrument has its own outcomes, so a value filters only the panels that use it; the others show no data.",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (outcome) (last_over_time({__name__=~\"corebankdemo_.+\", outcome!=\"\"}[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (outcome) (last_over_time({__name__=~\"corebankdemo_.+\", outcome!=\"\"}[7d])))",
-        "regex": "/outcome=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "options": []
-      },
-      {
-        "name": "payment_scheme",
-        "label": "Payment scheme",
-        "description": "Custom metrics: payment.intake scheme (standard, instant).",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (payment_scheme) (last_over_time(corebankdemo_payment_intake_total[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (payment_scheme) (last_over_time(corebankdemo_payment_intake_total[7d])))",
-        "regex": "/payment_scheme=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "options": []
-      },
-      {
-        "name": "store_name",
-        "label": "Store name",
-        "description": "Custom metrics: Inbox/Outbox store name.",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (messaging_store_name) (last_over_time({__name__=~\"corebankdemo_messaging_.+\", messaging_store_name!=\"\"}[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (messaging_store_name) (last_over_time({__name__=~\"corebankdemo_messaging_.+\", messaging_store_name!=\"\"}[7d])))",
-        "regex": "/messaging_store_name=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "options": []
-      },
-      {
-        "name": "store_kind",
-        "label": "Store kind",
-        "description": "Custom metrics: Inbox/Outbox store kind.",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (messaging_store_kind) (last_over_time({__name__=~\"corebankdemo_messaging_.+\", messaging_store_kind!=\"\"}[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (messaging_store_kind) (last_over_time({__name__=~\"corebankdemo_messaging_.+\", messaging_store_kind!=\"\"}[7d])))",
-        "regex": "/messaging_store_kind=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "options": []
-      },
-      {
-        "name": "direction",
-        "label": "Direction",
-        "description": "Custom metrics: messaging.deliveries direction.",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (messaging_direction) (last_over_time(corebankdemo_messaging_deliveries_total[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (messaging_direction) (last_over_time(corebankdemo_messaging_deliveries_total[7d])))",
-        "regex": "/messaging_direction=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "options": []
-      },
-      {
-        "name": "message_type",
-        "label": "Message type",
-        "description": "Custom metrics: messaging.deliveries message type.",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (messaging_message_type) (last_over_time(corebankdemo_messaging_deliveries_total[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (messaging_message_type) (last_over_time(corebankdemo_messaging_deliveries_total[7d])))",
-        "regex": "/messaging_message_type=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
-        },
-        "options": []
-      },
-      {
-        "name": "transport",
-        "label": "Transport",
-        "description": "Custom metrics: messaging.deliveries transport.",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "prometheus"
-        },
-        "query": {
-          "query": "query_result(count by (messaging_transport) (last_over_time(corebankdemo_messaging_deliveries_total[7d])))",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "definition": "query_result(count by (messaging_transport) (last_over_time(corebankdemo_messaging_deliveries_total[7d])))",
-        "regex": "/messaging_transport=\"(?<text>[^\"]+)\"/",
-        "refresh": 1,
-        "includeAll": true,
-        "allValue": ".*",
-        "multi": true,
-        "sort": 1,
-        "current": {
-          "selected": true,
-          "text": [
-            "All"
-          ],
-          "value": [
-            "$__all"
-          ]
         },
         "options": []
       }
@@ -662,7 +445,7 @@
     {
       "id": 7,
       "type": "row",
-      "title": "Custom metrics (CoreBankDemo.Business meter)",
+      "title": "Today",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -674,9 +457,9 @@
     },
     {
       "id": 8,
-      "type": "timeseries",
-      "title": "Payment intake",
-      "description": "corebankdemo.payment.intake \u2014 POST /api/payments outcomes. Per-second rate. Split by outcome, payment_scheme; click a legend row to isolate it.",
+      "type": "stat",
+      "title": "Payments received",
+      "description": "Payments PaymentsAPI stored today, each written to its transactional outbox in the same database transaction. Duplicates and validation failures are not counted.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -684,52 +467,34 @@
       "gridPos": {
         "x": 0,
         "y": 32,
-        "w": 12,
-        "h": 9
+        "w": 8,
+        "h": 5
       },
+      "timeFrom": "now/d",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "fixed",
+            "fixedColor": "blue"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "cps",
-          "min": 0
+          "decimals": 0,
+          "unit": "locale"
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
           "calcs": [
-            "lastNotNull",
-            "max"
-          ]
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "textMode": "value"
       },
       "targets": [
         {
@@ -738,71 +503,53 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (outcome, payment_scheme) (rate(corebankdemo_payment_intake_total{outcome=~\"$outcome\", payment_scheme=~\"$payment_scheme\"}[$__rate_interval]))",
-          "legendFormat": "outcome={{outcome}}, scheme={{payment_scheme}}",
-          "range": true,
+          "expr": "sum((last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range]) - (corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"} offset $__range)) or last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range])) or vector(0)",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
     },
     {
       "id": 9,
-      "type": "timeseries",
-      "title": "Instant payment duration",
-      "description": "corebankdemo.payment.instant.duration \u2014 Instant-rail request duration. 95th percentile. Split by outcome; click a legend row to isolate it.",
+      "type": "stat",
+      "title": "Transactions processed",
+      "description": "Transactions CoreBank executed today, exactly once each: completed or rejected by a business rule. The result event is written to CoreBank's outbox in the same database transaction.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 12,
+        "x": 8,
         "y": 32,
-        "w": 12,
-        "h": 9
+        "w": 8,
+        "h": 5
       },
+      "timeFrom": "now/d",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "fixed",
+            "fixedColor": "blue"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "ms",
-          "min": 0
+          "decimals": 0,
+          "unit": "locale"
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
           "calcs": [
-            "lastNotNull",
-            "max"
-          ]
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "textMode": "value"
       },
       "targets": [
         {
@@ -811,71 +558,53 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(corebankdemo_payment_instant_duration_milliseconds_bucket{outcome=~\"$outcome\"}[$__rate_interval])))",
-          "legendFormat": "outcome={{outcome}}",
-          "range": true,
+          "expr": "sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range]) - (corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"} offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range])) or vector(0)",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
     },
     {
       "id": 10,
-      "type": "timeseries",
-      "title": "Transaction intake",
-      "description": "corebankdemo.transaction.intake \u2014 CoreBank transaction intake outcomes. Per-second rate. Split by outcome; click a legend row to isolate it.",
+      "type": "stat",
+      "title": "Messages sent",
+      "description": "Result events (transaction-completed or transaction-failed) CoreBank's outbox published today, one per processed transaction. Equal to the other two totals unless there is an outage; a publish retried after a lost acknowledgement counts twice.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 0,
-        "y": 41,
-        "w": 12,
-        "h": 9
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 5
       },
+      "timeFrom": "now/d",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "fixed",
+            "fixedColor": "blue"
           },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "cps",
-          "min": 0
+          "decimals": 0,
+          "unit": "locale"
         },
         "overrides": []
       },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
           "calcs": [
-            "lastNotNull",
-            "max"
-          ]
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
+        "textMode": "value"
       },
       "targets": [
         {
@@ -884,374 +613,9 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (outcome) (rate(corebankdemo_transaction_intake_total{outcome=~\"$outcome\"}[$__rate_interval]))",
-          "legendFormat": "outcome={{outcome}}",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "Transactions processed",
-      "description": "corebankdemo.transaction.processed \u2014 CoreBank transaction execution outcomes. Per-second rate. Split by outcome; click a legend row to isolate it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 41,
-        "w": 12,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "cps",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (outcome) (rate(corebankdemo_transaction_processed_total{outcome=~\"$outcome\"}[$__rate_interval]))",
-          "legendFormat": "outcome={{outcome}}",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Store operations",
-      "description": "corebankdemo.messaging.store.operations \u2014 Rows added to (or rejected by) each Inbox/Outbox store. Per-second rate. Split by messaging_store_name, messaging_store_kind, outcome; click a legend row to isolate it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 50,
-        "w": 12,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "cps",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (messaging_store_name, messaging_store_kind, outcome) (rate(corebankdemo_messaging_store_operations_total{messaging_store_name=~\"$store_name\", messaging_store_kind=~\"$store_kind\", outcome=~\"$outcome\"}[$__rate_interval]))",
-          "legendFormat": "store={{messaging_store_name}}, kind={{messaging_store_kind}}, outcome={{outcome}}",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 13,
-      "type": "timeseries",
-      "title": "Items processed",
-      "description": "corebankdemo.messaging.items.processed \u2014 Inbox/Outbox rows finished, per outcome. Per-second rate. Split by messaging_store_name, messaging_store_kind, outcome; click a legend row to isolate it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 50,
-        "w": 12,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "cps",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (messaging_store_name, messaging_store_kind, outcome) (rate(corebankdemo_messaging_items_processed_total{messaging_store_name=~\"$store_name\", messaging_store_kind=~\"$store_kind\", outcome=~\"$outcome\"}[$__rate_interval]))",
-          "legendFormat": "store={{messaging_store_name}}, kind={{messaging_store_kind}}, outcome={{outcome}}",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 14,
-      "type": "timeseries",
-      "title": "Queue duration",
-      "description": "corebankdemo.messaging.queue.duration \u2014 Time a row waited in its store before processing. 95th percentile. Split by messaging_store_name, messaging_store_kind; click a legend row to isolate it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 59,
-        "w": 12,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "ms",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, messaging_store_name, messaging_store_kind) (rate(corebankdemo_messaging_queue_duration_milliseconds_bucket{messaging_store_name=~\"$store_name\", messaging_store_kind=~\"$store_kind\"}[$__rate_interval])))",
-          "legendFormat": "store={{messaging_store_name}}, kind={{messaging_store_kind}}",
-          "range": true,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "id": 15,
-      "type": "timeseries",
-      "title": "Deliveries",
-      "description": "corebankdemo.messaging.deliveries \u2014 Messages sent and received between the services. Per-second rate. Split by messaging_direction, messaging_message_type, messaging_transport, outcome; click a legend row to isolate it.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 59,
-        "w": 12,
-        "h": 9
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 2,
-            "fillOpacity": 8,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "mode": "none"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "cps",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true,
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "sum by (messaging_direction, messaging_message_type, messaging_transport, outcome) (rate(corebankdemo_messaging_deliveries_total{messaging_direction=~\"$direction\", messaging_message_type=~\"$message_type\", messaging_transport=~\"$transport\", outcome=~\"$outcome\"}[$__rate_interval]))",
-          "legendFormat": "direction={{messaging_direction}}, type={{messaging_message_type}}, transport={{messaging_transport}}, outcome={{outcome}}",
-          "range": true,
+          "expr": "sum((last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range]) - (corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"} offset $__range)) or last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range])) or vector(0)",
+          "instant": true,
+          "range": false,
           "refId": "A"
         }
       ]
