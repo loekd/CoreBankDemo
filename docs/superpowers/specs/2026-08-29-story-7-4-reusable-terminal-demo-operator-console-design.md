@@ -223,7 +223,7 @@ Migration may leave compatibility code temporarily while tests move, but no reti
 - Four workspaces, persistent chrome, confirmations, and compact layout live here.
   [`MainWindow.cs:12`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L12)
 
-- Confirmation requires uppercase Y and defaults focus to Cancel.
+- Confirmation requires uppercase Y or the non-default OK button, and defaults focus to Cancel.
   [`MainWindow.cs:525`](../../../CoreBankDemo.DemoRunner/Terminal/MainWindow.cs#L525)
 
 **Verification**

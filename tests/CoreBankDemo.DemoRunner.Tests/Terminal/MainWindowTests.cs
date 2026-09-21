@@ -568,6 +568,53 @@ public class MainWindowTests
     }
 
     [Fact]
+    public void DestructiveDialog_OkButtonConfirmsExactlyOnce()
+    {
+        var request = new ConfirmationRequest("Restart", "aspire resource x restart", ["x"]);
+
+        using var dialog = new DestructiveConfirmationDialog(request);
+        dialog.OkButton.InvokeCommand(Command.Accept);
+        dialog.Result.Should().BeTrue();
+        dialog.ConfirmationCount.Should().Be(1);
+
+        dialog.HandleKeyForTest(Key.Y.WithShift);
+        dialog.OkButton.InvokeCommand(Command.Accept);
+        dialog.ConfirmationCount.Should().Be(1);
+    }
+
+    [Fact]
+    public void DestructiveDialog_OkButtonNeverTakesTheDefaultOrInitialFocus()
+    {
+        var request = new ConfirmationRequest("Restart", "aspire resource x restart", ["x"]);
+
+        using var dialog = new DestructiveConfirmationDialog(request);
+        dialog.FocusCancel();
+
+        dialog.OkButton.IsDefault.Should().BeFalse();
+        dialog.OkButton.HasFocus.Should().BeFalse();
+        dialog.CancelButton.HasFocus.Should().BeTrue();
+        dialog.DefaultAcceptView.Should().BeSameAs(dialog.CancelButton);
+    }
+
+    [Fact]
+    public void DestructiveDialog_EnterOnFocusedOkConfirms_EnterOnFocusedCancelCancels()
+    {
+        var request = new ConfirmationRequest("Restart", "aspire resource x restart", ["x"]);
+
+        using var onOk = new DestructiveConfirmationDialog(request);
+        onOk.OkButton.SetFocus();
+        onOk.NewKeyDownEvent(Key.Enter);
+        onOk.Result.Should().BeTrue();
+        onOk.ConfirmationCount.Should().Be(1);
+
+        using var onCancel = new DestructiveConfirmationDialog(request);
+        onCancel.FocusCancel();
+        onCancel.NewKeyDownEvent(Key.Enter);
+        onCancel.Result.Should().BeFalse();
+        onCancel.ConfirmationCount.Should().Be(0);
+    }
+
+    [Fact]
     public void AcceptCommand_ReachesNonDefaultButtons()
     {
         // Terminal.Gui raises Accepted only for the default button; a click on any other
