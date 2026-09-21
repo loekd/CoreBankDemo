@@ -52,7 +52,7 @@ There is no scenario-provided process path, shell text, database statement, unre
 
 ### Single mutation lock and destructive confirmation
 
-Only one mutating operation may be in flight across the console. Read-only inspection remains available, and the active burst's own Cancel is the sole exception. Resource Stop/Restart, whole-AppHost Stop/Switch, and Load Test Run require a modal naming the exact target and command. Cancel receives initial focus; `Y` confirms and Escape cancels. There is no hold gesture or double-Enter confirmation.
+Only one mutating operation may be in flight across the console. Read-only inspection remains available, and the active burst's own Cancel is the sole exception. Resource Stop/Restart, whole-AppHost Stop/Switch, and Load Test Run require a modal naming the exact target and command. Cancel receives initial focus and is the default button; `Y` or the non-default OK button confirms, and Escape cancels. There is no hold gesture or double-Enter confirmation.
 
 ### Payment and load-test semantics remain owned by their existing contracts
 

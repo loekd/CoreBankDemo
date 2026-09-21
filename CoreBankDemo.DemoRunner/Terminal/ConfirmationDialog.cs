@@ -33,6 +33,13 @@ internal sealed class DestructiveConfirmationDialog : Dialog<bool>
         Height = 10;
         OperatorTheme.Apply(this, OperatorTheme.OverlayScheme);
 
+        OkButton = new Button { Text = "OK" };
+        OkButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            Confirm();
+        };
+
         CancelButton = new Button { Text = "Cancel", IsDefault = true };
         CancelButton.Accepting += (_, e) =>
         {
@@ -49,12 +56,14 @@ internal sealed class DestructiveConfirmationDialog : Dialog<bool>
             Y = 1,
             Width = Dim.Fill(1),
             Height = 4,
-            Text = $"{request.Command}{Environment.NewLine}Affected instances: {instances}{Environment.NewLine}Press uppercase Y to confirm. Enter/Escape cancel.",
+            Text = $"{request.Command}{Environment.NewLine}Affected instances: {instances}{Environment.NewLine}Press uppercase Y or choose OK to confirm. Enter/Escape cancel.",
         });
+        AddButton(OkButton);
         AddButton(CancelButton);
         DefaultAcceptView = CancelButton;
     }
 
+    internal Button OkButton { get; }
     internal Button CancelButton { get; }
     internal int ConfirmationCount { get; private set; }
 
@@ -63,13 +72,7 @@ internal sealed class DestructiveConfirmationDialog : Dialog<bool>
         if (InteractionPolicies.ConfirmsDestructiveAction((char)key.AsRune.Value))
         {
             key.Handled = true;
-            if (Result != true)
-            {
-                ConfirmationCount++;
-                Result = true;
-                RequestStop();
-            }
-
+            Confirm();
             return true;
         }
 
@@ -85,6 +88,18 @@ internal sealed class DestructiveConfirmationDialog : Dialog<bool>
 
     internal void FocusCancel() => CancelButton.SetFocus();
     internal bool HandleKeyForTest(Key key) => OnKeyDown(key);
+
+    private void Confirm()
+    {
+        if (Result == true)
+        {
+            return;
+        }
+
+        ConfirmationCount++;
+        Result = true;
+        RequestStop();
+    }
 
     private void Cancel()
     {
