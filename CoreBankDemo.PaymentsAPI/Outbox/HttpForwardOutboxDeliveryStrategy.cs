@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults;
@@ -152,6 +153,12 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
                 // and counts nothing, so this is the row's only out.
                 businessMetrics.RecordItemProcessed(
                     BusinessMetrics.StoreName.PaymentsOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.Cancelled);
+                // The processor's span re-attached to the payment's original
+                // trace, so this marks that trace as a failed payment exactly
+                // like an inline cancel does (FailedPaymentTags).
+                Activity.Current?.SetTag(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled);
+                Activity.Current?.SetTag(FailedPaymentTags.FailureReason, CancelledByCoreBankReason);
+                Activity.Current?.SetTag(FailedPaymentTags.TransactionId, message.TransactionId);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

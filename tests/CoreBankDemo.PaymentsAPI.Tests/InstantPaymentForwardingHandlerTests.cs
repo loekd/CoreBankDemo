@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
@@ -604,6 +605,77 @@ public class InstantPaymentForwardingHandlerTests
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("cancelled");
         ShouldHaveCountedOneCancelledItem(listener);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_tags_the_request_span_as_a_cancelled_payment_when_CoreBank_cancels_it()
+    {
+        // The traces dashboard lists failed payments by these tags on the
+        // request span, so the operator can open the trace of a cancelled
+        // payment and read why without a service or operation filter.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission());
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 });
+
+        await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        requestSpan.TagObjects.Should().Contain(
+            new KeyValuePair<string, object?>(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled),
+            new KeyValuePair<string, object?>(FailedPaymentTags.FailureReason, InstantPaymentForwardingHandler.CoreBankCancelReason),
+            new KeyValuePair<string, object?>(FailedPaymentTags.TransactionId, Payment.TransactionId));
+    }
+
+    [Fact]
+    public async Task ForwardAsync_tags_the_request_span_as_a_cancelled_payment_when_it_cancels_locally()
+    {
+        _lock.Acquired = false;
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageConstants.Status.Pending);
+        SetUpLocalCancel();
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 120, AttemptTimeoutMilliseconds = 30, MaxAttempts = 1, CancelTimeoutMilliseconds = 20 },
+            timeProvider: clock);
+
+        await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        requestSpan.TagObjects.Should().Contain(
+            new KeyValuePair<string, object?>(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled),
+            new KeyValuePair<string, object?>(FailedPaymentTags.FailureReason, InstantPaymentForwardingHandler.LocalCancelReason),
+            new KeyValuePair<string, object?>(FailedPaymentTags.TransactionId, Payment.TransactionId));
+    }
+
+    [Theory]
+    [InlineData(MessageConstants.Status.Completed)]
+    [InlineData(MessageConstants.Status.Failed)]
+    public async Task ForwardAsync_never_tags_a_failed_payment_when_the_cancel_arrives_after_execution(string coreBankStatus)
+    {
+        // A cancel that lost its race is not a failed payment: the row ends
+        // Completed with CoreBank's outcome. A rejection's reason is tagged
+        // by the transaction.failed event, never guessed here.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("transport failure"));
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, coreBankStatus, DateTimeOffset.UtcNow));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 1 });
+
+        await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        requestSpan.TagObjects.Should().NotContain(tag => tag.Key == FailedPaymentTags.Outcome);
     }
 
     [Theory]

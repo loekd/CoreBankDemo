@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
@@ -296,6 +297,51 @@ public class HttpForwardOutboxDeliveryStrategyTests
                 ["messaging.store.kind"] = "outbox",
                 ["outcome"] = "cancelled",
             });
+    }
+
+    [Fact]
+    public async Task DeliverAsync_tags_the_processing_span_as_a_cancelled_payment_when_CoreBank_replays_a_cancellation()
+    {
+        // The outbox processor re-attaches to the payment's original trace,
+        // so tagging its span here puts this row's cancellation on the traces
+        // dashboard's "Failed payments" table like an inline cancel.
+        var client = new FakeCoreBankApiClient
+        {
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(
+                new TransactionSubmission("forward-key", MessageConstants.Status.Cancelled, DateTimeOffset.UtcNow))
+        };
+        _store.Setup(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        var message = Message();
+        using var processingSpan = new Activity("ProcessOutboxMessage").Start();
+
+        await strategy.DeliverAsync(message, TestContext.Current.CancellationToken);
+
+        processingSpan.TagObjects.Should().Contain(
+            new KeyValuePair<string, object?>(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled),
+            new KeyValuePair<string, object?>(FailedPaymentTags.FailureReason, HttpForwardOutboxDeliveryStrategy.CancelledByCoreBankReason),
+            new KeyValuePair<string, object?>(FailedPaymentTags.TransactionId, message.TransactionId));
+    }
+
+    [Theory]
+    [InlineData(MessageTransitionOutcome.AlreadyTerminal)]
+    [InlineData(MessageTransitionOutcome.Conflicted)]
+    public async Task DeliverAsync_never_tags_a_failed_payment_when_the_replayed_cancellation_is_not_applied(MessageTransitionOutcome transition)
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            SubmitResult = CoreBankResult<TransactionSubmission>.Success(
+                new TransactionSubmission("forward-key", MessageConstants.Status.Cancelled, DateTimeOffset.UtcNow))
+        };
+        _store.Setup(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(transition);
+        var strategy = new HttpForwardOutboxDeliveryStrategy(client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+        using var processingSpan = new Activity("ProcessOutboxMessage").Start();
+
+        await strategy.DeliverAsync(Message(), TestContext.Current.CancellationToken);
+
+        processingSpan.TagObjects.Should().NotContain(tag => tag.Key == FailedPaymentTags.Outcome);
     }
 
     [Fact]

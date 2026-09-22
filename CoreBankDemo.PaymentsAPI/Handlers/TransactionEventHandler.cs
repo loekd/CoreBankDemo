@@ -135,6 +135,12 @@ internal sealed class TransactionEventHandler(
         // A null ErrorReason is valid; represent it explicitly so the expected
         // tag remains queryable rather than being removed by Activity.SetTag.
         activity?.SetTag("transaction.error_reason", payload.ErrorReason ?? string.Empty);
+        // This event is the only place PaymentsAPI learns why CoreBank
+        // rejected the payment, so it carries the traces dashboard's failed
+        // payment tags for a rejection (FailedPaymentTags); the transaction.id
+        // tag above already names the payment.
+        activity?.SetTag(FailedPaymentTags.Outcome, FailedPaymentTags.Rejected);
+        activity?.SetTag(FailedPaymentTags.FailureReason, payload.ErrorReason ?? string.Empty);
 
         logger.LogWarning(
             "Transaction {TransactionId} failed with status {Status}: {ErrorReason} for event {EventType}",
