@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Models;
@@ -485,6 +486,12 @@ internal sealed class InstantPaymentForwardingHandler(
 
         logger.LogInformation(
             "Instant rail: payment {IdempotencyKey} cancelled ({Reason})", payment.IdempotencyKey, reason);
+        // The request span is the trace's root: tagged here, once the row is
+        // provably dead, so the traces dashboard lists this payment as failed
+        // with its reason (FailedPaymentTags).
+        Activity.Current?.SetTag(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled);
+        Activity.Current?.SetTag(FailedPaymentTags.FailureReason, reason);
+        Activity.Current?.SetTag(FailedPaymentTags.TransactionId, claimed.TransactionId);
         businessMetrics.RecordItemProcessed(
             BusinessMetrics.StoreName.PaymentsOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.ItemOutcome.Cancelled);
         businessMetrics.RecordInstantPaymentDuration(

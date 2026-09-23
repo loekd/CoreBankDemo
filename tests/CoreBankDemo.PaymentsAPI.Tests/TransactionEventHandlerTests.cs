@@ -80,6 +80,47 @@ public class TransactionEventHandlerTests
             new KeyValuePair<string, object?>("transaction.error_reason", "Insufficient funds"));
     }
 
+    [Theory]
+    [InlineData("Insufficient funds", "Insufficient funds")]
+    [InlineData(null, "")]
+    public async Task Failed_event_tags_the_span_as_a_rejected_payment_with_its_reason(string? errorReason, string expectedReason)
+    {
+        // The transaction.failed event is the only place PaymentsAPI learns
+        // why CoreBank rejected a payment, so this span carries the traces
+        // dashboard's "Failed payments" tags for a rejection.
+        using var observedActivity = StartListenedActivity();
+        var activity = observedActivity.Activity;
+        var payload = new TransactionFailedEvent("txn-2", "Failed", Now, errorReason);
+        var message = Inbox(Constants.TransactionFailed, "txn-2", payload: Serialize(payload));
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        activity.TagObjects.Should().Contain(
+            new KeyValuePair<string, object?>(FailedPaymentTags.Outcome, FailedPaymentTags.Rejected),
+            new KeyValuePair<string, object?>(FailedPaymentTags.FailureReason, expectedReason),
+            new KeyValuePair<string, object?>(FailedPaymentTags.TransactionId, "txn-2"));
+    }
+
+    [Fact]
+    public async Task Completed_and_cancelled_events_never_tag_a_failed_payment()
+    {
+        // A settlement is not a failure, and a cancellation is tagged where
+        // the outbox row is cancelled, never a second time here.
+        using var observedActivity = StartListenedActivity();
+        var activity = observedActivity.Activity;
+        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+
+        await handler.HandleAsync(
+            Inbox(Constants.TransactionCompleted, "txn-1", payload: Serialize(new TransactionCompletedEvent("txn-1", "Completed", Now))),
+            TestContext.Current.CancellationToken);
+        await handler.HandleAsync(
+            Inbox(Constants.TransactionCancelled, "txn-4", payload: Serialize(new TransactionCancelledEvent("txn-4", "Cancelled", Now, "budget"))),
+            TestContext.Current.CancellationToken);
+
+        activity.TagObjects.Should().NotContain(tag => tag.Key == FailedPaymentTags.Outcome);
+    }
+
     [Fact]
     public async Task Failed_event_with_a_null_reason_remains_valid_and_still_logs_warning()
     {

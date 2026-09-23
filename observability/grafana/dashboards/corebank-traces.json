@@ -1,7 +1,7 @@
 {
   "uid": "corebank-traces",
   "title": "CoreBank Traces",
-  "description": "Jaeger-style trace search: pick a service and operation, see its rate, errors and p95 from span metrics, the matching end-to-end traces, and the service map. Below that, today's totals for the payment flow. Grafana's home page (ADR-022).",
+  "description": "Jaeger-style trace search: pick a service and operation, see its rate, errors and p95 from span metrics, the matching end-to-end traces, the payments that failed and why, and the service map. Below that, today's totals for the payment flow. Grafana's home page (ADR-022).",
   "tags": [
     "corebank"
   ],
@@ -366,6 +366,57 @@
       ]
     },
     {
+      "id": 11,
+      "type": "table",
+      "title": "Which payment failed, and why",
+      "description": "Every payment that ended without settling today: cancelled before execution (no money moved) or rejected by a business rule at CoreBank, with its reason. PaymentsAPI tags the span where the outcome is committed, so a cancel that lost its race to execution is not listed. Click the trace ID to open the full waterfall. Not narrowed by the Service and Operation filters.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 10
+      },
+      "timeFrom": "now/d",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Start time"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "limit": 50,
+          "query": "{ span.payment.outcome =~ \"cancelled|rejected\" } | select(span.transaction.id, span.payment.outcome, span.payment.failure_reason)",
+          "queryType": "traceql",
+          "refId": "A",
+          "tableType": "spans"
+        }
+      ]
+    },
+    {
       "id": 5,
       "type": "table",
       "title": "Traces with errors",
@@ -376,7 +427,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 29,
         "w": 12,
         "h": 12
       },
@@ -426,7 +477,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 19,
+        "y": 29,
         "w": 12,
         "h": 12
       },
@@ -449,7 +500,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 41,
         "w": 24,
         "h": 1
       },
@@ -466,8 +517,8 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
-        "w": 8,
+        "y": 42,
+        "w": 6,
         "h": 5
       },
       "timeFrom": "now/d",
@@ -503,7 +554,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum((last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range]) - (corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"} offset $__range)) or last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range])) or vector(0)",
+          "expr": "sum((last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range]) - last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[7d] offset $__range)) or last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range])) or vector(0)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -520,9 +571,9 @@
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 8,
-        "y": 32,
-        "w": 8,
+        "x": 6,
+        "y": 42,
+        "w": 6,
         "h": 5
       },
       "timeFrom": "now/d",
@@ -558,7 +609,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range]) - (corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"} offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range])) or vector(0)",
+          "expr": "sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range]) - last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[7d] offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range])) or vector(0)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -569,15 +620,15 @@
       "id": 10,
       "type": "stat",
       "title": "Messages sent",
-      "description": "Result events (transaction-completed or transaction-failed) CoreBank's outbox published today, one per processed transaction. Equal to the other two totals unless there is an outage; a publish retried after a lost acknowledgement counts twice.",
+      "description": "Result events (transaction-completed or transaction-failed) CoreBank's outbox published today, one per processed transaction. Equal to Transactions processed unless there is an outage; a publish retried after a lost acknowledgement counts twice.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
       },
       "gridPos": {
-        "x": 16,
-        "y": 32,
-        "w": 8,
+        "x": 12,
+        "y": 42,
+        "w": 6,
         "h": 5
       },
       "timeFrom": "now/d",
@@ -613,7 +664,62 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum((last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range]) - (corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"} offset $__range)) or last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range])) or vector(0)",
+          "expr": "sum((last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range]) - last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[7d] offset $__range)) or last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range])) or vector(0)",
+          "instant": true,
+          "range": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Failed payments",
+      "description": "Payments that ended without settling today: cancelled before execution (the instant rail ran out of time, or CoreBank withdrew it -- no money moved) plus rejected by a business rule at CoreBank. Payments received equals Transactions processed plus cancellations, give or take what is still in flight.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 42,
+        "w": 6,
+        "h": 5
+      },
+      "timeFrom": "now/d",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          },
+          "decimals": 0,
+          "unit": "locale"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "(sum((last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[$__range]) - last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[7d] offset $__range)) or last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[$__range])) or vector(0)) + (sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[$__range]) - last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[7d] offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[$__range])) or vector(0))",
           "instant": true,
           "range": false,
           "refId": "A"
