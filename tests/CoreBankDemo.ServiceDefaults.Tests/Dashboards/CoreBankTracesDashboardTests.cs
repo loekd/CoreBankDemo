@@ -118,12 +118,16 @@ public class CoreBankTracesDashboardTests
     /// Not increase(): it skips a series' first sample, and a business counter first
     /// appears already counting, so increase() under-reports and the tiles stop lining up.
     /// Every process is its own service_instance_id series that never resets, so the last
-    /// value each reported today, less what it already had at midnight, is exact.
+    /// value each reported today, less the last value it reported before midnight, is exact.
+    /// The baseline is the last sample in the week before midnight, not the sample at
+    /// midnight: a laptop asleep at midnight exports nothing then, and a series with no
+    /// baseline would otherwise count its whole lifetime as today.
     /// </summary>
     private static string SinceMidnight(string selector)
     {
         var today = $"last_over_time({selector}[$__range])";
-        return $"sum(({today} - ({selector} offset $__range)) or {today}) or vector(0)";
+        var beforeMidnight = $"last_over_time({selector}[7d] offset $__range)";
+        return $"sum(({today} - {beforeMidnight}) or {today}) or vector(0)";
     }
 
     [Fact]

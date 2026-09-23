@@ -554,7 +554,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum((last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range]) - (corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"} offset $__range)) or last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range])) or vector(0)",
+          "expr": "sum((last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range]) - last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[7d] offset $__range)) or last_over_time(corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}[$__range])) or vector(0)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -609,7 +609,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range]) - (corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"} offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range])) or vector(0)",
+          "expr": "sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range]) - last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[7d] offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[$__range])) or vector(0)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -664,7 +664,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum((last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range]) - (corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"} offset $__range)) or last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range])) or vector(0)",
+          "expr": "sum((last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range]) - last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[7d] offset $__range)) or last_over_time(corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}[$__range])) or vector(0)",
           "instant": true,
           "range": false,
           "refId": "A"
@@ -719,7 +719,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "(sum((last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[$__range]) - (corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"} offset $__range)) or last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[$__range])) or vector(0)) + (sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[$__range]) - (corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"} offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[$__range])) or vector(0))",
+          "expr": "(sum((last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[$__range]) - last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[7d] offset $__range)) or last_over_time(corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}[$__range])) or vector(0)) + (sum((last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[$__range]) - last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[7d] offset $__range)) or last_over_time(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}[$__range])) or vector(0))",
           "instant": true,
           "range": false,
           "refId": "A"
