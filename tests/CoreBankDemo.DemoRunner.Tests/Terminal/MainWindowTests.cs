@@ -245,6 +245,57 @@ public class MainWindowTests
         window.SubmitButton.Text.ToString().Should().Be("Submit");
     }
 
+    /// <summary>
+    /// The mode button names the mode it switches *to*, so the operator reads a destination,
+    /// not a state: <c>Burst mode</c> while composing single payments, <c>Single mode</c>
+    /// while a burst is armed. Which mode is current is stated by Submit's own caption and by
+    /// the burst count fields being present.
+    /// </summary>
+    [Fact]
+    public void BurstModeButton_NamesTheModeItSwitchesTo()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+
+        window.BurstButton.Text.ToString().Should().Be("Burst mode");
+
+        window.BurstButton.InvokeCommand(Command.Accept);
+        window.BurstButton.Text.ToString().Should().Be("Single mode", "while a burst is armed the button offers the way back");
+
+        window.BurstButton.InvokeCommand(Command.Accept);
+        window.BurstButton.Text.ToString().Should().Be("Burst mode");
+    }
+
+    /// <summary>
+    /// The mode button wears Submit's filled-teal treatment and sits on its own row beneath the
+    /// chips at every width, with the burst count fields sharing that row while a burst is armed,
+    /// so the two compose lines keep their full width for the fields and chips.
+    /// </summary>
+    [Theory]
+    [InlineData(80, 24)]
+    [InlineData(100, 30)]
+    public void BurstModeButton_MatchesSubmitAndOwnsTheThirdRow(int width, int height)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(width, height);
+        window.RenderForTest();
+
+        window.BurstButton.SchemeName.Should().Be(window.SubmitButton.SchemeName, "the mode button looks like Submit");
+        window.BurstButton.SchemeName.Should().Be(OperatorTheme.ActionScheme);
+        window.BurstButton.Frame.Y.Should().Be(2);
+        window.BurstButton.Frame.X.Should().Be(window.SubmitButton.Frame.X, "it shares Submit's right-anchored slot");
+        window.ComposeRuleLabel.Frame.Y.Should().Be(3, "the rule closes the bar directly beneath the mode row");
+
+        window.BurstButton.InvokeCommand(Command.Accept);
+        window.RenderForTest();
+
+        window.BurstCountField.Visible.Should().BeTrue();
+        window.BurstCountField.Frame.Y.Should().Be(window.BurstButton.Frame.Y, "the burst count shares the mode button's row");
+        window.BurstButton.Frame.Y.Should().Be(2, "arming a burst does not move the mode button");
+        window.ComposeRuleLabel.Frame.Y.Should().Be(3, "the burst count costs no extra row");
+    }
+
     [Fact]
     public async Task RefreshAndOrderlyExit_RunThroughActualMainWindowPaths()
     {
@@ -1063,10 +1114,11 @@ public class MainWindowTests
 
     /// <summary>
     /// Removing the three-row bottom band and collapsing the sixteen-row form re-cuts the rows at
-    /// 100x30 from 10 of shell chrome and 4 of payment area to 7 and 20.
+    /// 100x30 from 10 of shell chrome and 4 of payment area to 7 and 20; the mode button's own
+    /// row beneath the chips then takes one of those 20.
     /// </summary>
     [Fact]
-    public void OperationsRowBudget_At100x30_Spends7RowsOnChromeAnd20OnThePaymentArea()
+    public void OperationsRowBudget_At100x30_Spends7RowsOnChromeAnd19OnThePaymentArea()
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
@@ -1075,7 +1127,7 @@ public class MainWindowTests
         window.RenderForTest();
 
         window.OperationsChromeRowCount.Should().Be(7);
-        window.OperationsPaymentAreaRows.Should().Be(20);
+        window.OperationsPaymentAreaRows.Should().Be(19);
     }
 
     /// <summary>
@@ -1423,18 +1475,15 @@ public class MainWindowTests
     }
 
     /// <summary>
-    /// At the floor the compose bar keeps both captions and every control: where the chips and
-    /// Burst… cannot share the second line, the action wraps to a third rather than shedding a
-    /// caption. An unlabelled IBAN read from the back of a room is a run of digits, so a caption
-    /// is worth more than the row it costs, and no control in use is ever hidden.
+    /// At the floor the compose bar keeps both captions and every control: the mode button has
+    /// its own third line at every width, so the chips never compete with it for the second and
+    /// no caption is shed. An unlabelled IBAN read from the back of a room is a run of digits, so
+    /// a caption is worth more than the row it costs, and no control in use is ever hidden.
     /// </summary>
     [Theory]
-    [InlineData(80, 24, 2)]
-    [InlineData(100, 30, 1)]
-    public void ComposeBar_KeepsBothCaptionsAndEveryControl_WrappingBurstRatherThanHidingIt(
-        int width,
-        int height,
-        int expectedBurstRow)
+    [InlineData(80, 24)]
+    [InlineData(100, 30)]
+    public void ComposeBar_KeepsBothCaptionsAndEveryControl_AtEveryWidth(int width, int height)
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
@@ -1448,15 +1497,8 @@ public class MainWindowTests
         window.RailButton.Visible.Should().BeTrue();
         window.IdempotencyButton.Visible.Should().BeTrue();
         window.SubmitButton.Frame.Y.Should().Be(0);
-        window.BurstButton.Frame.Y.Should().Be(expectedBurstRow);
-        if (expectedBurstRow == window.IdempotencyButton.Frame.Y)
-        {
-            window.BurstButton.Frame.X.Should().BeGreaterThan(
-                window.IdempotencyButton.Frame.X + window.IdempotencyButton.Frame.Width - 1,
-                "Burst… never overlaps the chip beside it at {0}x{1}",
-                width,
-                height);
-        }
+        window.IdempotencyButton.Frame.Y.Should().Be(1);
+        window.BurstButton.Frame.Y.Should().Be(2, "the mode button never shares the chips' line at {0}x{1}", width, height);
         window.ComposeRuleLabel.Frame.Y.Should().BeGreaterThan(
             window.BurstButton.Frame.Y,
             "the rule closes the bar beneath every line it grew");
