@@ -228,6 +228,10 @@ As the process record, I want the accepted rebuild decisions audited against the
 - `MessageRepositoryBase` repeats its save-and-handle-conflict shape in every transition. — `MarkAsFailedWithRetryAsync` and `ReleaseClaimsAsync` tell a conflict on another tracked row from a conflict on the row in hand; `MarkAsCompletedAsync` and `MarkAsCancelledAsync` do not yet. Extract one conflict-aware save helper and use it in every transition.
 - Legacy `Failed` CoreBank inbox rows replay `503`, which PaymentsAPI retries without limit. — Only databases that already hold such rows are affected (ADR-023, Consequences); a one-off clean-up or a terminal answer for those rows needs its own decision.
 
+### [instant rail Retry-After](superpowers/specs/2026-09-23-instant-rail-retry-after-design.md)
+
+- The background payments outbox retries a `429`/`503` on every 200 ms poll tick with no backoff and ignores `Retry-After`. — The `corebank-api` client has no resilience pipeline (AD-11), so nothing throttles it; ADR-024 corrects the docs that said otherwise but changes only the instant rail. `CoreBankRetryException.RetryAfter` now carries the value; mapping it onto the row's `HoldUntil` (already honoured by the batch claim query) is the obvious shape, but it needs a decision on whether a held head-of-line row blocks its partition or is skipped.
+
 ## Open retrospective action items
 
 These carry-forwards were copied from the epic retrospectives during the 2026-09-10 migration; items verifiable as done in the code were removed then, the rest have not been re-verified.
