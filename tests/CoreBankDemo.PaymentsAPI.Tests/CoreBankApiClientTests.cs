@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using Microsoft.Extensions.Time.Testing;
 using Microsoft.Kiota.Abstractions.Authentication;
 using Microsoft.Kiota.Http.HttpClientLibrary;
 using Polly.Timeout;
@@ -817,7 +818,95 @@ public class CoreBankApiClientTests
         }
     }
 
-    private static KiotaCoreBankApiClient CreateClient(HttpMessageHandler handler)
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    public async Task ProcessTransactionAsync_carries_Retry_After_on_a_429_or_503(HttpStatusCode status)
+    {
+        // ADR-024: the server's hint travels with the retry outcome; nothing
+        // here waits -- the instant rail decides what to do with it.
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+        {
+            var response = JsonResponse(status, new { errors = new[] { "throttled" } });
+            response.Headers.TryAddWithoutValidation("Retry-After", "2");
+            return response;
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.ProcessTransactionAsync(SubmissionRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.StatusCode.Should().Be((int)status);
+        result.RetryAfter.Should().Be(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_reads_an_http_date_Retry_After_on_the_time_provider()
+    {
+        var now = new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero);
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+        {
+            var response = JsonResponse(HttpStatusCode.TooManyRequests, new { errors = new[] { "throttled" } });
+            response.Headers.TryAddWithoutValidation("Retry-After", now.AddSeconds(3).ToString("r"));
+            return response;
+        });
+        var client = CreateClient(handler, new FakeTimeProvider(now));
+
+        var result = await client.ProcessTransactionAsync(SubmissionRequest(), TestContext.Current.CancellationToken);
+
+        result.RetryAfter.Should().Be(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_ignores_Retry_After_on_any_other_status()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+        {
+            var response = JsonResponse(HttpStatusCode.InternalServerError, new { errors = new[] { "boom" } });
+            response.Headers.TryAddWithoutValidation("Retry-After", "2");
+            return response;
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.ProcessTransactionAsync(SubmissionRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryAfter.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_treats_an_unparseable_Retry_After_as_absent()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+        {
+            var response = JsonResponse(HttpStatusCode.TooManyRequests, new { errors = new[] { "throttled" } });
+            response.Headers.TryAddWithoutValidation("Retry-After", "soon");
+            return response;
+        });
+        var client = CreateClient(handler);
+
+        var result = await client.ProcessTransactionAsync(SubmissionRequest(), TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryAfter.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ProcessTransactionAsync_leaves_RetryAfter_null_on_a_429_without_the_header()
+    {
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            JsonResponse(HttpStatusCode.TooManyRequests, new { errors = new[] { "throttled" } }));
+        var client = CreateClient(handler);
+
+        var result = await client.ProcessTransactionAsync(SubmissionRequest(), TestContext.Current.CancellationToken);
+
+        result.RetryAfter.Should().BeNull();
+    }
+
+    private static TransactionSubmissionRequest SubmissionRequest() =>
+        new("NL91ABNA0417164300", "NL20INGB0001234567", 50m, "EUR", "tx-retry-after");
+
+    private static KiotaCoreBankApiClient CreateClient(HttpMessageHandler handler, TimeProvider? timeProvider = null)
     {
         // Mirrors CoreBankClientServiceCollectionExtensions' production
         // pipeline (LastResponseStatusHandler wraps the transport) so the
@@ -830,7 +919,7 @@ public class CoreBankApiClientTests
         };
         var adapter = new HttpClientRequestAdapter(new AnonymousAuthenticationProvider(), httpClient: httpClient);
         var generatedClient = new GeneratedClient(adapter);
-        return new KiotaCoreBankApiClient(generatedClient);
+        return new KiotaCoreBankApiClient(generatedClient, timeProvider ?? TimeProvider.System);
     }
 
     private static async Task AssertTraceContextAsync(
