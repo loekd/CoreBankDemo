@@ -15,9 +15,9 @@ internal static class RetryAfterHeader
 
     /// <summary>
     /// <see langword="true"/> with a non-negative wait when the header is
-    /// present and well-formed; <see langword="false"/> when it is missing,
-    /// unparseable or negative (spec: treated as absent). An HTTP-date
-    /// already in the past is a zero wait, not an absence.
+    /// present and well-formed; <see langword="false"/> when it is missing
+    /// or unparseable (spec: treated as absent). An HTTP-date already in the
+    /// past is a zero wait, not an absence.
     /// </summary>
     public static bool TryParse(
         IDictionary<string, IEnumerable<string>>? headers,
@@ -41,22 +41,15 @@ internal static class RetryAfterHeader
 
         if (parsed.Delta is TimeSpan delta)
         {
-            if (delta < TimeSpan.Zero)
-            {
-                return false;
-            }
-
             retryAfter = delta;
             return true;
         }
 
-        if (parsed.Date is DateTimeOffset date)
-        {
-            var until = date - timeProvider.GetUtcNow();
-            retryAfter = until < TimeSpan.Zero ? TimeSpan.Zero : until;
-            return true;
-        }
-
-        return false;
+        // RetryConditionHeaderValue sets exactly one of Delta/Date on a
+        // successful parse, and its delta-seconds grammar has no sign, so a
+        // negative value never reaches this method.
+        var until = parsed.Date!.Value - timeProvider.GetUtcNow();
+        retryAfter = until < TimeSpan.Zero ? TimeSpan.Zero : until;
+        return true;
     }
 }
