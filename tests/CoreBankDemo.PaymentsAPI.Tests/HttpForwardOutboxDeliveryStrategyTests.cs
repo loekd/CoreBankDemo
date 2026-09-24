@@ -580,6 +580,45 @@ public class HttpForwardOutboxDeliveryStrategyTests
             .Which.Tags["outcome"].Should().Be("succeeded");
     }
 
+    [Fact]
+    public async Task ForwardAsync_throws_a_typed_retry_exception_that_carries_Retry_After()
+    {
+        // ADR-024: the instant rail reads the hint off the exception; the
+        // background kernel keeps catching the base type and storing Message.
+        var client = new FakeCoreBankApiClient
+        {
+            SubmitResult = CoreBankResult<TransactionSubmission>.Retry(
+                CoreBankRetryReason.TransportRejection, 429, TimeSpan.FromSeconds(2))
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(
+            client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+
+        var act = () => strategy.ForwardAsync(Message(), executeInline: true, TestContext.Current.CancellationToken);
+
+        var assertion = await act.Should().ThrowAsync<CoreBankRetryException>();
+        assertion.Which.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection);
+        assertion.Which.StatusCode.Should().Be(429);
+        assertion.Which.RetryAfter.Should().Be(TimeSpan.FromSeconds(2));
+        assertion.Which.Message.Should().Be("Transaction submission failed: TransportRejection (status 429).");
+    }
+
+    [Fact]
+    public async Task ForwardAsync_retry_exception_message_is_unchanged_without_a_status()
+    {
+        var client = new FakeCoreBankApiClient
+        {
+            SubmitResult = CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.Timeout)
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(
+            client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+
+        var act = () => strategy.ForwardAsync(Message(), executeInline: true, TestContext.Current.CancellationToken);
+
+        var assertion = await act.Should().ThrowAsync<CoreBankRetryException>();
+        assertion.Which.RetryAfter.Should().BeNull();
+        assertion.Which.Message.Should().Be("Transaction submission failed: Timeout.");
+    }
+
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient
     {
         public CoreBankResult<TransactionSubmission>? SubmitResult { get; set; }

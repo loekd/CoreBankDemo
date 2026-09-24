@@ -266,8 +266,8 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
 
         if (submission.Outcome != CoreBankClientOutcome.Success)
         {
-            throw RetryOutcomeException(
-                "Transaction submission", submission.RetryReason, submission.StatusCode);
+            throw new CoreBankRetryException(
+                "Transaction submission", submission.RetryReason, submission.StatusCode, submission.RetryAfter);
         }
 
         // Review loop 1: persisted on EVERY completed delivery -- both this
@@ -284,16 +284,4 @@ internal sealed class HttpForwardOutboxDeliveryStrategy(
         return submission.Value!;
     }
 
-    /// <summary>
-    /// Builds the exception whose <see cref="Exception.Message"/> becomes the
-    /// row's <c>LastError</c> — preserving the transport
-    /// <see cref="CoreBankRetryReason"/> and, when present, the HTTP status
-    /// CoreBankAPI actually returned (edge-case matrix: "status preserved in
-    /// the message").
-    /// </summary>
-    private static InvalidOperationException RetryOutcomeException(
-        string operation, CoreBankRetryReason? retryReason, int? statusCode) =>
-        new($"{operation} failed: {retryReason}" +
-            (statusCode is int code ? $" (status {code})" : string.Empty) +
-            ".");
 }
