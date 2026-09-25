@@ -30,7 +30,7 @@ public class InstantPaymentRailRegistrationTests
         options.Enabled.Should().BeTrue();
         options.BudgetMilliseconds.Should().Be(9000);
         options.AttemptTimeoutMilliseconds.Should().Be(2500);
-        options.MaxAttempts.Should().Be(2);
+        options.MaxAttempts.Should().Be(3);
         options.CancelTimeoutMilliseconds.Should().Be(1500);
         provider.GetRequiredService<IInstantPaymentForwardingHandler>().Should().BeOfType<InstantPaymentForwardingHandler>();
     }
@@ -51,37 +51,50 @@ public class InstantPaymentRailRegistrationTests
     }
 
     [Fact]
-    public void An_over_budget_attempt_configuration_fails_startup_validation()
+    public void A_single_attempt_that_does_not_fit_beside_the_cancel_allowance_fails_startup_validation()
     {
-        // AttemptTimeoutMilliseconds * MaxAttempts (5000 * 3 = 15000) exceeds
-        // BudgetMilliseconds (9000) -- must fail fast at startup rather than
-        // silently holding a request thread beyond the budget at runtime.
+        // ADR-024: one attempt plus the cancel must fit; 8000 + 1500 > 9000.
         using var provider = BuildProvider(new Dictionary<string, string?>
         {
             ["Payments:InstantRail:BudgetMilliseconds"] = "9000",
-            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "5000",
-            ["Payments:InstantRail:MaxAttempts"] = "3"
+            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "8000",
+            ["Payments:InstantRail:MaxAttempts"] = "1",
+            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1500"
         });
 
         var act = provider.GetRequiredService<IStartupValidator>().Validate;
 
         act.Should().Throw<OptionsValidationException>()
-            .WithMessage("*must not exceed BudgetMilliseconds*");
+            .WithMessage("*AttemptTimeoutMilliseconds + CancelTimeoutMilliseconds must not exceed BudgetMilliseconds*");
     }
 
     [Fact]
-    public void An_exactly_at_budget_attempt_configuration_passes_startup_validation()
+    public void Attempts_that_only_fit_the_budget_one_at_a_time_pass_startup_validation()
     {
-        // AttemptTimeoutMilliseconds * MaxAttempts + CancelTimeoutMilliseconds
-        // (4000 * 2 + 1000 = 9000) exactly equals BudgetMilliseconds -- the
-        // boundary itself must be valid (spec: instant-rail-timeout-cancel
-        // reserves the cancel allowance inside the budget).
+        // ADR-024: the loop, not the validator, bounds the number of attempts.
+        // 2500 × 4 + 1500 = 11500 > 9000 was rejected under ADR-018/020; a
+        // single 2500 + 1500 = 4000 fits, so it is valid now.
         using var provider = BuildProvider(new Dictionary<string, string?>
         {
             ["Payments:InstantRail:BudgetMilliseconds"] = "9000",
-            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "4000",
-            ["Payments:InstantRail:MaxAttempts"] = "2",
-            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1000"
+            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "2500",
+            ["Payments:InstantRail:MaxAttempts"] = "4",
+            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1500"
+        });
+
+        provider.GetRequiredService<IStartupValidator>().Validate();
+    }
+
+    [Fact]
+    public void An_attempt_that_exactly_fits_beside_the_cancel_allowance_passes_startup_validation()
+    {
+        // 7500 + 1500 = 9000: the boundary itself is valid.
+        using var provider = BuildProvider(new Dictionary<string, string?>
+        {
+            ["Payments:InstantRail:BudgetMilliseconds"] = "9000",
+            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "7500",
+            ["Payments:InstantRail:MaxAttempts"] = "3",
+            ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1500"
         });
 
         provider.GetRequiredService<IStartupValidator>().Validate();
@@ -90,14 +103,13 @@ public class InstantPaymentRailRegistrationTests
     [Fact]
     public void A_cancel_allowance_that_pushes_the_attempts_over_budget_fails_startup_validation()
     {
-        // 4500 * 2 = 9000 fits the budget on its own; the cancel allowance
-        // must fit inside it too, or a request thread could be held beyond
-        // the budget by the cancel call.
+        // AttemptTimeoutMilliseconds + CancelTimeoutMilliseconds must fit
+        // inside the budget; 9000 + 1 = 9001 > 9000.
         using var provider = BuildProvider(new Dictionary<string, string?>
         {
             ["Payments:InstantRail:BudgetMilliseconds"] = "9000",
-            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "4500",
-            ["Payments:InstantRail:MaxAttempts"] = "2",
+            ["Payments:InstantRail:AttemptTimeoutMilliseconds"] = "9000",
+            ["Payments:InstantRail:MaxAttempts"] = "1",
             ["Payments:InstantRail:CancelTimeoutMilliseconds"] = "1"
         });
 
