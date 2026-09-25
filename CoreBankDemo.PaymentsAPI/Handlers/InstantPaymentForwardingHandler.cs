@@ -259,6 +259,8 @@ internal sealed class InstantPaymentForwardingHandler(
 
             var thisAttemptTimeout = remaining < attemptTimeout ? remaining : attemptTimeout;
             using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // Deliberately the system timer, not the injected TimeProvider (pre-existing; tests
+            // depend on it) -- the sleep below runs on the injected clock instead, so tests can observe it.
             attemptCts.CancelAfter(thisAttemptTimeout);
 
             TimeSpan? retryAfter = null;
@@ -335,7 +337,7 @@ internal sealed class InstantPaymentForwardingHandler(
             RecordRetryWait(attempt, decision, statusCode);
             logger.LogInformation(
                 "Instant rail: waiting {WaitMs} ms ({Source}) before attempt {NextAttempt} for payment {IdempotencyKey}",
-                (long)decision.Wait.TotalMilliseconds, decision.Source, attempt + 1, payment.IdempotencyKey);
+                (long)decision.Wait.TotalMilliseconds, SourceTag(decision.Source), attempt + 1, payment.IdempotencyKey);
             await Task.Delay(decision.Wait, timeProvider, cancellationToken).ConfigureAwait(false);
         }
 
@@ -670,7 +672,7 @@ internal sealed class InstantPaymentForwardingHandler(
         {
             ["attempt"] = attempt,
             ["wait_ms"] = (long)decision.Wait.TotalMilliseconds,
-            ["source"] = decision.Source == InstantRetrySource.RetryAfter ? "retry-after" : "backoff",
+            ["source"] = SourceTag(decision.Source),
         };
         if (statusCode is int code)
         {
@@ -679,6 +681,10 @@ internal sealed class InstantPaymentForwardingHandler(
 
         Activity.Current?.AddEvent(new ActivityEvent(RetryWaitEventName, tags: tags));
     }
+
+    /// <summary>The one wire string per <see cref="InstantRetrySource"/>, shared by the span tag and the log line so they never disagree.</summary>
+    private static string SourceTag(InstantRetrySource source) =>
+        source == InstantRetrySource.RetryAfter ? "retry-after" : "backoff";
 
     private InstantForwardResult Deferred(DateTimeOffset startedAt)
     {
