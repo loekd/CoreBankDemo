@@ -175,7 +175,7 @@ The solution uses a shared `CoreBankDemo.Messaging` library to provide reusable 
 **Key Features:**
 - Generic implementations supporting any message type and DbContext
 - Partitioned processing with distributed locking (via Dapr)
-- Automatic retry without limit: a failed row returns to `Pending` and is retried on the next poll tick; a batch stops at its first failed row so nothing overtakes it (ADR-023). The poll interval is the only retry delay for the background stores: the `corebank-api` client runs without the HTTP resilience pipeline (AD-11), and only the instant rail's inline loop honours `Retry-After` and backs off (ADR-024)
+- Automatic retry without limit: a failed row returns to `Pending` and is retried on the next poll tick; a batch stops at its first failed row so nothing overtakes it (ADR-023). For the payments outbox's CoreBank hop the poll interval is the only retry delay: the `corebank-api` client runs without the HTTP resilience pipeline (AD-11); only the instant rail's inline loop honours `Retry-After` and backs off (ADR-024). Other HttpClients keep the standard resilience handler (ADR-006)
 - OpenTelemetry tracing integration
 - Configurable via `InboxProcessingOptions` and `OutboxProcessingOptions`
 

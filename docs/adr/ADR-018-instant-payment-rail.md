@@ -3,6 +3,9 @@
 **Date:** 2026-09-02
 **Status:** Accepted
 **Deciders:** Architecture team
+**Superseded in part by:** [ADR-024](ADR-024-instant-rail-retry-policy.md) — replaces the
+`AttemptTimeoutMilliseconds × MaxAttempts ≤ BudgetMilliseconds` option rule with a time-bounded
+retry loop; the rest of this record stands
 
 ## Context
 

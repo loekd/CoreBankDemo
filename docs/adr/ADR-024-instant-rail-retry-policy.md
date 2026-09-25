@@ -5,7 +5,10 @@
 **Deciders:** Architecture team
 **Supersedes in part:** ADR-018's option rule "`AttemptTimeoutMilliseconds × MaxAttempts` must not exceed
 `BudgetMilliseconds`" and ADR-020's restatement of it with the cancel allowance; the edge-case row
-"CoreBank returns 5xx → existing retry/circuit-breaker policy applies" in the instant rail spec.
+"CoreBank returns 5xx → existing retry/circuit-breaker policy applies" in the instant rail spec; and,
+for `MaxAttempts` only, the "Always" constraint "do not touch `BudgetMilliseconds`/`MaxAttempts`" in
+[`docs/superpowers/specs/2026-09-03-add-instant-rail-load-coverage-design.md`](../superpowers/specs/2026-09-03-add-instant-rail-load-coverage-design.md)
+— that constraint was about the k6 load-coverage story's own scope, not a ceiling on future changes.
 **Corrects:** ADR-023's and `ARCHITECTURE.md`'s statement that backoff for CoreBank calls lives in the HTTP
 resilience pipeline.
 
@@ -76,7 +79,11 @@ attempts is deliberate. The cancel phase (ADR-020) is untouched.
   configuration that was valid under ADR-018/020 remains valid; some configurations that were rejected
   (large `MaxAttempts`) are now accepted, because the loop, not the validator, bounds them.
 - Under a fault profile that answers fast, an instant request now holds its partition lock longer on
-  average (never longer in the worst case). Rows queued behind it in a burst see that as extra latency and,
+  average. The worst case grows too: with the old default (`MaxAttempts: 2`) the worst-case hold was
+  `2 × 2500 + 1500 = 6.5 s`; with the shipped default (`MaxAttempts: 3`) and a window-bounded loop it is
+  the full `9 s` budget, unattainable before only through the retired `AttemptTimeoutMilliseconds ×
+  MaxAttempts` product term. The ceiling the validator permits is unchanged at `9 s` — the same budget
+  ADR-018 sized the rail to. Rows queued behind it in a burst see that as extra latency and,
   at the window's edge, as more *local* cancellations ("budget exhausted before the command left
   PaymentsAPI"). Accepted: under a real `429` that partition should not be sending.
 - `CoreBankResult<T>` and the forwarder's exception type gain members; both additive. Fakes that construct
