@@ -1,6 +1,6 @@
 # Instant rail honours `Retry-After` and uses its forward window
 
-> **Status:** Approved, not yet implemented
+> **Status:** Implemented
 > **Kind:** design spec
 > **Original date:** 2026-09-23
 > **Related:** [ADR-024](../../adr/ADR-024-instant-rail-retry-policy.md); [ADR-018](../../adr/ADR-018-instant-payment-rail.md); [ADR-020](../../adr/ADR-020-instant-rail-timeout-cancellation.md); [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md); [instant rail timeout cancel](2026-09-08-instant-rail-timeout-cancel-design.md); [constraints](../../constraints.md)

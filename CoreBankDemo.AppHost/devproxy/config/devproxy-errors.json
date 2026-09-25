@@ -28,7 +28,7 @@
             },
             {
               "name": "Retry-After",
-              "value": "5"
+              "value": "2"
             }
           ],
           "body": {

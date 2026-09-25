@@ -176,7 +176,8 @@ Message processing is configured per store, and the partition count is a validat
     "Enabled": true,
     "BudgetMilliseconds": 9000,
     "AttemptTimeoutMilliseconds": 2500,
-    "MaxAttempts": 2
+    "MaxAttempts": 3,
+    "CancelTimeoutMilliseconds": 1500
   }
 }
 ```
