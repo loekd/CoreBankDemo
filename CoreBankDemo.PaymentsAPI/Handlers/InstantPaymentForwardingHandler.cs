@@ -81,6 +81,9 @@ internal sealed class InstantPaymentForwardingHandler(
     internal const string LocalCancelReason = "Instant rail budget exhausted before the command left PaymentsAPI";
     internal const string CoreBankCancelReason = "Instant rail budget exhausted; cancelled at CoreBank before execution";
 
+    /// <summary>Span event recorded once per deliberate wait between attempts (ADR-024).</summary>
+    internal const string RetryWaitEventName = "instant_rail.retry_wait";
+
     public async Task<InstantForwardResult> ForwardAsync(PaymentSnapshot payment, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(payment);
@@ -241,18 +244,27 @@ internal sealed class InstantPaymentForwardingHandler(
         var attemptTimeout = TimeSpan.FromMilliseconds(opts.AttemptTimeoutMilliseconds);
         var forwardDeadline = ForwardDeadline(startedAt, opts);
 
+        // ADR-024: the window is a ceiling, not a quota. Attempts run while a
+        // useful one still fits and the cap allows; between them the loop
+        // waits the server's Retry-After or a jittered backoff -- still
+        // holding the partition lock and the claim, so nothing behind this
+        // row in its partition can overtake it while its fate is decided.
         for (var attempt = 1; attempt <= opts.MaxAttempts; attempt++)
         {
             var remaining = forwardDeadline - timeProvider.GetUtcNow();
-            if (remaining <= TimeSpan.Zero)
+            if (!InstantRetryPolicy.CanStartAttempt(remaining))
             {
                 break;
             }
 
             var thisAttemptTimeout = remaining < attemptTimeout ? remaining : attemptTimeout;
             using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            // Deliberately the system timer, not the injected TimeProvider (pre-existing; tests
+            // depend on it) -- the sleep below runs on the injected clock instead, so tests can observe it.
             attemptCts.CancelAfter(thisAttemptTimeout);
 
+            TimeSpan? retryAfter = null;
+            int? statusCode = null;
             try
             {
                 var submission = await forwarder
@@ -288,6 +300,18 @@ internal sealed class InstantPaymentForwardingHandler(
                     "Instant rail attempt {Attempt} timed out for payment {IdempotencyKey}",
                     attempt, payment.IdempotencyKey);
             }
+            catch (CoreBankRetryException ex)
+            {
+                // Transport failure with the transport's own diagnostics: the
+                // status decides nothing here (AD-11), but a 429/503's
+                // Retry-After sets how long the next wait is.
+                retryAfter = ex.RetryAfter;
+                statusCode = ex.StatusCode;
+                logger.LogWarning(
+                    ex,
+                    "Instant rail attempt {Attempt} failed for payment {IdempotencyKey}",
+                    attempt, payment.IdempotencyKey);
+            }
             catch (Exception ex)
             {
                 // Transport failure -- counts toward retry, never toward a
@@ -298,6 +322,23 @@ internal sealed class InstantPaymentForwardingHandler(
                     "Instant rail attempt {Attempt} failed for payment {IdempotencyKey}",
                     attempt, payment.IdempotencyKey);
             }
+
+            var decision = InstantRetryPolicy.AfterFailure(
+                attempt,
+                opts.MaxAttempts,
+                retryAfter,
+                forwardDeadline - timeProvider.GetUtcNow(),
+                Random.Shared.NextDouble());
+            if (!decision.Retry)
+            {
+                break;
+            }
+
+            RecordRetryWait(attempt, decision, statusCode);
+            logger.LogInformation(
+                "Instant rail: waiting {WaitMs} ms ({Source}) before attempt {NextAttempt} for payment {IdempotencyKey}",
+                (long)decision.Wait.TotalMilliseconds, SourceTag(decision.Source), attempt + 1, payment.IdempotencyKey);
+            await Task.Delay(decision.Wait, timeProvider, cancellationToken).ConfigureAwait(false);
         }
 
         // Budget or attempts exhausted, still under the partition lock (so a
@@ -619,6 +660,31 @@ internal sealed class InstantPaymentForwardingHandler(
         startedAt
         + TimeSpan.FromMilliseconds(opts.BudgetMilliseconds)
         - TimeSpan.FromMilliseconds(opts.CancelTimeoutMilliseconds);
+
+    /// <summary>
+    /// Marks a deliberate wait on the request span so a waterfall shows the
+    /// gap was chosen, not latency (ADR-024). Tags are a closed set; the
+    /// status is added only when the transport reported one.
+    /// </summary>
+    private static void RecordRetryWait(int attempt, InstantRetryDecision decision, int? statusCode)
+    {
+        var tags = new ActivityTagsCollection
+        {
+            ["attempt"] = attempt,
+            ["wait_ms"] = (long)decision.Wait.TotalMilliseconds,
+            ["source"] = SourceTag(decision.Source),
+        };
+        if (statusCode is int code)
+        {
+            tags["status_code"] = code;
+        }
+
+        Activity.Current?.AddEvent(new ActivityEvent(RetryWaitEventName, tags: tags));
+    }
+
+    /// <summary>The one wire string per <see cref="InstantRetrySource"/>, shared by the span tag and the log line so they never disagree.</summary>
+    private static string SourceTag(InstantRetrySource source) =>
+        source == InstantRetrySource.RetryAfter ? "retry-after" : "backoff";
 
     private InstantForwardResult Deferred(DateTimeOffset startedAt)
     {

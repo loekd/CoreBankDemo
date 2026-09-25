@@ -7,11 +7,10 @@ namespace CoreBankDemo.PaymentsAPI.Models;
 /// rail), bound and validated at startup following the Story 3.1 pattern
 /// (<c>AddOptions&lt;T&gt;().Bind(...).ValidateDataAnnotations().Validate(...)
 /// .ValidateOnStart()</c>): every value must be positive, and
-/// <see cref="AttemptTimeoutMilliseconds"/> x <see cref="MaxAttempts"/> plus
-/// <see cref="CancelTimeoutMilliseconds"/> must
-/// never exceed <see cref="BudgetMilliseconds"/> -- an over-budget
+/// <see cref="AttemptTimeoutMilliseconds"/> plus <see cref="CancelTimeoutMilliseconds"/>
+/// must never exceed <see cref="BudgetMilliseconds"/> -- an over-budget
 /// configuration fails fast at startup rather than silently holding a
-/// request thread beyond its budget at runtime.
+/// request thread beyond its budget at runtime (ADR-024).
 /// </summary>
 public sealed record InstantRailOptions
 {
@@ -37,18 +36,22 @@ public sealed record InstantRailOptions
     [Range(1, int.MaxValue, ErrorMessage = "AttemptTimeoutMilliseconds must be positive.")]
     public int AttemptTimeoutMilliseconds { get; init; } = 2500;
 
-    /// <summary>Maximum number of inline attempts made within the budget.</summary>
+    /// <summary>
+    /// Hard cap on inline attempts. The forward window, not this cap, is
+    /// what normally ends the loop (ADR-024): an attempt is started only
+    /// while a useful one still fits before <c>Budget - CancelTimeout</c>.
+    /// </summary>
     [Range(1, int.MaxValue, ErrorMessage = "MaxAttempts must be positive.")]
-    public int MaxAttempts { get; init; } = 2;
+    public int MaxAttempts { get; init; } = 3;
 
     /// <summary>
     /// Allowance, in milliseconds, reserved <em>inside</em>
     /// <see cref="BudgetMilliseconds"/> for the cancellation call CoreBankAPI
-    /// receives once every forward attempt is exhausted (spec:
+    /// receives once the forward phase ends without a committed outcome (spec:
     /// instant-rail-timeout-cancel). The forward phase ends at
     /// <c>Budget - CancelTimeout</c>, so a request thread is never held beyond
-    /// the budget; <c>AttemptTimeoutMilliseconds * MaxAttempts + CancelTimeoutMilliseconds</c>
-    /// must not exceed the budget.
+    /// the budget; <c>AttemptTimeoutMilliseconds + CancelTimeoutMilliseconds</c>
+    /// must not exceed the budget, so at least one full attempt fits (ADR-024).
     /// </summary>
     [Range(1, int.MaxValue, ErrorMessage = "CancelTimeoutMilliseconds must be positive.")]
     public int CancelTimeoutMilliseconds { get; init; } = 1500;

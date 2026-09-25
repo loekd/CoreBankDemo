@@ -40,9 +40,9 @@ public static class InstantPaymentRailServiceCollectionExtensions
             .Bind(section)
             .ValidateDataAnnotations()
             .Validate(
-                options => (long)options.AttemptTimeoutMilliseconds * options.MaxAttempts + options.CancelTimeoutMilliseconds
+                options => (long)options.AttemptTimeoutMilliseconds + options.CancelTimeoutMilliseconds
                     <= options.BudgetMilliseconds,
-                "Payments:InstantRail: AttemptTimeoutMilliseconds * MaxAttempts + CancelTimeoutMilliseconds must not exceed BudgetMilliseconds.")
+                "Payments:InstantRail: AttemptTimeoutMilliseconds + CancelTimeoutMilliseconds must not exceed BudgetMilliseconds.")
             .Validate(
                 options => options.BudgetMilliseconds <= maxBudgetMilliseconds,
                 $"Payments:InstantRail: BudgetMilliseconds must not exceed {maxBudgetMilliseconds} ms " +

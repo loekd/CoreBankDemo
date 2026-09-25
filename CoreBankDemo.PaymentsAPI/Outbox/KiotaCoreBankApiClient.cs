@@ -43,9 +43,11 @@ namespace CoreBankDemo.PaymentsAPI.Outbox;
 /// cancellation must stay cooperative.
 /// </para>
 /// </summary>
-internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBankApiClient
+internal sealed class KiotaCoreBankApiClient(GeneratedClient client, TimeProvider timeProvider) : ICoreBankApiClient
 {
     private const int BadRequest = 400;
+    private const int TooManyRequests = 429;
+    private const int ServiceUnavailable = 503;
 
     public Task<CoreBankResult<AccountDetails>> GetAccountDetailsAsync(
         string accountNumber, CancellationToken cancellationToken)
@@ -242,7 +244,7 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
     /// a <see cref="CoreBankRetryReason.MalformedResponse"/> retry, not an
     /// exception.
     /// </summary>
-    private static async Task<CoreBankResult<T>> ExecuteAsync<T>(
+    private async Task<CoreBankResult<T>> ExecuteAsync<T>(
         Func<CancellationToken, Task<T?>> operation,
         CancellationToken cancellationToken,
         Func<ApiException, CoreBankResult<T>?>? classifyApiException = null,
@@ -277,9 +279,10 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
             // classify a specific mapped status as a non-retry outcome (the
             // cancel's 409); otherwise preserve only the status code the
             // generated client already surfaces on the base ApiException
-            // type, never the generated error body.
+            // type, never the generated error body -- plus, on a 429 or
+            // 503, the server's Retry-After (ADR-024).
             return classifyApiException?.Invoke(ex)
-                ?? RejectionOrRetry<T>(ex.ResponseStatusCode, badRequestIsVerdict);
+                ?? RejectionOrRetry<T>(ex.ResponseStatusCode, badRequestIsVerdict, RetryAfterFor(ex));
         }
         catch (TimeoutRejectedException)
         {
@@ -320,11 +323,22 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client) : ICoreBank
     /// other status, and a <c>400</c> to any other operation, stays a
     /// <see cref="CoreBankRetryReason.TransportRejection"/> retry.
     /// </summary>
-    private static CoreBankResult<T> RejectionOrRetry<T>(int? statusCode, bool badRequestIsVerdict)
+    private CoreBankResult<T> RejectionOrRetry<T>(int? statusCode, bool badRequestIsVerdict, TimeSpan? retryAfter = null)
         where T : class =>
         badRequestIsVerdict && statusCode == BadRequest
             ? CoreBankResult<T>.Rejected(BadRequest)
-            : CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, statusCode);
+            : CoreBankResult<T>.Retry(CoreBankRetryReason.TransportRejection, statusCode, retryAfter);
+
+    /// <summary>
+    /// The server's <c>Retry-After</c>, honoured only where RFC 9110 gives it
+    /// its throttling meaning: a <c>429</c> or a <c>503</c> (ADR-024). Any
+    /// other status, and any value that does not parse, is "no hint".
+    /// </summary>
+    private TimeSpan? RetryAfterFor(ApiException ex) =>
+        ex.ResponseStatusCode is TooManyRequests or ServiceUnavailable
+        && RetryAfterHeader.TryParse(ex.ResponseHeaders, timeProvider, out var retryAfter)
+            ? retryAfter
+            : null;
 
     /// <summary>
     /// A required response string that is missing entirely already fails an

@@ -499,6 +499,7 @@ public class InstantPaymentForwardingHandlerTests
     [Fact]
     public async Task ForwardAsync_retries_a_transport_failure_within_budget_and_then_succeeds()
     {
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
         var claimed = ClaimedMessage();
         _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
         var callCount = 0;
@@ -508,16 +509,18 @@ public class InstantPaymentForwardingHandlerTests
                 callCount++;
                 return callCount == 1
                     ? Task.FromException<TransactionSubmission>(new InvalidOperationException("transport failure"))
-                    : Task.FromResult(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, DateTimeOffset.UtcNow));
+                    : Task.FromResult(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, clock.GetUtcNow()));
             });
         _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageTransitionOutcome.Applied);
-        var handler = CreateHandler(new InstantRailOptions
-        {
-            BudgetMilliseconds = 9000,
-            AttemptTimeoutMilliseconds = 2500,
-            MaxAttempts = 2
-        });
+        var handler = CreateHandler(
+            new InstantRailOptions
+            {
+                BudgetMilliseconds = 9000,
+                AttemptTimeoutMilliseconds = 2500,
+                MaxAttempts = 2
+            },
+            timeProvider: clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
@@ -587,9 +590,11 @@ public class InstantPaymentForwardingHandlerTests
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
         var handler = CreateHandler(
             new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 2 },
-            businessMetrics);
+            businessMetrics,
+            timeProvider: clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
@@ -605,6 +610,216 @@ public class InstantPaymentForwardingHandlerTests
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("cancelled");
         ShouldHaveCountedOneCancelledItem(listener);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_sleeps_the_server_Retry_After_holding_the_lock_and_then_settles()
+    {
+        // ADR-024: a 429 with Retry-After: 2 requests a 2 s sleep, and that
+        // sleep is honoured while still holding the partition lock and the
+        // claim (BudgetClock's ImmediateTimer does not itself advance fake
+        // time through a sleep, so the window arithmetic that determines how
+        // much budget remains for attempt 2 is pinned separately, by
+        // InstantRetryPolicyTests -- this test only proves the sleep happened
+        // under the lock and attempt 2 then settles).
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        var callCount = 0;
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .Returns(() =>
+            {
+                callCount++;
+                if (callCount == 1)
+                {
+                    clock.Advance(TimeSpan.FromMilliseconds(1750));
+                    return Task.FromException<TransactionSubmission>(new CoreBankRetryException(
+                        "Transaction submission", CoreBankRetryReason.TransportRejection, 429, TimeSpan.FromSeconds(2)));
+                }
+
+                return Task.FromResult(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, clock.GetUtcNow()));
+            });
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 3, CancelTimeoutMilliseconds = 1500 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Completed);
+        callCount.Should().Be(2);
+        clock.Delays.Should().ContainSingle().Which.Should().Be(TimeSpan.FromSeconds(2));
+        _lock.LockNames.Should().ContainSingle("the sleep happens inside the one lock acquisition");
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        var waitEvent = requestSpan.Events.Should().ContainSingle(e => e.Name == InstantPaymentForwardingHandler.RetryWaitEventName).Which;
+        waitEvent.Tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["attempt"] = 1,
+            ["wait_ms"] = 2000L,
+            ["source"] = "retry-after",
+            ["status_code"] = 429,
+        });
+    }
+
+    [Fact]
+    public async Task ForwardAsync_skips_the_sleep_and_cancels_when_Retry_After_exceeds_the_window()
+    {
+        // 429 with Retry-After: 5 at 3.0 s: 3.0 + 5 + 0.5 > 7.5 -> no sleep,
+        // straight to the ADR-020 cancel; the 504 arrives at 3.0 s, not 7.5 s.
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .Returns(() =>
+            {
+                clock.Advance(TimeSpan.FromSeconds(3));
+                return Task.FromException<TransactionSubmission>(new CoreBankRetryException(
+                    "Transaction submission", CoreBankRetryReason.TransportRejection, 429, TimeSpan.FromSeconds(5)));
+            });
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission());
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 3, CancelTimeoutMilliseconds = 1500 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Once);
+        clock.Delays.Should().BeEmpty("a wait that no useful attempt can follow is never made");
+        requestSpan.Events.Should().NotContain(e => e.Name == InstantPaymentForwardingHandler.RetryWaitEventName);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_cancels_through_CoreBank_without_an_attempt_when_the_window_is_already_too_short()
+    {
+        // The lock/turn wait's acquireTimeout is min(remaining, attemptTimeout)
+        // computed BEFORE OnAttempt runs, so the lock still acquires; by the
+        // time the workload claims the row and reaches the attempt loop, only
+        // 400 ms of forward phase remains -- under MinUsefulAttempt (500 ms) --
+        // so CanStartAttempt breaks the loop before a first attempt. The row
+        // is claimed but nothing was ever sent, and the cancel that follows
+        // asks CoreBank to withdraw a command it has never seen (backlogged:
+        // docs/backlog.md).
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var claimed = ClaimedMessage();
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(7100));
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission());
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 3, CancelTimeoutMilliseconds = 1500 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Never);
+        _forwarder.Verify(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()), Times.Once);
+        clock.Delays.Should().BeEmpty();
+        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.CoreBankCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_backs_off_with_jitter_between_unhinted_failures_and_then_cancels()
+    {
+        // Three 500s: two sleeps in [125, 375] ms and [250, 750] ms, then the cap
+        // is reached and the cancel phase runs without a third sleep.
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .Returns(() =>
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(1200));
+                return Task.FromException<TransactionSubmission>(new CoreBankRetryException(
+                    "Transaction submission", CoreBankRetryReason.TransportRejection, 500, retryAfter: null));
+            });
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission());
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 3, CancelTimeoutMilliseconds = 1500 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Exactly(3));
+        clock.Delays.Should().HaveCount(2);
+        clock.Delays[0].Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(125)).And.BeLessThanOrEqualTo(TimeSpan.FromMilliseconds(375));
+        clock.Delays[1].Should().BeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(250)).And.BeLessThanOrEqualTo(TimeSpan.FromMilliseconds(750));
+        requestSpan.Events.Where(e => e.Name == InstantPaymentForwardingHandler.RetryWaitEventName)
+            .Should().HaveCount(2)
+            .And.AllSatisfy(e => e.Tags.Should().Contain(new KeyValuePair<string, object?>("source", "backoff")));
+    }
+
+    [Fact]
+    public async Task ForwardAsync_does_not_start_an_attempt_with_less_than_the_minimum_useful_window()
+    {
+        // The first attempt burns 7.1 s of the 7.5 s window: 400 ms < 500 ms,
+        // so no second attempt is started even though MaxAttempts allows one.
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .Returns(() =>
+            {
+                clock.Advance(TimeSpan.FromMilliseconds(7100));
+                return Task.FromException<TransactionSubmission>(new CoreBankRetryException(
+                    "Transaction submission", CoreBankRetryReason.Timeout, null, retryAfter: null));
+            });
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CancelledSubmission());
+        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 3, CancelTimeoutMilliseconds = 1500 },
+            timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Once);
+        clock.Delays.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ForwardAsync_propagates_caller_cancellation_during_a_sleep_and_leaves_the_row_claimed()
+    {
+        // The client disconnects while the rail is honouring Retry-After: the
+        // OperationCanceledException propagates, nothing is released or
+        // cancelled, no metric is recorded -- exactly as during an attempt.
+        using var cancellation = new CancellationTokenSource();
+        var clock = new SleepingClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero), onSleep: cancellation.Cancel);
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new CoreBankRetryException(
+                "Transaction submission", CoreBankRetryReason.TransportRejection, 429, TimeSpan.FromSeconds(2)));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(
+            new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 3, CancelTimeoutMilliseconds = 1500 },
+            businessMetrics,
+            timeProvider: clock);
+
+        var act = () => handler.ForwardAsync(Payment, cancellation.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName);
     }
 
     [Fact]
@@ -729,9 +944,11 @@ public class InstantPaymentForwardingHandlerTests
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
         var handler = CreateHandler(
             new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 2 },
-            businessMetrics);
+            businessMetrics,
+            timeProvider: clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
@@ -923,12 +1140,15 @@ public class InstantPaymentForwardingHandlerTests
             });
         _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageTransitionOutcome.Applied);
-        var handler = CreateHandler(new InstantRailOptions
-        {
-            BudgetMilliseconds = 9000,
-            AttemptTimeoutMilliseconds = 50,
-            MaxAttempts = 2
-        });
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
+        var handler = CreateHandler(
+            new InstantRailOptions
+            {
+                BudgetMilliseconds = 9000,
+                AttemptTimeoutMilliseconds = 50,
+                MaxAttempts = 2
+            },
+            timeProvider: clock);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
@@ -1035,13 +1255,23 @@ public class InstantPaymentForwardingHandlerTests
     {
         private long _ticks = start.UtcTicks;
 
+        /// <summary>Every due time a Task.Delay on this clock asked for, in order — the sleeps the handler made.</summary>
+        public List<TimeSpan> Delays { get; } = [];
+
         public override DateTimeOffset GetUtcNow() =>
             new(Interlocked.Read(ref _ticks), TimeSpan.Zero);
 
         public void Advance(TimeSpan by) => Interlocked.Add(ref _ticks, by.Ticks);
 
-        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period) =>
-            new ImmediateTimer(callback, state);
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            lock (Delays)
+            {
+                Delays.Add(dueTime);
+            }
+
+            return new ImmediateTimer(callback, state);
+        }
 
         private sealed class ImmediateTimer : ITimer
         {
@@ -1056,6 +1286,33 @@ public class InstantPaymentForwardingHandlerTests
             {
             }
 
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// A clock whose timers never fire: a Task.Delay on it completes only through its
+    /// cancellation token. <paramref name="onSleep"/> runs when the delay is created.
+    /// </summary>
+    private sealed class SleepingClock(DateTimeOffset start, Action onSleep) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => start;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            // Queuing onSleep does not guarantee Task.Delay has finished registering its
+            // cancellation callback by the time onSleep runs and cancels the token. The test is
+            // safe regardless of that race: CancellationToken.Register on an already-cancelled
+            // token invokes the callback inline, so whichever of the two happens first, the
+            // delay still observes the cancellation.
+            ThreadPool.QueueUserWorkItem(_ => onSleep());
+            return new NeverTimer();
+        }
+
+        private sealed class NeverTimer : ITimer
+        {
+            public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+            public void Dispose() { }
             public ValueTask DisposeAsync() => ValueTask.CompletedTask;
         }
     }

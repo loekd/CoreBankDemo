@@ -6,6 +6,9 @@
 **Supersedes in part:** ADR-018's rule "a budget timeout is therefore never mapped to `504`" — that rule
 held because a timed-out command could still execute later. This record adds the cancellation path
 that makes the timeout unambiguous, and changes the answer only for the case that path proves.
+**Superseded in part by:** [ADR-024](ADR-024-instant-rail-retry-policy.md) — restates the
+`MaxAttempts` product term in the cancel-timeout validation rule below as a loop-bounded one; the
+cancellation path and the two-phase budget split are otherwise unchanged
 
 > The implementation spec for this record named it ADR-019; that number was already taken by
 > ADR-019 (generated Dev Proxy session config), so it is recorded here as ADR-020.
@@ -75,7 +78,9 @@ the success model into an `ApiException`.
 ### PaymentsAPI: two-phase cancel inside the budget
 
 `Payments:InstantRail` gains `CancelTimeoutMilliseconds` (default `1500`), validated so that
-`AttemptTimeoutMilliseconds × MaxAttempts + CancelTimeoutMilliseconds ≤ BudgetMilliseconds`. The
+`AttemptTimeoutMilliseconds × MaxAttempts + CancelTimeoutMilliseconds ≤ BudgetMilliseconds`.
+*(Superseded by ADR-024: the rule is now `AttemptTimeoutMilliseconds + CancelTimeoutMilliseconds ≤
+BudgetMilliseconds`; the loop, not the validator, bounds the attempts.)* The
 budget is split: a **forward phase** of `Budget − CancelTimeout` (both the lock/turn wait and the
 attempts stop there) and a **cancel allowance** of `CancelTimeout`, so a request thread is never
 held beyond the budget.

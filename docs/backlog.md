@@ -228,6 +228,14 @@ As the process record, I want the accepted rebuild decisions audited against the
 - `MessageRepositoryBase` repeats its save-and-handle-conflict shape in every transition. — `MarkAsFailedWithRetryAsync` and `ReleaseClaimsAsync` tell a conflict on another tracked row from a conflict on the row in hand; `MarkAsCompletedAsync` and `MarkAsCancelledAsync` do not yet. Extract one conflict-aware save helper and use it in every transition.
 - Legacy `Failed` CoreBank inbox rows replay `503`, which PaymentsAPI retries without limit. — Only databases that already hold such rows are affected (ADR-023, Consequences); a one-off clean-up or a terminal answer for those rows needs its own decision.
 
+### [instant rail Retry-After](superpowers/specs/2026-09-23-instant-rail-retry-after-design.md)
+
+- The background payments outbox retries a `429`/`503` on every 200 ms poll tick with no backoff and ignores `Retry-After`. — The `corebank-api` client has no resilience pipeline (AD-11), so nothing throttles it; ADR-024 corrects the docs that said otherwise but changes only the instant rail. `CoreBankRetryException.RetryAfter` now carries the value; mapping it onto the row's `HoldUntil` (already honoured by the batch claim query) is the obvious shape, but it needs a decision on whether a held head-of-line row blocks its partition or is skipped.
+- Load-test phase should watch partition latency: the lock is now held across sleeps by design (ADR-024), so p95 of `http_req_duration{type:payment}` (k6 threshold `p(95)<2000`) is the invariant most exposed; `CoreBankDemo.LoadTests` inherits `MaxAttempts: 3` from `PaymentsAPI/appsettings.json`.
+- Zero-attempt entry (window under 500 ms at claim time) cancels through CoreBank for a command CoreBank never saw; a local cancel would skip the round trip but needs a helper that cancels an already-claimed row (`CancelLocallyAsync` re-claims via `TryClaimByIdAsync` and would lose its own claim).
+- `Retry-After: 0` (or a past HTTP-date) with a large `MaxAttempts` can hammer the partition for the whole window now that validation no longer bounds `MaxAttempts` by budget; a floor on the hint or a ceiling on `MaxAttempts` needs a decision.
+- `KiotaCoreBankApiClient`'s `catch (TimeoutRejectedException)` branch and its comment claim the standard resilience pipeline applies to `corebank-api`; it has been removed since the rail's first commit (ADR-024). Dead branch and stale comment to retire.
+
 ## Open retrospective action items
 
 These carry-forwards were copied from the epic retrospectives during the 2026-09-10 migration; items verifiable as done in the code were removed then, the rest have not been re-verified.

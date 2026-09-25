@@ -50,9 +50,10 @@ internal enum CoreBankClientOutcome
 /// Coarse, application-owned classification of why a
 /// <see cref="CoreBankClientOutcome.Retry"/> outcome occurred (edge-case
 /// matrix: "Preserve status/diagnostic context without generated types").
-/// Deliberately does not carry response bodies, headers, or any
-/// Kiota-generated type — only enough shape for a caller to distinguish the
-/// four transport-failure classes.
+/// Deliberately does not carry response bodies or any Kiota-generated type
+/// (the one header that matters, <c>Retry-After</c>, travels as
+/// <see cref="CoreBankResult{T}.RetryAfter"/>) — only enough shape for a
+/// caller to distinguish the four transport-failure classes.
 /// </summary>
 internal enum CoreBankRetryReason
 {
@@ -96,28 +97,37 @@ internal sealed record CoreBankResult<T>
     public CoreBankRetryReason? RetryReason { get; }
     public int? StatusCode { get; }
 
+    /// <summary>
+    /// The server's <c>Retry-After</c>, when a <c>429</c> or <c>503</c>
+    /// carried one (ADR-024). Only ever set on a
+    /// <see cref="CoreBankClientOutcome.Retry"/>; a hint, never an
+    /// instruction -- the caller's own budget decides whether to wait.
+    /// </summary>
+    public TimeSpan? RetryAfter { get; }
+
     private CoreBankResult(
-        CoreBankClientOutcome outcome, T? value, CoreBankRetryReason? retryReason, int? statusCode)
+        CoreBankClientOutcome outcome, T? value, CoreBankRetryReason? retryReason, int? statusCode, TimeSpan? retryAfter)
     {
         Outcome = outcome;
         Value = value;
         RetryReason = retryReason;
         StatusCode = statusCode;
+        RetryAfter = retryAfter;
     }
 
     public static CoreBankResult<T> Success(T value) =>
-        new(CoreBankClientOutcome.Success, value, retryReason: null, statusCode: null);
+        new(CoreBankClientOutcome.Success, value, retryReason: null, statusCode: null, retryAfter: null);
 
-    public static CoreBankResult<T> Retry(CoreBankRetryReason reason, int? statusCode = null) =>
-        new(CoreBankClientOutcome.Retry, value: default, reason, statusCode);
+    public static CoreBankResult<T> Retry(CoreBankRetryReason reason, int? statusCode = null, TimeSpan? retryAfter = null) =>
+        new(CoreBankClientOutcome.Retry, value: default, reason, statusCode, retryAfter);
 
     /// <summary>A <c>409</c> answer whose body <paramref name="value"/> is the current state CoreBankAPI reported.</summary>
     public static CoreBankResult<T> Conflict(T value) =>
-        new(CoreBankClientOutcome.Conflict, value, retryReason: null, statusCode: 409);
+        new(CoreBankClientOutcome.Conflict, value, retryReason: null, statusCode: 409, retryAfter: null);
 
     /// <summary>A <c>400</c> answer to a transaction submission: CoreBank's verdict, never retried (ADR-023).</summary>
     public static CoreBankResult<T> Rejected(int statusCode) =>
-        new(CoreBankClientOutcome.Rejected, value: default, retryReason: null, statusCode);
+        new(CoreBankClientOutcome.Rejected, value: default, retryReason: null, statusCode, retryAfter: null);
 }
 
 /// <summary>

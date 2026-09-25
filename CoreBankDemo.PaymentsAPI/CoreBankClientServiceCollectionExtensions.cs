@@ -1,4 +1,5 @@
 using CoreBankDemo.PaymentsAPI.Outbox;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Kiota.Abstractions;
 using Microsoft.Kiota.Abstractions.Authentication;
@@ -41,6 +42,11 @@ internal static class CoreBankClientServiceCollectionExtensions
             .RemoveAllResilienceHandlers()
             .AddServiceDiscovery();
 #pragma warning restore EXTEXP0001
+
+        // The client reads an HTTP-date Retry-After on the same clock the
+        // instant rail budgets on (ADR-024); ServiceDefaults registers the
+        // system clock too, so this only matters for a bare registration.
+        services.TryAddSingleton(TimeProvider.System);
 
         services.AddScoped<IRequestAdapter>(sp =>
         {
