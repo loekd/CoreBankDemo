@@ -64,16 +64,12 @@ public sealed class MainWindow : Window
     private const int AccountFieldWidth = 19;
     private const int AmountCaptionWidth = 6;
     private const int AmountFieldWidth = 8;
-    private const int ChipWidth = 19;
+    // A chip's longest caption ("Rail ‹ standard ›", "Key ‹ Generated ›") is seventeen cells,
+    // and Terminal.Gui brackets and pads a Button's title with four more: at nineteen the
+    // closing "›" reflowed onto the line beneath.
+    private const int ChipWidth = 21;
     private const int RailChipX = 17;
-    private const int KeyChipX = 37;
-
-    /// <summary>
-    /// The narrowest content line on which the second compose line's chips and <c>Burst…</c>
-    /// still fit together. Below it the action wraps to a third line rather than shedding a
-    /// caption or hiding a control: no control in use is ever hidden at any width.
-    /// </summary>
-    private const int SecondComposeLineMinimumWidth = KeyChipX + ChipWidth + 1 + CardActionSlotWidth;
+    private const int KeyChipX = RailChipX + ChipWidth + 2;
 
     /// <summary>
     /// Rows between the terminal's own height and a workspace's inner area: the window border
@@ -85,8 +81,23 @@ public sealed class MainWindow : Window
     /// </summary>
     private const int OperationsChromeRows = 7;
 
-    /// <summary>The compose bar's two captioned lines, before any mode-specific third one.</summary>
-    private const int ComposeBarRows = 2;
+    /// <summary>
+    /// The compose bar's two captioned lines plus the mode row beneath them, before any
+    /// mode-specific line. The mode row is the mode button's own at every width, so the chips
+    /// never compete with it for the second line and no caption is ever shed to make room.
+    /// </summary>
+    private const int ComposeBarRows = 3;
+
+    /// <summary>The row the mode button and, while a burst is armed, the burst count fields share.</summary>
+    private const int ModeButtonRow = 2;
+
+    /// <summary>
+    /// The mode button names the mode it switches <em>to</em>, so the operator reads a
+    /// destination rather than a state. Which mode is current is already stated by Submit's own
+    /// caption and by the burst count fields being present.
+    /// </summary>
+    private const string BurstModeCaption = "Burst mode";
+    private const string SingleModeCaption = "Single mode";
 
     /// <summary>
     /// Sized to the longest label the slot will ever hold (<c>[ Look up outcome ]</c>), so
@@ -175,7 +186,7 @@ public sealed class MainWindow : Window
     private readonly Button _railButton = NewButton("Rail ‹ standard ›");
     private readonly Button _idempotencyButton = NewButton("Key ‹ Generated ›");
     private readonly Button _submitButton = NewButton("Submit", isDefault: true);
-    private readonly Button _burstButton = NewButton("Burst…");
+    private readonly Button _burstButton = NewButton(BurstModeCaption);
     private readonly Button _cancelBurstButton = NewButton("Stop sending");
 
     // --- Operations: the two regions that replace each other -----------------------------
@@ -366,11 +377,14 @@ public sealed class MainWindow : Window
         Title = "CoreBankDemo — Operator Console";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
-        // Submit is Operations' single filled-teal control. Burst…, the card's own action and the
-        // takeover's dismiss take the object-anchored treatment instead -- and Cancel payment
-        // pointedly takes neither the destructive tokens (it destroys nothing) nor the
-        // lock-exempt outline (it is exempt from confirmation, never from the lock).
+        // Submit and the mode button are Operations' two filled-teal controls: the mode button
+        // wears Submit's treatment so the compose bar's own two actions read as a pair. The
+        // card's own action and the takeover's dismiss take the object-anchored treatment
+        // instead -- and Cancel payment pointedly takes neither the destructive tokens (it
+        // destroys nothing) nor the lock-exempt outline (it is exempt from confirmation, never
+        // from the lock).
         OperatorTheme.Apply(_submitButton, OperatorTheme.ActionScheme);
+        OperatorTheme.Apply(_burstButton, OperatorTheme.ActionScheme);
         OperatorTheme.Apply(_resourceActionButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_restartResourceButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_stopButton, OperatorTheme.DestructiveScheme);
@@ -448,7 +462,7 @@ public sealed class MainWindow : Window
     /// carrying the selected payment's own action, and a STILL OPEN strip that renders only
     /// while more than one payment is open. Its actions anchor to the object they operate on
     /// rather than to a shared lower region, which this workspace no longer has: Submit and
-    /// Burst… belong to the compose bar whose contents they act on, and Cancel payment / Look up
+    /// the mode button belong to the compose bar whose contents they act on, and Cancel payment / Look up
     /// outcome / Resend same key to the card, acting on the payment printed above them.
     /// </summary>
     private View BuildOperationsView()
@@ -465,16 +479,18 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// Two captioned lines, each ending in a right-anchored action slot, plus a third line only
-    /// where a mode needs one. The captions are what stay at every width: an unlabelled IBAN read
-    /// from the back of a room is a run of digits. There is no currency field and no currency
-    /// validation — the console always sends EUR.
+    /// Two captioned lines, the first ending in a right-anchored action slot, then the mode row
+    /// holding the mode button in that same slot, plus a further line only where a mode needs
+    /// one. The captions are what stay at every width: an unlabelled IBAN read from the back of a
+    /// room is a run of digits. There is no currency field and no currency validation — the
+    /// console always sends EUR.
     /// </summary>
     private void BuildComposeBar(View view)
     {
         // Added in the workspace's literal Tab order: compose-bar first line (From, To, Submit),
-        // then the second (Amount, rail chip, idempotency chip, Burst…), then the third line
-        // where a mode renders one (EXPERIENCE.md, Accessibility Floor).
+        // then the second (Amount, rail chip, idempotency chip), then the mode row (mode button,
+        // burst count fields), then the line where a mode renders one (EXPERIENCE.md,
+        // Accessibility Floor).
         AddField(view, "From", _fromAccount, LabelX, 0, AccountCaptionWidth, AccountFieldWidth);
         AddField(
             view,
@@ -495,7 +511,7 @@ public sealed class MainWindow : Window
         _submitButton.X = Pos.AnchorEnd(CardActionSlotWidth);
         _submitButton.Y = 0;
         _burstButton.X = Pos.AnchorEnd(CardActionSlotWidth);
-        _burstButton.Y = 1;
+        _burstButton.Y = ModeButtonRow;
 
         view.Add(_railButton, _idempotencyButton, _burstButton);
 
@@ -521,28 +537,29 @@ public sealed class MainWindow : Window
             Repaint();
         };
 
-        // The one mode-specific third line: the supplied-key field in Supplied mode, the
-        // not-retry-safe warning in Omitted mode. No control in use is ever hidden.
-        _modeLine = new Label { X = LabelX, Y = 2, Height = 1, Width = 14, Text = "Supplied key" };
-        _suppliedKey.X = LabelX + 15;
-        _suppliedKey.Y = 2;
-        _suppliedKey.Height = 1;
-        _suppliedKey.Width = AccountFieldWidth + 6;
-        view.Add(_modeLine, _suppliedKey);
-
-        // Burst… reveals the burst control rather than firing one: the count is bounded and the
-        // operator states it before two hundred payments leave.
-        _burstSetupLabel = new Label { X = LabelX, Y = 3, Height = 1, Width = 12, Text = "Burst count" };
+        // Burst mode reveals the burst control rather than firing one: the count is bounded and
+        // the operator states it before two hundred payments leave. The fields share the mode
+        // button's row, so arming a burst costs the bar no extra line.
+        _burstSetupLabel = new Label { X = LabelX, Y = ModeButtonRow, Height = 1, Width = 12, Text = "Burst count" };
         _burstCount.X = LabelX + 13;
-        _burstCount.Y = 3;
+        _burstCount.Y = ModeButtonRow;
         _burstCount.Height = 1;
         _burstCount.Width = NarrowFieldWidth;
-        _burstConcurrencyLabel = new Label { X = LabelX + 25, Y = 3, Height = 1, Width = 9, Text = "at once" };
+        _burstConcurrencyLabel = new Label { X = LabelX + 25, Y = ModeButtonRow, Height = 1, Width = 9, Text = "at once" };
         _burstConcurrency.X = LabelX + 35;
-        _burstConcurrency.Y = 3;
+        _burstConcurrency.Y = ModeButtonRow;
         _burstConcurrency.Height = 1;
         _burstConcurrency.Width = NarrowFieldWidth;
         view.Add(_burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency);
+
+        // The one mode-specific line beneath the mode row: the supplied-key field in Supplied
+        // mode, the not-retry-safe warning in Omitted mode. No control in use is ever hidden.
+        _modeLine = new Label { X = LabelX, Y = ComposeBarRows, Height = 1, Width = 14, Text = "Supplied key" };
+        _suppliedKey.X = LabelX + 15;
+        _suppliedKey.Y = ComposeBarRows;
+        _suppliedKey.Height = 1;
+        _suppliedKey.Width = AccountFieldWidth + 6;
+        view.Add(_modeLine, _suppliedKey);
 
         // Submit itself sends the burst once one is armed, so there is exactly one action that
         // fires payments — not a second "Start burst" button duplicating what Submit already does.
@@ -1326,7 +1343,7 @@ public sealed class MainWindow : Window
 
     private async Task SubmitPaymentAsync()
     {
-        // Burst… arms the burst rather than firing it, so Submit is the one action that sends
+        // Burst mode arms the burst rather than firing it, so Submit is the one action that sends
         // payments: while the burst setup is visible, Submit sends the burst instead of a single
         // payment. There is no separate "Start burst" button duplicating this.
         if (_burstSetupVisible)
@@ -1927,13 +1944,6 @@ public sealed class MainWindow : Window
     {
         var inner = Math.Max(0, Frame.Height - OperationsChromeRows);
 
-        // Where the chips and Burst… cannot share the second line they wrap to a third rather
-        // than shedding a caption: the wrap is the only legal answer, because nothing is ever
-        // hidden (EXPERIENCE.md, Operations compose bar at the 80x24 floor).
-        var wrapped = ContentWidth() < SecondComposeLineMinimumWidth;
-        _burstButton.Y = wrapped ? ComposeBarRows : 1;
-        var wrapRows = wrapped ? 1 : 0;
-
         // The mode line speaks only about Supplied and Omitted mode, so in Generated mode it is a
         // row of noise and the first one reclaimed.
         var supplied = _idempotencyMode == IdempotencyMode.Supplied;
@@ -1951,19 +1961,13 @@ public sealed class MainWindow : Window
         _burstConcurrency.Visible = _burstSetupVisible;
 
         // Submit is the one action that fires payments, so its label states which one it will
-        // fire while burst setup is armed.
+        // fire while burst setup is armed; the mode button offers the other mode.
         _submitButton.Text = _burstSetupVisible ? "Send burst" : "Submit";
+        _burstButton.Text = _burstSetupVisible ? SingleModeCaption : BurstModeCaption;
 
-        var modeRow = ComposeBarRows + wrapRows;
-        var burstRow = modeRow + (_modeLine.Visible ? 1 : 0);
-        var ruleRow = burstRow + (_burstSetupVisible ? 1 : 0);
-        _modeLine.Y = modeRow;
-        _suppliedKey.Y = modeRow;
-        foreach (var view in new View[] { _burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency })
-        {
-            view.Y = burstRow;
-        }
-
+        // The burst fields live on the mode button's own row, so the only line that can grow the
+        // bar is the mode line.
+        var ruleRow = ComposeBarRows + (_modeLine.Visible ? 1 : 0);
         _composeRule.Y = ruleRow;
 
         // A blank row above the card's first line, so the card looks finished standing alone
@@ -2004,7 +2008,7 @@ public sealed class MainWindow : Window
         _cardClosing.Height = Math.Max(1, closingRows);
 
         // The ladder just moved rows that Pos/Dim resolve against, and this runs outside the
-        // draw loop (a state change, a mode chip, a Burst… toggle). Without re-resolving here,
+        // draw loop (a state change, a mode chip, a mode toggle). Without re-resolving here,
         // every frame on this surface keeps whatever geometry the last resize gave it -- which is
         // exactly how a payment area squeezed to zero rows once passed for correct.
         _operationsMain.SetNeedsLayout();
