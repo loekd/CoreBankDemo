@@ -37,6 +37,8 @@ public class InstantPaymentForwardingHandlerTests
         TraceParent: null,
         TraceState: null);
 
+    private static readonly ActivitySource ActivitySource = new(nameof(InstantPaymentForwardingHandlerTests));
+
     private readonly Mock<IOutboxMessageStore<OutboxMessage>> _store = new(MockBehavior.Strict);
     private readonly Mock<ICoreBankTransactionForwarder> _forwarder = new(MockBehavior.Strict);
     private readonly TestLockService _lock = new();
@@ -81,7 +83,8 @@ public class InstantPaymentForwardingHandlerTests
             Options.Create(new OutboxProcessingOptions()),
             timeProvider ?? TimeProvider.System,
             NullLogger<InstantPaymentForwardingHandler>.Instance,
-            businessMetrics ?? _businessMetrics);
+            businessMetrics ?? _businessMetrics,
+            ActivitySource);
 
     /// <summary>An applied cancel is the payments-outbox row's out, counted exactly once.</summary>
     private static void ShouldHaveCountedOneCancelledItem(MetricsTestListener listener) =>
@@ -1085,7 +1088,8 @@ public class InstantPaymentForwardingHandlerTests
             Options.Create(new OutboxProcessingOptions()),
             timeProvider,
             NullLogger<InstantPaymentForwardingHandler>.Instance,
-            _businessMetrics);
+            _businessMetrics,
+            ActivitySource);
 
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
@@ -1218,6 +1222,50 @@ public class InstantPaymentForwardingHandlerTests
         _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.LocalCancelReason, It.IsAny<CancellationToken>()), Times.Once);
         _store.VerifyNoOtherCalls();
         _forwarder.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task ForwardAsync_wraps_the_inline_forward_in_the_same_ProcessOutboxMessage_span_the_background_rail_emits()
+    {
+        // The instant rail delivers the payments-outbox row in place of
+        // PaymentsOutboxProcessor, so a trace must read the same on either
+        // rail: one ProcessOutboxMessage producer span, under the request
+        // span, carrying the tags OutboxProcessorBase.StartDeliveryActivity
+        // sets -- plus messaging.inline so the two rails can be told apart.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, DateTimeOffset.UtcNow));
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var stopped = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == nameof(InstantPaymentForwardingHandlerTests),
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = stopped.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler();
+
+        await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        var span = stopped.Should().ContainSingle(a => a.OperationName == "ProcessOutboxMessage").Which;
+        span.Kind.Should().Be(ActivityKind.Producer);
+        span.ParentId.Should().Be(requestSpan.Id, "the inline forward is part of the request's trace");
+        var tags = span.TagObjects.ToDictionary(t => t.Key, t => t.Value);
+        tags.Should().ContainKey("queue_duration_ms").WhoseValue.Should().BeOfType<double>();
+        tags.Remove("queue_duration_ms");
+        tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["IdempotencyKey"] = Payment.IdempotencyKey,
+            ["PartitionId"] = Payment.PartitionId,
+            ["messaging.store.name"] = "PaymentsOutbox",
+            ["messaging.message.id"] = Payment.Id.ToString(),
+            ["messaging.partition.id"] = Payment.PartitionId,
+            ["messaging.inline"] = true,
+        });
     }
 
     private sealed class SequencedTimeProvider(params DateTimeOffset[] values) : TimeProvider

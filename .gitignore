@@ -10,6 +10,7 @@ riderModule.iml
 *.db-wal
 
 /.idea
+/.vscode/settings.json
 .DS_Store
 
 # Coverlet output (tests/Directory.Build.props gate)

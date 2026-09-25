@@ -69,7 +69,8 @@ internal sealed class InstantPaymentForwardingHandler(
     IOptions<OutboxProcessingOptions> outboxOptions,
     TimeProvider timeProvider,
     ILogger<InstantPaymentForwardingHandler> logger,
-    BusinessMetrics businessMetrics) : IInstantPaymentForwardingHandler
+    BusinessMetrics businessMetrics,
+    ActivitySource activitySource) : IInstantPaymentForwardingHandler
 {
     /// <summary>
     /// Pause between "not yet first in dispatch order" checks while waiting
@@ -240,6 +241,19 @@ internal sealed class InstantPaymentForwardingHandler(
                 payment.PartitionId);
             return null;
         }
+
+        // The rail delivers this row in place of PaymentsOutboxProcessor, so
+        // the trace shows the same ProcessOutboxMessage span the background
+        // rail emits (OutboxProcessorBase.StartDeliveryActivity), under the
+        // request span. Retry-wait events and failed-payment tags land on it.
+        using var activity = activitySource.StartActivity("ProcessOutboxMessage", ActivityKind.Producer);
+        activity?.SetTag("IdempotencyKey", claimed.IdempotencyKey);
+        activity?.SetTag("PartitionId", claimed.PartitionId);
+        activity?.SetTag("messaging.store.name", BusinessMetrics.StoreName.PaymentsOutbox.ToString());
+        activity?.SetTag("messaging.message.id", claimed.Id.ToString());
+        activity?.SetTag("messaging.partition.id", claimed.PartitionId);
+        activity?.SetTag("messaging.inline", true);
+        activity?.SetTag("queue_duration_ms", (timeProvider.GetUtcNow().UtcDateTime - claimed.CreatedAt).TotalMilliseconds);
 
         var attemptTimeout = TimeSpan.FromMilliseconds(opts.AttemptTimeoutMilliseconds);
         var forwardDeadline = ForwardDeadline(startedAt, opts);
@@ -527,9 +541,12 @@ internal sealed class InstantPaymentForwardingHandler(
 
         logger.LogInformation(
             "Instant rail: payment {IdempotencyKey} cancelled ({Reason})", payment.IdempotencyKey, reason);
-        // The request span is the trace's root: tagged here, once the row is
-        // provably dead, so the traces dashboard lists this payment as failed
-        // with its reason (FailedPaymentTags).
+        // Tagged here, once the row is provably dead, so the traces dashboard
+        // lists this payment as failed with its reason (FailedPaymentTags).
+        // Lands on the ProcessOutboxMessage span when the cancel went through
+        // CoreBank (as on the background rail) and on the request span when
+        // the command never left PaymentsAPI; the dashboard selects by tag,
+        // not by span.
         Activity.Current?.SetTag(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled);
         Activity.Current?.SetTag(FailedPaymentTags.FailureReason, reason);
         Activity.Current?.SetTag(FailedPaymentTags.TransactionId, claimed.TransactionId);

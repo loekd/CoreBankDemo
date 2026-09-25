@@ -93,7 +93,8 @@ internal sealed class TransactionIntakeHandler(
     IOptions<InboxProcessingOptions> inboxOptions,
     TimeProvider timeProvider,
     ILogger<TransactionIntakeHandler> logger,
-    BusinessMetrics businessMetrics) : ITransactionIntakeHandler
+    BusinessMetrics businessMetrics,
+    ActivitySource activitySource) : ITransactionIntakeHandler
 {
     public async Task<TransactionIntakeResult> ProcessAsync(
         TransactionRequest request,
@@ -423,27 +424,43 @@ internal sealed class TransactionIntakeHandler(
             return new InlineAttempt(null, NotFirstYet: true);
         }
 
-        try
+        // Inline execution runs this row in place of the inbox processor, so
+        // the trace shows the same ProcessInboxMessage span the background
+        // path emits (InboxProcessorBase.StartDispatchActivity), under the
+        // request span. Scoped to the execution only: the outcome tag below
+        // describes the request and stays on the request span.
+        using (var activity = activitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer))
         {
-            await executionHandler.HandleAsync(claimed, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(
-                ex,
-                "Inline execution failed for transaction {TransactionId}; releasing the claim for the inbox processor",
-                claimed.TransactionId);
-            await inboxStore.MarkAsFailedWithRetryAsync(
-                claimed,
-                ex.Message,
-                cancellationToken).ConfigureAwait(false);
+            activity?.SetTag("IdempotencyKey", claimed.IdempotencyKey);
+            activity?.SetTag("PartitionId", claimed.PartitionId);
+            activity?.SetTag("messaging.store.name", BusinessMetrics.StoreName.CoreBankInbox.ToString());
+            activity?.SetTag("messaging.message.id", claimed.Id.ToString());
+            activity?.SetTag("messaging.partition.id", claimed.PartitionId);
+            activity?.SetTag("messaging.inline", true);
+            activity?.SetTag("queue_duration_ms", (timeProvider.GetUtcNow().UtcDateTime - claimed.ReceivedAt).TotalMilliseconds);
 
-            // ADR-023: the row is back at Pending; the inbox processor retries it.
-            return new InlineAttempt(null, NotFirstYet: false);
+            try
+            {
+                await executionHandler.HandleAsync(claimed, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(
+                    ex,
+                    "Inline execution failed for transaction {TransactionId}; releasing the claim for the inbox processor",
+                    claimed.TransactionId);
+                await inboxStore.MarkAsFailedWithRetryAsync(
+                    claimed,
+                    ex.Message,
+                    cancellationToken).ConfigureAwait(false);
+
+                // ADR-023: the row is back at Pending; the inbox processor retries it.
+                return new InlineAttempt(null, NotFirstYet: false);
+            }
         }
 
         if (claimed.Status != MessageConstants.Status.Completed ||

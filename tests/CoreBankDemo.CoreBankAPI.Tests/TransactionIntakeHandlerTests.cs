@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI.Inbox;
@@ -23,6 +24,8 @@ public class TransactionIntakeHandlerTests
     private const string ToAccount = "NL20INGB0001234567";
     private const string TransactionId = "txn-123";
 
+    private static readonly ActivitySource ActivitySource = new(nameof(TransactionIntakeHandlerTests));
+
     private readonly FakeTimeProvider _timeProvider = new();
     private readonly Mock<IInboxMessageRepository> _repository = new(MockBehavior.Strict);
     private readonly Mock<IInboxMessageStore<InboxMessage>> _inboxStore = new(MockBehavior.Strict);
@@ -38,7 +41,8 @@ public class TransactionIntakeHandlerTests
             Options.Create(new InboxProcessingOptions { PartitionCount = partitionCount, LockExpirySeconds = 30 }),
             _timeProvider,
             NullLogger<TransactionIntakeHandler>.Instance,
-            _businessMetrics);
+            _businessMetrics,
+            ActivitySource);
 
     /// <summary>Sets up a successful inline claim of whatever row <see cref="_repository"/>'s <c>StoreIfNewAsync</c> stores.</summary>
     private void SetUpSuccessfulClaimOf(Func<InboxMessage?> stored) =>
@@ -457,6 +461,62 @@ public class TransactionIntakeHandlerTests
         // commits the row on both paths); intake must not count it again.
         listener.Measurements
             .Should().NotContain(m => m.InstrumentName == BusinessMetrics.MessagingItemsProcessedInstrumentName);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_wraps_inline_execution_in_the_same_ProcessInboxMessage_span_the_inbox_processor_emits()
+    {
+        // Inline execution runs the corebank-inbox row in place of the inbox
+        // processor, so a trace must read the same on either path: one
+        // ProcessInboxMessage consumer span, under the request span, carrying
+        // the tags InboxProcessorBase.StartDispatchActivity sets -- plus
+        // messaging.inline so the two paths can be told apart.
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        SetUpSuccessfulClaimOf(() => stored);
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ResponsePayload = JsonSerializer.Serialize(
+                    new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow()));
+            })
+            .Returns(Task.CompletedTask);
+        var stopped = new List<Activity>();
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == nameof(TransactionIntakeHandlerTests),
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+            ActivityStopped = stopped.Add,
+        };
+        ActivitySource.AddActivityListener(listener);
+        using var requestSpan = new Activity("POST api/Transactions/process").Start();
+        var handler = CreateHandler();
+
+        await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        var span = stopped.Should().ContainSingle(a => a.OperationName == "ProcessInboxMessage").Which;
+        span.Kind.Should().Be(ActivityKind.Consumer);
+        span.ParentId.Should().Be(requestSpan.Id, "inline execution is part of the request's trace");
+        var tags = span.TagObjects.ToDictionary(t => t.Key, t => t.Value);
+        tags.Should().ContainKey("queue_duration_ms").WhoseValue.Should().BeOfType<double>();
+        tags.Remove("queue_duration_ms");
+        tags.Should().BeEquivalentTo(new Dictionary<string, object?>
+        {
+            ["IdempotencyKey"] = TransactionId,
+            ["PartitionId"] = stored!.PartitionId,
+            ["messaging.store.name"] = "CoreBankInbox",
+            ["messaging.message.id"] = stored.Id.ToString(),
+            ["messaging.partition.id"] = stored.PartitionId,
+            ["messaging.inline"] = true,
+        });
+        requestSpan.GetTagItem("outcome").Should().Be("inline_completed",
+            "the intake outcome describes the request, not the dispatch span");
     }
 
     [Fact]

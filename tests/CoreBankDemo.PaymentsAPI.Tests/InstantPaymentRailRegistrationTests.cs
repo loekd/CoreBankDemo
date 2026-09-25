@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
@@ -206,6 +207,8 @@ public class InstantPaymentRailRegistrationTests
         services.AddLogging();
         services.AddSingleton<BusinessMetrics>();
         services.AddSingleton(TimeProvider.System);
+        // AddServiceDefaults registers the service's ActivitySource singleton in the real host.
+        services.AddSingleton(new ActivitySource(nameof(InstantPaymentRailRegistrationTests)));
         services.AddSingleton<IDistributedLockService, NoOpDistributedLockService>();
         services.AddOptions<OutboxProcessingOptions>();
         services.AddInstantPaymentRail(Configuration(values));
