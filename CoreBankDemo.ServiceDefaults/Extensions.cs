@@ -214,6 +214,9 @@ public static class Extensions
                         tracing.AddSource(sourceName);
                     }
 
+                    // Ahead of the exporter: poll-tick database/cache spans with no
+                    // parent are marked not recorded before the exporter sees them.
+                    tracing.AddProcessor(new OrphanedDependencySpanFilter());
                     tracing.AddOtlpExporter(options => ApplyOtlpEndpoint(options, otlpEndpoint));
                 });
 
