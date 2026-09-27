@@ -85,6 +85,14 @@ internal sealed class InstantPaymentForwardingHandler(
     /// <summary>Span event recorded once per deliberate wait between attempts (ADR-024).</summary>
     internal const string RetryWaitEventName = "instant_rail.retry_wait";
 
+    /// <summary>
+    /// The <see cref="TraceSuppression"/> scope each wait-for-turn iteration
+    /// runs in: its lock, claim and status round-trips are not recorded. The
+    /// wait is reported as <c>dispatch.wait_iterations</c>/<c>dispatch.wait_ms</c>
+    /// on the delivery span instead.
+    /// </summary>
+    internal const string WaitForTurnScopeName = "WaitForDispatchTurn";
+
     public async Task<InstantForwardResult> ForwardAsync(PaymentSnapshot payment, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(payment);
@@ -115,6 +123,15 @@ internal sealed class InstantPaymentForwardingHandler(
         // turn -- until the forward phase runs out. It stops early the moment
         // another claimant owns the row: that row is being delivered by the
         // background processor and its outcome will arrive via the event.
+        //
+        // Each iteration runs in a suppressed trace scope: its lock, claim
+        // and status round-trips are not recorded (they said nothing but
+        // "still waiting", four spans per 25 ms). The delivery span opened on
+        // the claim is parented to the request explicitly so it escapes the
+        // scope; the local-cancel paths run outside it so their row update
+        // and failed-payment tags stay on the request.
+        var requestContext = Activity.Current?.Context ?? default;
+        var iterations = 0;
         while (true)
         {
             var remaining = forwardDeadline - timeProvider.GetUtcNow();
@@ -127,82 +144,96 @@ internal sealed class InstantPaymentForwardingHandler(
                 return await CancelLocallyAsync(payment, startedAt, LocalCancelReason, cancellationToken).ConfigureAwait(false);
             }
 
+            iterations++;
             InstantForwardResult? result = null;
-            try
+            string? currentStatus = null;
+            var cancelLocally = false;
+            using (TraceSuppression.Begin(activitySource, WaitForTurnScopeName))
             {
-                await lockService.ExecuteWithLockAsync(
-                    lockName,
-                    outboxOptions.Value.LockExpirySeconds,
-                    remaining < attemptTimeout ? remaining : attemptTimeout,
-                    async lockToken =>
-                    {
-                        result = await ForwardUnderPartitionLockAsync(
-                            payment,
-                            opts,
-                            startedAt,
-                            lockToken).ConfigureAwait(false);
-                    },
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                // The lock backend can throw AFTER the workload ran (a release
-                // or renew failure). The forward -- and possibly CoreBank's
-                // execution -- genuinely happened then, so that result is
-                // trusted and returned; cancelling locally here would answer
-                // 504 for a command that may be executing. Only a failure
-                // that prevented the workload from ever running (result still
-                // null) means the command never left PaymentsAPI.
-                if (result is not null)
+                try
                 {
+                    await lockService.ExecuteWithLockAsync(
+                        lockName,
+                        outboxOptions.Value.LockExpirySeconds,
+                        remaining < attemptTimeout ? remaining : attemptTimeout,
+                        async lockToken =>
+                        {
+                            result = await ForwardUnderPartitionLockAsync(
+                                payment,
+                                opts,
+                                startedAt,
+                                new DispatchWait(iterations, requestContext),
+                                lockToken).ConfigureAwait(false);
+                        },
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    // The lock backend can throw AFTER the workload ran (a release
+                    // or renew failure). The forward -- and possibly CoreBank's
+                    // execution -- genuinely happened then, so that result is
+                    // trusted and returned; cancelling locally here would answer
+                    // 504 for a command that may be executing. Only a failure
+                    // that prevented the workload from ever running (result still
+                    // null) means the command never left PaymentsAPI.
+                    if (result is not null)
+                    {
+                        logger.LogWarning(
+                            ex,
+                            "Instant rail: lock backend failed for partition {PartitionId} after forwarding payment {IdempotencyKey}; returning the forwarded outcome",
+                            payment.PartitionId,
+                            payment.IdempotencyKey);
+                        return result;
+                    }
+
                     logger.LogWarning(
                         ex,
-                        "Instant rail: lock backend failed for partition {PartitionId} after forwarding payment {IdempotencyKey}; returning the forwarded outcome",
+                        "Instant rail: lock backend failed for partition {PartitionId} while forwarding payment {IdempotencyKey}; cancelling locally",
                         payment.PartitionId,
                         payment.IdempotencyKey);
-                    return result;
+                    cancelLocally = true;
                 }
 
-                logger.LogWarning(
-                    ex,
-                    "Instant rail: lock backend failed for partition {PartitionId} while forwarding payment {IdempotencyKey}; cancelling locally",
-                    payment.PartitionId,
-                    payment.IdempotencyKey);
+                // ExecuteWithLockAsync returns false both when the lock was never
+                // acquired (the callback never ran, so result is still null) AND
+                // when the workload ran but lock ownership was lost mid-flight.
+                // In the second case result is non-null -- the forward genuinely
+                // happened -- and is trusted and returned; only a null result
+                // (lock unavailable, or not yet first in dispatch order) waits.
+                if (!cancelLocally && result is null)
+                {
+                    try
+                    {
+                        currentStatus = await store.GetStatusAsync(payment.Id, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(
+                            ex,
+                            "Instant rail: could not read payment {IdempotencyKey} while waiting for partition {PartitionId}; cancelling locally",
+                            payment.IdempotencyKey,
+                            payment.PartitionId);
+                        cancelLocally = true;
+                    }
+                }
+            }
+
+            if (cancelLocally)
+            {
                 return await CancelLocallyAsync(payment, startedAt, LocalCancelReason, cancellationToken).ConfigureAwait(false);
             }
 
-            // ExecuteWithLockAsync returns false both when the lock was never
-            // acquired (the callback never ran, so result is still null) AND
-            // when the workload ran but lock ownership was lost mid-flight.
-            // In the second case result is non-null -- the forward genuinely
-            // happened -- and is trusted and returned; only a null result
-            // (lock unavailable, or not yet first in dispatch order) waits.
             if (result is not null)
             {
                 return result;
-            }
-
-            string? currentStatus;
-            try
-            {
-                currentStatus = await store.GetStatusAsync(payment.Id, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(
-                    ex,
-                    "Instant rail: could not read payment {IdempotencyKey} while waiting for partition {PartitionId}; cancelling locally",
-                    payment.IdempotencyKey,
-                    payment.PartitionId);
-                return await CancelLocallyAsync(payment, startedAt, LocalCancelReason, cancellationToken).ConfigureAwait(false);
             }
 
             if (currentStatus != MessageConstants.Status.Pending)
@@ -219,6 +250,13 @@ internal sealed class InstantPaymentForwardingHandler(
     }
 
     /// <summary>
+    /// How long, and how many wait-for-turn iterations, the request waited
+    /// before it claimed its row; and the request span the delivery span is
+    /// parented to, since the claim happens inside the suppressed scope.
+    /// </summary>
+    private readonly record struct DispatchWait(int Iterations, ActivityContext RequestContext);
+
+    /// <summary>
     /// The one budgeted forward attempt under the partition lock. Returns
     /// <see langword="null"/> -- rather than a deferral -- when the row is not
     /// yet first in dispatch order, so the caller can wait and try again.
@@ -227,6 +265,7 @@ internal sealed class InstantPaymentForwardingHandler(
         PaymentSnapshot payment,
         InstantRailOptions opts,
         DateTimeOffset startedAt,
+        DispatchWait wait,
         CancellationToken cancellationToken)
     {
         var claimed = await store.TryClaimByIdIfOldestAsync(
@@ -244,9 +283,12 @@ internal sealed class InstantPaymentForwardingHandler(
 
         // The rail delivers this row in place of PaymentsOutboxProcessor, so
         // the trace shows the same ProcessOutboxMessage span the background
-        // rail emits (OutboxProcessorBase.StartDeliveryActivity), under the
-        // request span. Retry-wait events and failed-payment tags land on it.
-        using var activity = activitySource.StartActivity("ProcessOutboxMessage", ActivityKind.Producer);
+        // rail emits (OutboxProcessorBase.StartDeliveryActivity), parented to
+        // the request explicitly because the claim happens inside the wait
+        // scope. Retry-wait events and failed-payment tags land on it.
+        using var activity = activitySource.StartActivity("ProcessOutboxMessage", ActivityKind.Producer, wait.RequestContext);
+        activity?.SetTag("dispatch.wait_iterations", wait.Iterations);
+        activity?.SetTag("dispatch.wait_ms", (timeProvider.GetUtcNow() - startedAt).TotalMilliseconds);
         activity?.SetTag("IdempotencyKey", claimed.IdempotencyKey);
         activity?.SetTag("PartitionId", claimed.PartitionId);
         activity?.SetTag("messaging.store.name", BusinessMetrics.StoreName.PaymentsOutbox.ToString());

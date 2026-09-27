@@ -214,9 +214,14 @@ public static class Extensions
                         tracing.AddSource(sourceName);
                     }
 
-                    // Ahead of the exporter: poll-tick database/cache spans with no
-                    // parent are marked not recorded before the exporter sees them.
-                    tracing.AddProcessor(new OrphanedDependencySpanFilter());
+                    // The SDK default, set explicitly because Aspire configures always_on
+                    // through OTEL_TRACES_SAMPLER: a child must follow its parent, or nothing
+                    // can be hidden by hiding its parent (TraceNoiseFilter). Dapr samples at
+                    // rate 1 and the CoreBank client forwards the live traceparent, so
+                    // following the parent loses nothing recorded upstream.
+                    tracing.SetSampler(new ParentBasedSampler(new AlwaysOnSampler()));
+                    // Ahead of the exporter, so noise is marked not recorded before it sees it.
+                    tracing.AddProcessor(new TraceNoiseFilter());
                     tracing.AddOtlpExporter(options => ApplyOtlpEndpoint(options, otlpEndpoint));
                 });
 

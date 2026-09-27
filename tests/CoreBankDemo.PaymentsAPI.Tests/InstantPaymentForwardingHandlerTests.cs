@@ -1257,6 +1257,8 @@ public class InstantPaymentForwardingHandlerTests
         var tags = span.TagObjects.ToDictionary(t => t.Key, t => t.Value);
         tags.Should().ContainKey("queue_duration_ms").WhoseValue.Should().BeOfType<double>();
         tags.Remove("queue_duration_ms");
+        tags.Should().ContainKey("dispatch.wait_ms").WhoseValue.Should().BeOfType<double>();
+        tags.Remove("dispatch.wait_ms");
         tags.Should().BeEquivalentTo(new Dictionary<string, object?>
         {
             ["IdempotencyKey"] = Payment.IdempotencyKey,
@@ -1265,7 +1267,73 @@ public class InstantPaymentForwardingHandlerTests
             ["messaging.message.id"] = Payment.Id.ToString(),
             ["messaging.partition.id"] = Payment.PartitionId,
             ["messaging.inline"] = true,
+            ["dispatch.wait_iterations"] = 1,
         });
+    }
+
+    [Fact]
+    public async Task ForwardAsync_waits_for_its_turn_in_a_suppressed_scope_and_then_forwards_under_the_request_span()
+    {
+        // Every wait-for-turn iteration is lock, claim attempt, unlock, status
+        // read -- four dependency spans per 25 ms that said nothing but "still
+        // waiting" and buried the payment trace. The iterations run inside a
+        // TraceSuppression scope (nothing under it is recorded); the wait is
+        // reported as two tags on the delivery span instead, and that span
+        // still hangs directly off the request.
+        var clock = new BudgetClock(new DateTimeOffset(2026, 9, 25, 12, 0, 0, TimeSpan.Zero));
+        var claimed = ClaimedMessage();
+        var currentDuringWait = new List<Activity?>();
+        var looks = 0;
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                if (++looks == 1)
+                {
+                    currentDuringWait.Add(Activity.Current);
+                    return null;
+                }
+
+                return claimed;
+            });
+        _store.Setup(s => s.GetStatusAsync(Payment.Id, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                currentDuringWait.Add(Activity.Current);
+                return MessageConstants.Status.Pending;
+            });
+        Activity? currentDuringForward = null;
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                currentDuringForward = Activity.Current;
+                return new TransactionSubmission(Payment.TransactionId, MessageConstants.Status.Completed, clock.GetUtcNow());
+            });
+        _store.Setup(s => s.MarkAsCompletedAsync(claimed, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(40));
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == nameof(InstantPaymentForwardingHandlerTests),
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(listener);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Completed);
+        looks.Should().Be(2);
+        currentDuringWait.Should().HaveCount(2).And.AllSatisfy(a =>
+        {
+            a!.OperationName.Should().Be("WaitForDispatchTurn");
+            a.GetTagItem(TraceSuppression.Tag).Should().NotBeNull();
+        });
+        currentDuringForward!.OperationName.Should().Be("ProcessOutboxMessage");
+        currentDuringForward.ParentId.Should().Be(requestSpan.Id, "the delivery hangs off the request, not off the wait scope");
+        currentDuringForward.GetTagItem("dispatch.wait_iterations").Should().Be(2);
+        currentDuringForward.GetTagItem("dispatch.wait_ms").Should().Be(80.0);
+        Activity.Current.Should().BeSameAs(requestSpan, "the request is current again once the wait is over");
     }
 
     private sealed class SequencedTimeProvider(params DateTimeOffset[] values) : TimeProvider

@@ -148,7 +148,7 @@ internal sealed class TransactionIntakeHandler(
 
             if (executeInline)
             {
-                var inlineResult = await TryExecuteInlineAsync(message, cancellationToken).ConfigureAwait(false);
+                var inlineResult = await TryExecuteInlineAsync(message, Activity.Current, cancellationToken).ConfigureAwait(false);
                 if (inlineResult is not null)
                 {
                     return inlineResult;
@@ -295,7 +295,7 @@ internal sealed class TransactionIntakeHandler(
     /// <see langword="null"/>.
     /// </returns>
     private async Task<TransactionIntakeResult?> TryExecuteInlineAsync(
-        InboxMessage message, CancellationToken cancellationToken)
+        InboxMessage message, Activity? requestActivity, CancellationToken cancellationToken)
     {
         // Same reasoning as PaymentsAPI's InstantPaymentForwardingHandler:
         // under load the partition lock is busy and the row is rarely first
@@ -304,8 +304,15 @@ internal sealed class TransactionIntakeHandler(
         // "not first yet" is retried; an execution failure is never retried
         // inline (the inbox processor drains it, per the spec), and a row
         // claimed by that processor meanwhile is left to it.
+        //
+        // As there, each iteration runs in a suppressed trace scope: its
+        // lock, claim and status round-trips are not recorded. The dispatch
+        // span opened on the claim is parented to the request explicitly so
+        // it escapes the scope.
         var lockName = $"corebank-inbox-partition-{message.PartitionId}";
-        var deadline = timeProvider.GetUtcNow() + InlineClaimWait;
+        var waitStartedAt = timeProvider.GetUtcNow();
+        var deadline = waitStartedAt + InlineClaimWait;
+        var iterations = 0;
         while (true)
         {
             var remaining = deadline - timeProvider.GetUtcNow();
@@ -318,29 +325,34 @@ internal sealed class TransactionIntakeHandler(
                 return null;
             }
 
-            var attempt = await TryExecuteInlineOnceAsync(message, lockName, remaining, cancellationToken).ConfigureAwait(false);
-            if (!attempt.NotFirstYet)
-            {
-                return attempt.Result;
-            }
-
+            iterations++;
             string? currentStatus;
-            try
+            using (TraceSuppression.Begin(activitySource, WaitForTurnScopeName))
             {
-                currentStatus = await inboxStore.GetStatusAsync(message.Id, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(
-                    ex,
-                    "Inline execution: could not read transaction {TransactionId} while waiting for partition {PartitionId}; leaving it for the inbox processor",
-                    message.TransactionId,
-                    message.PartitionId);
-                return null;
+                var wait = new DispatchWait(iterations, waitStartedAt, requestActivity);
+                var attempt = await TryExecuteInlineOnceAsync(message, lockName, remaining, wait, cancellationToken).ConfigureAwait(false);
+                if (!attempt.NotFirstYet)
+                {
+                    return attempt.Result;
+                }
+
+                try
+                {
+                    currentStatus = await inboxStore.GetStatusAsync(message.Id, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "Inline execution: could not read transaction {TransactionId} while waiting for partition {PartitionId}; leaving it for the inbox processor",
+                        message.TransactionId,
+                        message.PartitionId);
+                    return null;
+                }
             }
 
             if (currentStatus != MessageConstants.Status.Pending)
@@ -366,10 +378,25 @@ internal sealed class TransactionIntakeHandler(
 
     private static readonly TimeSpan ClaimRetryDelay = TimeSpan.FromMilliseconds(25);
 
+    /// <summary>
+    /// The <see cref="TraceSuppression"/> scope each wait-for-turn iteration
+    /// runs in; the wait is reported as <c>dispatch.wait_iterations</c>/
+    /// <c>dispatch.wait_ms</c> on the dispatch span instead.
+    /// </summary>
+    internal const string WaitForTurnScopeName = "WaitForDispatchTurn";
+
     private readonly record struct InlineAttempt(TransactionIntakeResult? Result, bool NotFirstYet);
 
+    /// <summary>
+    /// How many wait-for-turn iterations preceded the claim and when the wait
+    /// began, and the request activity the dispatch span is parented to (and
+    /// the intake outcome is tagged on), since the claim happens inside the
+    /// suppressed scope.
+    /// </summary>
+    private readonly record struct DispatchWait(int Iterations, DateTimeOffset StartedAt, Activity? RequestActivity);
+
     private async Task<InlineAttempt> TryExecuteInlineOnceAsync(
-        InboxMessage message, string lockName, TimeSpan acquireTimeout, CancellationToken cancellationToken)
+        InboxMessage message, string lockName, TimeSpan acquireTimeout, DispatchWait wait, CancellationToken cancellationToken)
     {
         InlineAttempt? outcome = null;
         try
@@ -380,7 +407,7 @@ internal sealed class TransactionIntakeHandler(
                 acquireTimeout,
                 async lockToken =>
                 {
-                    outcome = await ExecuteOldestInlineAsync(message, lockToken).ConfigureAwait(false);
+                    outcome = await ExecuteOldestInlineAsync(message, wait, lockToken).ConfigureAwait(false);
                 },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -409,6 +436,7 @@ internal sealed class TransactionIntakeHandler(
 
     private async Task<InlineAttempt> ExecuteOldestInlineAsync(
         InboxMessage message,
+        DispatchWait wait,
         CancellationToken cancellationToken)
     {
         var claimed = await inboxStore.TryClaimByIdIfOldestAsync(
@@ -426,11 +454,15 @@ internal sealed class TransactionIntakeHandler(
 
         // Inline execution runs this row in place of the inbox processor, so
         // the trace shows the same ProcessInboxMessage span the background
-        // path emits (InboxProcessorBase.StartDispatchActivity), under the
-        // request span. Scoped to the execution only: the outcome tag below
-        // describes the request and stays on the request span.
-        using (var activity = activitySource.StartActivity("ProcessInboxMessage", ActivityKind.Consumer))
+        // path emits (InboxProcessorBase.StartDispatchActivity), parented to
+        // the request explicitly because the claim happens inside the wait
+        // scope. Scoped to the execution only: the outcome tag below
+        // describes the request and goes on the request span.
+        using (var activity = activitySource.StartActivity(
+                   "ProcessInboxMessage", ActivityKind.Consumer, wait.RequestActivity?.Context ?? default))
         {
+            activity?.SetTag("dispatch.wait_iterations", wait.Iterations);
+            activity?.SetTag("dispatch.wait_ms", (timeProvider.GetUtcNow() - wait.StartedAt).TotalMilliseconds);
             activity?.SetTag("IdempotencyKey", claimed.IdempotencyKey);
             activity?.SetTag("PartitionId", claimed.PartitionId);
             activity?.SetTag("messaging.store.name", BusinessMetrics.StoreName.CoreBankInbox.ToString());
@@ -476,7 +508,7 @@ internal sealed class TransactionIntakeHandler(
             return new InlineAttempt(null, NotFirstYet: false);
         }
 
-        Activity.Current?.SetTag("outcome", "inline_completed");
+        wait.RequestActivity?.SetTag("outcome", "inline_completed");
         return new InlineAttempt(
             new TransactionIntakeResult(TransactionIntakeOutcome.InlineCompleted, response, null),
             NotFirstYet: false);

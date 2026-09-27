@@ -506,6 +506,8 @@ public class TransactionIntakeHandlerTests
         var tags = span.TagObjects.ToDictionary(t => t.Key, t => t.Value);
         tags.Should().ContainKey("queue_duration_ms").WhoseValue.Should().BeOfType<double>();
         tags.Remove("queue_duration_ms");
+        tags.Should().ContainKey("dispatch.wait_ms").WhoseValue.Should().BeOfType<double>();
+        tags.Remove("dispatch.wait_ms");
         tags.Should().BeEquivalentTo(new Dictionary<string, object?>
         {
             ["IdempotencyKey"] = TransactionId,
@@ -514,6 +516,7 @@ public class TransactionIntakeHandlerTests
             ["messaging.message.id"] = stored.Id.ToString(),
             ["messaging.partition.id"] = stored.PartitionId,
             ["messaging.inline"] = true,
+            ["dispatch.wait_iterations"] = 1,
         });
         requestSpan.GetTagItem("outcome").Should().Be("inline_completed",
             "the intake outcome describes the request, not the dispatch span");
@@ -588,6 +591,79 @@ public class TransactionIntakeHandlerTests
 
         result.Outcome.Should().Be(TransactionIntakeOutcome.InlineCompleted);
         looks.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ProcessAsync_waits_for_its_turn_in_a_suppressed_scope_and_then_executes_under_the_request_span()
+    {
+        // Same shape as PaymentsAPI's instant rail: the lock/claim/status
+        // round-trips of each wait iteration run inside a TraceSuppression
+        // scope, the wait is reported as tags on the dispatch span, and that
+        // span -- and the request's own outcome tag -- stay on the request.
+        _repository.Setup(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((InboxMessage?)null);
+        InboxMessage? stored = null;
+        _repository.Setup(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) => stored = m)
+            .ReturnsAsync(true);
+        var currentDuringWait = new List<Activity?>();
+        var looks = 0;
+        _inboxStore
+            .Setup(s => s.TryClaimByIdIfOldestAsync(It.IsAny<Guid>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                if (++looks == 1)
+                {
+                    currentDuringWait.Add(Activity.Current);
+                    return null;
+                }
+
+                stored!.Status = MessageConstants.Status.Processing;
+                return stored;
+            });
+        _inboxStore
+            .Setup(s => s.GetStatusAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() =>
+            {
+                currentDuringWait.Add(Activity.Current);
+                return stored?.Status;
+            });
+        Activity? currentDuringExecution = null;
+        _executionHandler
+            .Setup(h => h.HandleAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                currentDuringExecution = Activity.Current;
+                m.Status = MessageConstants.Status.Completed;
+                m.ResponsePayload = JsonSerializer.Serialize(
+                    new TransactionResponse(TransactionId, MessageConstants.Status.Completed, _timeProvider.GetUtcNow()));
+            })
+            .Returns(Task.CompletedTask);
+        _lock.OnCall = () => _timeProvider.Advance(TimeSpan.FromMilliseconds(40));
+        using var listener = new ActivityListener
+        {
+            ShouldListenTo = source => source.Name == nameof(TransactionIntakeHandlerTests),
+            Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData,
+        };
+        ActivitySource.AddActivityListener(listener);
+        using var requestSpan = new Activity("POST api/Transactions/process").Start();
+        var handler = CreateHandler();
+
+        var result = await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken, executeInline: true);
+
+        result.Outcome.Should().Be(TransactionIntakeOutcome.InlineCompleted);
+        looks.Should().Be(2);
+        currentDuringWait.Should().HaveCount(2).And.AllSatisfy(a =>
+        {
+            a!.OperationName.Should().Be("WaitForDispatchTurn");
+            a.GetTagItem(TraceSuppression.Tag).Should().NotBeNull();
+        });
+        currentDuringExecution!.OperationName.Should().Be("ProcessInboxMessage");
+        currentDuringExecution.ParentId.Should().Be(requestSpan.Id, "the dispatch hangs off the request, not off the wait scope");
+        currentDuringExecution.GetTagItem("dispatch.wait_iterations").Should().Be(2);
+        currentDuringExecution.GetTagItem("dispatch.wait_ms").Should().Be(80.0);
+        requestSpan.GetTagItem("outcome").Should().Be("inline_completed");
+        Activity.Current.Should().BeSameAs(requestSpan, "the request is current again once the wait is over");
     }
 
     [Fact]
