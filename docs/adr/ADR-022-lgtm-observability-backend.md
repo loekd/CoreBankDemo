@@ -2,6 +2,7 @@
 
 **Date:** 2026-09-16
 **Status:** Accepted
+**Amended by:** ADR-025 (retention: one day; component configs mounted from `observability/lgtm/`)
 **Deciders:** Architecture team
 **Supersedes in part:** ADR-003 (telemetry backend only; the OpenTelemetry instrumentation
 and trace-propagation decisions stand)
