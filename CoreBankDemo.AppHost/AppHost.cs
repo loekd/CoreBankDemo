@@ -44,6 +44,21 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
         Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "grafana", "dashboards")),
         "/otel-lgtm/grafana/conf/provisioning/dashboards/custom",
         isReadOnly: true)
+    // ADR-025: the image ships Tempo, Loki and Prometheus with no retention, so the data
+    // volume only grew (13.7 GB in thirteen days). These are the image's own config files
+    // plus one-day retention, mounted over the originals the run scripts read.
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "lgtm", "tempo-config.yaml")),
+        "/otel-lgtm/tempo-config.yaml",
+        isReadOnly: true)
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "lgtm", "loki-config.yaml")),
+        "/otel-lgtm/loki-config.yaml",
+        isReadOnly: true)
+    .WithBindMount(
+        Path.GetFullPath(Path.Combine(builder.AppHostDirectory, "..", "observability", "lgtm", "prometheus.yaml")),
+        "/otel-lgtm/prometheus.yaml",
+        isReadOnly: true)
     .WithVolume("corebank-lgtm-data", "/data")
     .WithHttpHealthCheck("/api/health", endpointName: "grafana")
     .WithLifetime(ContainerLifetime.Persistent);

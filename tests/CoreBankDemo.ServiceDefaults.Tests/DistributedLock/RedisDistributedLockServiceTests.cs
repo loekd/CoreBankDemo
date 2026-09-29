@@ -158,6 +158,34 @@ public class RedisDistributedLockServiceTests
     }
 
     [Fact]
+    public async Task Lock_acquired_is_logged_at_debug_level()
+    {
+        // Every 200 ms poll tick of every partition acquires and releases a lock;
+        // at Information the two lines were two thirds of all log volume while idle.
+        var (factory, logger, sut) = CreateSut();
+        var handle = CreateHandleMock();
+        SetupAcquire(factory, "corebankdemo:lock:quiet", TimeSpan.FromSeconds(30), handle.Object);
+
+        await sut.ExecuteWithLockAsync("quiet", 30, _ => Task.CompletedTask, TestContext.Current.CancellationToken);
+
+        VerifyLogged(logger, LogLevel.Debug, "Acquired lock", Times.Once());
+        VerifyLogged(logger, LogLevel.Information, "Acquired lock", Times.Never());
+    }
+
+    [Fact]
+    public async Task Lock_released_is_logged_at_debug_level()
+    {
+        var (factory, logger, sut) = CreateSut();
+        var handle = CreateHandleMock();
+        SetupAcquire(factory, "corebankdemo:lock:quiet", TimeSpan.FromSeconds(30), handle.Object);
+
+        await sut.ExecuteWithLockAsync("quiet", 30, _ => Task.CompletedTask, TestContext.Current.CancellationToken);
+
+        VerifyLogged(logger, LogLevel.Debug, "Released lock", Times.Once());
+        VerifyLogged(logger, LogLevel.Information, "Released lock", Times.Never());
+    }
+
+    [Fact]
     public async Task Acquisition_throwing_is_caught_logged_at_error_level_and_returns_false()
     {
         var (factory, logger, sut) = CreateSut();

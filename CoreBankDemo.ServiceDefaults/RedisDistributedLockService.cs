@@ -68,7 +68,10 @@ internal sealed class RedisDistributedLockService(
                 return false;
             }
 
-            logger.LogInformation("Acquired lock {LockName} with {ExpirySeconds}s lease", lockName, lockExpirySeconds);
+            // Debug, not Information: every 200 ms poll tick of every partition acquires
+            // and releases a lock, and at Information these two lines were two thirds of
+            // all log volume while the system sat idle. Lost ownership stays a Warning.
+            logger.LogDebug("Acquired lock {LockName} with {ExpirySeconds}s lease", lockName, lockExpirySeconds);
 
             try
             {
@@ -108,7 +111,7 @@ internal sealed class RedisDistributedLockService(
                 // already lost — the handle is disposed unconditionally so a
                 // still-valid lease is always released promptly.
                 await handle.DisposeAsync().ConfigureAwait(false);
-                logger.LogInformation("Released lock {LockName}", lockName);
+                logger.LogDebug("Released lock {LockName}", lockName);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
