@@ -58,4 +58,23 @@ public class LgtmRetentionTests
 
         config.Should().MatchRegex(@"storage:\s*\n\s+tsdb:\s*\n\s+retention:\s*\n\s+time: 1d");
     }
+
+    [Theory]
+    [InlineData("CoreBankDemo.AppHost", "tempo-config.yaml")]
+    [InlineData("CoreBankDemo.AppHost", "loki-config.yaml")]
+    [InlineData("CoreBankDemo.AppHost", "prometheus.yaml")]
+    [InlineData("CoreBankDemo.LoadTests", "tempo-config.yaml")]
+    [InlineData("CoreBankDemo.LoadTests", "loki-config.yaml")]
+    [InlineData("CoreBankDemo.LoadTests", "prometheus.yaml")]
+    public void AppHost_mounts_the_component_config_read_only_over_the_images_file(string appHost, string file)
+    {
+        // ADR-022 keeps the two lgtm declarations equivalent; ADR-025 adds these mounts.
+        var source = File.ReadAllText(Linked("AppHosts", appHost, "AppHost.cs"));
+        var mount = new System.Text.RegularExpressions.Regex(
+            @"\.WithBindMount\(\s*Path\.GetFullPath\(Path\.Combine\(builder\.AppHostDirectory, ""\.\."", ""observability"", ""lgtm"", """
+            + System.Text.RegularExpressions.Regex.Escape(file)
+            + @"""\)\),\s*""/otel-lgtm/" + System.Text.RegularExpressions.Regex.Escape(file) + @""",\s*isReadOnly: true\)");
+
+        mount.IsMatch(source).Should().BeTrue($"{appHost} must mount observability/lgtm/{file} read-only at /otel-lgtm/{file}");
+    }
 }
