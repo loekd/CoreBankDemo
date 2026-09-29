@@ -95,9 +95,10 @@ mechanism for all three is simpler to read and to test.
 **The existing 13 GB is reclaimed by the components themselves**, not by hand: Aspire
 recreates a persistent container when its configuration changes (aspire.dev, "Configuration
 changes can recreate persistent resources"), the new mounts are such a change, and on the next
-start Tempo's retention cycle (30 s) deletes blocks older than 24 h, Loki's compactor marks
-chunks for deletion and removes them after the 1 h delay, and Prometheus drops out-of-retention
-blocks at its next compaction (≤ 2 h). Expected steady state after the logging changes below:
+start Tempo's hourly retention cycle marks blocks older than 24 h and deletes them one cycle
+later (`compacted_block_retention: 1h`), Loki's compactor marks chunks for deletion and removes
+them after the 1 h delay, and Prometheus drops out-of-retention blocks at its next compaction
+(≤ 2 h). Observed on 2026-09-29: Tempo 10.2 GB → 2 MB at +2 h, Loki 1.74 GB → 380 MB at +75 min. Expected steady state after the logging changes below:
 well under 1 GB. If Aspire does not recreate the container, `docker rm -f corebank-lgtm`
 (the volume is untouched) and start the AppHost again — a manual step, to be confirmed with
 the user first.
