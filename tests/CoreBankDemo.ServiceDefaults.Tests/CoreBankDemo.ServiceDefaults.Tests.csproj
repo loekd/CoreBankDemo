@@ -22,6 +22,11 @@
     <!-- Idle poll ticks must not log: the EF Core command category is pinned at Warning. -->
     <Content Include="..\..\CoreBankDemo.PaymentsAPI\appsettings.json" Link="Services\CoreBankDemo.PaymentsAPI\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\CoreBankDemo.CoreBankAPI\appsettings.json" Link="Services\CoreBankDemo.CoreBankAPI\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- ADR-025: the LGTM component configs both AppHosts mount over the image's own are
+         checked for their one-day retention so a re-sync after an image bump cannot drop it. -->
+    <Content Include="..\..\observability\lgtm\tempo-config.yaml" Link="Lgtm\tempo-config.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\observability\lgtm\loki-config.yaml" Link="Lgtm\loki-config.yaml" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\observability\lgtm\prometheus.yaml" Link="Lgtm\prometheus.yaml" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

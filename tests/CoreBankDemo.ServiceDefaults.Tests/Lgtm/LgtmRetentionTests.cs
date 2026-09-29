@@ -28,4 +28,34 @@ public class LgtmRetentionTests
 
         level.Should().Be("Warning");
     }
+
+    [Fact]
+    public void Tempo_keeps_blocks_for_one_day()
+    {
+        // Tempo 3 has no `compactor` block; retention lives with the backend scheduler
+        // (which plans the retention jobs) and the backend worker (which runs them).
+        var config = File.ReadAllText(Linked("Lgtm", "tempo-config.yaml"));
+
+        config.Should().MatchRegex(@"backend_scheduler:\s*\n\s+provider:\s*\n\s+compaction:\s*\n\s+compaction:\s*\n\s+block_retention: 24h");
+        config.Should().MatchRegex(@"backend_worker:\s*\n\s+compaction:\s*\n\s+block_retention: 24h");
+    }
+
+    [Fact]
+    public void Loki_deletes_chunks_older_than_one_day()
+    {
+        var config = File.ReadAllText(Linked("Lgtm", "loki-config.yaml"));
+
+        config.Should().MatchRegex(@"compactor:\s*\n(?:\s+\S.*\n)*?\s+retention_enabled: true");
+        config.Should().MatchRegex(@"compactor:\s*\n(?:\s+\S.*\n)*?\s+delete_request_store: filesystem");
+        config.Should().MatchRegex(@"limits_config:\s*\n\s+retention_period: 24h");
+    }
+
+    [Fact]
+    public void Prometheus_keeps_samples_for_one_day()
+    {
+        // Prometheus 3.14 deprecates --storage.tsdb.retention.time for this config field.
+        var config = File.ReadAllText(Linked("Lgtm", "prometheus.yaml"));
+
+        config.Should().MatchRegex(@"storage:\s*\n\s+tsdb:\s*\n\s+retention:\s*\n\s+time: 1d");
+    }
 }
