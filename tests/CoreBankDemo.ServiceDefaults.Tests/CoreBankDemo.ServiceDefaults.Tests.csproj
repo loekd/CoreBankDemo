@@ -19,6 +19,9 @@
     <Content Include="..\..\observability\grafana\dashboards\corebank-traces.json" Link="Dashboards\corebank-traces.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\CoreBankDemo.AppHost\AppHost.cs" Link="AppHosts\CoreBankDemo.AppHost\AppHost.cs" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\CoreBankDemo.LoadTests\AppHost.cs" Link="AppHosts\CoreBankDemo.LoadTests\AppHost.cs" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Idle poll ticks must not log: the EF Core command category is pinned at Warning. -->
+    <Content Include="..\..\CoreBankDemo.PaymentsAPI\appsettings.json" Link="Services\CoreBankDemo.PaymentsAPI\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\CoreBankDemo.CoreBankAPI\appsettings.json" Link="Services\CoreBankDemo.CoreBankAPI\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
