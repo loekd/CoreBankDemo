@@ -929,7 +929,7 @@ public class CoreBankApiClientTests
         using var activitySource = new ActivitySource(nameof(CoreBankApiClientTests));
         using var listener = new ActivityListener
         {
-            ShouldListenTo = _ => true,
+            ShouldListenTo = source => source == activitySource,
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData
         };
         ActivitySource.AddActivityListener(listener);
