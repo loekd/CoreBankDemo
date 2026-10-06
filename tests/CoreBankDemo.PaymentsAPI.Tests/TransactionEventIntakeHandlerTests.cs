@@ -220,7 +220,7 @@ public class TransactionEventIntakeHandlerTests
         using var activitySource = new ActivitySource(nameof(Ambient_activity_is_captured_into_trace_fields));
         using var listener = new ActivityListener
         {
-            ShouldListenTo = _ => true,
+            ShouldListenTo = source => source == activitySource,
             Sample = (ref ActivityCreationOptions<ActivityContext> _) => ActivitySamplingResult.AllData
         };
         ActivitySource.AddActivityListener(listener);
