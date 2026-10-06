@@ -46,5 +46,8 @@ jobs:
       - name: Build
         run: dotnet build CoreBankDemo.Rebuild.slnf --no-restore --configuration Debug
 
+      # A test that runs past 5 minutes aborts its test host and the log names it,
+      # instead of the job sitting silent until timeout-minutes with no log to read.
+      # The slowest project finishes in under 20 s, so 5 minutes is never a false hit.
       - name: Test (unit + PostgreSQL integration, >=90% coverage gate)
-        run: dotnet test CoreBankDemo.Rebuild.slnf --no-build --configuration Debug
+        run: dotnet test CoreBankDemo.Rebuild.slnf --no-build --configuration Debug --blame-hang-timeout 5m --blame-hang-dump-type none
