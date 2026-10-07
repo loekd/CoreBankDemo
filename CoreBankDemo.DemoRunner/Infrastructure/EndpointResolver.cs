@@ -21,6 +21,9 @@ public static class EndpointResolver
     private const string LgtmProbeUrl = "http://127.0.0.1:3000/api/health";
     private const string LgtmLinkUrl = "http://localhost:3000/d/corebank";
 
+    // The Regular AppHost pins pgAdmin's host port to 5050 so this link stays stable.
+    private const string PgAdminLinkUrl = "http://localhost:5050";
+
     public static string HealthUrlFor(string resourceName, TopologyProfile profile = TopologyProfile.Regular) => resourceName switch
     {
         KnownResources.PaymentsApi => $"{PaymentsBaseUrl(profile)}/health",
@@ -65,6 +68,7 @@ public static class EndpointResolver
     public static string LinkFor(string linkId) => linkId switch
     {
         KnownLinks.Lgtm => LgtmLinkUrl,
+        KnownLinks.PgAdmin => PgAdminLinkUrl,
         _ => throw new ArgumentOutOfRangeException(nameof(linkId), linkId, "Unknown link."),
     };
 
