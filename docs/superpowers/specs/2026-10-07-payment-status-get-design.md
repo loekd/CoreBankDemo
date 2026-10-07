@@ -1,9 +1,9 @@
 # Payment status is readable through `GET /api/payments/{transactionId}`
 
-> **Status:** Draft
+> **Status:** Implemented
 > **Kind:** design spec
 > **Original date:** 2026-10-07
-> **Related:** [ADR-018](../../adr/ADR-018-instant-payment-rail.md); [ADR-020](../../adr/ADR-020-instant-rail-timeout-cancellation.md); [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md); ADR-027 (written by this change); [constraints](../../constraints.md); [backlog](../../backlog.md)
+> **Related:** [ADR-018](../../adr/ADR-018-instant-payment-rail.md); [ADR-020](../../adr/ADR-020-instant-rail-timeout-cancellation.md); [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md); [ADR-027](../../adr/ADR-027-payment-status-local-projection.md); [constraints](../../constraints.md); [backlog](../../backlog.md)
 
 ## Intent
 
