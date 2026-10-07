@@ -1,4 +1,3 @@
-using System.Text.Json;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
@@ -235,24 +234,10 @@ public class PaymentsController(
     /// </summary>
     private static (string Status, DateTimeOffset ProcessedAt) ResolveDeliveredResponse(PaymentSnapshot snapshot)
     {
-        var fallbackProcessedAt = new DateTimeOffset(DateTime.SpecifyKind(snapshot.CreatedAt, DateTimeKind.Utc));
-
-        if (string.IsNullOrEmpty(snapshot.ResponsePayload))
-        {
-            return (snapshot.Status, fallbackProcessedAt);
-        }
-
-        try
-        {
-            var submission = JsonSerializer.Deserialize<TransactionSubmission>(snapshot.ResponsePayload);
-            return string.IsNullOrWhiteSpace(submission?.Status)
-                ? (snapshot.Status, fallbackProcessedAt)
-                : (submission.Status, submission.ProcessedAt);
-        }
-        catch (JsonException)
-        {
-            return (snapshot.Status, fallbackProcessedAt);
-        }
+        var cached = CachedTransactionOutcome.TryRead(snapshot.ResponsePayload);
+        return cached is null
+            ? (snapshot.Status, new DateTimeOffset(DateTime.SpecifyKind(snapshot.CreatedAt, DateTimeKind.Utc)))
+            : (cached.Status, cached.ProcessedAt);
     }
 
     private static PaymentResponse ToInstantResponse(PaymentSnapshot snapshot, InstantForwardResult forward) => new(
