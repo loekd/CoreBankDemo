@@ -44,9 +44,10 @@ public class EndpointResolverTests
     }
 
     [Fact]
-    public void LinkFor_AllowsOnlyAspireAndLgtm()
+    public void LinkFor_AllowsOnlyAspireLgtmAndPgAdmin()
     {
         EndpointResolver.LinkFor(KnownLinks.Lgtm).Should().Be("http://localhost:3000/d/corebank");
+        EndpointResolver.LinkFor(KnownLinks.PgAdmin).Should().Be("http://localhost:5050");
         Action aspireRequiresLiveState = () => EndpointResolver.LinkFor(KnownLinks.AspireDashboard);
         aspireRequiresLiveState.Should().Throw<ArgumentOutOfRangeException>();
         Action arbitrary = () => EndpointResolver.LinkFor("https://example.com");

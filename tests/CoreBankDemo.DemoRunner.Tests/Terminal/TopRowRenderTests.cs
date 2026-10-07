@@ -7,7 +7,7 @@ using Xunit;
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 
 /// <summary>
-/// The shell's top row carries the Aspire and LGTM quick-open buttons and nothing else; the
+/// The shell's top row carries the Aspire, LGTM and pgAdmin quick-open buttons and nothing else; the
 /// topology line that used to share it is gone. Asserted against the screen buffer, for the
 /// reason <see cref="NavigationRailRenderTests"/> gives.
 /// </summary>
@@ -15,11 +15,11 @@ namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 public class TopRowRenderTests
 {
     [Fact]
-    public void TopRowShowsOnlyTheAspireAndLgtmButtons()
+    public void TopRowShowsOnlyTheAspireLgtmAndPgAdminButtons()
     {
         var row = RenderTopRow();
 
-        row.Trim().Should().Be("⟦ Aspire ⟧ ⟦ LGTM ⟧", "nothing else is drawn on the top row");
+        row.Trim().Should().Be("⟦ Aspire ⟧ ⟦ LGTM ⟧ ⟦ pgAdmin ⟧", "nothing else is drawn on the top row");
     }
 
     /// <summary>Reads the row under the window border straight out of the driver's output buffer.</summary>

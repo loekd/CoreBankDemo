@@ -157,6 +157,7 @@ public sealed class MainWindow : Window
 
     private readonly Button _aspireDashboardButton = NewButton("Aspire");
     private readonly Button _lgtmButton = NewButton("LGTM");
+    private readonly Button _pgAdminButton = NewButton("pgAdmin");
     // Dim.Fill() rather than Dim.Fill(3): the removed bottom band is where those three rows of
     // permanent chrome went, in all five workspaces (EXPERIENCE.md, Information Architecture).
     private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = RailWidthPreferred, Height = Dim.Fill(), Title = "WORKSPACES" };
@@ -431,10 +432,12 @@ public sealed class MainWindow : Window
         _faultsView = BuildFaultsView();
         _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView, _faultsView];
 
-        _aspireDashboardButton.X = Pos.AnchorEnd(19);
+        _aspireDashboardButton.X = Pos.AnchorEnd(31);
         _aspireDashboardButton.Y = 0;
-        _lgtmButton.X = Pos.AnchorEnd(8);
+        _lgtmButton.X = Pos.AnchorEnd(20);
         _lgtmButton.Y = 0;
+        _pgAdminButton.X = Pos.AnchorEnd(11);
+        _pgAdminButton.Y = 0;
         _aspireDashboardButton.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -445,8 +448,13 @@ public sealed class MainWindow : Window
             e.Handled = true;
             OpenKnownLink("LGTM", KnownLinks.Lgtm);
         };
+        _pgAdminButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            OpenKnownLink("pgAdmin", KnownLinks.PgAdmin);
+        };
 
-        Add(_aspireDashboardButton, _lgtmButton, _navigation, _content);
+        Add(_aspireDashboardButton, _lgtmButton, _pgAdminButton, _navigation, _content);
         UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
@@ -1622,6 +1630,8 @@ public sealed class MainWindow : Window
         _runLoadButton.Enabled = model.CanUseLoadTest && _controller.CanRunLoadTest;
         _aspireDashboardButton.Enabled = _controller.State.Topology?.DashboardUrl is not null;
         _lgtmButton.Enabled = _controller.State.Profile != TopologyProfile.None;
+        // Only the Regular AppHost runs pgAdmin.
+        _pgAdminButton.Enabled = _controller.State.Profile == TopologyProfile.Regular;
         _detailsButton.Enabled = true;
         _wrapButton.Enabled = true;
     }
@@ -2565,6 +2575,7 @@ public sealed class MainWindow : Window
     internal Button CopyButton => _copyButton;
     internal Button ClearEvidenceButton => _clearEvidenceButton;
     internal Button LgtmButton => _lgtmButton;
+    internal Button PgAdminButton => _pgAdminButton;
     internal Button AspireDashboardButton => _aspireDashboardButton;
 
     internal TextField SuppliedKeyField => _suppliedKey;

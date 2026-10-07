@@ -722,6 +722,22 @@ public class MainWindowTests
         window.LastUiMessage.Should().Contain("terminal clipboard").And.Contain(EndpointResolver.LinkFor(KnownLinks.Lgtm));
     }
 
+    /// <summary>Only the Regular AppHost runs pgAdmin, so the button is live only under that profile.</summary>
+    [Theory]
+    [InlineData(TopologyProfile.Regular, true)]
+    [InlineData(TopologyProfile.LoadTests, false)]
+    public async Task PgAdminButton_IsEnabledOnlyUnderTheRegularProfile(TopologyProfile profile, bool enabled)
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(profile));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(profile, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+
+        window.PgAdminButton.Enabled.Should().Be(enabled);
+    }
+
     [Fact]
     public async Task OpenAspireLink_WhenNoDashboardUrlIsVerifiedYet_SaysSoAndCopiesNothing()
     {

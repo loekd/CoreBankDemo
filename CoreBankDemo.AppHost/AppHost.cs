@@ -76,7 +76,12 @@ var postgres = builder.AddPostgres("postgres", password: postgresPassword, port:
     // (tests/CoreBankDemo.Persistence.IntegrationTests/Infrastructure/PostgresImage.cs).
     .WithImageTag("18.3")
     .WithLifetime(ContainerLifetime.Persistent)
-    .WithPgAdmin();
+    // pgAdmin on a fixed host port so the DemoRunner's pgAdmin button has a stable URL.
+    .WithPgAdmin(pgAdmin => {
+        pgAdmin
+            .WithHostPort(5050)
+            .WithEndpoint("http", endpoint => endpoint.TargetHost = "0.0.0.0");
+    });
 
 var paymentsDb = postgres.AddDatabase("paymentsdb");
 var coreBankDb = postgres.AddDatabase("corebankdb");
