@@ -492,6 +492,8 @@ export function teardown(data) {
         'balance conservation':           (r) => r.checks.balanceConservation.passed === true,
         'balances correct':               (r) => r.checks.balancesCorrect.passed === true,
         'per-key ordering':                (r) => r.checks.perKeyOrdering.passed === true,
+        'per-account ordering':            (r) => r.checks.perAccountOrdering.passed === true,
+        'partition routing by debtor':     (r) => r.checks.partitionRouting.passed === true,
         'inline instant settlement':       (r) => r.checks.inlineInstantSettlement.passed === true,
         'stage cardinality N/N/3N/3N':     (r) => r.checks.stageCardinality.passed === true,
         'canonical account set exact':     (r) => r.checks.canonicalAccountSet.passed === true,
