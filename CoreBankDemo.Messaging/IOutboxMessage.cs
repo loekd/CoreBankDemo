@@ -6,10 +6,10 @@ namespace CoreBankDemo.Messaging;
 public interface IOutboxMessage : IMessage
 {
     /// <summary>
-    /// Ordering identity (AD-4): drives partition assignment. Also the baseline
-    /// dedupe identity; dedupe is per store — command stores dedupe on this key
-    /// alone, event stores on a composite event identity enforced via the
-    /// repository's unique-index hooks (story 2.2).
+    /// Dedupe identity (AD-4); dedupe is per store — command stores dedupe on
+    /// this key alone, event stores on a composite event identity enforced via
+    /// the repository's unique-index hooks (story 2.2). Not the partition key
+    /// since ADR-026: see <see cref="IMessage.PartitionId"/>.
     /// </summary>
     string IdempotencyKey { get; set; }
 

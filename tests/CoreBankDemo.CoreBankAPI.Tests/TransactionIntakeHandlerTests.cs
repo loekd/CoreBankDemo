@@ -81,7 +81,7 @@ public class TransactionIntakeHandlerTests
         stored.Currency.Should().Be("EUR");
         stored.Status.Should().Be(MessageConstants.Status.Pending);
         stored.ReceivedAt.Should().Be(_timeProvider.GetUtcNow().UtcDateTime);
-        stored.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 4));
+        stored.PartitionId.Should().Be(PartitionHelper.GetPartitionId(FromAccount, 4));
 
         _repository.Verify(r => r.FindByIdempotencyKeyAsync(TransactionId, It.IsAny<CancellationToken>()), Times.Once);
         _repository.Verify(r => r.StoreIfNewAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Once);
@@ -102,7 +102,7 @@ public class TransactionIntakeHandlerTests
 
         await handler.ProcessAsync(ValidRequest(), TestContext.Current.CancellationToken);
 
-        stored!.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 7));
+        stored!.PartitionId.Should().Be(PartitionHelper.GetPartitionId(FromAccount, 7));
     }
 
     [Fact]

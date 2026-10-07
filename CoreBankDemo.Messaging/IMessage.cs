@@ -8,7 +8,15 @@ public interface IMessage
     /// <summary>Row identity.</summary>
     Guid Id { get; set; }
 
-    /// <summary>Partition assignment (AD-4): derived via <c>PartitionHelper.GetPartitionId</c> from the message's dedupe identity (see the derived interfaces) and the configured partition count.</summary>
+    /// <summary>
+    /// Partition assignment (AD-4, ADR-026): derived via
+    /// <c>PartitionHelper.GetPartitionId</c> from the store's partition key and
+    /// the configured partition count. Payment commands (payments outbox,
+    /// CoreBank inbox) partition on the debtor account, so one account's
+    /// debits never overtake each other; the event stores partition on the
+    /// transaction id, or the account number for <c>balance.updated</c>. The
+    /// dedupe identity (see the derived interfaces) is a separate concern.
+    /// </summary>
     int PartitionId { get; set; }
 
     /// <summary>Transport state; values come from <see cref="MessageConstants.Status"/> only (AD-11).</summary>

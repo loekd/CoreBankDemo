@@ -90,16 +90,19 @@ internal sealed class TransactionRejectionHandler(
             }
 
             var now = timeProvider.GetUtcNow();
+            // ADR-026: partitioned on the debtor account as stored -- the
+            // clamped value -- so the row sits where the command would have.
+            var fromAccount = Clamp(request!.FromAccount);
             var rejection = new InboxMessage
             {
                 Id = Guid.NewGuid(),
                 IdempotencyKey = transactionId,
                 TransactionId = transactionId,
-                FromAccount = Clamp(request!.FromAccount),
+                FromAccount = fromAccount,
                 ToAccount = Clamp(request.ToAccount),
                 Amount = request.Amount is >= 0m and <= MaxStorableAmount ? request.Amount : 0m,
                 Currency = request.Currency is { Length: 3 } currency ? currency : FallbackCurrency,
-                PartitionId = PartitionHelper.GetPartitionId(transactionId, inboxOptions.Value.PartitionCount),
+                PartitionId = PartitionHelper.GetPartitionId(fromAccount, inboxOptions.Value.PartitionCount),
                 Status = MessageConstants.Status.Completed,
                 ReceivedAt = now.UtcDateTime,
                 ProcessedAt = now.UtcDateTime,

@@ -160,7 +160,7 @@ public sealed class TransactionCancellationHandlerTests : IDisposable
         stored.ToAccount.Should().Be(ToAccount);
         stored.Amount.Should().Be(50m);
         stored.Currency.Should().Be("EUR");
-        stored.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 4));
+        stored.PartitionId.Should().Be(PartitionHelper.GetPartitionId(FromAccount, 4));
         stored.Priority.Should().Be(MessageConstants.Priority.Instant);
         stored.Status.Should().Be(MessageConstants.Status.Cancelled, "the tombstone is terminal from birth");
         stored.ReceivedAt.Should().Be(_timeProvider.GetUtcNow().UtcDateTime);

@@ -116,7 +116,9 @@ internal sealed class TransactionIntakeHandler(
             return BuildIntakeResultForExisting(existing);
         }
 
-        var partitionId = PartitionHelper.GetPartitionId(request.TransactionId, inboxOptions.Value.PartitionCount);
+        // ADR-026: partition on the debtor account, so one account's debits
+        // execute in arrival order. TransactionId stays the dedupe identity.
+        var partitionId = PartitionHelper.GetPartitionId(request.FromAccount, inboxOptions.Value.PartitionCount);
         var message = new InboxMessage
         {
             Id = Guid.NewGuid(),

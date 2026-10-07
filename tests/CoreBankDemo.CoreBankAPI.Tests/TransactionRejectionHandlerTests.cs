@@ -137,7 +137,7 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
         row.ToAccount.Should().Be(ToAccount);
         row.Amount.Should().Be(0m);
         row.Currency.Should().Be("EUR");
-        row.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 4));
+        row.PartitionId.Should().Be(PartitionHelper.GetPartitionId(FromAccount, 4));
         row.Status.Should().Be(MessageConstants.Status.Completed);
         row.ReceivedAt.Should().Be(now.UtcDateTime);
         row.ProcessedAt.Should().Be(now.UtcDateTime);
@@ -162,7 +162,7 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
             .RejectAsync(Request(), ["Amount out of range", "Currency must be 3 uppercase letters"], TestContext.Current.CancellationToken);
 
         stored()!.LastError.Should().Be("Amount out of range; Currency must be 3 uppercase letters");
-        stored()!.PartitionId.Should().Be(PartitionHelper.GetPartitionId(TransactionId, 16));
+        stored()!.PartitionId.Should().Be(PartitionHelper.GetPartitionId(FromAccount, 16));
         _enqueued.Single().Reason.Should().Be("Amount out of range; Currency must be 3 uppercase letters");
     }
 
@@ -171,15 +171,18 @@ public sealed class TransactionRejectionHandlerTests : IDisposable
     {
         SetUpNoExistingRow();
         var stored = SetUpStore(stored: true);
-        var request = new TransactionRequest(new string('A', 80), null!, -5m, null!, TransactionId);
+        var request = new TransactionRequest(new string('B', 80), null!, -5m, null!, TransactionId);
 
         var outcome = await CreateHandler().RejectAsync(request, Errors, TestContext.Current.CancellationToken);
 
         outcome.Should().Be(TransactionRejectionOutcome.Recorded);
-        stored()!.FromAccount.Should().Be(new string('A', 50));
+        stored()!.FromAccount.Should().Be(new string('B', 50));
         stored()!.ToAccount.Should().BeEmpty();
         stored()!.Amount.Should().Be(0m);
         stored()!.Currency.Should().Be("EUR");
+        // ADR-026: the row partitions on the debtor account it stores -- the
+        // clamped value, not the 80-char original and not the transaction id.
+        stored()!.PartitionId.Should().Be(PartitionHelper.GetPartitionId(new string('B', 50), 4));
     }
 
     [Fact]
