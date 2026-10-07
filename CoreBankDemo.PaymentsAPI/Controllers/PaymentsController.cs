@@ -12,15 +12,17 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 /// add-instant-payment-rail). Thin by design (conventions skill): bind,
 /// check <see cref="ModelState"/>, call <see cref="IPaymentStorageHandler"/>
 /// and (for <c>scheme=instant</c>) <see cref="IInstantPaymentForwardingHandler"/>,
-/// and map results to an <see cref="IActionResult"/> -- no persistence,
-/// idempotency, partitioning, rounding, tracing, clock, or budget/claim logic
-/// here; all of that lives in the handlers.
+/// or, for the <c>GET</c>, <see cref="IPaymentStatusHandler"/>, and map
+/// results to an <see cref="IActionResult"/> -- no persistence, idempotency,
+/// partitioning, rounding, tracing, clock, or budget/claim logic here; all of
+/// that lives in the handlers.
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
 public class PaymentsController(
     IPaymentStorageHandler handler,
     IInstantPaymentForwardingHandler instantHandler,
+    IPaymentStatusHandler statusHandler,
     BusinessMetrics businessMetrics) : ControllerBase
 {
     private const string IdempotencyKeyHeader = "Idempotency-Key";
@@ -62,6 +64,22 @@ public class PaymentsController(
                 BadRequest(new { Errors = result.Errors }),
             _ => throw new InvalidOperationException($"Unhandled payment storage outcome: {result.Outcome}")
         };
+    }
+
+    /// <summary>
+    /// The payment's business status, read locally from CoreBank's recorded
+    /// outcome -- never by calling CoreBank (spec: payment-status-get,
+    /// ADR-027). Always <c>200</c> for a known payment, the outcome in the
+    /// body's <c>Status</c>; <c>404</c> otherwise. This is the resource the
+    /// <c>202</c>'s <c>Location</c> header points at.
+    /// </summary>
+    [HttpGet("{transactionId}")]
+    public async Task<IActionResult> GetPayment(string transactionId, CancellationToken cancellationToken)
+    {
+        // Location escapes '/' as %2F, which routing leaves encoded.
+        var id = transactionId.Replace("%2F", "/", StringComparison.OrdinalIgnoreCase);
+        var payment = await statusHandler.GetAsync(id, cancellationToken);
+        return payment is null ? NotFound() : Ok(payment);
     }
 
     /// <summary>
