@@ -169,7 +169,7 @@ The solution uses a shared `CoreBankDemo.Messaging` library to provide reusable 
 - `InboxMessageRepositoryBase<TMessage, TDbContext>` - Base repository for inbox pattern
 - `OutboxProcessorBase<TMessage, TDbContext>` - Base background service for processing outbox messages
 - `OutboxMessageRepositoryBase<TMessage, TDbContext>` - Base repository for outbox pattern
-- `PartitionHelper` - Consistent FNV-1a hashing for partition assignment
+- `PartitionHelper` - Consistent hashing (FNV-1a + MurmurHash3 fmix32) for partition assignment
 - `MessageConstants` - Centralized constants for status values and defaults
 
 **Key Features:**
@@ -308,7 +308,7 @@ Defaults.PollingInterval     // 5 seconds
 
 2. PaymentsAPI - Immediate Response
    - Generate unique PaymentId (IdempotencyKey)
-   - Calculate PartitionId using FNV-1a hash
+   - Calculate PartitionId from the debtor account (ADR-026)
    - Store OutboxMessage (Status: Pending)
    - Return 202 Accepted with PaymentId
 
@@ -584,7 +584,7 @@ CoreBankDemo/
 4. **Ordering Layer** - Partitioning
    - Per-entity ordering guarantees
    - Scalable parallel processing
-   - Consistent partition assignment via FNV-1a hashing
+   - Consistent partition assignment: payment commands by debtor account, events by transaction id (ADR-026)
 
 ## Key Design Decisions
 
@@ -610,9 +610,10 @@ CoreBankDemo/
 - Easier refactoring
 - Better IDE support
 
-### Why Partitioning by IdempotencyKey?
-- Consistent hashing ensures same messages go to same partition
-- FNV-1a provides good distribution
+### Why Partitioning by Debtor Account?
+- Two debits from one account never overtake each other (ADR-026); events keep partitioning by transaction id
+- Consistent hashing ensures the same account always goes to the same partition
+- FNV-1a with MurmurHash3's fmix32 finalizer spreads account numbers over all partitions (bare FNV-1a mod 4 collapsed them)
 - No external coordination needed
 - Deterministic replay
 

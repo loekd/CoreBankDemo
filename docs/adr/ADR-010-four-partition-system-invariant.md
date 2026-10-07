@@ -2,6 +2,7 @@
 
 **Date:** 2026-08-29
 **Status:** Accepted
+**Amended by:** ADR-026 (the key-to-partition mapping is `fmix32(fnv1a(key)) % 4`, and payment commands key on the debtor account; the count of four is unchanged)
 **Deciders:** Architecture team
 **Supersedes:** Configurations that allowed runtime partition counts other than four
 

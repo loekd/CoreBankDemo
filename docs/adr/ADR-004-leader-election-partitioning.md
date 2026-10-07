@@ -2,6 +2,7 @@
 
 **Date:** 2026-05-23
 **Status:** Accepted
+**Amended by:** ADR-026 (payment commands partition on the debtor account, not the idempotency key; the hash gains MurmurHash3's fmix32 finalizer)
 **Deciders:** Architecture team
 **Superseded in part by:** ADR-011 replaces the Dapr lock adapter and fixed-expiry lifetime behavior; partitioning remains accepted
 

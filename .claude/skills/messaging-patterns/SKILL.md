@@ -39,18 +39,28 @@ There is no retry limit (`MaxRetryCount` was removed by ADR-023): a failed row r
 
 ## Partition assignment
 
+Partition on the debtor account for payment commands, on the idempotency key elsewhere (ADR-026):
+
 ```csharp
-int partitionId = PartitionHelper.GetPartitionId(idempotencyKey, partitionCount);
+// Payments outbox and CoreBank inbox (every row: intake, cancellation tombstone, recorded rejection)
+int partitionId = PartitionHelper.GetPartitionId(request.FromAccount, partitionCount);
+
+// Messaging outbox (transaction.* events) and payments inbox
+int partitionId = PartitionHelper.GetPartitionId(transactionId, partitionCount);
+// balance.updated events
+int partitionId = PartitionHelper.GetPartitionId(accountNumber, partitionCount);
 ```
 
-Always use `PartitionHelper` — never write a second implementation.
+Two debits from one account therefore share a lane and execute in arrival order, within a priority class. Dedupe stays on the idempotency key (`StoreIfNewAsync`, global unique index) and is never partition-scoped.
+
+Always use `PartitionHelper` — never write a second implementation. Its mapping (`fmix32(fnv1a(key)) % count`) is pinned by known-vector tests; changing it needs an ADR and a drained database.
 
 ## Key files
 
 | File | Purpose |
 |---|---|
 | `CoreBankDemo.Messaging/MessageConstants.cs` | All status strings and defaults |
-| `CoreBankDemo.Messaging/PartitionHelper.cs` | FNV-1a partition hashing |
+| `CoreBankDemo.Messaging/PartitionHelper.cs` | Partition hashing: FNV-1a + MurmurHash3 fmix32 |
 | `CoreBankDemo.Messaging/Inbox/InboxProcessorBase.cs` | Base inbox service |
 | `CoreBankDemo.Messaging/Outbox/OutboxProcessorBase.cs` | Base outbox service |
 | `CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs` | Reference inbox implementation |
