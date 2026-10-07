@@ -111,8 +111,9 @@ reports `Pending`.
 
 | Input | Behaviour |
 |---|---|
-| `transactionId` longer than 100 characters | `404` (no row can exist; no validation error) |
+| `transactionId` longer than 100 characters | `404` (no row can exist; the handler answers not-found without querying, so no validation error and no reliance on how the provider sizes the parameter) |
 | Case differs from the stored id | `404` (exact match, as the dedupe index matches today) |
+| Id containing `/` (the `Location` header escapes it as `%2F`) | `200` for the stored payment: the `GET` follows its own `Location`. ASP.NET Core leaves `%2F` encoded in route values, so the action turns `%2F` back into `/` before the lookup. A key that literally contains the text `%2F` is the one id this cannot tell apart; accepted and recorded in ADR-027. |
 | `GET /api/payments` with no id | unchanged: `405`, the route exists for `POST` only |
 | Event redelivered after the outcome is cached | no effect on the answer (`RecordCommittedOutcomeAsync` never overwrites a terminal cached status) |
 | Corrupt `ResponsePayload` | rows 2 to 4 apply as if no payload existed |
@@ -147,8 +148,8 @@ Test-first, xUnit + AwesomeAssertions + Moq; ≥90% line coverage holds.
   payload, and not found → `null`.
 - **`PaymentsControllerTests`**: the `GET` action answers `200` with the handler's response and `404`
   for `null`; existing duplicate-`POST` tests pass unchanged after the helper move.
-- **`PaymentStorageHandlerTests`**: pins `TransactionId == IdempotencyKey` for a stored payment, with
-  and without a client-supplied key.
+- **`PaymentStorageHandlerTests`** already pins `TransactionId == IdempotencyKey` for a stored payment,
+  with a client-supplied key and with a generated one; no new test is needed there.
 - **`tests/CoreBankDemo.Persistence.IntegrationTests`** (Postgres Testcontainer): store a payment,
   record a committed outcome through `RecordCommittedOutcomeAsync`, and read it back through
   `PaymentStatusHandler`; also a stored-but-undecided payment reads `Pending`.
@@ -160,8 +161,8 @@ Test-first, xUnit + AwesomeAssertions + Moq; ≥90% line coverage holds.
   local-read decision and its lag, always `200` with the status in the body, the `TransactionId`
   route, and the technical-versus-business `Completed` distinction.
 - **`docs/constraints.md`**, §2 PaymentsAPI: add the `GET` with its `200`/`404` contract.
-- **`ARCHITECTURE.md`**: add the `GET` next to `POST /api/payments` in the PaymentsAPI box and add
-  ADR-027 to the ADR table.
+- **`ARCHITECTURE.md`**: add the `GET` next to `POST /api/payments` in the PaymentsAPI box. The ADR
+  table there stops at ADR-014 and its regeneration is Story 8.1, so ADR-027 is not added to it.
 - **`docs/backlog.md`**: the standard-rail duplicate-`POST` entry (already added under this spec's
   heading).
 
