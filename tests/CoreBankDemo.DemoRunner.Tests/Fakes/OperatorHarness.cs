@@ -455,7 +455,7 @@ public sealed class FakeLoadWorkflowRunner : ILoadWorkflowRunner
             new InvariantResult("Zero message loss", true, "passed"),
             new InvariantResult("Balance conservation", true, "passed"),
             new InvariantResult("Terminal-state completeness", true, "passed"),
-            new InvariantResult("Per-key ordering", true, "passed"),
+            new InvariantResult("Per-account ordering", true, "passed"),
         ],
         new InlineSettlementResult(true, "observed"),
         "details");

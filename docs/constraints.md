@@ -8,7 +8,7 @@ This document is the guardrail contract for every design spec, plan and implemen
 2. **Zero message loss** — every accepted payment reaches a terminal state; total submitted == total processed.
 3. **Balance conservation** — the sum of the 10 load-test account balances is constant (10 × €10,000,000).
 4. **Terminal-state completeness** — zero `Failed` and zero `Pending`/`Processing` messages after drain.
-5. **Per-key ordering** — messages with the same idempotency key partition are processed in order; one partition is processed by at most one worker at a time. A batch stops at the first row that does not reach a terminal state and releases the rows claimed behind it, so ordering holds with faults on (ADR-023).
+5. **Per-debtor ordering** — payment commands (payments outbox, CoreBank inbox) are partitioned by debtor account (`FromAccount`), so two debits from one account are processed in the order they were accepted, within a priority class (ADR-026); the event stores partition on the transaction id, or the account number for `balance.updated`. In every store, rows in one partition are processed in order and one partition is processed by at most one worker at a time. A batch stops at the first row that does not reach a terminal state and releases the rows claimed behind it, so ordering holds with faults on (ADR-023). The load test asserts per-partition FIFO, per-account FIFO and that every command row sits in its debtor account's partition.
 
 ## 2. External contract (same externally observable behavior as `main`)
 

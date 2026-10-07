@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using CoreBankDemo.LoadTestSupport.Services;
+using CoreBankDemo.Messaging;
 using Xunit;
 
 namespace CoreBankDemo.LoadTestSupport.Tests;
@@ -45,10 +46,11 @@ public class LoadTestAssertionServiceTests
         var ordering = orderingObservations ?? transactions
             .Select((transaction, index) => new OrderingObservation(
                 "CoreBankInbox",
-                0,
+                PartitionHelper.GetPartitionId(transaction.FromAccount, LoadTestConstants.PartitionCount),
                 transaction.IdempotencyKey,
                 new DateTime(2026, 1, 1).AddSeconds(index),
-                new DateTime(2026, 1, 1).AddSeconds(index + 1)))
+                new DateTime(2026, 1, 1).AddSeconds(index + 1),
+                FromAccount: transaction.FromAccount))
             .ToList();
         return
         LoadTestAssertionCalculator.ComputeAssertionResult(new ComputeAssertionRequest(
@@ -79,6 +81,10 @@ public class LoadTestAssertionServiceTests
         result.Checks.BalanceConservation.Passed.Should().BeTrue();
         result.Checks.BalancesCorrect.Passed.Should().BeTrue();
         result.Checks.PerKeyOrdering.Passed.Should().BeFalse();
+        result.Checks.PerAccountOrdering.Passed.Should().BeFalse();
+        result.Checks.PerAccountOrdering.Detail.Should().Be("No payment-command observations were available");
+        result.Checks.PartitionRouting.Passed.Should().BeFalse();
+        result.Checks.PartitionRouting.Detail.Should().Be("No payment-command observations were available");
         result.Summary.TotalBalance.Should().Be(AccountCount * InitialBalance);
     }
 
@@ -345,13 +351,15 @@ public class LoadTestAssertionServiceTests
             LoadTestAccounts: UntouchedAccounts(),
             OrderingObservations:
             [
-                new OrderingObservation("CoreBankInbox", 0, "key-1", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
-                new OrderingObservation("CoreBankInbox", 0, "key-2", new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
+                Command("CoreBankInbox", "key-1", AccountNumber(1), new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
+                Command("CoreBankInbox", "key-2", AccountNumber(2), new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
             ],
             InlineInstantSettlementCount: 1));
 
         result.Checks.StageCardinality.Passed.Should().BeTrue();
         result.Checks.CanonicalAccountSet.Passed.Should().BeTrue();
+        result.Checks.PerAccountOrdering.Passed.Should().BeTrue();
+        result.Checks.PartitionRouting.Passed.Should().BeTrue();
         result.AllPassed.Should().BeTrue();
     }
 
@@ -392,9 +400,9 @@ public class LoadTestAssertionServiceTests
             LoadTestAccounts: UntouchedAccounts(),
             OrderingObservations:
             [
-                new OrderingObservation("CoreBankInbox", 0, "key-1", new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
-                new OrderingObservation("CoreBankInbox", 0, "key-2", new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
-                new OrderingObservation("PaymentsOutbox", 0, "key-3", new DateTime(2026, 1, 1, 0, 0, 4), new DateTime(2026, 1, 1, 0, 0, 13)),
+                Command("CoreBankInbox", "key-1", AccountNumber(1), new DateTime(2026, 1, 1), new DateTime(2026, 1, 1, 0, 0, 1)),
+                Command("CoreBankInbox", "key-2", AccountNumber(2), new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
+                Command("PaymentsOutbox", "key-3", AccountNumber(3), new DateTime(2026, 1, 1, 0, 0, 4), new DateTime(2026, 1, 1, 0, 0, 13)),
             ],
             InlineInstantSettlementCount: 1));
 
@@ -595,6 +603,167 @@ public class LoadTestAssertionServiceTests
 
         result.Checks.AllSubmittedProcessed.Passed.Should().BeFalse();
         result.Checks.NoPendingMessages.Passed.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// A payment-command observation (ADR-026): carries its debtor account and
+    /// sits in the partition <see cref="PartitionHelper"/> assigns that account,
+    /// unless <paramref name="partitionId"/> says otherwise.
+    /// </summary>
+    private static OrderingObservation Command(
+        string store,
+        string key,
+        string fromAccount,
+        DateTime enqueuedAt,
+        DateTime? processedAt,
+        int priority = 0,
+        string? status = null,
+        int? partitionId = null) =>
+        new(
+            store,
+            partitionId ?? PartitionHelper.GetPartitionId(fromAccount, LoadTestConstants.PartitionCount),
+            key,
+            enqueuedAt,
+            processedAt,
+            Guid.NewGuid(),
+            priority,
+            status,
+            fromAccount);
+
+    // ---- ADR-026: per-debtor ordering and partition routing ----
+
+    [Fact]
+    public void Two_debits_from_one_account_processed_out_of_order_fail_per_account_ordering_even_across_partitions()
+    {
+        // The defect ADR-026 fixes: under key partitioning, one account's
+        // debits spread over partitions, each partition is FIFO on its own,
+        // and the later debit still executes first. Per-partition FIFO is
+        // satisfied here; the per-account check is what names the inversion.
+        var account = AccountNumber(1);
+        var observations = new[]
+        {
+            Command("CoreBankInbox", "earlier", account, new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 5), partitionId: 0),
+            Command("CoreBankInbox", "later", account, new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 4), partitionId: 1),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerKeyOrdering.Passed.Should().BeTrue("each partition is FIFO on its own");
+        result.Checks.PerAccountOrdering.Passed.Should().BeFalse();
+        result.Checks.PerAccountOrdering.Detail.Should().Contain("CoreBankInbox").And.Contain(account)
+            .And.Contain("earlier processed after later");
+        var violation = result.Debug.AccountOrderingViolations.Should().ContainSingle().Subject;
+        violation.Should().Be(new AccountOrderingViolation(
+            "CoreBankInbox", account, 0, "earlier", "later",
+            new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 1),
+            new DateTime(2026, 1, 1, 0, 0, 5), new DateTime(2026, 1, 1, 0, 0, 4)));
+    }
+
+    [Fact]
+    public void Debits_from_different_accounts_may_be_processed_in_any_order()
+    {
+        var observations = new[]
+        {
+            Command("PaymentsOutbox", "earlier", AccountNumber(1), new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 5)),
+            Command("PaymentsOutbox", "later", AccountNumber(2), new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 4)),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerAccountOrdering.Passed.Should().BeTrue();
+        result.Checks.PerAccountOrdering.Detail.Should().Contain("2 account lanes");
+        result.Debug.AccountOrderingViolations.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void An_instant_debit_overtaking_a_standard_debit_from_the_same_account_is_not_a_per_account_inversion()
+    {
+        // ADR-026 decision 5: the guarantee is FIFO per debtor account within
+        // a priority class; an SCT Inst may still pass a queued SCT.
+        var account = AccountNumber(1);
+        var observations = new[]
+        {
+            Command("PaymentsOutbox", "standard-earlier", account, new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 9)),
+            Command("PaymentsOutbox", "instant-later", account, new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 2), priority: 100),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PerAccountOrdering.Passed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_cancelled_debit_is_left_out_of_per_account_ordering()
+    {
+        // Same rule as the per-partition check: a Cancelled row never
+        // executed, so its withdrawal time is no step in execution order.
+        var account = AccountNumber(1);
+        var observations = new[]
+        {
+            Command("PaymentsOutbox", "A", account, new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 30), priority: 100, status: "Completed"),
+            Command("PaymentsOutbox", "B", account, new DateTime(2026, 1, 1, 0, 0, 1), new DateTime(2026, 1, 1, 0, 0, 8), priority: 100, status: "Cancelled"),
+        };
+
+        LoadTestAssertionCalculator.FindAccountOrderingViolations(observations).Should().BeEmpty();
+        LoadTestAssertionCalculator.FindAccountOrderingViolations(observations.Select(o => o with { Status = null }).ToList())
+            .Should().ContainSingle();
+    }
+
+    [Fact]
+    public void A_payment_command_outside_its_debtor_accounts_partition_fails_partition_routing()
+    {
+        var account = AccountNumber(1);
+        var expected = PartitionHelper.GetPartitionId(account, LoadTestConstants.PartitionCount);
+        var observations = new[]
+        {
+            Command("CoreBankInbox", "routed", account, new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 1)),
+            Command("CoreBankInbox", "misrouted", account, new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3), partitionId: expected + 1),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PartitionRouting.Passed.Should().BeFalse();
+        result.Checks.PartitionRouting.Detail.Should().Contain("1 misrouted row(s)").And.Contain("misrouted")
+            .And.Contain($"partition {expected + 1}, expected {expected}");
+        result.Debug.PartitionRoutingViolations.Should().ContainSingle()
+            .Which.Should().Be(new PartitionRoutingViolation("CoreBankInbox", "misrouted", account, expected + 1, expected));
+        result.AllPassed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Partition_routing_covers_cancelled_command_rows_too()
+    {
+        // Every command row, tombstones included, must sit in its debtor
+        // account's partition: a tombstone in another lane would not shield
+        // the late original from executing out of order.
+        var account = AccountNumber(1);
+        var expected = PartitionHelper.GetPartitionId(account, LoadTestConstants.PartitionCount);
+        var observations = new[]
+        {
+            Command("CoreBankInbox", "tombstone", account, new DateTime(2026, 1, 1), new DateTime(2026, 1, 1), status: "Cancelled", partitionId: expected + 1),
+        };
+
+        LoadTestAssertionCalculator.FindPartitionRoutingViolations(observations).Should().ContainSingle();
+    }
+
+    [Fact]
+    public void Event_store_rows_are_not_subject_to_partition_routing()
+    {
+        // The event stores partition on the transaction id or the account
+        // number, not the debtor (ADR-026 decision 4), so they carry no
+        // FromAccount and are never judged by it.
+        var observations = new[]
+        {
+            Command("PaymentsOutbox", "key-1", AccountNumber(1), new DateTime(2026, 1, 1, 0, 0, 0), new DateTime(2026, 1, 1, 0, 0, 1)),
+            new OrderingObservation("CoreBankOutbox", 3, "key-1", new DateTime(2026, 1, 1, 0, 0, 2), new DateTime(2026, 1, 1, 0, 0, 3)),
+            new OrderingObservation("PaymentsInbox", 2, "key-1", new DateTime(2026, 1, 1, 0, 0, 4), new DateTime(2026, 1, 1, 0, 0, 5)),
+        };
+
+        var result = Compute(expectedUnique: 0, orderingObservations: observations);
+
+        result.Checks.PartitionRouting.Passed.Should().BeTrue();
+        result.Checks.PartitionRouting.Detail.Should().Contain("1 payment-command row(s)");
+        result.Debug.PartitionRoutingViolations.Should().BeEmpty();
     }
 
     [Fact]

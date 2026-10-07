@@ -362,12 +362,42 @@ public sealed class AssertEndpointsIntegrationTests(PostgresContainerFixture fix
         result.Checks.StageCardinality.Passed.Should().BeTrue();
         result.Checks.CanonicalAccountSet.Passed.Should().BeTrue();
         result.Checks.PerKeyOrdering.Passed.Should().BeTrue();
+        // ADR-026: FromAccount is read off both command stores, and the
+        // seeded rows sit in their debtor account's partition.
+        result.Checks.PerAccountOrdering.Passed.Should().BeTrue();
+        result.Checks.PartitionRouting.Passed.Should().BeTrue();
         result.Checks.InlineInstantSettlement.Passed.Should().BeTrue();
         result.Summary.PaymentsOutbox.Should().Be(new MessageStoreSummary(1, 1, 0, 0));
         result.Summary.CoreBankInbox.Should().Be(new MessageStoreSummary(1, 1, 0, 0));
         result.Summary.CoreBankOutbox.Should().Be(new MessageStoreSummary(3, 3, 0, 0));
         result.Summary.PaymentsInbox.Should().Be(new MessageStoreSummary(3, 3, 0, 0));
         result.AllPassed.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Results_flags_a_payment_command_outside_its_debtor_accounts_partition()
+    {
+        // ADR-026: a command row's PartitionId must be PartitionHelper's
+        // partition for its FromAccount, as stored. The projection reads the
+        // account off the real row, so a misrouted row is named by key.
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var coreBank = CreateCoreBankContext();
+        await using var payments = CreatePaymentsContext();
+        SeedLoadAccounts(coreBank, 1, 2);
+        var expected = PartitionHelper.GetPartitionId(AccountNumber(1), LoadTestConstants.PartitionCount);
+        var misrouted = CompletedTransfer("key-1", 1, 2, 0m);
+        misrouted.PartitionId = (expected + 1) % LoadTestConstants.PartitionCount;
+        coreBank.InboxMessages.Add(misrouted);
+        payments.OutboxMessages.Add(CompletedOutbox("key-1"));
+        await coreBank.SaveChangesAsync(cancellationToken);
+        await payments.SaveChangesAsync(cancellationToken);
+
+        var result = await new LoadTestAssertionService(coreBank, payments).GetResultsAsync(1, cancellationToken);
+
+        result.Checks.PartitionRouting.Passed.Should().BeFalse();
+        result.Debug.PartitionRoutingViolations.Should().ContainSingle().Which.Should().Be(
+            new PartitionRoutingViolation("CoreBankInbox", "key-1", AccountNumber(1), misrouted.PartitionId, expected));
+        result.AllPassed.Should().BeFalse();
     }
 
     private static string AccountNumber(int i) => $"NL{i:D2}LOAD{i:D10}";
@@ -395,7 +425,8 @@ public sealed class AssertEndpointsIntegrationTests(PostgresContainerFixture fix
             Id = Guid.NewGuid(),
             IdempotencyKey = key,
             TransactionId = key,
-            PartitionId = 0,
+            // Routed like the real intake handler (ADR-026): by debtor account.
+            PartitionId = PartitionHelper.GetPartitionId(AccountNumber(fromIndex), LoadTestConstants.PartitionCount),
             Status = MessageConstants.Status.Completed,
             ReceivedAt = new DateTime(2026, 8, 30, 0, 0, 0, DateTimeKind.Utc),
             ProcessedAt = new DateTime(2026, 8, 30, 0, 1, 0, DateTimeKind.Utc),

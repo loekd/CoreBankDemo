@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using CoreBankDemo.CoreBankAPI;
+using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI;
 using static CoreBankDemo.Messaging.MessageConstants;
 
@@ -77,7 +78,12 @@ public sealed record OrderingObservation(
     // out of the FIFO comparison (it still counts as terminal with a
     // ProcessedAt for the missing-timestamp check). Defaulted so existing
     // call sites keep compiling.
-    string? Status = null);
+    string? Status = null,
+    // ADR-026: the debtor account of a payment command (payments outbox,
+    // CoreBank inbox) -- the partition key of those two stores. Null for the
+    // event stores, which partition on the transaction id or account number
+    // and are judged by neither of the per-account checks.
+    string? FromAccount = null);
 
 public sealed record OrderingViolation(
     string Store,
@@ -88,6 +94,35 @@ public sealed record OrderingViolation(
     DateTime LaterEnqueuedAt,
     DateTime EarlierProcessedAt,
     DateTime LaterProcessedAt);
+
+/// <summary>
+/// Two debits from one account, in one priority class, processed in the
+/// reverse of their enqueue order (ADR-026) -- the inversion key partitioning
+/// let through whenever the two rows landed in different partitions.
+/// </summary>
+public sealed record AccountOrderingViolation(
+    string Store,
+    string FromAccount,
+    int Priority,
+    string EarlierKey,
+    string LaterKey,
+    DateTime EarlierEnqueuedAt,
+    DateTime LaterEnqueuedAt,
+    DateTime EarlierProcessedAt,
+    DateTime LaterProcessedAt);
+
+/// <summary>
+/// A payment-command row whose <c>PartitionId</c> is not
+/// <see cref="PartitionHelper"/>'s partition for its debtor account (ADR-026).
+/// Per-partition FIFO plus correct routing together imply per-account FIFO;
+/// this names a routing regression on its own.
+/// </summary>
+public sealed record PartitionRoutingViolation(
+    string Store,
+    string IdempotencyKey,
+    string FromAccount,
+    int PartitionId,
+    int ExpectedPartitionId);
 
 /// <summary>
 /// The <c>NoDuplicateProcessing</c> check plus the actual duplicate rows
@@ -147,6 +182,10 @@ public sealed record AssertionChecks(
     AssertionCheck BalanceConservation,
     BalancesCorrectCheck BalancesCorrect,
     AssertionCheck PerKeyOrdering,
+    // ADR-026 (additive): FIFO per debtor account within a priority class,
+    // and every command row in its debtor account's partition.
+    AssertionCheck PerAccountOrdering,
+    AssertionCheck PartitionRouting,
     AssertionCheck InlineInstantSettlement,
     StageCardinalityCheck StageCardinality,
     CanonicalAccountSetCheck CanonicalAccountSet);
@@ -173,7 +212,9 @@ public sealed record AssertionSummary(
 /// <summary>Raw completed-transaction data behind the balance replay, for troubleshooting a failed assertion run.</summary>
 public sealed record AssertionDebugInfo(
     IReadOnlyList<CompletedTransaction> CompletedTransactions,
-    IReadOnlyList<OrderingViolation> OrderingViolations);
+    IReadOnlyList<OrderingViolation> OrderingViolations,
+    IReadOnlyList<AccountOrderingViolation> AccountOrderingViolations,
+    IReadOnlyList<PartitionRoutingViolation> PartitionRoutingViolations);
 
 /// <summary>Full result of the assertion suite: overall pass/fail, the individual checks, aggregate summary, and replay debug data.</summary>
 public sealed record AssertionResult(
@@ -307,7 +348,8 @@ public sealed class LoadTestAssertionService(
                 message.ProcessedAt,
                 message.Id,
                 message.Priority,
-                message.Status))
+                message.Status,
+                message.FromAccount))
             .ToListAsync(ct));
         orderingObservations.AddRange(await coreBankDb.InboxMessages
             .Select(message => new OrderingObservation(
@@ -318,7 +360,8 @@ public sealed class LoadTestAssertionService(
                 message.ProcessedAt,
                 message.Id,
                 message.Priority,
-                message.Status))
+                message.Status,
+                message.FromAccount))
             .ToListAsync(ct));
         orderingObservations.AddRange(await coreBankDb.MessagingOutboxMessages
             .Select(message => new OrderingObservation(
@@ -506,6 +549,25 @@ public static class LoadTestAssertionCalculator
                 : orderingViolations.Count == 0
                     ? $"Verified timestamp-distinct FIFO ordering within each priority class across {orderingObservations.Select(item => (item.Store, item.PartitionId)).Distinct().Count()} store partitions"
                     : $"{orderingViolations.Count} ordering inversion(s); first: {orderingViolations[0].Store}/partition-{orderingViolations[0].PartitionId} {orderingViolations[0].EarlierKey} processed after {orderingViolations[0].LaterKey}");
+        // ADR-026: both checks judge only the payment-command rows (the ones
+        // carrying a FromAccount). Zero of them is no proof, as above.
+        var commandObservations = orderingObservations.Count(item => item.FromAccount is not null);
+        var accountOrderingViolations = FindAccountOrderingViolations(orderingObservations);
+        var perAccountOrdering = new AssertionCheck(
+            commandObservations > 0 && accountOrderingViolations.Count == 0,
+            commandObservations == 0
+                ? "No payment-command observations were available"
+                : accountOrderingViolations.Count == 0
+                    ? $"Verified FIFO per debtor account within each priority class across {orderingObservations.Where(item => item.FromAccount is not null).Select(item => (item.Store, item.FromAccount)).Distinct().Count()} account lanes"
+                    : $"{accountOrderingViolations.Count} per-account inversion(s); first: {accountOrderingViolations[0].Store}/{accountOrderingViolations[0].FromAccount} {accountOrderingViolations[0].EarlierKey} processed after {accountOrderingViolations[0].LaterKey}");
+        var partitionRoutingViolations = FindPartitionRoutingViolations(orderingObservations);
+        var partitionRouting = new AssertionCheck(
+            commandObservations > 0 && partitionRoutingViolations.Count == 0,
+            commandObservations == 0
+                ? "No payment-command observations were available"
+                : partitionRoutingViolations.Count == 0
+                    ? $"Every one of {commandObservations} payment-command row(s) sits in its debtor account's partition"
+                    : $"{partitionRoutingViolations.Count} misrouted row(s); first: {partitionRoutingViolations[0].Store} {partitionRoutingViolations[0].IdempotencyKey} from {partitionRoutingViolations[0].FromAccount} in partition {partitionRoutingViolations[0].PartitionId}, expected {partitionRoutingViolations[0].ExpectedPartitionId}");
         var inlineInstantSettlement = new AssertionCheck(
             request.InlineInstantSettlementCount > 0,
             $"Fresh instant payments completed inline: {request.InlineInstantSettlementCount}");
@@ -576,6 +638,8 @@ public static class LoadTestAssertionCalculator
             balanceConservation,
             balancesCorrectCheck,
             perKeyOrdering,
+            perAccountOrdering,
+            partitionRouting,
             inlineInstantSettlement,
             stageCardinality,
             canonicalAccountSet);
@@ -589,6 +653,8 @@ public static class LoadTestAssertionCalculator
             balanceConservation.Passed &&
             balancesCorrectCheck.Passed &&
             perKeyOrdering.Passed &&
+            perAccountOrdering.Passed &&
+            partitionRouting.Passed &&
             inlineInstantSettlement.Passed &&
             stageCardinality.Passed &&
             canonicalAccountSet.Passed;
@@ -615,79 +681,134 @@ public static class LoadTestAssertionCalculator
             allPassed,
             checks,
             summary,
-            new AssertionDebugInfo(completedTransactions, orderingViolations));
+            new AssertionDebugInfo(
+                completedTransactions, orderingViolations, accountOrderingViolations, partitionRoutingViolations));
     }
 
+    /// <summary>
+    /// FIFO per <c>(Store, PartitionId, Priority)</c>: the lane a processor
+    /// actually works. FIFO is a promise within a priority class, not across
+    /// them: the instant rail is *meant* to overtake queued standard work in
+    /// the same partition (an SCT Inst never waits behind batch SCT work), so
+    /// rows are only ever compared against rows of their own priority.
+    /// </summary>
     internal static IReadOnlyList<OrderingViolation> FindOrderingViolations(
-        IReadOnlyList<OrderingObservation> observations)
-    {
-        var violations = new List<OrderingViolation>();
-        // FIFO is a promise within a priority class, not across them: the
-        // instant rail is *meant* to overtake queued standard work in the
-        // same partition (an SCT Inst never waits behind batch SCT work), so
-        // rows are only ever compared against rows of their own priority.
-        //
-        // A Cancelled row is left out entirely (spec: instant-rail-timeout-
-        // cancel): it never executed, so it is not a step in execution
-        // order. Its ProcessedAt is when it was withdrawn, which can legally
-        // precede the completion of an older row it was waiting behind --
-        // an older instant row that held the lock through its forward phase
-        // and cancel, was released on the residual unknown and completed
-        // later by the background rail, while the younger row behind it hit
-        // its own forward deadline first and was cancelled locally. A
-        // CoreBank tombstone (ReceivedAt == ProcessedAt) versus an older
-        // still-pending row is the same shape.
-        foreach (var partition in observations
-                     .Where(item => item.Status != Status.Cancelled)
-                     .GroupBy(item => (item.Store, item.PartitionId, item.Priority)))
-        {
-            OrderingObservation? latestPrior = null;
-            // Grouping by EnqueuedAt alone collapsed every row sharing an
-            // exact timestamp (realistic under real concurrent load, since
-            // timestamps come from TimeProvider.GetUtcNow() per-request
-            // rather than a monotonic sequence) into one group that was
-            // never compared against itself -- silently reducing detection
-            // power exactly during the highest-throughput phase this check
-            // exists to police. Id is the same stable secondary tiebreaker
-            // GetClaimableMessagesQuery already uses
-            // (.OrderBy(EnqueuedAt).ThenBy(Id)) to give same-timestamp rows a
-            // deterministic order, so grouping by (EnqueuedAt, Id) instead
-            // makes every row its own step again and restores comparability.
-            foreach (var enqueueGroup in partition
-                         .OrderBy(item => item.EnqueuedAt)
-                         .ThenBy(item => item.Id)
-                         .GroupBy(item => (item.EnqueuedAt, item.Id)))
-            {
-                var current = enqueueGroup
-                    .Where(item => item.ProcessedAt.HasValue)
-                    .OrderBy(item => item.ProcessedAt)
-                    .ToList();
-                if (latestPrior?.ProcessedAt is { } priorProcessed
-                    && current.FirstOrDefault()?.ProcessedAt is { } currentProcessed
-                    && currentProcessed < priorProcessed)
-                {
-                    var later = current[0];
-                    violations.Add(new OrderingViolation(
-                        partition.Key.Store,
-                        partition.Key.PartitionId,
-                        latestPrior.IdempotencyKey,
-                        later.IdempotencyKey,
-                        latestPrior.EnqueuedAt,
-                        later.EnqueuedAt,
-                        priorProcessed,
-                        currentProcessed));
-                }
+        IReadOnlyList<OrderingObservation> observations) =>
+        ExecutedRows(observations)
+            .GroupBy(item => (item.Store, item.PartitionId, item.Priority))
+            .SelectMany(lane => FindInversions(lane).Select(pair => new OrderingViolation(
+                lane.Key.Store,
+                lane.Key.PartitionId,
+                pair.Earlier.IdempotencyKey,
+                pair.Later.IdempotencyKey,
+                pair.Earlier.EnqueuedAt,
+                pair.Later.EnqueuedAt,
+                pair.Earlier.ProcessedAt!.Value,
+                pair.Later.ProcessedAt!.Value)))
+            .ToList();
 
-                var latestCurrent = current.LastOrDefault();
-                if (latestCurrent?.ProcessedAt is not null
-                    && (latestPrior?.ProcessedAt is null || latestCurrent.ProcessedAt > latestPrior.ProcessedAt))
-                {
-                    latestPrior = latestCurrent;
-                }
+    /// <summary>
+    /// FIFO per <c>(Store, FromAccount, Priority)</c> over the payment-command
+    /// rows (ADR-026): the guarantee the demo makes, independent of which
+    /// partition each row sits in. Same priority-class and Cancelled rules
+    /// as <see cref="FindOrderingViolations"/>.
+    /// </summary>
+    internal static IReadOnlyList<AccountOrderingViolation> FindAccountOrderingViolations(
+        IReadOnlyList<OrderingObservation> observations) =>
+        ExecutedRows(observations)
+            .Where(item => item.FromAccount is not null)
+            .GroupBy(item => (item.Store, FromAccount: item.FromAccount!, item.Priority))
+            .SelectMany(lane => FindInversions(lane).Select(pair => new AccountOrderingViolation(
+                lane.Key.Store,
+                lane.Key.FromAccount,
+                lane.Key.Priority,
+                pair.Earlier.IdempotencyKey,
+                pair.Later.IdempotencyKey,
+                pair.Earlier.EnqueuedAt,
+                pair.Later.EnqueuedAt,
+                pair.Earlier.ProcessedAt!.Value,
+                pair.Later.ProcessedAt!.Value)))
+            .ToList();
+
+    /// <summary>
+    /// Every payment-command row, Cancelled tombstones included, must sit in
+    /// <see cref="PartitionHelper"/>'s partition for its debtor account as
+    /// stored (ADR-026). A tombstone in another lane would not shield the
+    /// late original from executing out of order, so none is exempt.
+    /// </summary>
+    internal static IReadOnlyList<PartitionRoutingViolation> FindPartitionRoutingViolations(
+        IReadOnlyList<OrderingObservation> observations) =>
+        observations
+            .Where(item => item.FromAccount is not null)
+            .Select(item => (Row: item, Expected: PartitionHelper.GetPartitionId(item.FromAccount!, LoadTestConstants.PartitionCount)))
+            .Where(candidate => candidate.Row.PartitionId != candidate.Expected)
+            .Select(candidate => new PartitionRoutingViolation(
+                candidate.Row.Store,
+                candidate.Row.IdempotencyKey,
+                candidate.Row.FromAccount!,
+                candidate.Row.PartitionId,
+                candidate.Expected))
+            .ToList();
+
+    /// <summary>
+    /// A Cancelled row is left out entirely (spec: instant-rail-timeout-
+    /// cancel): it never executed, so it is not a step in execution order.
+    /// Its ProcessedAt is when it was withdrawn, which can legally precede
+    /// the completion of an older row it was waiting behind -- an older
+    /// instant row that held the lock through its forward phase and cancel,
+    /// was released on the residual unknown and completed later by the
+    /// background rail, while the younger row behind it hit its own forward
+    /// deadline first and was cancelled locally. A CoreBank tombstone
+    /// (ReceivedAt == ProcessedAt) versus an older still-pending row is the
+    /// same shape.
+    /// </summary>
+    private static IEnumerable<OrderingObservation> ExecutedRows(IEnumerable<OrderingObservation> observations) =>
+        observations.Where(item => item.Status != Status.Cancelled);
+
+    /// <summary>
+    /// Walks one FIFO lane in enqueue order and yields every
+    /// (earlier, later) pair where the later row was processed before the
+    /// latest-processed row enqueued ahead of it. Both rows of a pair carry a
+    /// ProcessedAt.
+    /// </summary>
+    private static IEnumerable<(OrderingObservation Earlier, OrderingObservation Later)> FindInversions(
+        IEnumerable<OrderingObservation> lane)
+    {
+        OrderingObservation? latestPrior = null;
+        // Grouping by EnqueuedAt alone collapsed every row sharing an
+        // exact timestamp (realistic under real concurrent load, since
+        // timestamps come from TimeProvider.GetUtcNow() per-request
+        // rather than a monotonic sequence) into one group that was
+        // never compared against itself -- silently reducing detection
+        // power exactly during the highest-throughput phase this check
+        // exists to police. Id is the same stable secondary tiebreaker
+        // GetClaimableMessagesQuery already uses
+        // (.OrderBy(EnqueuedAt).ThenBy(Id)) to give same-timestamp rows a
+        // deterministic order, so grouping by (EnqueuedAt, Id) instead
+        // makes every row its own step again and restores comparability.
+        foreach (var enqueueGroup in lane
+                     .OrderBy(item => item.EnqueuedAt)
+                     .ThenBy(item => item.Id)
+                     .GroupBy(item => (item.EnqueuedAt, item.Id)))
+        {
+            var current = enqueueGroup
+                .Where(item => item.ProcessedAt.HasValue)
+                .OrderBy(item => item.ProcessedAt)
+                .ToList();
+            if (latestPrior?.ProcessedAt is { } priorProcessed
+                && current.FirstOrDefault()?.ProcessedAt is { } currentProcessed
+                && currentProcessed < priorProcessed)
+            {
+                yield return (latestPrior, current[0]);
+            }
+
+            var latestCurrent = current.LastOrDefault();
+            if (latestCurrent?.ProcessedAt is not null
+                && (latestPrior?.ProcessedAt is null || latestCurrent.ProcessedAt > latestPrior.ProcessedAt))
+            {
+                latestPrior = latestCurrent;
             }
         }
-
-        return violations;
     }
 
     /// <summary>

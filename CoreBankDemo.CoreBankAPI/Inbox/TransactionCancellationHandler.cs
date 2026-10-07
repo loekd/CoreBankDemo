@@ -126,7 +126,8 @@ internal sealed class TransactionCancellationHandler(
             ToAccount = request.ToAccount,
             Amount = request.Amount,
             Currency = request.Currency,
-            PartitionId = PartitionHelper.GetPartitionId(request.TransactionId, inboxOptions.Value.PartitionCount),
+            // Same lane the original would take (ADR-026: debtor account).
+            PartitionId = PartitionHelper.GetPartitionId(request.FromAccount, inboxOptions.Value.PartitionCount),
             Status = MessageConstants.Status.Cancelled,
             Priority = priority,
             ReceivedAt = now.UtcDateTime,

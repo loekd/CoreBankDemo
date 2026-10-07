@@ -41,7 +41,7 @@ public class PaymentStorageHandlerTests
     [InlineData("x")]
     [InlineData("   ")]
     [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    public async Task Caller_key_is_preserved_verbatim_and_used_for_identity_and_partition(string key)
+    public async Task Caller_key_is_preserved_verbatim_for_identity_while_the_debtor_account_picks_the_partition(string key)
     {
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>();
@@ -57,8 +57,33 @@ public class PaymentStorageHandlerTests
         captured.Should().NotBeNull();
         captured!.IdempotencyKey.Should().Be(key);
         captured.TransactionId.Should().Be(key);
-        captured.PartitionId.Should().Be(PartitionHelper.GetPartitionId(key, 4));
+        captured.PartitionId.Should().Be(PartitionHelper.GetPartitionId(Request.FromAccount, 4));
         result.Payment!.IdempotencyKey.Should().Be(key);
+    }
+
+    [Fact]
+    public async Task Payments_from_one_debtor_share_a_partition_whatever_their_keys()
+    {
+        // ADR-026: two debits from the same account must never overtake each
+        // other, so the debtor account -- not the idempotency key -- picks
+        // the partition. These three keys land in three different partitions
+        // when hashed themselves ("x" -> 0, "aaa…" -> 2, "mapped-key" -> 1).
+        var captured = new List<OutboxMessage>();
+        var repository = new Mock<IOutboxRepository>();
+        repository
+            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<OutboxMessage, CancellationToken>((message, _) => captured.Add(message))
+            .ReturnsAsync(true);
+        var handler = CreateHandler(repository.Object);
+
+        foreach (var key in new[] { "x", new string('a', 100), "mapped-key" })
+        {
+            await handler.StoreAsync(Request, key, TestContext.Current.CancellationToken);
+        }
+
+        captured.Select(message => message.PartitionId).Distinct()
+            .Should().ContainSingle()
+            .Which.Should().Be(PartitionHelper.GetPartitionId(Request.FromAccount, 4));
     }
 
     [Theory]
@@ -143,7 +168,7 @@ public class PaymentStorageHandlerTests
             Request.ToAccount,
             Request.Amount,
             Request.Currency,
-            PartitionId = PartitionHelper.GetPartitionId("mapped-key", 4),
+            PartitionId = PartitionHelper.GetPartitionId(Request.FromAccount, 4),
             Status = MessageConstants.Status.Pending,
             CreatedAt = Now.UtcDateTime
         });
@@ -164,7 +189,7 @@ public class PaymentStorageHandlerTests
         logger.Scope.Should().Contain(
             new KeyValuePair<string, object>(
                 "PartitionId",
-                PartitionHelper.GetPartitionId("mapped-key", 4)));
+                PartitionHelper.GetPartitionId(Request.FromAccount, 4)));
         logger.Messages.Should().ContainSingle(message => message.Contains("Stored payment"));
         repository.VerifyAll();
     }
@@ -185,7 +210,7 @@ public class PaymentStorageHandlerTests
         Guid.TryParseExact(captured!.IdempotencyKey, "D", out _).Should().BeTrue();
         captured.TransactionId.Should().Be(captured.IdempotencyKey);
         captured.PartitionId.Should().Be(
-            PartitionHelper.GetPartitionId(captured.IdempotencyKey, 4));
+            PartitionHelper.GetPartitionId(Request.FromAccount, 4));
         captured.CreatedAt.Should().Be(Now.UtcDateTime);
         captured.Status.Should().Be(MessageConstants.Status.Pending);
         captured.TraceParent.Should().BeNull();

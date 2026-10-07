@@ -6,42 +6,91 @@ namespace CoreBankDemo.Messaging.Tests;
 public class PartitionHelperTests
 {
     /// <summary>
-    /// Known vectors captured by executing the legacy PartitionHelper
-    /// (FNV-1a over chars, prime 16777619, offset basis 2166136261,
-    /// Math.Abs % count) at partitionCount = 4 before the epic-2 demolition.
-    /// Any change to these ids breaks ordering compatibility with existing rows.
+    /// Known vectors for <c>fmix32(fnv1a(key)) % 4</c> (ADR-026): 32-bit FNV-1a
+    /// over chars (prime 16777619, offset basis 2166136261), run through
+    /// MurmurHash3's fmix32 finalizer, unsigned modulus. Any change to these
+    /// ids breaks ordering compatibility with existing rows.
     /// </summary>
-    public static TheoryData<string, int> LegacyKnownVectors => new()
+    public static TheoryData<string, int> KnownVectors => new()
     {
         // GUID-string keys
-        { "3f2504e0-4f89-11d3-9a0c-0305e82c3301", 0 },
-        { "a1b2c3d4-e5f6-7890-abcd-ef1234567890", 1 },
-        { "00000000-0000-0000-0000-000000000000", 3 },
-        { "D9428888-122B-11E1-B85C-61CD3CBB3210", 1 },
+        { "3f2504e0-4f89-11d3-9a0c-0305e82c3301", 1 },
+        { "a1b2c3d4-e5f6-7890-abcd-ef1234567890", 2 },
+        { "00000000-0000-0000-0000-000000000000", 0 },
+        { "D9428888-122B-11E1-B85C-61CD3CBB3210", 0 },
         // IBAN keys
-        { "NL91ABNA0417164300", 3 },
-        { "DE89370400440532013000", 1 },
+        { "NL91ABNA0417164300", 1 },
+        { "DE89370400440532013000", 0 },
         { "GB29NWBK60161331926819", 3 },
         // Plain keys — casing is significant and preserved
-        { "payment-key-001", 1 },
-        { "PAYMENT-KEY-001", 3 },
+        { "payment-key-001", 3 },
+        { "PAYMENT-KEY-001", 2 },
         // Unicode keys (char-based hashing, incl. surrogate pairs)
-        { "héllo wörld ünïcode-Ω", 2 },
-        { "支付-注文-😀-1234", 3 },
+        { "héllo wörld ünïcode-Ω", 0 },
+        { "支付-注文-😀-1234", 1 },
     };
 
     [Theory]
-    [MemberData(nameof(LegacyKnownVectors))]
-    public void Known_legacy_vectors_produce_identical_partition_ids(string key, int expectedPartitionId)
+    [MemberData(nameof(KnownVectors))]
+    public void Known_vectors_produce_the_pinned_partition_ids(string key, int expectedPartitionId)
     {
         PartitionHelper.GetPartitionId(key, 4).Should().Be(expectedPartitionId);
     }
 
     [Fact]
-    public void Very_long_key_matches_legacy_vector()
+    public void Very_long_key_matches_known_vector()
     {
-        // Legacy-computed: new string('a', 1024) at partitionCount 4 => 3
-        PartitionHelper.GetPartitionId(new string('a', 1024), 4).Should().Be(3);
+        PartitionHelper.GetPartitionId(new string('a', 1024), 4).Should().Be(0);
+    }
+
+    /// <summary>
+    /// ADR-026's motivating defect: bare FNV-1a mod 4 put all three Regular
+    /// demo accounts in partition 3 and the ten load-test accounts in
+    /// partitions 1 and 3 only, because the low two bits of the hash depend
+    /// only on the low two bits of each char. The finalizer spreads them.
+    /// </summary>
+    [Theory]
+    [InlineData("NL91ABNA0417164300", 1)]
+    [InlineData("NL20INGB0001234567", 3)]
+    [InlineData("NL39RABO0300065264", 2)]
+    [InlineData("NL01LOAD0000000001", 0)]
+    [InlineData("NL02LOAD0000000002", 1)]
+    [InlineData("NL03LOAD0000000003", 0)]
+    [InlineData("NL04LOAD0000000004", 1)]
+    [InlineData("NL05LOAD0000000005", 0)]
+    [InlineData("NL06LOAD0000000006", 1)]
+    [InlineData("NL07LOAD0000000007", 2)]
+    [InlineData("NL08LOAD0000000008", 0)]
+    [InlineData("NL09LOAD0000000009", 1)]
+    [InlineData("NL10LOAD0000000010", 2)]
+    public void Account_numbers_map_to_the_partitions_adr_026_records(string accountNumber, int expectedPartitionId)
+    {
+        PartitionHelper.GetPartitionId(accountNumber, 4).Should().Be(expectedPartitionId);
+    }
+
+    [Fact]
+    public void Account_shaped_keys_are_spread_over_all_four_partitions()
+    {
+        var accounts = new[] { "NL91ABNA0417164300", "NL20INGB0001234567", "NL39RABO0300065264" }
+            .Concat(Enumerable.Range(1, 10).Select(i => $"NL{i:D2}LOAD{i:D10}"));
+
+        accounts.Select(account => PartitionHelper.GetPartitionId(account, 4))
+            .Distinct()
+            .Should().BeEquivalentTo([0, 1, 2, 3]);
+    }
+
+    /// <summary>
+    /// Pins the finalizer to MurmurHash3's published fmix32, not a homegrown
+    /// mix: fmix32(0) = 0 and fmix32(1) = 0x514E28B7 are the reference values.
+    /// </summary>
+    [Theory]
+    [InlineData(0u, 0u)]
+    [InlineData(1u, 0x514E28B7u)]
+    [InlineData(0xFFFFFFFFu, 0x81F16F39u)]
+    [InlineData(2166136261u, 0xAB3E7C0Bu)]
+    public void Finalizer_is_murmurhash3_fmix32(uint input, uint expected)
+    {
+        PartitionHelper.Fmix32(input).Should().Be(expected);
     }
 
     [Theory]
@@ -78,7 +127,8 @@ public class PartitionHelperTests
     public void Empty_key_is_deterministic_in_range_and_does_not_throw()
     {
         // Spec I/O matrix: degenerate keys yield a deterministic id, no throw.
-        // FNV-1a of "" is the offset basis: Math.Abs((int)2166136261) % 4 == 3.
+        // FNV-1a of "" is the offset basis 0x811C9DC5; fmix32 of that is
+        // 0xAB3E7C0B, and 0xAB3E7C0B % 4 == 3.
         var act = () => PartitionHelper.GetPartitionId(string.Empty, 4);
 
         act.Should().NotThrow();
@@ -125,21 +175,13 @@ public class PartitionHelperTests
     }
 
     [Fact]
-    public void Hash_of_int_min_value_maps_to_partition_zero_instead_of_overflowing()
+    public void Partition_count_larger_than_the_hash_range_of_a_signed_int_is_handled_unsigned()
     {
-        // Math.Abs(int.MinValue) throws OverflowException; the mapper repairs
-        // that single case to 0 (legacy would have crashed, so no stored row
-        // can depend on a different mapping). Tested via the internal seam
-        // because no practical key is known to hash to int.MinValue.
-        PartitionHelper.MapHashToPartition(int.MinValue, 4).Should().Be(0);
-    }
+        // The modulus is taken on the unsigned hash, so a count above
+        // int.MaxValue / 2 still yields a non-negative id below the count
+        // (the old Math.Abs mapping had an int.MinValue hole here).
+        var id = PartitionHelper.GetPartitionId("NL91ABNA0417164300", int.MaxValue);
 
-    [Theory]
-    [InlineData(-7, 4)]
-    [InlineData(7, 4)]
-    [InlineData(int.MaxValue, 4)]
-    public void Hash_mapping_preserves_legacy_abs_mod_semantics(int hash, int count)
-    {
-        PartitionHelper.MapHashToPartition(hash, count).Should().Be(Math.Abs(hash) % count);
+        id.Should().BeInRange(0, int.MaxValue - 1);
     }
 }

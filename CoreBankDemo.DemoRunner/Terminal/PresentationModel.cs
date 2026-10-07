@@ -270,7 +270,7 @@ public static class PresentationModelBuilder
                 "○ Zero message loss — not yet observed",
                 "○ Balance conservation — not yet observed",
                 "○ Terminal-state completeness — not yet observed",
-                "○ Per-key ordering — not yet observed",
+                "○ Per-account ordering — not yet observed",
                 "○ Inline instant settlement — not yet observed",
             });
         }

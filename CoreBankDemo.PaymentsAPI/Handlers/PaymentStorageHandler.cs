@@ -71,7 +71,10 @@ internal sealed class PaymentStorageHandler(
         }
 
         var key = idempotencyKey ?? Guid.NewGuid().ToString("D");
-        var partitionId = PartitionHelper.GetPartitionId(key, options.Value.PartitionCount);
+        // ADR-026: the debtor account picks the partition, not the key, so two
+        // debits from one account sit in the same lane and are forwarded in
+        // the order they were accepted. The key stays the dedupe identity.
+        var partitionId = PartitionHelper.GetPartitionId(request.FromAccount, options.Value.PartitionCount);
         var normalizedAmount = decimal.Round(request.Amount, 2, MidpointRounding.ToEven);
         var now = timeProvider.GetUtcNow().UtcDateTime;
         var isInstant = scheme == BusinessMetrics.PaymentScheme.Instant;
