@@ -29,6 +29,8 @@ public class LoadWorkflowRunnerTests
                     "noFailedMessages": {"passed":true,"detail":"none"},
                     "noPendingMessages": {"passed":true,"detail":"drained"},
                     "perKeyOrdering": {"passed":true,"detail":"ordered"},
+                    "perAccountOrdering": {"passed":true,"detail":"accounts ordered"},
+                    "partitionRouting": {"passed":true,"detail":"routed"},
                     "inlineInstantSettlement": {"passed":true,"detail":"count=20"}
                   },
                   "summary": {"inlineInstantSettlementCount":20}
@@ -121,6 +123,8 @@ public class LoadWorkflowRunnerTests
                     "noFailedMessages":{"passed":true,"detail":"none"},
                     "noPendingMessages":{"passed":false,"detail":"pending 1"},
                     "perKeyOrdering":{"passed":false,"detail":"partition 2 inverted"},
+                    "perAccountOrdering":{"passed":true,"detail":"accounts ordered"},
+                    "partitionRouting":{"passed":true,"detail":"routed"},
                     "inlineInstantSettlement":{"passed":true,"detail":"count=3"}
                   },
                   "summary":{"inlineInstantSettlementCount":3}
@@ -141,9 +145,66 @@ public class LoadWorkflowRunnerTests
         result.ErrorSummary.Should().Contain("allPassed=false");
         result.Invariants.Should().HaveCount(5);
         result.Invariants.Single(item => item.Name == "Zero message loss").Detail.Should().Be("missing 1");
-        result.Invariants.Single(item => item.Name == "Per-key ordering").Detail.Should().Contain("inverted");
+        result.Invariants.Single(item => item.Name == "Per-account ordering").Detail.Should().Contain("inverted");
         result.InlineSettlement.Count.Should().Be(3);
         result.InvestigationDetail.Should().Contain(KnownEndpoints.CoreBankInbox);
+    }
+
+    /// <summary>
+    /// ADR-026: a payment routed outside its debtor's partition fails the run through
+    /// <c>allPassed</c>, and the ordering row must say so -- otherwise the operator sees a
+    /// failed run beside five green rows.
+    /// </summary>
+    [Theory]
+    [InlineData("perAccountOrdering", "NL01LOAD0000000001 inverted")]
+    [InlineData("partitionRouting", "1 row(s) outside their debtor partition")]
+    public async Task RunAsync_DebtorOrderingCheckFailure_FailsThePerAccountOrderingRow(string failingCheck, string detail)
+    {
+        var checks = new Dictionary<string, (bool Passed, string Detail)>
+        {
+            ["perKeyOrdering"] = (true, "ordered"),
+            ["perAccountOrdering"] = (true, "accounts ordered"),
+            ["partitionRouting"] = (true, "routed"),
+        };
+        checks[failingCheck] = (false, detail);
+        var ordering = string.Join(",\n", checks.Select(check =>
+            $"\"{check.Key}\":{{\"passed\":{(check.Value.Passed ? "true" : "false")},\"detail\":\"{check.Value.Detail}\"}}"));
+        var responses = new Queue<HttpResponseMessage>(
+        [
+            Json(HttpStatusCode.OK, "{}"),
+            Json(HttpStatusCode.OK, """{"isDrained":true}"""),
+            Json(HttpStatusCode.OK,
+                $$"""
+                {
+                  "allPassed":false,
+                  "checks":{
+                    "noDuplicateProcessing":{"passed":true,"detail":"unique"},
+                    "allSubmittedProcessed":{"passed":true,"detail":"all"},
+                    "balanceConservation":{"passed":true,"detail":"balanced"},
+                    "balancesCorrect":{"passed":true,"detail":"replay"},
+                    "noFailedMessages":{"passed":true,"detail":"none"},
+                    "noPendingMessages":{"passed":true,"detail":"drained"},
+                    {{ordering}}
+                  }
+                }
+                """),
+            .. InvestigationResponses(),
+        ]);
+        using var client = new HttpClient(new QueueHttpHandler(responses));
+        var aspire = new FakeAspireAdapter();
+        aspire.Queue(
+            K6Snapshot(ResourceCondition.Completed, "old-run"),
+            K6Snapshot(ResourceCondition.Completed, "new-run"));
+        var runner = new LoadWorkflowRunner(client, aspire, TimeProvider.System);
+
+        var result = await runner.RunAsync(100, new InlineProgress<LoadWorkflowProgress>(_ => { }), CancellationToken.None);
+
+        result.AllPassed.Should().BeFalse();
+        var row = result.Invariants.Single(invariant => invariant.Name == "Per-account ordering");
+        row.Passed.Should().BeFalse();
+        row.Detail.Should().Contain(detail);
+        result.Invariants.Where(invariant => invariant.Name != "Per-account ordering")
+            .Should().OnlyContain(invariant => invariant.Passed);
     }
 
     [Fact]
@@ -183,8 +244,10 @@ public class LoadWorkflowRunnerTests
         var result = await runner.RunAsync(100, new InlineProgress<LoadWorkflowProgress>(_ => { }), CancellationToken.None);
 
         result.AllPassed.Should().BeFalse();
-        result.Invariants.Single(invariant => invariant.Name == "Per-key ordering").Detail
-            .Should().Contain("Not reported");
+        var ordering = result.Invariants.Single(invariant => invariant.Name == "Per-account ordering");
+        ordering.Passed.Should().BeFalse();
+        ordering.Detail.Should().Contain("Missing source check")
+            .And.Contain("PerKeyOrdering").And.Contain("PerAccountOrdering").And.Contain("PartitionRouting");
     }
 
     [Fact]
@@ -269,6 +332,8 @@ public class LoadWorkflowRunnerTests
                     "noFailedMessages":{"passed":true,"detail":"none"},
                     "noPendingMessages":{"passed":true,"detail":"drained"},
                     "perKeyOrdering":{"passed":true,"detail":"ordered"},
+                    "perAccountOrdering":{"passed":true,"detail":"accounts ordered"},
+                    "partitionRouting":{"passed":true,"detail":"routed"},
                     "inlineInstantSettlement":{"passed":true,"detail":"count=1"}
                   },
                   "summary":{"inlineInstantSettlementCount":1}

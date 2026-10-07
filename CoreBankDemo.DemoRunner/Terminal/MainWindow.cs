@@ -2618,6 +2618,7 @@ public sealed class MainWindow : Window
     internal void RenderForTest() => Repaint();
     internal ListView StillOpenList => _stillOpenList;
     internal ListView EvidenceList => _evidenceList;
+    internal ListView LoadResultsList => _loadResults;
     internal int EvidenceRowCount => _evidenceList.Source?.Count ?? 0;
     internal string EvidenceDetailText => string.Join(
         Environment.NewLine,

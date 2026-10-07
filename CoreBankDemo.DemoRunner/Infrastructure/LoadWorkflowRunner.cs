@@ -19,7 +19,7 @@ public sealed class LoadWorkflowRunner(
         ("Zero message loss", ["AllSubmittedProcessed"]),
         ("Balance conservation", ["BalanceConservation", "BalancesCorrect"]),
         ("Terminal-state completeness", ["NoFailedMessages", "NoPendingMessages"]),
-        ("Per-key ordering", ["PerKeyOrdering"]),
+        ("Per-account ordering", ["PerKeyOrdering", "PerAccountOrdering", "PartitionRouting"]),
     ];
 
     public async Task<LoadWorkflowResult> RunAsync(
@@ -250,6 +250,13 @@ public sealed class LoadWorkflowRunner(
         if (name == "Terminal-state completeness")
         {
             return CombineChecks(json, name, ["NoFailedMessages", "NoPendingMessages"]);
+        }
+
+        if (name == "Per-account ordering")
+        {
+            // ADR-026: FIFO per partition only proves per-account order while every
+            // command sits in its debtor's partition, so all three feed one row.
+            return CombineChecks(json, name, ["PerKeyOrdering", "PerAccountOrdering", "PartitionRouting"]);
         }
 
         foreach (var key in sourceKeys)
