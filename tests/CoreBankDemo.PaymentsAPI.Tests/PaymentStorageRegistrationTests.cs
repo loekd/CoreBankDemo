@@ -35,6 +35,7 @@ public class PaymentStorageRegistrationTests
         using var scope = provider.CreateScope();
         scope.ServiceProvider.GetRequiredService<IOutboxRepository>().Should().BeOfType<OutboxRepository>();
         scope.ServiceProvider.GetRequiredService<IPaymentStorageHandler>().Should().BeOfType<PaymentStorageHandler>();
+        scope.ServiceProvider.GetRequiredService<IPaymentStatusHandler>().Should().BeOfType<PaymentStatusHandler>();
     }
 
     [Fact]
