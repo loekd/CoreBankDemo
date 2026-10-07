@@ -1,7 +1,7 @@
 # ADR-026: Payment commands are partitioned by debtor account
 
 **Date:** 2026-10-07
-**Status:** Proposed
+**Status:** Accepted
 **Deciders:** Architecture team
 **Supersedes in part:**
 - ADR-004's "partition messages using a consistent hash of the idempotency key", for the two payment-command stores (the payments outbox and the CoreBank inbox). The other two stores keep their keys.
