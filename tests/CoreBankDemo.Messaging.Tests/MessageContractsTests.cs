@@ -118,7 +118,7 @@ public class MessageContractsTests
 
         message.Id.Should().Be(Guid.Parse("3f2504e0-4f89-11d3-9a0c-0305e82c3301"));
         message.IdempotencyKey.Should().Be("NL91ABNA0417164300");
-        message.PartitionId.Should().Be(3);
+        message.PartitionId.Should().Be(1);
         message.Status.Should().Be("Processing");
         message.RetryCount.Should().Be(2);
         message.ReceivedAt.Should().Be(received);
@@ -148,7 +148,7 @@ public class MessageContractsTests
 
         message.Id.Should().Be(Guid.Parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
         message.IdempotencyKey.Should().Be("payment-key-001");
-        message.PartitionId.Should().Be(1);
+        message.PartitionId.Should().Be(3);
         message.Status.Should().Be("Completed");
         message.RetryCount.Should().Be(0);
         message.CreatedAt.Should().Be(created);
