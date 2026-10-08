@@ -89,6 +89,13 @@ public static class KnownEndpoints
     public const string TransactionOutcome = "corebank.transactions.status";
 
     /// <summary>
+    /// PaymentsAPI's own status read, <c>GET /api/payments/{transactionId}</c> (ADR-027): the
+    /// payments side's projection of CoreBank's outcome. The card's Look up outcome keeps asking
+    /// CoreBank through <see cref="TransactionOutcome"/>.
+    /// </summary>
+    public const string PaymentStatus = "payments.status";
+
+    /// <summary>
     /// CoreBank's own cancellation endpoint (<c>POST /api/transactions/cancel</c>). The console
     /// adds no endpoint to any banking service for its Cancel payment action; it calls the one
     /// CoreBank already exposes, and it reaches it only through this allow-listed id

@@ -669,6 +669,61 @@ public class HttpPaymentGatewayTests
         exchange.ResponseBody.Should().EndWith("…").And.NotContain("[redacted]");
     }
 
+    [Fact]
+    public async Task FetchPaymentStatus_IsABareGetOnPaymentsApi_WithTheIdEscaped()
+    {
+        var requests = new List<HttpRequestMessage>();
+        using var client = new HttpClient(new StubHttpHandler(request =>
+        {
+            requests.Add(request);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"status":"Pending"}"""),
+            });
+        }));
+
+        var result = await new HttpPaymentGateway(client)
+            .FetchPaymentStatusAsync(TopologyProfile.Regular, "tenant/payment-1", CancellationToken.None);
+
+        requests.Should().ContainSingle();
+        requests[0].Method.Should().Be(HttpMethod.Get);
+        requests[0].RequestUri!.AbsoluteUri.Should().Be("http://127.0.0.1:5294/api/payments/tenant%2Fpayment-1");
+        result.Succeeded.Should().BeTrue();
+        result.StatusCode.Should().Be(200);
+        result.Target.Should().Be(KnownEndpoints.PaymentStatus);
+        result.Body.Should().Contain("Pending");
+        result.Exchange!.Method.Should().Be("GET");
+    }
+
+    [Fact]
+    public async Task FetchPaymentStatus_NotFound_IsAnAnsweredCallThatDidNotSucceed()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.NotFound))));
+
+        var result = await new HttpPaymentGateway(client)
+            .FetchPaymentStatusAsync(TopologyProfile.LoadTests, "unknown", CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.StatusCode.Should().Be(404);
+        result.Exchange.Should().NotBeNull("the call was made and answered");
+    }
+
+    [Fact]
+    public async Task FetchPaymentStatus_ConnectionFailure_HasNoStatusButKeepsTheRequest()
+    {
+        using var client = new HttpClient(new StubHttpHandler(_ =>
+            throw new HttpRequestException("Connection refused")));
+
+        var result = await new HttpPaymentGateway(client)
+            .FetchPaymentStatusAsync(TopologyProfile.Regular, "tx-1", CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.StatusCode.Should().Be(0);
+        result.ErrorSummary.Should().Contain("Connection refused");
+        result.Exchange.Should().NotBeNull("the request was sent; only the answer is missing");
+    }
+
     private sealed class StubHttpHandler(Func<HttpRequestMessage, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
