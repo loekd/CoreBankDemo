@@ -1,9 +1,21 @@
 using System.Text.Json;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.PaymentsAPI.Accounts;
 using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
 
 namespace CoreBankDemo.PaymentsAPI.Outbox;
+
+/// <summary>Outcome of <see cref="IOutboxRepository.AcceptAsync"/>.</summary>
+internal enum PaymentAcceptance
+{
+    /// <summary>Row inserted and the debtor's reservation raised, in one commit.</summary>
+    Stored,
+    /// <summary>The idempotency key already exists; nothing written. The balance was never consulted.</summary>
+    Duplicate,
+    /// <summary>The debtor's known available balance is short; nothing written, key not consumed.</summary>
+    InsufficientFunds
+}
 
 internal interface IOutboxRepository
 {
@@ -37,6 +49,16 @@ internal interface IOutboxRepository
         string status,
         DateTimeOffset processedAt,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The transactional-outbox accept (spec: payments-account-projection,
+    /// ADR-028): inserts <paramref name="message"/> and raises the debtor's
+    /// <see cref="Accounts.ProjectedAccount.Reserved"/> in one database
+    /// transaction. The insert runs first, so a duplicate key is detected by
+    /// the unique index before any balance is read (AD-4), and a refusal rolls
+    /// the insert back so no row and no reservation remain.
+    /// </summary>
+    Task<PaymentAcceptance> AcceptAsync(OutboxMessage message, CancellationToken cancellationToken);
 }
 
 internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
@@ -86,4 +108,82 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
     private static bool HasCommittedOutcome(string? responsePayload) =>
         CachedTransactionOutcome.TryRead(responsePayload) is { } cached
         && CachedTransactionOutcome.IsCommitted(cached.Status);
+
+    public async Task<PaymentAcceptance> AcceptAsync(OutboxMessage message, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        try
+        {
+            await ExecuteInTransactionAsync(async () =>
+            {
+                // 1. Insert first (AD-4). A unique violation aborts the
+                //    PostgreSQL transaction, so the only way out is a rollback.
+                OutboxMessages.Add(message);
+                try
+                {
+                    await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (DbUpdateException ex) when (UniqueViolation.IsUniqueViolation(ex))
+                {
+                    throw new AcceptanceRollback(PaymentAcceptance.Duplicate);
+                }
+
+                // 2. Lock the debtor's projection row (created if unseen).
+                var now = timeProvider.GetUtcNow().UtcDateTime;
+                var account = await ProjectedAccountRows
+                    .LockAsync(DbContext, message.FromAccount, now, cancellationToken).ConfigureAwait(false);
+
+                // 3. Refuse only what the projection knows is short.
+                if (account.SettledBalance is { } settled && settled - account.Reserved < message.Amount)
+                {
+                    throw new AcceptanceRollback(PaymentAcceptance.InsufficientFunds);
+                }
+
+                // 4. Reserve and commit with the row.
+                account.Reserved += message.Amount;
+                account.UpdatedAt = now;
+                await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AcceptanceRollback rollback)
+        {
+            DbContext.ChangeTracker.Clear();
+            if (rollback.Outcome == PaymentAcceptance.Duplicate)
+            {
+                // Only a dedupe hit is a store "duplicate"; a refusal is
+                // counted by the payment-intake metric, not by the store.
+                businessMetrics.RecordStoreOperation(
+                    StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Duplicate);
+            }
+
+            return rollback.Outcome;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            DbContext.ChangeTracker.Clear();
+            throw;
+        }
+        catch
+        {
+            DbContext.ChangeTracker.Clear();
+            businessMetrics.RecordStoreOperation(
+                StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Failed);
+            throw;
+        }
+
+        businessMetrics.RecordStoreOperation(
+            StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Added);
+        return PaymentAcceptance.Stored;
+    }
+
+    /// <summary>
+    /// Carries a deliberate rollback out of <see cref="ExecuteInTransactionAsync"/>;
+    /// never escapes <see cref="AcceptAsync"/>. Not transient, so the Npgsql
+    /// execution strategy never retries it.
+    /// </summary>
+    private sealed class AcceptanceRollback(PaymentAcceptance outcome) : Exception
+    {
+        public PaymentAcceptance Outcome { get; } = outcome;
+    }
 }
