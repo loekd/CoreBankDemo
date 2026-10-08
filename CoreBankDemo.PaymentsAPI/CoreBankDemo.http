@@ -14,6 +14,12 @@ Idempotency-Key: regular-apphost-demo-payment-v1
 
 ###
 
+# Read the demo payment's status (CoreBank's committed outcome, or Pending)
+GET {{CoreBankDemo_HostAddress}}/api/payments/regular-apphost-demo-payment-v1
+Accept: application/json
+
+###
+
 # Check if unique index exists on OutboxMessages (diagnostic endpoint)
 GET {{CoreBankDemo_HostAddress}}/api/outbox/check-index
 Accept: application/json

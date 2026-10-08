@@ -34,6 +34,7 @@ public static class PaymentStorageServiceCollectionExtensions
         services.AddScoped<OutboxRepository>();
         services.AddScoped<IOutboxRepository>(provider => provider.GetRequiredService<OutboxRepository>());
         services.AddScoped<IPaymentStorageHandler, PaymentStorageHandler>();
+        services.AddScoped<IPaymentStatusHandler, PaymentStatusHandler>();
         return services;
     }
 }

@@ -236,6 +236,10 @@ As the process record, I want the accepted rebuild decisions audited against the
 - `Retry-After: 0` (or a past HTTP-date) with a large `MaxAttempts` can hammer the partition for the whole window now that validation no longer bounds `MaxAttempts` by budget; a floor on the hint or a ceiling on `MaxAttempts` needs a decision.
 - `KiotaCoreBankApiClient`'s `catch (TimeoutRejectedException)` branch and its comment claim the standard resilience pipeline applies to `corebank-api`; it has been removed since the rail's first commit (ADR-024). Dead branch and stale comment to retire.
 
+### [payment status GET](superpowers/specs/2026-10-07-payment-status-get-design.md)
+
+- A duplicate standard-rail `POST /api/payments` reports `Completed` for a payment CoreBank has received but not yet executed. — `PaymentsController.ToDuplicateResult` echoes the outbox row's kernel `Status` verbatim on the standard rail, and that column turns `Completed` once CoreBank has stored the command in its inbox (AD-11: transport state only). The instant rail and `GET /api/payments/{transactionId}` derive the status from CoreBank's committed outcome instead; aligning the standard duplicate response changes an existing response and needs its own decision.
+
 ## Open retrospective action items
 
 These carry-forwards were copied from the epic retrospectives during the 2026-09-10 migration; items verifiable as done in the code were removed then, the rest have not been re-verified.

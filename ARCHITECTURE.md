@@ -83,6 +83,7 @@ A devcontainer configuration is provided in `.devcontainer/` for GitHub Codespac
 │  │                                                            │  │
 │  │  Endpoints:                                                │  │
 │  │  • POST /api/payments                                      │  │
+│  │  • GET  /api/payments/{transactionId}                      │  │
 │  │  • GET  /api/outbox                                        │  │
 │  │  • GET  /api/inbox                                         │  │
 │  │  • POST /events/transactions/*                             │  │

@@ -80,26 +80,10 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         return true;
     }
 
-    private static bool HasCommittedOutcome(string? responsePayload)
-    {
-        if (string.IsNullOrEmpty(responsePayload))
-        {
-            return false;
-        }
-
-        try
-        {
-            var cached = JsonSerializer.Deserialize<TransactionSubmission>(responsePayload);
-            // Cancelled is terminal too (spec: instant-rail-timeout-cancel):
-            // a cached cancellation is never overwritten by a later event.
-            return cached?.Status is MessageConstants.Status.Completed
-                or MessageConstants.Status.Failed
-                or MessageConstants.Status.Cancelled;
-        }
-        catch (JsonException)
-        {
-            // A corrupt payload is never a committed outcome; overwrite it.
-            return false;
-        }
-    }
+    // Cancelled is terminal too (spec: instant-rail-timeout-cancel): a cached
+    // cancellation is never overwritten by a later event. A corrupt payload is
+    // never a committed outcome; it is overwritten.
+    private static bool HasCommittedOutcome(string? responsePayload) =>
+        CachedTransactionOutcome.TryRead(responsePayload) is { } cached
+        && CachedTransactionOutcome.IsCommitted(cached.Status);
 }

@@ -130,6 +130,74 @@ public class PaymentIntakeWiringTests(PostgresContainerFixture fixture)
             .Should().Be(1);
     }
 
+    [Theory]
+    [InlineData("payment-status-wiring")]
+    [InlineData("tenant/payment-status-wiring")]
+    public async Task Get_follows_the_202_location_and_reports_the_business_status(string idempotencyKey)
+    {
+        await using var environment = PaymentsEntryPointEnvironment.Apply(ConnectionString);
+        await using var factory = new PaymentsApiFactory();
+        using var client = factory.CreateClient();
+        using var post = new HttpRequestMessage(HttpMethod.Post, "/api/payments")
+        {
+            Content = JsonContent.Create(new PaymentRequest(
+                "NL91ABNA0417164300", "NL20INGB0001234567", 12.34m, "EUR"))
+        };
+        post.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey).Should().BeTrue();
+        var accepted = await client.SendAsync(post, TestContext.Current.CancellationToken);
+        accepted.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        var location = accepted.Headers.Location!;
+
+        // Stored, nothing delivered yet: Pending.
+        var pending = await client.GetAsync(location, TestContext.Current.CancellationToken);
+        pending.StatusCode.Should().Be(HttpStatusCode.OK);
+        var pendingBody = await pending.Content.ReadFromJsonAsync<PaymentResponse>(TestContext.Current.CancellationToken);
+        pendingBody!.TransactionId.Should().Be(idempotencyKey);
+        pendingBody.Status.Should().Be(MessageConstants.Status.Pending);
+
+        // Delivered to CoreBank's inbox (technical Completed) is still Pending.
+        await using (var store = CreateStore())
+        await using (var context = store.CreateContext())
+        {
+            var row = context.OutboxMessages.Single(message => message.IdempotencyKey == idempotencyKey);
+            row.Status = MessageConstants.Status.Completed;
+            row.ResponsePayload = $$"""{"TransactionId":"{{idempotencyKey}}","Status":"Pending","ProcessedAt":"2026-10-07T12:00:01+00:00"}""";
+            await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+        }
+
+        var delivered = await client.GetFromJsonAsync<PaymentResponse>(location, TestContext.Current.CancellationToken);
+        delivered!.Status.Should().Be(MessageConstants.Status.Pending);
+
+        // CoreBank's transaction.completed event recorded: Completed.
+        var settledAt = new DateTimeOffset(2026, 10, 7, 12, 0, 5, TimeSpan.Zero);
+        await using (var store = CreateStore())
+        await using (var context = store.CreateContext())
+        {
+            var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
+            (await repository.RecordCommittedOutcomeAsync(
+                idempotencyKey, MessageConstants.Status.Completed, settledAt, TestContext.Current.CancellationToken))
+                .Should().BeTrue();
+        }
+
+        var completed = await client.GetFromJsonAsync<PaymentResponse>(location, TestContext.Current.CancellationToken);
+        completed!.Status.Should().Be(MessageConstants.Status.Completed);
+        completed.ProcessedAt.Should().Be(settledAt);
+    }
+
+    [Theory]
+    [InlineData("/api/payments/never-stored")]
+    [InlineData("/api/payments/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    public async Task Get_answers_404_for_an_unknown_or_over_long_id(string path)
+    {
+        await using var environment = PaymentsEntryPointEnvironment.Apply(ConnectionString);
+        await using var factory = new PaymentsApiFactory();
+        using var client = factory.CreateClient();
+
+        var response = await client.GetAsync(path, TestContext.Current.CancellationToken);
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+    }
+
     // The integration project references two APIs that both export a global
     // Program type. An application type from PaymentsAPI selects that same
     // entry assembly without introducing an ambiguous Program reference.

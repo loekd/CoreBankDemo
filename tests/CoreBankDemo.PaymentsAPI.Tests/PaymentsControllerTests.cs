@@ -33,6 +33,7 @@ public class PaymentsControllerTests
 
     private readonly Mock<IPaymentStorageHandler> _handler = new(MockBehavior.Strict);
     private readonly Mock<IInstantPaymentForwardingHandler> _instantHandler = new(MockBehavior.Strict);
+    private readonly Mock<IPaymentStatusHandler> _statusHandler = new(MockBehavior.Strict);
     private readonly BusinessMetrics _businessMetrics = new();
 
     private static PaymentRequest ValidRequest() => new(FromAccount, ToAccount, 50m, "EUR");
@@ -66,7 +67,7 @@ public class PaymentsControllerTests
             httpContext.Request.Headers["Idempotency-Key"] = idempotencyKeyHeader;
         }
 
-        return new PaymentsController(_handler.Object, _instantHandler.Object, _businessMetrics)
+        return new PaymentsController(_handler.Object, _instantHandler.Object, _statusHandler.Object, _businessMetrics)
         {
             ControllerContext = new ControllerContext { HttpContext = httpContext }
         };
@@ -768,5 +769,46 @@ public class PaymentsControllerTests
         var property = value!.GetType().GetProperty("Errors");
         property.Should().NotBeNull();
         return ((IEnumerable<string>)property!.GetValue(value)!).ToList();
+    }
+
+    [Fact]
+    public async Task GetPayment_returns_200_with_the_handlers_response()
+    {
+        var payment = new PaymentResponse(
+            IdempotencyKey, TransactionId, "Pending", 50m, "EUR",
+            new DateTimeOffset(2026, 10, 7, 12, 0, 0, TimeSpan.Zero));
+        var cancellationToken = TestContext.Current.CancellationToken;
+        _statusHandler.Setup(handler => handler.GetAsync(TransactionId, cancellationToken)).ReturnsAsync(payment);
+
+        var result = await CreateController().GetPayment(TransactionId, cancellationToken);
+
+        result.Should().BeOfType<OkObjectResult>().Which.Value.Should().BeSameAs(payment);
+    }
+
+    [Fact]
+    public async Task GetPayment_returns_404_when_the_payment_is_unknown()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        _statusHandler.Setup(handler => handler.GetAsync("unknown", cancellationToken)).ReturnsAsync((PaymentResponse?)null);
+
+        var result = await CreateController().GetPayment("unknown", cancellationToken);
+
+        result.Should().BeOfType<NotFoundResult>();
+    }
+
+    [Theory]
+    // ASP.NET Core keeps %2F encoded in route values; the Location header
+    // escapes '/' that way, so the action must turn it back.
+    [InlineData("tenant%2Fpayment-1", "tenant/payment-1")]
+    [InlineData("tenant%2fpayment-1", "tenant/payment-1")]
+    [InlineData("plain-key", "plain-key")]
+    public async Task GetPayment_restores_an_escaped_slash_before_the_lookup(string routeValue, string expectedId)
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        _statusHandler.Setup(handler => handler.GetAsync(expectedId, cancellationToken)).ReturnsAsync((PaymentResponse?)null);
+
+        await CreateController().GetPayment(routeValue, cancellationToken);
+
+        _statusHandler.Verify(handler => handler.GetAsync(expectedId, cancellationToken), Times.Once);
     }
 }
