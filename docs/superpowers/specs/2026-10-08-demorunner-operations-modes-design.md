@@ -1,6 +1,6 @@
 # Operations gets three modes: Single, Burst, Fetch
 
-> **Status:** Draft
+> **Status:** Implemented
 > **Kind:** design spec
 > **Original date:** 2026-10-08
 > **Related:** [ADR-015](../../adr/ADR-015-presentation-safe-terminal-demo-console.md); [ADR-027](../../adr/ADR-027-payment-status-local-projection.md); [payment status GET](2026-10-07-payment-status-get-design.md); [UX experience](2026-09-03-demorunner-ux-experience-design.md); [Operations stage focus](2026-09-09-demorunner-operations-stage-focus-design.md)
