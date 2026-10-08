@@ -21,7 +21,11 @@ namespace CoreBankDemo.PaymentsAPI.Handlers;
 /// and reservation release) and the payment row's cached committed outcome
 /// -- and its own completion: all of it, plus
 /// <see cref="IInboxMessageRepository.MarkAsCompletedAsync"/> on this row,
-/// commits in one database transaction (the transactional inbox). It still
+/// commits in one database transaction (the transactional inbox). Each
+/// transaction attempt -- including an execution-strategy retry -- starts
+/// from, and on failure restores, the message's pre-transaction
+/// <see cref="InboxMessage.Status"/> and <c>ProcessedAt</c>, so attempts are
+/// idempotent with respect to the message's in-memory state. It still
 /// never writes the outbox row's transport <c>Status</c>, never calls an
 /// external service and never creates a second <see cref="ActivitySource"/>.
 /// A malformed payload (invalid JSON or a JSON <c>null</c>), a stored event
@@ -73,6 +77,12 @@ internal sealed class TransactionEventHandler(
             // it back and the kernel records a retry (ADR-023).
             await inboxRepository.ExecuteInTransactionAsync(async () =>
             {
+                // Npgsql retry-on-failure (on by default under Aspire) re-runs
+                // this delegate: every attempt starts from the pre-transaction
+                // state, never from a previous attempt's in-memory Completed.
+                message.Status = originalStatus;
+                message.ProcessedAt = originalProcessedAt;
+
                 switch (message.EventType)
                 {
                     case Constants.TransactionCompleted:

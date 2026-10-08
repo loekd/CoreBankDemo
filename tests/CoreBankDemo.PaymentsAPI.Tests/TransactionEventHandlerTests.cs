@@ -653,6 +653,40 @@ public class TransactionEventHandlerTests
     }
 
     [Fact]
+    public async Task A_retried_transaction_attempt_starts_from_the_original_message_status()
+    {
+        // Npgsql retry-on-failure re-runs the transaction delegate; an attempt
+        // that inherited the previous attempt's in-memory Completed would make
+        // MarkAsCompletedAsync answer AlreadyTerminal and commit without
+        // completing the row.
+        var inbox = new Mock<IInboxMessageRepository>();
+        inbox
+            .Setup(r => r.ExecuteInTransactionAsync(It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()))
+            .Returns<Func<Task>, CancellationToken>(async (operation, _) =>
+            {
+                await operation();
+                await operation();
+            });
+        var statusesSeen = new List<string>();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                statusesSeen.Add(m.Status);
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+            })
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var message = Inbox(Constants.TransactionCompleted, "txn-rt", payload: Serialize(new TransactionCompletedEvent("txn-rt", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        var handler = CreateHandler(inbox: inbox);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        statusesSeen.Should().Equal(MessageConstants.Status.Processing, MessageConstants.Status.Processing);
+    }
+
+    [Fact]
     public async Task Balance_update_tags_the_span_with_the_projection_state()
     {
         using var observedActivity = StartListenedActivity();
