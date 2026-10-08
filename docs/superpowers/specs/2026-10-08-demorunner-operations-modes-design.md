@@ -49,7 +49,8 @@ the answer is identical to the previous one.
 ## Layout
 
 The selector takes row 0 of the compose area. Each mode's bar follows on rows 1–2. Every mode is
-three rows tall, so switching modes never moves the card. The compose rule follows as today.
+three rows tall, so switching modes never moves the card (with the default Generated key mode; the
+Supplied/Omitted line beneath Single adds its row exactly as today). The compose rule follows as today.
 
 ```
  ◉ Single  ○ Burst  ○ Fetch
@@ -93,16 +94,18 @@ overwritten. With no payment on the card, the field is left as it is.
 Evidence record, like Look up outcome: no topology started or attached; empty id.
 
 **Result line** — persistent until the next Fetch, so a repeated identical answer still visibly
-changes its stamp. The right end always carries `fetched HH:mm:ss · <duration>` (local time of
-the press; duration as elsewhere in the console).
+changes its stamp. The right end always carries `fetched HH:mm:ss · <n> ms`: the press time in the
+console's own clock format (`OutcomeFeedNarrative.Clock`), and the duration in whole milliseconds as
+the Evidence pane prints it.
 
 | State | Left part | Tone |
 |---|---|---|
-| In flight | `~ GET /api/payments/<id> …`; Fetch reads `Fetching — 0.4s` and is disabled | neutral |
+| In flight | `~ GET /api/payments/<id> …`; Fetch reads `Fetching — 0s` (whole seconds, like the card's `Cancelling — 3s`) and is disabled | neutral |
 | `200` with a readable `PaymentResponse` | `✓ 200  <Status> · <amount> <currency> · <since\|at> HH:mm:ss` — `since` for `Pending`, `at` otherwise; the time is the body's `processedAt` | accent (teal) |
 | `404` | `○ 404  no payment with this id` | neutral |
 | `200` with an unreadable body | `✗ 200  unreadable response body` | failure |
-| Any other status, timeout, or no connection | `✗ <code>  <error summary>`, or `✗ PaymentsAPI unreachable — <reason>` without a status code | failure |
+| Any other status | `✗ <code>  unexpected answer from PaymentsAPI` | failure |
+| Timeout or no connection | `✗ PaymentsAPI unreachable — <reason>` | failure |
 | Refused (no topology, empty id) | `✗ <refusal reason>`, with no request sent | failure |
 
 No new colour: the theme has no success green, so `✓` takes the teal accent and `✗` the existing
@@ -111,8 +114,10 @@ Evidence record carry it.
 
 **Evidence.** Kind `OutcomeQuery`, method `GET`, target the endpoint id, the status code, the
 duration, the body or error summary, and the exchange. Titles `Payment status fetched` (any HTTP
-answer, `404` included) and `Payment status fetch failed` (no HTTP answer or a refusal). The record
-names the creditor account when the id is a payment the console tracks, as the outcome query does.
+answer) and `Payment status fetch failed` (no HTTP answer); a refusal follows the console's refusal
+convention, `Payment status fetch refused`. The record counts as succeeded for a `2xx` and for a
+`404` — an unknown id is an answer, not a failure. It names the creditor account when the id is a
+payment the console tracks, as the outcome query does.
 
 **Typed id.** The UX experience spec retired a standing typed **Outcome key** field in favour of the
 card's untyped lookup. Fetch deliberately brings back a typed field, scoped to its own mode and
