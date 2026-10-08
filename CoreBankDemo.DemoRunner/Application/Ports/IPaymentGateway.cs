@@ -24,6 +24,15 @@ public interface IPaymentGateway
         string transactionIdOrKey,
         CancellationToken ct);
 
+    /// <summary>
+    /// Reads a payment's status from PaymentsAPI (ADR-027). Read-only; the answer is never proof
+    /// of an outcome on the card.
+    /// </summary>
+    Task<InspectionResult> FetchPaymentStatusAsync(
+        TopologyProfile profile,
+        string transactionId,
+        CancellationToken ct);
+
     Task<InspectionResult> InspectAsync(
         TopologyProfile profile,
         string endpointId,

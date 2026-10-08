@@ -265,6 +265,10 @@ public sealed class FakePaymentGateway : IPaymentGateway
     public TaskCompletionSource? ReleaseSubmission { get; set; }
     public TaskCompletionSource? QueryStarted { get; set; }
     public TaskCompletionSource? ReleaseQuery { get; set; }
+    public List<string> FetchIds { get; } = [];
+    public List<TopologyProfile> FetchProfiles { get; } = [];
+    public TaskCompletionSource? FetchStarted { get; set; }
+    public TaskCompletionSource? ReleaseFetch { get; set; }
     public TaskCompletionSource? CancelStarted { get; set; }
     public TaskCompletionSource? ReleaseCancel { get; set; }
 
@@ -358,6 +362,22 @@ public sealed class FakePaymentGateway : IPaymentGateway
         }
 
         return NextInspection("outcome");
+    }
+
+    public async Task<InspectionResult> FetchPaymentStatusAsync(
+        TopologyProfile profile,
+        string transactionId,
+        CancellationToken ct)
+    {
+        FetchProfiles.Add(profile);
+        FetchIds.Add(transactionId);
+        FetchStarted?.TrySetResult();
+        if (ReleaseFetch is not null)
+        {
+            await ReleaseFetch.Task.WaitAsync(ct);
+        }
+
+        return NextInspection(KnownEndpoints.PaymentStatus);
     }
 
     public Task<InspectionResult> InspectAsync(

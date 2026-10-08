@@ -316,6 +316,12 @@ public sealed class HttpPaymentGateway(HttpClient httpClient) : IPaymentGateway
         CancellationToken ct) =>
         SendInspectionAsync(profile, KnownEndpoints.TransactionOutcome, transactionIdOrKey, null, ct);
 
+    public Task<InspectionResult> FetchPaymentStatusAsync(
+        TopologyProfile profile,
+        string transactionId,
+        CancellationToken ct) =>
+        SendInspectionAsync(profile, KnownEndpoints.PaymentStatus, transactionId, null, ct);
+
     public Task<InspectionResult> InspectAsync(
         TopologyProfile profile,
         string endpointId,

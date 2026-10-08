@@ -44,6 +44,9 @@ public static class EndpointResolver
         string? pathParameter = null) => endpointId switch
     {
         KnownEndpoints.PaymentsSubmit => ($"{PaymentsBaseUrl(profile)}/api/payments", HttpMethod.Post),
+        KnownEndpoints.PaymentStatus => (
+            $"{PaymentsBaseUrl(profile)}/api/payments/{Uri.EscapeDataString(RequirePathParameter(endpointId, pathParameter))}",
+            HttpMethod.Get),
         KnownEndpoints.TransactionOutcome => (
             $"{CoreBankApiBaseUrl}/api/transactions/{Uri.EscapeDataString(RequirePathParameter(endpointId, pathParameter))}",
             HttpMethod.Get),

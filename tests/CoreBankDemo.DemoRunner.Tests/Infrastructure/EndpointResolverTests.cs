@@ -64,6 +64,7 @@ public class EndpointResolverTests
     [InlineData(KnownEndpoints.CoreBankInbox, null, "5181/corebank/inbox")]
     [InlineData(KnownEndpoints.CoreBankOutbox, null, "5181/corebank/outbox")]
     [InlineData(KnownEndpoints.TransactionCancel, null, "5032/api/transactions/cancel")]
+    [InlineData(KnownEndpoints.PaymentStatus, "key", "5295/api/payments/key")]
     public void EndpointFor_AllCompiledEndpointsResolve(
         string endpoint,
         string? path,
@@ -107,5 +108,30 @@ public class EndpointResolverTests
         ProfileRegistry.ProjectPath("/repo", TopologyProfile.Regular).Should().Be("/repo/CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj");
         Action invalid = () => ProfileRegistry.RelativeProjectPath(TopologyProfile.None);
         invalid.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    /// <summary>
+    /// PaymentsAPI's own status read (ADR-027), on the profile's PaymentsAPI port, reached only
+    /// through this allow-listed id (ADR-015).
+    /// </summary>
+    [Theory]
+    [InlineData(TopologyProfile.Regular, "http://127.0.0.1:5294/api/payments/tx-1")]
+    [InlineData(TopologyProfile.LoadTests, "http://127.0.0.1:5295/api/payments/tx-1")]
+    public void EndpointFor_PaymentStatus_IsAGetOnTheProfilesPaymentsApi(TopologyProfile profile, string expected)
+    {
+        var (url, method) = EndpointResolver.EndpointFor(profile, KnownEndpoints.PaymentStatus, "tx-1");
+
+        url.Should().Be(expected);
+        method.Should().Be(HttpMethod.Get);
+    }
+
+    [Fact]
+    public void EndpointFor_PaymentStatus_RequiresAnId()
+    {
+        var missing = () => EndpointResolver.EndpointFor(TopologyProfile.Regular, KnownEndpoints.PaymentStatus);
+        var blank = () => EndpointResolver.EndpointFor(TopologyProfile.Regular, KnownEndpoints.PaymentStatus, "  ");
+
+        missing.Should().Throw<ArgumentException>();
+        blank.Should().Throw<ArgumentException>();
     }
 }

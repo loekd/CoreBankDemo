@@ -202,7 +202,12 @@ public sealed record OperatorPresentationModel(
     // What the console is doing or last did to the topology. Rendered in Resources, which is the
     // workspace that owns the question it answers -- the removed bottom band showed it in all
     // five, and Evidence/Results is where the durable record of it lives.
-    string TopologyStatus);
+    string TopologyStatus,
+    // The Fetch result line and button (spec: demorunner-operations-modes). Never locked by the
+    // single-action-in-flight rule; disabled only while its own call is out.
+    FetchLineViewModel FetchLine,
+    string FetchCaption,
+    bool CanFetch);
 
 public static class PresentationModelBuilder
 {
@@ -324,7 +329,10 @@ public static class PresentationModelBuilder
             state.Ownership == TopologyOwnership.None,
             state.ActiveMutation is null
                 ? state.StatusLine
-                : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running");
+                : $"{state.ActiveMutation.Kind} · {state.ActiveMutation.Target} · Running",
+            PaymentStatusLine.Build(state.PaymentStatusFetch),
+            PaymentStatusLine.Caption(state.PaymentStatusFetch, now),
+            state.PaymentStatusFetch is not { InFlight: true });
     }
 
     /// <summary>

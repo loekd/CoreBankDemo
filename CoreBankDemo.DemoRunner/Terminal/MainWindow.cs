@@ -82,22 +82,21 @@ public sealed class MainWindow : Window
     private const int OperationsChromeRows = 7;
 
     /// <summary>
-    /// The compose bar's two captioned lines plus the mode row beneath them, before any
-    /// mode-specific line. The mode row is the mode button's own at every width, so the chips
-    /// never compete with it for the second line and no caption is ever shed to make room.
+    /// The selector's row plus the active mode's two-line bar, before any mode-specific line.
+    /// Every mode is this tall, so switching modes never moves the card.
     /// </summary>
     private const int ComposeBarRows = 3;
 
-    /// <summary>The row the mode button and, while a burst is armed, the burst count fields share.</summary>
-    private const int ModeButtonRow = 2;
+    private const int SelectorRow = 0;
+    private const int ComposeFirstRow = 1;
+    private const int ComposeSecondRow = 2;
 
-    /// <summary>
-    /// The mode button names the mode it switches <em>to</em>, so the operator reads a
-    /// destination rather than a state. Which mode is current is already stated by Submit's own
-    /// caption and by the burst count fields being present.
-    /// </summary>
-    private const string BurstModeCaption = "Burst mode";
-    private const string SingleModeCaption = "Single mode";
+    // Burst's second line: Count and at once share it with Amount and the rail chip, in the
+    // column the Key chip uses in Single, narrowed to fit the 71-column floor (ends at 66).
+    private const int BurstFieldWidth = 6;
+    private const int BurstCountCaptionX = 40;
+    private const int BurstConcurrencyCaptionX = 53;
+
 
     /// <summary>
     /// Sized to the longest label the slot will ever hold (<c>[ Look up outcome ]</c>), so
@@ -187,7 +186,12 @@ public sealed class MainWindow : Window
     private readonly Button _railButton = NewButton("Rail ‹ standard ›");
     private readonly Button _idempotencyButton = NewButton("Key ‹ Generated ›");
     private readonly Button _submitButton = NewButton("Submit", isDefault: true);
-    private readonly Button _burstButton = NewButton(BurstModeCaption);
+    private readonly OptionSelector<ComposeMode> _modeSelector = new() { Orientation = Orientation.Horizontal };
+    private readonly Button _sendBurstButton = NewButton("Send burst");
+    private readonly Button _fetchButton = NewButton(PaymentStatusLine.FetchCaption);
+    private readonly TextField _fetchId = new() { Text = string.Empty };
+    private readonly Label _fetchStatus = new();
+    private readonly Label _fetchStamp = new();
     private readonly Button _cancelBurstButton = NewButton("Stop sending");
 
     // --- Operations: the two regions that replace each other -----------------------------
@@ -234,6 +238,10 @@ public sealed class MainWindow : Window
     private Label _modeLine = null!;
     private Label _burstSetupLabel = null!;
     private Label _burstConcurrencyLabel = null!;
+    private Label _fromCaption = null!;
+    private Label _toCaption = null!;
+    private Label _amountCaption = null!;
+    private Label _fetchIdCaption = null!;
 
     // --- Operations: burst takeover ------------------------------------------------------
     private readonly Label _burstRule = new();
@@ -333,7 +341,10 @@ public sealed class MainWindow : Window
     private bool _rebindingResourceList;
     private View? _resourceActions;
     private bool _compactLayout;
-    private bool _burstSetupVisible;
+    private ComposeMode _composeMode = ComposeMode.Single;
+
+    /// <summary>The id Fetch's field was last filled with from the card, so a typed id is never overwritten.</summary>
+    private string? _lastFetchPrefill;
 
     /// <summary>
     /// True while a burst is running or still holding its final summary. A result that clears
@@ -378,14 +389,15 @@ public sealed class MainWindow : Window
         Title = "CoreBankDemo — Operator Console";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
-        // Submit and the mode button are Operations' two filled-teal controls: the mode button
-        // wears Submit's treatment so the compose bar's own two actions read as a pair. The
+        // Submit, Send burst and Fetch are the compose area's filled-teal controls, one per mode,
+        // in the same right-hand slot. The
         // card's own action and the takeover's dismiss take the object-anchored treatment
         // instead -- and Cancel payment pointedly takes neither the destructive tokens (it
         // destroys nothing) nor the lock-exempt outline (it is exempt from confirmation, never
         // from the lock).
         OperatorTheme.Apply(_submitButton, OperatorTheme.ActionScheme);
-        OperatorTheme.Apply(_burstButton, OperatorTheme.ActionScheme);
+        OperatorTheme.Apply(_sendBurstButton, OperatorTheme.ActionScheme);
+        OperatorTheme.Apply(_fetchButton, OperatorTheme.ActionScheme);
         OperatorTheme.Apply(_resourceActionButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_restartResourceButton, OperatorTheme.DestructiveScheme);
         OperatorTheme.Apply(_stopButton, OperatorTheme.DestructiveScheme);
@@ -470,7 +482,7 @@ public sealed class MainWindow : Window
     /// carrying the selected payment's own action, and a STILL OPEN strip that renders only
     /// while more than one payment is open. Its actions anchor to the object they operate on
     /// rather than to a shared lower region, which this workspace no longer has: Submit and
-    /// the mode button belong to the compose bar whose contents they act on, and Cancel payment / Look up
+    /// the selector's bars belong to the compose bar whose contents they act on, and Cancel payment / Look up
     /// outcome / Resend same key to the card, acting on the payment printed above them.
     /// </summary>
     private View BuildOperationsView()
@@ -487,41 +499,71 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
-    /// Two captioned lines, the first ending in a right-anchored action slot, then the mode row
-    /// holding the mode button in that same slot, plus a further line only where a mode needs
-    /// one. The captions are what stay at every width: an unlabelled IBAN read from the back of a
-    /// room is a run of digits. There is no currency field and no currency validation — the
-    /// console always sends EUR.
+    /// The selector on the first row, then the active mode's own two-line bar with its own action
+    /// in the right-anchored slot: Single (From, To, Submit; Amount, rail, key), Burst (From, To,
+    /// Send burst; Amount, rail, count, at once) or Fetch (Payment id, Fetch; the result line).
+    /// No button changes its caption or meaning with the mode. The captions are what stay at
+    /// every width: an unlabelled IBAN read from the back of a room is a run of digits. There is
+    /// no currency field and no currency validation — the console always sends EUR.
     /// </summary>
     private void BuildComposeBar(View view)
     {
-        // Added in the workspace's literal Tab order: compose-bar first line (From, To, Submit),
-        // then the second (Amount, rail chip, idempotency chip), then the mode row (mode button,
-        // burst count fields), then the line where a mode renders one (EXPERIENCE.md,
-        // Accessibility Floor).
-        AddField(view, "From", _fromAccount, LabelX, 0, AccountCaptionWidth, AccountFieldWidth);
-        AddField(
+        // Added in the workspace's literal Tab order: the selector, then each bar's first line,
+        // then its second, then the line a key mode renders (EXPERIENCE.md, Accessibility Floor).
+        _modeSelector.X = LabelX;
+        _modeSelector.Y = SelectorRow;
+        view.Add(_modeSelector);
+        _modeSelector.ValueChanged += (_, e) =>
+        {
+            _composeMode = e.Value ?? ComposeMode.Single;
+            if (_composeMode == ComposeMode.Fetch)
+            {
+                PrefillFetchId();
+            }
+
+            Repaint();
+        };
+
+        _fromCaption = AddField(view, "From", _fromAccount, LabelX, ComposeFirstRow, AccountCaptionWidth, AccountFieldWidth);
+        _toCaption = AddField(
             view,
             "→ To",
             _toAccount,
             LabelX + AccountCaptionWidth + AccountFieldWidth + 2,
-            0,
+            ComposeFirstRow,
             AccountCaptionWidth,
             AccountFieldWidth);
-        view.Add(_submitButton);
-        AddField(view, "Amount", _amount, LabelX, 1, AmountCaptionWidth, AmountFieldWidth);
+        _fetchIdCaption = AddField(view, "Payment id", _fetchId, LabelX, ComposeFirstRow, 10, 1);
+        _fetchId.Width = Dim.Fill(CardActionSlotWidth + 1);
+        foreach (var action in new[] { _submitButton, _sendBurstButton, _fetchButton })
+        {
+            action.X = Pos.AnchorEnd(CardActionSlotWidth);
+            action.Y = ComposeFirstRow;
+            view.Add(action);
+        }
+
+        _amountCaption = AddField(view, "Amount", _amount, LabelX, ComposeSecondRow, AmountCaptionWidth, AmountFieldWidth);
         _railButton.X = RailChipX;
-        _railButton.Y = 1;
+        _railButton.Y = ComposeSecondRow;
         _railButton.Width = ChipWidth;
         _idempotencyButton.X = KeyChipX;
-        _idempotencyButton.Y = 1;
+        _idempotencyButton.Y = ComposeSecondRow;
         _idempotencyButton.Width = ChipWidth;
-        _submitButton.X = Pos.AnchorEnd(CardActionSlotWidth);
-        _submitButton.Y = 0;
-        _burstButton.X = Pos.AnchorEnd(CardActionSlotWidth);
-        _burstButton.Y = ModeButtonRow;
+        view.Add(_railButton, _idempotencyButton);
 
-        view.Add(_railButton, _idempotencyButton, _burstButton);
+        _burstSetupLabel = AddField(view, "Count", _burstCount, BurstCountCaptionX, ComposeSecondRow, 5, BurstFieldWidth);
+        _burstConcurrencyLabel = AddField(
+            view, "at once", _burstConcurrency, BurstConcurrencyCaptionX, ComposeSecondRow, 7, BurstFieldWidth);
+
+        _fetchStatus.X = LabelX;
+        _fetchStatus.Y = ComposeSecondRow;
+        _fetchStatus.Height = 1;
+        // The stamp ("fetched HH:mm:ss · 38 ms") is sized to its own text on every render, so the
+        // status takes every other cell: a 200 line only just fits the 80x24 floor.
+        SizeFetchStamp(0);
+        _fetchStamp.Y = ComposeSecondRow;
+        _fetchStamp.Height = 1;
+        view.Add(_fetchStatus, _fetchStamp);
 
         _railButton.Accepting += (_, e) =>
         {
@@ -545,22 +587,7 @@ public sealed class MainWindow : Window
             Repaint();
         };
 
-        // Burst mode reveals the burst control rather than firing one: the count is bounded and
-        // the operator states it before two hundred payments leave. The fields share the mode
-        // button's row, so arming a burst costs the bar no extra line.
-        _burstSetupLabel = new Label { X = LabelX, Y = ModeButtonRow, Height = 1, Width = 12, Text = "Burst count" };
-        _burstCount.X = LabelX + 13;
-        _burstCount.Y = ModeButtonRow;
-        _burstCount.Height = 1;
-        _burstCount.Width = NarrowFieldWidth;
-        _burstConcurrencyLabel = new Label { X = LabelX + 25, Y = ModeButtonRow, Height = 1, Width = 9, Text = "at once" };
-        _burstConcurrency.X = LabelX + 35;
-        _burstConcurrency.Y = ModeButtonRow;
-        _burstConcurrency.Height = 1;
-        _burstConcurrency.Width = NarrowFieldWidth;
-        view.Add(_burstSetupLabel, _burstCount, _burstConcurrencyLabel, _burstConcurrency);
-
-        // The one mode-specific line beneath the mode row: the supplied-key field in Supplied
+        // The one mode-specific line beneath Single's bar: the supplied-key field in Supplied
         // mode, the not-retry-safe warning in Omitted mode. No control in use is ever hidden.
         _modeLine = new Label { X = LabelX, Y = ComposeBarRows, Height = 1, Width = 14, Text = "Supplied key" };
         _suppliedKey.X = LabelX + 15;
@@ -569,15 +596,9 @@ public sealed class MainWindow : Window
         _suppliedKey.Width = AccountFieldWidth + 6;
         view.Add(_modeLine, _suppliedKey);
 
-        // Submit itself sends the burst once one is armed, so there is exactly one action that
-        // fires payments — not a second "Start burst" button duplicating what Submit already does.
         _submitButton.Accepting += (_, e) => { e.Handled = true; Dispatch(SubmitPaymentAsync); };
-        _burstButton.Accepting += (_, e) =>
-        {
-            e.Handled = true;
-            _burstSetupVisible = !_burstSetupVisible;
-            Repaint();
-        };
+        _sendBurstButton.Accepting += (_, e) => { e.Handled = true; Dispatch(RunBurstAsync); };
+        _fetchButton.Accepting += (_, e) => { e.Handled = true; Dispatch(FetchPaymentStatusAsync); };
 
         _composeRule.X = LabelX;
         _composeRule.Y = ComposeBarRows;
@@ -585,6 +606,38 @@ public sealed class MainWindow : Window
         _composeRule.Width = Dim.Fill(1);
         view.Add(_composeRule);
     }
+
+    /// <summary>
+    /// Fills Fetch's field with the card's payment when the field is empty or still holds the
+    /// id it was last filled with. An id the operator typed is never overwritten, and with no
+    /// payment on the card the field is left as it is.
+    /// </summary>
+    private void PrefillFetchId()
+    {
+        if (_focusCard.IsPlaceholder || string.IsNullOrEmpty(_focusCard.TransactionId))
+        {
+            return;
+        }
+
+        var current = _fetchId.Text.ToString() ?? string.Empty;
+        if (current.Length == 0 || string.Equals(current, _lastFetchPrefill, StringComparison.Ordinal))
+        {
+            _fetchId.Text = _focusCard.TransactionId;
+            _lastFetchPrefill = _focusCard.TransactionId;
+        }
+    }
+
+    /// <summary>Right-anchors the stamp at its own width and gives the status the rest of the line, less one cell of gap.</summary>
+    private void SizeFetchStamp(int width)
+    {
+        _fetchStamp.X = Pos.AnchorEnd(width);
+        _fetchStamp.Width = width;
+        _fetchStatus.Width = Dim.Fill(width + 1);
+    }
+
+    /// <summary>One call per press; the answer goes to the result line and Evidence, never the announcement.</summary>
+    private Task FetchPaymentStatusAsync() =>
+        _controller.FetchPaymentStatusAsync(_fetchId.Text.ToString() ?? string.Empty, _sessionCancellation.Token);
 
     /// <summary>
     /// The card's first line is a fixed grid — symbol, state word, right-aligned clock, action
@@ -1351,15 +1404,6 @@ public sealed class MainWindow : Window
 
     private async Task SubmitPaymentAsync()
     {
-        // Burst mode arms the burst rather than firing it, so Submit is the one action that sends
-        // payments: while the burst setup is visible, Submit sends the burst instead of a single
-        // payment. There is no separate "Start burst" button duplicating this.
-        if (_burstSetupVisible)
-        {
-            await RunBurstAsync();
-            return;
-        }
-
         if (!decimal.TryParse(_amount.Text.ToString(), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var amount))
         {
             ShowMessage("Amount must be a decimal using '.' as the separator.");
@@ -1610,7 +1654,19 @@ public sealed class MainWindow : Window
         _armingButton.Enabled = model.CanChangeArming;
 
         _submitButton.Enabled = !model.IsBusy;
-        _burstButton.Enabled = !model.IsBusy;
+        _sendBurstButton.Enabled = !model.IsBusy;
+        // Read-only, so never behind the single-action lock; disabled only while its own call is out.
+        _fetchButton.Enabled = model.CanFetch;
+        _fetchButton.Text = model.FetchCaption;
+        _fetchStatus.Text = model.FetchLine.Status;
+        OperatorTheme.Apply(_fetchStatus, model.FetchLine.Tone switch
+        {
+            LineTone.Accent => OperatorTheme.LockExemptScheme,
+            LineTone.Failure => OperatorTheme.DestructiveScheme,
+            _ => OperatorTheme.BaseScheme,
+        });
+        _fetchStamp.Text = model.FetchLine.Stamp;
+        SizeFetchStamp(model.FetchLine.Stamp.Length);
         _cancelBurstButton.Enabled = model.CanCancelBurst;
         var state = _controller.State;
         _startRegularButton.Enabled = !model.IsBusy && state.Preflight?.CanStart(TopologyProfile.Regular) == true;
@@ -1937,6 +1993,54 @@ public sealed class MainWindow : Window
     }
 
     /// <summary>
+    /// Shows the active mode's bar and nothing else, and makes its action the one default button,
+    /// so Enter in any field fires the bar that field belongs to.
+    /// </summary>
+    private void ApplyComposeMode()
+    {
+        var single = _composeMode == ComposeMode.Single;
+        var burst = _composeMode == ComposeMode.Burst;
+        var fetch = _composeMode == ComposeMode.Fetch;
+
+        foreach (var paymentControl in new View[]
+                 {
+                     _fromCaption, _fromAccount, _toCaption, _toAccount, _amountCaption, _amount, _railButton,
+                 })
+        {
+            paymentControl.Visible = !fetch;
+        }
+
+        _idempotencyButton.Visible = single;
+        _submitButton.Visible = single;
+        _submitButton.IsDefault = single;
+
+        _burstSetupLabel.Visible = burst;
+        _burstCount.Visible = burst;
+        _burstConcurrencyLabel.Visible = burst;
+        _burstConcurrency.Visible = burst;
+        _sendBurstButton.Visible = burst;
+        _sendBurstButton.IsDefault = burst;
+
+        _fetchIdCaption.Visible = fetch;
+        _fetchId.Visible = fetch;
+        _fetchStatus.Visible = fetch;
+        _fetchStamp.Visible = fetch;
+        _fetchButton.Visible = fetch;
+        _fetchButton.IsDefault = fetch;
+
+        // The key-mode line speaks only about Supplied and Omitted mode in Single, so in every
+        // other case it is a row of noise and the first one reclaimed.
+        var supplied = single && _idempotencyMode == IdempotencyMode.Supplied;
+        var omitted = single && _idempotencyMode == IdempotencyMode.Omitted;
+        _modeLine.Visible = supplied || omitted;
+        _suppliedKey.Visible = supplied;
+        _modeLine.Text = supplied
+            ? "Supplied key"
+            : "Omitted mode: not retry-safe after an ambiguous outcome";
+        _modeLine.Width = supplied ? 14 : Dim.Fill(1);
+    }
+
+    /// <summary>
     /// Places the three Operations regions.
     /// <para>
     /// The focus card is budgeted <b>first</b> and everything else is compressed into what is
@@ -1954,29 +2058,9 @@ public sealed class MainWindow : Window
     {
         var inner = Math.Max(0, Frame.Height - OperationsChromeRows);
 
-        // The mode line speaks only about Supplied and Omitted mode, so in Generated mode it is a
-        // row of noise and the first one reclaimed.
-        var supplied = _idempotencyMode == IdempotencyMode.Supplied;
-        var omitted = _idempotencyMode == IdempotencyMode.Omitted;
-        _modeLine.Visible = supplied || omitted;
-        _suppliedKey.Visible = supplied;
-        _modeLine.Text = supplied
-            ? "Supplied key"
-            : "Omitted mode: not retry-safe after an ambiguous outcome";
-        _modeLine.Width = supplied ? 14 : Dim.Fill(1);
+        ApplyComposeMode();
 
-        _burstSetupLabel.Visible = _burstSetupVisible;
-        _burstCount.Visible = _burstSetupVisible;
-        _burstConcurrencyLabel.Visible = _burstSetupVisible;
-        _burstConcurrency.Visible = _burstSetupVisible;
-
-        // Submit is the one action that fires payments, so its label states which one it will
-        // fire while burst setup is armed; the mode button offers the other mode.
-        _submitButton.Text = _burstSetupVisible ? "Send burst" : "Submit";
-        _burstButton.Text = _burstSetupVisible ? SingleModeCaption : BurstModeCaption;
-
-        // The burst fields live on the mode button's own row, so the only line that can grow the
-        // bar is the mode line.
+        // Every mode's bar is the same height, so only Single's key-mode line can grow it.
         var ruleRow = ComposeBarRows + (_modeLine.Visible ? 1 : 0);
         _composeRule.Y = ruleRow;
 
@@ -2581,7 +2665,15 @@ public sealed class MainWindow : Window
     internal TextField SuppliedKeyField => _suppliedKey;
     internal Button RefreshButton => _refreshButton;
     internal int MountedWorkspaceCount => _content.SubViews.Count;
-    internal Button BurstButton => _burstButton;
+    internal OptionSelector<ComposeMode> ModeSelector => _modeSelector;
+    internal Button SendBurstButton => _sendBurstButton;
+    internal Button FetchButton => _fetchButton;
+    internal TextField FetchIdField => _fetchId;
+    internal string FetchStatusText => _fetchStatus.Text;
+    internal string FetchStampText => _fetchStamp.Text;
+    internal View FetchStatusLabel => _fetchStatus;
+    internal void SelectComposeModeForTest(ComposeMode mode) => _modeSelector.Value = mode;
+    internal Task TriggerFetchForTestAsync() => FetchPaymentStatusAsync();
     internal Button StopButton => _stopButton;
     internal Button ResourceActionButton => _resourceActionButton;
     internal Button RestartResourceButton => _restartResourceButton;
