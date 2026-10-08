@@ -598,6 +598,61 @@ public class TransactionEventHandlerTests
     }
 
     [Fact]
+    public async Task A_failing_completion_restores_the_message_status_so_the_kernel_can_record_the_retry()
+    {
+        // MarkAsCompletedAsync stamps the in-memory row before its save; if the
+        // save (or the commit) then fails, a message still saying Completed
+        // would make the kernel's retry transition a no-op (AlreadyTerminal)
+        // while the database row stays Processing.
+        var inbox = TransactionalInbox();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+            })
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        var message = Inbox(Constants.TransactionCompleted, "txn-rc", payload: Serialize(new TransactionCompletedEvent("txn-rc", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        message.ProcessedAt = null;
+        var handler = CreateHandler(inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom");
+        message.Status.Should().Be(MessageConstants.Status.Processing);
+        message.ProcessedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_completion_cancelled_mid_flight_restores_the_message_status()
+    {
+        using var cts = new CancellationTokenSource();
+        var inbox = TransactionalInbox();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Returns<InboxMessage, CancellationToken>((m, token) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+                cts.Cancel();
+                token.ThrowIfCancellationRequested();
+                return Task.FromResult(MessageTransitionOutcome.Applied);
+            });
+        var message = Inbox(Constants.TransactionCompleted, "txn-cc", payload: Serialize(new TransactionCompletedEvent("txn-cc", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        message.ProcessedAt = null;
+        var handler = CreateHandler(inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        message.Status.Should().Be(MessageConstants.Status.Processing);
+        message.ProcessedAt.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Balance_update_tags_the_span_with_the_projection_state()
     {
         using var observedActivity = StartListenedActivity();

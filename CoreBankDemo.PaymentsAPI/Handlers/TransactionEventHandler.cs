@@ -54,52 +54,75 @@ internal sealed class TransactionEventHandler(
             ["EventType"] = message.EventType
         });
 
-        // Transactional inbox (spec: payments-account-projection): the event's
-        // effect on the account projection, the cached outcome on the payment
-        // row and this inbox row's completion commit together or not at all.
-        // The kernel's MarkAsCompletedAsync afterwards finds the row terminal
-        // and does nothing -- the same arrangement as CoreBank's
-        // TransactionExecutionHandler (story 4.6). Any exception rolls all of
-        // it back and the kernel records a retry (ADR-023).
-        await inboxRepository.ExecuteInTransactionAsync(async () =>
-        {
-            switch (message.EventType)
-            {
-                case Constants.TransactionCompleted:
-                    await RecordCommittedOutcomeAsync(HandleTransactionCompleted(message), cancellationToken).ConfigureAwait(false);
-                    break;
-                case Constants.TransactionFailed:
-                    await RecordCommittedOutcomeAsync(HandleTransactionFailed(message), cancellationToken).ConfigureAwait(false);
-                    await ReleaseReservationAsync(message.TransactionId, cancellationToken).ConfigureAwait(false);
-                    break;
-                case Constants.BalanceUpdated:
-                    await ApplyBalanceUpdatedAsync(HandleBalanceUpdated(message), cancellationToken).ConfigureAwait(false);
-                    break;
-                case Constants.TransactionCancelled:
-                    // spec: instant-rail-cancelled-event -- a cancellation CoreBank
-                    // committed is the residual 202's committed outcome. The
-                    // repository refuses to overwrite a terminal cached payload, so
-                    // a row the rail already marked Cancelled is a no-op, and a
-                    // cached Cancelled is never overwritten by a later
-                    // Completed/Failed either.
-                    await RecordCommittedOutcomeAsync(HandleTransactionCancelled(message), cancellationToken).ConfigureAwait(false);
-                    await ReleaseReservationAsync(message.TransactionId, cancellationToken).ConfigureAwait(false);
-                    break;
-                default:
-                    // Never acknowledge a stored type this handler doesn't
-                    // recognize (edge-case matrix) -- Story 5.5 only ever stores
-                    // one of the four shared constants above, so reaching here
-                    // means either the shared constants changed underneath this
-                    // handler or the row was corrupted; either way this is a
-                    // handler defect the kernel must retry (without limit, never
-                    // poisoned: it blocks its partition until fixed -- ADR-023),
-                    // never a silently accepted no-op.
-                    throw new InvalidOperationException(
-                        $"Unsupported stored transaction-events type '{message.EventType}' for inbox message {message.Id}.");
-            }
+        // MarkAsCompletedAsync stamps the in-memory row before its save. If the
+        // save or the commit then fails, a message still saying Completed would
+        // make the kernel's MarkAsFailedWithRetryAsync answer AlreadyTerminal
+        // while the database row is still Processing -- so restore both fields
+        // before rethrowing, as CoreBank's TransactionExecutionHandler does.
+        var originalStatus = message.Status;
+        var originalProcessedAt = message.ProcessedAt;
 
-            await inboxRepository.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
-        }, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // Transactional inbox (spec: payments-account-projection): the event's
+            // effect on the account projection, the cached outcome on the payment
+            // row and this inbox row's completion commit together or not at all.
+            // The kernel's MarkAsCompletedAsync afterwards finds the row terminal
+            // and does nothing -- the same arrangement as CoreBank's
+            // TransactionExecutionHandler (story 4.6). Any exception rolls all of
+            // it back and the kernel records a retry (ADR-023).
+            await inboxRepository.ExecuteInTransactionAsync(async () =>
+            {
+                switch (message.EventType)
+                {
+                    case Constants.TransactionCompleted:
+                        await RecordCommittedOutcomeAsync(HandleTransactionCompleted(message), cancellationToken).ConfigureAwait(false);
+                        break;
+                    case Constants.TransactionFailed:
+                        await RecordCommittedOutcomeAsync(HandleTransactionFailed(message), cancellationToken).ConfigureAwait(false);
+                        await ReleaseReservationAsync(message.TransactionId, cancellationToken).ConfigureAwait(false);
+                        break;
+                    case Constants.BalanceUpdated:
+                        await ApplyBalanceUpdatedAsync(HandleBalanceUpdated(message), cancellationToken).ConfigureAwait(false);
+                        break;
+                    case Constants.TransactionCancelled:
+                        // spec: instant-rail-cancelled-event -- a cancellation CoreBank
+                        // committed is the residual 202's committed outcome. The
+                        // repository refuses to overwrite a terminal cached payload, so
+                        // a row the rail already marked Cancelled is a no-op, and a
+                        // cached Cancelled is never overwritten by a later
+                        // Completed/Failed either.
+                        await RecordCommittedOutcomeAsync(HandleTransactionCancelled(message), cancellationToken).ConfigureAwait(false);
+                        await ReleaseReservationAsync(message.TransactionId, cancellationToken).ConfigureAwait(false);
+                        break;
+                    default:
+                        // Never acknowledge a stored type this handler doesn't
+                        // recognize (edge-case matrix) -- Story 5.5 only ever stores
+                        // one of the four shared constants above, so reaching here
+                        // means either the shared constants changed underneath this
+                        // handler or the row was corrupted; either way this is a
+                        // handler defect the kernel must retry (without limit, never
+                        // poisoned: it blocks its partition until fixed -- ADR-023),
+                        // never a silently accepted no-op.
+                        throw new InvalidOperationException(
+                            $"Unsupported stored transaction-events type '{message.EventType}' for inbox message {message.Id}.");
+                }
+
+                await inboxRepository.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            message.Status = originalStatus;
+            message.ProcessedAt = originalProcessedAt;
+            throw;
+        }
+        catch
+        {
+            message.Status = originalStatus;
+            message.ProcessedAt = originalProcessedAt;
+            throw;
+        }
     }
 
     /// <summary>
