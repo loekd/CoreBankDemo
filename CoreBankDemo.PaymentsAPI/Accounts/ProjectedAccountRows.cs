@@ -16,6 +16,15 @@ internal static class ProjectedAccountRows
     /// two first-time writers cannot both fail to create it) and then takes a
     /// <c>SELECT … FOR UPDATE</c> lock on it. Must run inside an open
     /// transaction: the lock is released when that transaction ends.
+    /// <para>
+    /// The returned instance always carries the database's values. An
+    /// execution-strategy retry re-runs the caller's transaction on the same
+    /// context, and an instance the rolled-back attempt left tracked would
+    /// otherwise come back from the tracked query unchanged (EF identity
+    /// resolution) -- releasing from a stale <c>Reserved</c> loses or doubles
+    /// the release. So any tracked row for this account is detached first and
+    /// the query materialises a fresh one.
+    /// </para>
     /// </summary>
     public static async Task<ProjectedAccount> LockAsync(
         PaymentsDbContext dbContext,
@@ -33,6 +42,13 @@ internal static class ProjectedAccountRows
              ON CONFLICT ("AccountNumber") DO NOTHING
              """,
             cancellationToken).ConfigureAwait(false);
+
+        var stale = dbContext.ChangeTracker.Entries<ProjectedAccount>()
+            .FirstOrDefault(entry => entry.Entity.AccountNumber == accountNumber);
+        if (stale is not null)
+        {
+            stale.State = EntityState.Detached;
+        }
 
         return await dbContext.ProjectedAccounts
             .FromSqlInterpolated($"SELECT * FROM \"ProjectedAccounts\" WHERE \"AccountNumber\" = {accountNumber} FOR UPDATE")

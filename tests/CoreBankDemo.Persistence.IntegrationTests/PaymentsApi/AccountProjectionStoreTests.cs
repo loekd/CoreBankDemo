@@ -141,4 +141,71 @@ public class AccountProjectionStoreTests(PostgresContainerFixture fixture) : Pay
         await using var verification = CreateContext();
         (await verification.ProjectedAccounts.CountAsync(ct)).Should().Be(1, "ON CONFLICT DO NOTHING creates the row once");
     }
+
+    [Fact]
+    public async Task ReleaseAsync_retried_on_the_same_context_after_a_rollback_releases_from_the_database_value()
+    {
+        // An execution-strategy retry re-runs the inbox transaction on the same
+        // context: the first attempt's release was accepted into the tracker,
+        // then rolled back in the database.
+        var ct = TestContext.Current.CancellationToken;
+        await using (var seed = CreateContext())
+        {
+            seed.ProjectedAccounts.Add(new ProjectedAccount
+            {
+                AccountNumber = Account, SettledBalance = 100m, Reserved = 12.34m,
+                UpdatedAt = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc)
+            });
+            await seed.SaveChangesAsync(ct);
+        }
+        await using var context = CreateContext();
+        var store = new AccountProjectionStore(context, TimeProvider);
+        await using (var attempt1 = await context.Database.BeginTransactionAsync(ct))
+        {
+            (await store.ReleaseAsync(Account, 12.34m, ct)).Should().Be(0m);
+            await attempt1.RollbackAsync(ct);
+        }
+
+        decimal shortfall;
+        await using (var attempt2 = await context.Database.BeginTransactionAsync(ct))
+        {
+            shortfall = await store.ReleaseAsync(Account, 12.34m, ct);
+            await attempt2.CommitAsync(ct);
+        }
+
+        shortfall.Should().Be(0m, "the retry must see the rolled-back database value, not the stale tracked one");
+        await using var verification = CreateContext();
+        (await verification.ProjectedAccounts.SingleAsync(ct)).Reserved.Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task SettleAsync_retried_on_the_same_context_after_a_rollback_commits_the_retried_value()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        await using (var seed = CreateContext())
+        {
+            seed.ProjectedAccounts.Add(new ProjectedAccount
+            {
+                AccountNumber = Account, SettledBalance = 100m, Reserved = 0m, Currency = "EUR",
+                UpdatedAt = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc)
+            });
+            await seed.SaveChangesAsync(ct);
+        }
+        await using var context = CreateContext();
+        var store = new AccountProjectionStore(context, TimeProvider);
+        await using (var attempt1 = await context.Database.BeginTransactionAsync(ct))
+        {
+            await store.SettleAsync(Account, 50m, "EUR", ct);
+            await attempt1.RollbackAsync(ct);
+        }
+
+        await using (var attempt2 = await context.Database.BeginTransactionAsync(ct))
+        {
+            await store.SettleAsync(Account, 75m, "EUR", ct);
+            await attempt2.CommitAsync(ct);
+        }
+
+        await using var verification = CreateContext();
+        (await verification.ProjectedAccounts.SingleAsync(ct)).SettledBalance.Should().Be(75m);
+    }
 }

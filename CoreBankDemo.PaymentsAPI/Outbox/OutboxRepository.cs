@@ -81,6 +81,20 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         DateTimeOffset processedAt,
         CancellationToken cancellationToken)
     {
+        // An execution-strategy retry re-runs the inbox transaction on the same
+        // context: a row the rolled-back attempt left tracked would come back
+        // from the tracked query with that attempt's in-memory payload (EF
+        // identity resolution), read as already committed, and the outcome
+        // would be lost. Detach it so the query materialises the database's
+        // ResponsePayload and Status -- the latter still the concurrency token
+        // a racing outbox-processor transition trips.
+        var stale = DbContext.ChangeTracker.Entries<OutboxMessage>()
+            .FirstOrDefault(entry => entry.Entity.TransactionId == transactionId);
+        if (stale is not null)
+        {
+            stale.State = EntityState.Detached;
+        }
+
         var message = await OutboxMessages
             .SingleOrDefaultAsync(row => row.TransactionId == transactionId, cancellationToken)
             .ConfigureAwait(false);
