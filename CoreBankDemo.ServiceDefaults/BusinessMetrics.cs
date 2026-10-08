@@ -43,7 +43,9 @@ public sealed class BusinessMetrics : IDisposable
     {
         Stored,
         Duplicate,
-        ValidationFailed
+        ValidationFailed,
+        /// <summary>Refused at the door by the local account projection (ADR-028); nothing stored.</summary>
+        InsufficientFunds
     }
 
     /// <summary>
@@ -321,6 +323,7 @@ public sealed class BusinessMetrics : IDisposable
         PaymentOutcome.Stored => "stored",
         PaymentOutcome.Duplicate => "duplicate",
         PaymentOutcome.ValidationFailed => "validation_failed",
+        PaymentOutcome.InsufficientFunds => "insufficient_funds",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)
     };
 
