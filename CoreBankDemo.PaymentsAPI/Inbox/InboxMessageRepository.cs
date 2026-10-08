@@ -16,6 +16,12 @@ namespace CoreBankDemo.PaymentsAPI.Inbox;
 internal interface IInboxMessageRepository
 {
     Task<bool> StoreIfNewAsync(InboxMessage message, CancellationToken cancellationToken);
+
+    /// <summary>Kernel transaction helper, exposed so <c>TransactionEventHandler</c> can make its projection writes and the row's completion one commit (spec: payments-account-projection).</summary>
+    Task ExecuteInTransactionAsync(Func<Task> operation, CancellationToken cancellationToken);
+
+    /// <summary>The kernel's own completion transition; called by the handler inside its transaction so the processor's later call finds the row <see cref="MessageTransitionOutcome.AlreadyTerminal"/>.</summary>
+    Task<MessageTransitionOutcome> MarkAsCompletedAsync(InboxMessage message, CancellationToken cancellationToken);
 }
 
 /// <summary>
