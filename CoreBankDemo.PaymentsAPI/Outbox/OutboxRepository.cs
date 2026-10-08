@@ -117,6 +117,14 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         {
             await ExecuteInTransactionAsync(async () =>
             {
+                // Every attempt starts from a clean tracker (review fix,
+                // 2026-10-08): a retry-on-failure re-run of this delegate, or
+                // a second AcceptAsync on the same context, must never see an
+                // account/message instance left over from a previous attempt
+                // -- LockAsync's tracking query would otherwise hand back the
+                // stale in-memory instance instead of the row it just locked.
+                DbContext.ChangeTracker.Clear();
+
                 // 1. Insert first (AD-4). A unique violation aborts the
                 //    PostgreSQL transaction, so the only way out is a rollback.
                 OutboxMessages.Add(message);
@@ -130,7 +138,7 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
                 }
 
                 // 2. Lock the debtor's projection row (created if unseen).
-                var now = timeProvider.GetUtcNow().UtcDateTime;
+                var now = TimeProvider.GetUtcNow().UtcDateTime;
                 var account = await ProjectedAccountRows
                     .LockAsync(DbContext, message.FromAccount, now, cancellationToken).ConfigureAwait(false);
 
@@ -153,7 +161,7 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
             {
                 // Only a dedupe hit is a store "duplicate"; a refusal is
                 // counted by the payment-intake metric, not by the store.
-                businessMetrics.RecordStoreOperation(
+                BusinessMetrics.RecordStoreOperation(
                     StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Duplicate);
             }
 
@@ -167,12 +175,12 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         catch
         {
             DbContext.ChangeTracker.Clear();
-            businessMetrics.RecordStoreOperation(
+            BusinessMetrics.RecordStoreOperation(
                 StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Failed);
             throw;
         }
 
-        businessMetrics.RecordStoreOperation(
+        BusinessMetrics.RecordStoreOperation(
             StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Added);
         return PaymentAcceptance.Stored;
     }

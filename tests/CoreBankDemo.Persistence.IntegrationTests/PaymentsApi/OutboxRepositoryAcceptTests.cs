@@ -132,6 +132,38 @@ public class OutboxRepositoryAcceptTests(PostgresContainerFixture fixture) : Pay
     }
 
     [Fact]
+    public async Task AcceptAsync_second_accept_on_a_reused_context_sees_the_settlement_written_in_between()
+    {
+        // Review fix (2026-10-08): a second AcceptAsync on the same
+        // repository/context must re-lock and re-read the row, not hand back
+        // a stale in-memory ProjectedAccount from the first call. Chosen so
+        // the stale balance (20.00) and the fresh one (50.00) disagree on the
+        // second accept's outcome: stale leaves only 7.66 available (refuses
+        // 12.34), fresh leaves 37.66 (accepts it).
+        var ct = TestContext.Current.CancellationToken;
+        await Seed(settled: 20m, reserved: 0m, ct);
+        await using var context = CreateContext();
+        var repository = new OutboxRepository(context, TimeProvider, TestBusinessMetrics.Instance);
+
+        (await repository.AcceptAsync(PaymentsApiTestData.Outbox("reuse-a"), ct)).Should().Be(PaymentAcceptance.Stored);
+
+        await using (var settlement = CreateContext())
+        {
+            var row = await settlement.ProjectedAccounts.SingleAsync(ct);
+            row.SettledBalance = 50m;
+            await settlement.SaveChangesAsync(ct);
+        }
+
+        (await repository.AcceptAsync(PaymentsApiTestData.Outbox("reuse-b"), ct)).Should().Be(PaymentAcceptance.Stored,
+            "the fresh row leaves 37.66 available; a stale cached row would wrongly refuse");
+
+        await using var verification = CreateContext();
+        var account = await verification.ProjectedAccounts.SingleAsync(ct);
+        account.Reserved.Should().Be(24.68m, "both accepts' reservations landed");
+        account.SettledBalance.Should().Be(50m, "the settlement the other context wrote was never clobbered");
+    }
+
+    [Fact]
     public async Task AcceptAsync_two_concurrent_debits_cannot_both_pass_on_the_same_funds()
     {
         var ct = TestContext.Current.CancellationToken;
