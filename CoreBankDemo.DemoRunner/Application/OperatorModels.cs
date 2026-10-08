@@ -358,6 +358,16 @@ public sealed record InspectionResult(
     HttpExchange? Exchange = null);
 
 /// <summary>
+/// The console's latest PaymentsAPI status read (ADR-027), for the Fetch result line. Held until
+/// the next Fetch replaces it. <see cref="Result"/> is <see langword="null"/> while the call is
+/// out. Never consulted for a payment's outcome: the card is driven by the feed.
+/// </summary>
+public sealed record PaymentStatusFetch(string TransactionId, DateTimeOffset StartedAt, InspectionResult? Result)
+{
+    public bool InFlight => Result is null;
+}
+
+/// <summary>
 /// One header line, recorded as it was set or as it came back. Never interpreted: a header the
 /// console set is shown verbatim, and a header it did not set is absent rather than explained.
 /// </summary>
@@ -685,6 +695,9 @@ public sealed record OperatorConsoleState(
     public string? CancellingPayment { get; init; }
 
     public DateTimeOffset? CancellingSince { get; init; }
+
+    /// <summary>The latest Fetch on the Operations compose area, or null before the first.</summary>
+    public PaymentStatusFetch? PaymentStatusFetch { get; init; }
 
     /// <summary>
     /// Whether this console can currently hear the broadcast. Carried on the rows that depend

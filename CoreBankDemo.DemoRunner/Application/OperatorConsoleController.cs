@@ -1157,6 +1157,62 @@ public sealed class OperatorConsoleController
         return result with { Duration = result.Duration == TimeSpan.Zero ? TimeSpanSince(startedAt) : result.Duration };
     }
 
+    /// <summary>
+    /// Reads the payment's status from PaymentsAPI (ADR-027). Read-only and never blocked by the
+    /// single-action-in-flight rule, like the outcome query. The answer is recorded as evidence and
+    /// held for the Fetch result line; it never touches a tracked payment, whose outcome is the
+    /// feed's to prove.
+    /// </summary>
+    public async Task<InspectionResult> FetchPaymentStatusAsync(string transactionId, CancellationToken ct)
+    {
+        var state = State;
+        var id = transactionId?.Trim() ?? string.Empty;
+        var startedAt = _time.GetUtcNow();
+        InspectionResult result;
+        if (state.Profile == TopologyProfile.None || state.Ownership == TopologyOwnership.None)
+        {
+            result = RefusedInspection(
+                EvidenceKind.OutcomeQuery,
+                "Payment status fetch",
+                KnownEndpoints.PaymentStatus,
+                "Start or attach a topology before fetching a payment status.");
+        }
+        else if (id.Length == 0)
+        {
+            result = RefusedInspection(
+                EvidenceKind.OutcomeQuery,
+                "Payment status fetch",
+                KnownEndpoints.PaymentStatus,
+                "Enter a payment id.");
+        }
+        else
+        {
+            Update(current => current with { PaymentStatusFetch = new PaymentStatusFetch(id, startedAt, null) });
+            var context = CaptureContext(state);
+            result = await _payments.FetchPaymentStatusAsync(context.Profile, id, ct);
+            var answered = result.StatusCode > 0;
+            AddEvidence(
+                Provenance(context),
+                EvidenceKind.OutcomeQuery,
+                answered ? EvidenceTitles.PaymentStatusFetched : EvidenceTitles.PaymentStatusFetchFailed,
+                answered ? $"Payment status fetch returned HTTP {result.StatusCode}" : "Payment status fetch failed",
+                "GET",
+                result.Target,
+                result.StatusCode,
+                result.Duration,
+                result.Body ?? result.ErrorSummary ?? string.Empty,
+                // An unknown id is an answer, not a failure.
+                result.Succeeded || result.StatusCode == 404,
+                exchange: result.Exchange,
+                // Known only for a payment this console still tracks; a bare id names no creditor.
+                account: state.TrackedPayments.FirstOrDefault(payment =>
+                    payment.TransactionId == id || payment.IdempotencyKey == id)?.ToAccount);
+        }
+
+        Update(current => current with { PaymentStatusFetch = new PaymentStatusFetch(id, startedAt, result) });
+        return result;
+    }
+
     public async Task<InspectionResult> InspectAsync(string endpointId, CancellationToken ct)
     {
         var state = State;

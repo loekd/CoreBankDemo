@@ -43,6 +43,8 @@ public static class EvidenceTitles
     public const string LoadTestFailed = "Load test failed";
     public const string OutcomeQueried = "Outcome queried";
     public const string OutcomeQueryFailed = "Outcome query failed";
+    public const string PaymentStatusFetched = "Payment status fetched";
+    public const string PaymentStatusFetchFailed = "Payment status fetch failed";
     public const string EvidenceExported = "Evidence exported";
     public const string EvidenceExportFailed = "Evidence export failed";
 
