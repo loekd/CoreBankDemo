@@ -116,7 +116,8 @@ internal sealed class PaymentStorageHandler(
             ["PartitionId"] = partitionId
         });
 
-        switch (await repository.AcceptAsync(message, cancellationToken).ConfigureAwait(false))
+        var acceptance = await repository.AcceptAsync(message, cancellationToken).ConfigureAwait(false);
+        switch (acceptance)
         {
             case PaymentAcceptance.Stored:
                 logger.LogInformation(
@@ -145,8 +146,10 @@ internal sealed class PaymentStorageHandler(
                 return new PaymentStorageResult(PaymentStorageOutcome.InsufficientFunds, null, [InsufficientFundsError]);
 
             case PaymentAcceptance.Duplicate:
-            default:
                 break;
+
+            default:
+                throw new InvalidOperationException($"Unhandled payment acceptance: {acceptance}");
         }
 
         logger.LogInformation(

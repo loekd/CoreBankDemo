@@ -64,9 +64,11 @@ public class TransactionEventHandlerTests(PostgresContainerFixture fixture) : Pa
         await using var context = CreateContext();
         var message = await context.InboxMessages.AsNoTracking().SingleAsync(ct);
         // Every dependency runs on the failing context, so the transaction is
-        // opened on it, the projection's INSERT … ON CONFLICT executes inside
-        // that transaction, and the first SaveChangesAsync (the store's) throws.
-        await using var failing = new ThrowingSavePaymentsDbContext(context);
+        // opened on it and the projection's INSERT … ON CONFLICT executes inside
+        // that transaction. The first SaveChangesAsync (the settlement) succeeds;
+        // the second (the inbox row's completion) throws, so the projection
+        // write is already in the transaction when it rolls back.
+        await using var failing = new ThrowingSavePaymentsDbContext(context, failingSave: 2);
         var handler = new TransactionEventHandler(
             NullLogger<TransactionEventHandler>.Instance,
             new OutboxRepository(failing, TimeProvider, TestBusinessMetrics.Instance),
@@ -100,13 +102,17 @@ public class TransactionEventHandlerTests(PostgresContainerFixture fixture) : Pa
         ReceivedAt = TimeProvider.GetUtcNow().UtcDateTime
     };
 
-    /// <summary>Shares the inner context's connection so it joins the same database, but every save throws.</summary>
-    private sealed class ThrowingSavePaymentsDbContext(PaymentsDbContext inner)
+    /// <summary>Shares the inner context's connection so it joins the same database; the <paramref name="failingSave"/>-th save throws.</summary>
+    private sealed class ThrowingSavePaymentsDbContext(PaymentsDbContext inner, int failingSave)
         : PaymentsDbContext(new DbContextOptionsBuilder<PaymentsDbContext>()
             .UseNpgsql(inner.Database.GetDbConnection())
             .Options)
     {
+        private int _saves;
+
         public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("boom during save");
+            ++_saves == failingSave
+                ? throw new InvalidOperationException("boom during save")
+                : base.SaveChangesAsync(cancellationToken);
     }
 }

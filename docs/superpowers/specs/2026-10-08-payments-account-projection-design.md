@@ -185,7 +185,7 @@ Standard OpenTelemetry mechanisms only (observability skill); no new `ActivitySo
 - The refusal tags the current request span with `FailedPaymentTags.Outcome = rejected` and
   `FailedPaymentTags.FailureReason = "insufficient_funds"`, so it lands on the failed-payments
   dashboard beside CoreBank's rejections. The structured log carries `IdempotencyKey`,
-  `PartitionId`, the account, the available and the requested amount.
+  `PartitionId`, the account and the requested amount.
 - `TransactionEventHandler` adds `account.settled_balance` and `account.released` (the amount
   released by this event) tags on `balance.updated` next to the tags it already sets, and logs
   each release.
