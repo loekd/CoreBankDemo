@@ -1,5 +1,6 @@
 using System.Text;
 using AwesomeAssertions;
+using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
 using Terminal.Gui.App;
@@ -18,14 +19,14 @@ namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 public class ComposeBarRenderTests
 {
     /// <summary>
-    /// The mode button draws on its own third line at both the 80x24 floor and a comfortable
-    /// width, so the chips' line is drawn whole, and arming a burst puts the count fields on
-    /// that same line beside the button rather than on a line of their own.
+    /// Each mode draws its own bar under the selector, whole, at the floor and at a comfortable
+    /// width; every mode is three rows, so the card's first line stays on the same screen row
+    /// whichever mode is selected.
     /// </summary>
     [Theory]
     [InlineData(80, 24)]
     [InlineData(100, 30)]
-    public void TheModeButton_DrawsOnItsOwnLine_AndTheBurstFieldsShareIt(int width, int height)
+    public void EachMode_DrawsItsOwnBar_AndTheCardNeverMoves(int width, int height)
     {
         using var app = TerminalAppFactory.CreateHeadless(width, height);
         OperatorTheme.Register(ThemeMode.Dark);
@@ -36,24 +37,77 @@ public class ComposeBarRenderTests
         window.Frame = new System.Drawing.Rectangle(0, 0, width, height);
         window.HandleKeyForTest(Key.D1);
         window.ResizeForTest(width, height);
+
+        List<string> Draw(ComposeMode mode)
+        {
+            window.SelectComposeModeForTest(mode);
+            window.RenderForTest();
+            app.LayoutAndDraw(true);
+            return AsDrawn(app, window.SubmitButton.SuperView!);
+        }
+
+        var single = Draw(ComposeMode.Single);
+        var singleCardRow = window.CardStateLabel.FrameToScreen().Y;
+        single[0].Should().Be(" ◉ Single  ○ Burst  ○ Fetch");
+        single[1].Should().StartWith(" From").And.Contain("→ To").And.EndWith("⟦► Submit ◄⟧");
+        single[2].Should().StartWith(" Amount").And.Contain("⟦ Rail ‹ standard ›⟧").And.Contain("⟦ Key ‹ Generated ›⟧");
+
+        var burst = Draw(ComposeMode.Burst);
+        burst[0].Should().Be(" ○ Single  ◉ Burst  ○ Fetch");
+        burst[1].Should().StartWith(" From").And.Contain("→ To").And.EndWith("⟦► Send burst ◄⟧");
+        burst[2].Should().StartWith(" Amount").And.Contain("⟦ Rail ‹ standard ›⟧")
+            .And.Contain("Count").And.Contain("at once").And.NotContain("Key ‹", "a burst never reads the key mode");
+        window.CardStateLabel.FrameToScreen().Y.Should().Be(singleCardRow);
+
+        var fetch = Draw(ComposeMode.Fetch);
+        fetch[0].Should().Be(" ○ Single  ○ Burst  ◉ Fetch");
+        fetch[1].Should().StartWith(" Payment id").And.EndWith("⟦► Fetch ◄⟧").And.NotContain("From");
+        fetch[2].Should().BeEmpty("nothing has been fetched yet");
+        window.CardStateLabel.FrameToScreen().Y.Should().Be(singleCardRow);
+    }
+
+    /// <summary>
+    /// The result line is drawn under the Fetch bar and stays until the next Fetch; a second,
+    /// identical answer still changes the line, because its stamp is the press time.
+    /// </summary>
+    [Fact]
+    public async Task FetchResultLine_IsDrawnUnderItsBar_AndARepeatChangesOnlyTheStamp()
+    {
+        using var app = TerminalAppFactory.CreateHeadless(80, 24);
+        OperatorTheme.Register(ThemeMode.Dark);
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = new MainWindow(
+            app, controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false, time: harness.Time);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 80, 24);
+        window.HandleKeyForTest(Key.D1);
+        window.ResizeForTest(80, 24);
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.FetchIdField.Text = "tx-1";
+        const string body =
+            """{"paymentId":"tx-1","transactionId":"tx-1","status":"Pending","amount":1.00,"currency":"EUR","processedAt":"2026-08-29T11:59:58+00:00"}""";
+        harness.Payments.QueueInspections(
+            new InspectionResult(true, 200, KnownEndpoints.PaymentStatus, body, null, TimeSpan.FromMilliseconds(38)),
+            new InspectionResult(true, 200, KnownEndpoints.PaymentStatus, body, null, TimeSpan.FromMilliseconds(41)));
+
+        await window.TriggerFetchForTestAsync();
         window.RenderForTest();
         app.LayoutAndDraw(true);
+        var first = AsDrawn(app, window.SubmitButton.SuperView!)[2];
 
-        var rows = AsDrawn(app, window.SubmitButton.SuperView!);
-        rows[0].Should().StartWith(" From").And.Contain("→ To").And.EndWith("⟦► Submit ◄⟧");
-        // Each chip is drawn whole, closing chevron and bracket included: a chip two cells
-        // narrower than its decorated caption reflowed its "›" onto the line beneath.
-        rows[1].Should().StartWith(" Amount").And.Contain("⟦ Rail ‹ standard ›⟧").And.Contain("⟦ Key ‹ Generated ›⟧");
-        rows[2].TrimStart().Should().Be("⟦ Burst mode ⟧", "nothing else draws on the mode line in single mode");
-
-        window.BurstButton.InvokeCommand(Command.Accept);
+        harness.Time.Advance(TimeSpan.FromSeconds(5));
+        await window.TriggerFetchForTestAsync();
         window.RenderForTest();
         app.LayoutAndDraw(true);
+        var second = AsDrawn(app, window.SubmitButton.SuperView!)[2];
 
-        rows = AsDrawn(app, window.SubmitButton.SuperView!);
-        rows[0].Should().EndWith("⟦► Send burst ◄⟧");
-        rows[1].Should().Contain("⟦ Rail ‹ standard ›⟧").And.Contain("⟦ Key ‹ Generated ›⟧");
-        rows[2].Should().StartWith(" Burst count").And.Contain("at once").And.EndWith("⟦ Single mode ⟧");
+        first.Should().StartWith(" ✓ 200  Pending · 1.00 EUR · since 11:59:58").And.EndWith("fetched 12:00:00 · 38 ms");
+        second.Should().StartWith(" ✓ 200  Pending · 1.00 EUR · since 11:59:58").And.EndWith("fetched 12:00:05 · 41 ms");
+        window.FetchStatusLabel.SchemeName.Should().Be(OperatorTheme.LockExemptScheme, "a 200 takes the teal accent");
+        harness.Payments.FetchIds.Should().Equal("tx-1", "tx-1");
     }
 
     private static List<string> AsDrawn(IApplication app, View pane)

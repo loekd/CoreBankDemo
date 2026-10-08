@@ -211,7 +211,7 @@ public class MainWindowTests
     }
 
     [Fact]
-    public async Task ArmedBurst_SubmitSendsTheBurstInsteadOfASinglePayment()
+    public async Task SendBurst_SendsABurst_AndSubmitAlwaysSendsOnePayment()
     {
         var harness = new OperatorHarness();
         harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
@@ -219,81 +219,191 @@ public class MainWindowTests
         await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
         using var window = CreateWindow(controller);
         window.ResizeForTest(100, 30);
-        window.BurstButton.InvokeCommand(Command.Accept);
+        window.SelectComposeModeForTest(ComposeMode.Burst);
         window.BurstCountField.Text = "2";
         window.BurstConcurrencyField.Text = "1";
 
+        window.SendBurstButton.InvokeCommand(Command.Accept);
+        await window.LastDispatchedTask!;
+
+        harness.Payments.Submissions.Should().HaveCount(2);
+        window.SubmitButton.Text.ToString().Should().Be("Submit", "no button changes its caption with the mode");
+        window.SendBurstButton.Text.ToString().Should().Be("Send burst");
+
+        window.SelectComposeModeForTest(ComposeMode.Single);
         await window.TriggerSubmitForTestAsync();
 
-        controller.State.Burst.Sent.Should().Be(2);
-        harness.Payments.Submissions.Should().HaveCount(2, "Submit must fire the burst, not a single payment, while burst setup is armed");
-        window.LastUiMessage.Should().BeEmpty();
+        harness.Payments.Submissions.Should().HaveCount(3, "Submit sends exactly one payment in every mode");
     }
 
     [Fact]
-    public void SubmitButtonLabel_TogglesToSendBurst_WhileBurstSetupIsArmed()
+    public void EachMode_ShowsOnlyItsOwnControls()
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
 
-        window.SubmitButton.Text.ToString().Should().Be("Submit");
+        window.ModeSelector.Value.Should().Be(ComposeMode.Single);
+        window.SubmitButton.Visible.Should().BeTrue();
+        window.IdempotencyButton.Visible.Should().BeTrue();
+        window.SendBurstButton.Visible.Should().BeFalse();
+        window.BurstCountField.Visible.Should().BeFalse();
+        window.FetchButton.Visible.Should().BeFalse();
 
-        window.BurstButton.InvokeCommand(Command.Accept);
-        window.SubmitButton.Text.ToString().Should().Be("Send burst", "arming burst setup must make it obvious Submit will send a burst");
+        window.SelectComposeModeForTest(ComposeMode.Burst);
+        window.SendBurstButton.Visible.Should().BeTrue();
+        window.BurstCountField.Visible.Should().BeTrue();
+        window.BurstConcurrencyField.Visible.Should().BeTrue();
+        window.FromAccountField.Visible.Should().BeTrue();
+        window.SubmitButton.Visible.Should().BeFalse();
+        window.IdempotencyButton.Visible.Should().BeFalse("a burst never reads the key mode");
 
-        window.BurstButton.InvokeCommand(Command.Accept);
-        window.SubmitButton.Text.ToString().Should().Be("Submit");
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.FetchButton.Visible.Should().BeTrue();
+        window.FetchIdField.Visible.Should().BeTrue();
+        window.FromAccountField.Visible.Should().BeFalse();
+        window.AmountField.Visible.Should().BeFalse();
+        window.RailButton.Visible.Should().BeFalse();
+        window.SendBurstButton.Visible.Should().BeFalse();
     }
 
-    /// <summary>
-    /// The mode button names the mode it switches *to*, so the operator reads a destination,
-    /// not a state: <c>Burst mode</c> while composing single payments, <c>Single mode</c>
-    /// while a burst is armed. Which mode is current is stated by Submit's own caption and by
-    /// the burst count fields being present.
-    /// </summary>
-    [Fact]
-    public void BurstModeButton_NamesTheModeItSwitchesTo()
+    [Theory]
+    [InlineData(ComposeMode.Single)]
+    [InlineData(ComposeMode.Burst)]
+    [InlineData(ComposeMode.Fetch)]
+    public void EachMode_HasExactlyOneDefaultButton(ComposeMode mode)
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
+        window.SelectComposeModeForTest(mode);
 
-        window.BurstButton.Text.ToString().Should().Be("Burst mode");
-
-        window.BurstButton.InvokeCommand(Command.Accept);
-        window.BurstButton.Text.ToString().Should().Be("Single mode", "while a burst is armed the button offers the way back");
-
-        window.BurstButton.InvokeCommand(Command.Accept);
-        window.BurstButton.Text.ToString().Should().Be("Burst mode");
+        new[] { window.SubmitButton, window.SendBurstButton, window.FetchButton }
+            .Where(button => button.IsDefault)
+            .Should().ContainSingle()
+            .Which.Should().BeSameAs(mode switch
+            {
+                ComposeMode.Single => window.SubmitButton,
+                ComposeMode.Burst => window.SendBurstButton,
+                _ => window.FetchButton,
+            });
     }
 
-    /// <summary>
-    /// The mode button wears Submit's filled-teal treatment and sits on its own row beneath the
-    /// chips at every width, with the burst count fields sharing that row while a burst is armed,
-    /// so the two compose lines keep their full width for the fields and chips.
-    /// </summary>
     [Theory]
     [InlineData(80, 24)]
     [InlineData(100, 30)]
-    public void BurstModeButton_MatchesSubmitAndOwnsTheThirdRow(int width, int height)
+    public void Selector_OwnsTheFirstRow_AndEveryModeIsThreeRowsTall(int width, int height)
     {
         var controller = new OperatorHarness().CreateController();
         using var window = CreateWindow(controller);
         window.ResizeForTest(width, height);
+
+        foreach (var mode in new[] { ComposeMode.Single, ComposeMode.Burst, ComposeMode.Fetch })
+        {
+            window.SelectComposeModeForTest(mode);
+            window.RenderForTest();
+            window.ModeSelector.Frame.Y.Should().Be(0);
+            window.ComposeRuleLabel.Frame.Y.Should().Be(3, "every mode is three rows ({0})", mode);
+        }
+
+        window.SelectComposeModeForTest(ComposeMode.Burst);
+        window.RenderForTest();
+        window.BurstCountField.Frame.Y.Should().Be(2, "the burst fields share the Amount line");
+        window.SendBurstButton.Frame.X.Should().Be(window.SubmitButton.Frame.X, "each bar's action sits in the same slot");
+        window.SendBurstButton.SchemeName.Should().Be(OperatorTheme.ActionScheme);
+        window.FetchButton.SchemeName.Should().Be(OperatorTheme.ActionScheme);
+    }
+
+    [Fact]
+    public void SingleAndBurst_ShareTheAccountAndAmountValues()
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var window = CreateWindow(controller);
+        window.AmountField.Text = "7.50";
+
+        window.SelectComposeModeForTest(ComposeMode.Burst);
+        window.SelectComposeModeForTest(ComposeMode.Single);
+
+        window.AmountField.Text.ToString().Should().Be("7.50");
+    }
+
+    [Fact]
+    public async Task FetchPrefill_TakesTheCardsPayment_AndNeverOverwritesATypedId()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.ResizeForTest(100, 30);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "card-key", "card-key", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        window.IdempotencyButton.InvokeCommand(Command.Accept); // Generated → Supplied
+        window.SuppliedKeyField.Text = "card-key";
+        await window.TriggerSubmitForTestAsync();
         window.RenderForTest();
 
-        window.BurstButton.SchemeName.Should().Be(window.SubmitButton.SchemeName, "the mode button looks like Submit");
-        window.BurstButton.SchemeName.Should().Be(OperatorTheme.ActionScheme);
-        window.BurstButton.Frame.Y.Should().Be(2);
-        window.BurstButton.Frame.X.Should().Be(window.SubmitButton.Frame.X, "it shares Submit's right-anchored slot");
-        window.ComposeRuleLabel.Frame.Y.Should().Be(3, "the rule closes the bar directly beneath the mode row");
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.FetchIdField.Text.ToString().Should().Be("card-key");
 
-        window.BurstButton.InvokeCommand(Command.Accept);
+        window.FetchIdField.Text = "typed-id";
+        window.SelectComposeModeForTest(ComposeMode.Single);
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.FetchIdField.Text.ToString().Should().Be("typed-id");
+    }
+
+    [Fact]
+    public async Task SwitchingModes_IsNeverLocked_ByAnInFlightAction()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        harness.Payments.SubmissionStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseSubmission = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.Queue(new PaymentResult(
+            PaymentOutcome.Pending, 202, "tx-1", "tx-1", "Pending", "{}", null, TimeSpan.FromMilliseconds(5)));
+        var submit = window.TriggerSubmitForTestAsync();
+        await harness.Payments.SubmissionStarted.Task;
         window.RenderForTest();
 
-        window.BurstCountField.Visible.Should().BeTrue();
-        window.BurstCountField.Frame.Y.Should().Be(window.BurstButton.Frame.Y, "the burst count shares the mode button's row");
-        window.BurstButton.Frame.Y.Should().Be(2, "arming a burst does not move the mode button");
-        window.ComposeRuleLabel.Frame.Y.Should().Be(3, "the burst count costs no extra row");
+        window.ModeSelector.Enabled.Should().BeTrue();
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.RenderForTest();
+        window.FetchButton.Enabled.Should().BeTrue("a fetch is read-only and never locked");
+
+        harness.Payments.ReleaseSubmission.SetResult();
+        await submit;
+        controller.State.TrackedPayments.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task FetchButton_CountsUpAndIsDisabled_WhileItsCallIsOut()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.FetchIdField.Text = "tx-1";
+        harness.Payments.FetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseFetch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var fetch = window.TriggerFetchForTestAsync();
+        await harness.Payments.FetchStarted.Task;
+        window.RenderForTest();
+
+        window.FetchButton.Enabled.Should().BeFalse();
+        window.FetchButton.Text.ToString().Should().StartWith("Fetching — ");
+        window.FetchStatusText.Should().Be("~ GET /api/payments/tx-1 …");
+
+        harness.Payments.ReleaseFetch.SetResult();
+        await fetch;
+        window.RenderForTest();
+        window.FetchButton.Enabled.Should().BeTrue();
+        window.FetchButton.Text.ToString().Should().Be("Fetch");
+        window.LastUiMessage.Should().BeEmpty("the result line carries the answer, not the announcement");
     }
 
     [Fact]
@@ -1130,8 +1240,8 @@ public class MainWindowTests
 
     /// <summary>
     /// Removing the three-row bottom band and collapsing the sixteen-row form re-cuts the rows at
-    /// 100x30 from 10 of shell chrome and 4 of payment area to 7 and 20; the mode button's own
-    /// row beneath the chips then takes one of those 20.
+    /// 100x30 from 10 of shell chrome and 4 of payment area to 7 and 20; the selector's own
+    /// row above the bar then takes one of those 20.
     /// </summary>
     [Fact]
     public void OperationsRowBudget_At100x30_Spends7RowsOnChromeAnd19OnThePaymentArea()
@@ -1491,9 +1601,9 @@ public class MainWindowTests
     }
 
     /// <summary>
-    /// At the floor the compose bar keeps both captions and every control: the mode button has
-    /// its own third line at every width, so the chips never compete with it for the second and
-    /// no caption is shed. An unlabelled IBAN read from the back of a room is a run of digits, so
+    /// At the floor the compose bar keeps both captions and every control: the selector has its
+    /// own first line at every width, so the chips keep the bar's second line and no caption is
+    /// shed. An unlabelled IBAN read from the back of a room is a run of digits, so
     /// a caption is worth more than the row it costs, and no control in use is ever hidden.
     /// </summary>
     [Theory]
@@ -1512,11 +1622,11 @@ public class MainWindowTests
         window.AmountField.Visible.Should().BeTrue();
         window.RailButton.Visible.Should().BeTrue();
         window.IdempotencyButton.Visible.Should().BeTrue();
-        window.SubmitButton.Frame.Y.Should().Be(0);
-        window.IdempotencyButton.Frame.Y.Should().Be(1);
-        window.BurstButton.Frame.Y.Should().Be(2, "the mode button never shares the chips' line at {0}x{1}", width, height);
+        window.ModeSelector.Frame.Y.Should().Be(0);
+        window.SubmitButton.Frame.Y.Should().Be(1);
+        window.IdempotencyButton.Frame.Y.Should().Be(2, "the chips keep their own line at {0}x{1}", width, height);
         window.ComposeRuleLabel.Frame.Y.Should().BeGreaterThan(
-            window.BurstButton.Frame.Y,
+            window.IdempotencyButton.Frame.Y,
             "the rule closes the bar beneath every line it grew");
         window.FocusCard.StateWord.Should().NotBeEmpty("the state word is never abbreviated to fit");
     }
