@@ -59,6 +59,21 @@ internal interface IOutboxRepository
     /// the insert back so no row and no reservation remain.
     /// </summary>
     Task<PaymentAcceptance> AcceptAsync(OutboxMessage message, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The instant rail's never-forwarded cancel (spec matrix: "Never reached
+    /// CoreBank"): marks the claimed row <c>Cancelled</c> and, only when that
+    /// transition is <see cref="MessageTransitionOutcome.Applied"/>, releases
+    /// the debtor's <see cref="Accounts.ProjectedAccount.Reserved"/> for it --
+    /// both in one database transaction. Only this path releases: the command
+    /// never reached CoreBank, so no <c>transaction.cancelled</c> event will
+    /// ever arrive to do it. A cancel that went through CoreBank must keep
+    /// using <see cref="IOutboxMessageStore{TMessage}.MarkAsCancelledAsync"/>,
+    /// because CoreBank's event releases that reservation and a second release
+    /// here would eat into the account's other reservations.
+    /// </summary>
+    /// <returns>The cancel transition; anything but <see cref="MessageTransitionOutcome.Applied"/> released nothing.</returns>
+    Task<MessageTransitionOutcome> CancelLocallyAsync(OutboxMessage claimed, string reason, CancellationToken cancellationToken);
 }
 
 internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider timeProvider, BusinessMetrics businessMetrics)
@@ -131,12 +146,17 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         {
             await ExecuteInTransactionAsync(async () =>
             {
-                // Every attempt starts from a clean tracker (review fix,
-                // 2026-10-08): a retry-on-failure re-run of this delegate, or
-                // a second AcceptAsync on the same context, must never see an
-                // account/message instance left over from a previous attempt
-                // -- LockAsync's tracking query would otherwise hand back the
-                // stale in-memory instance instead of the row it just locked.
+                // Every attempt starts from a clean tracker: a retry-on-failure
+                // re-run of this delegate, or a second AcceptAsync on the same
+                // context, must never see an account/message instance left over
+                // from a previous attempt -- LockAsync's tracking query would
+                // otherwise hand back the stale in-memory instance instead of
+                // the row it just locked.
+                // This method owns the whole transaction on a request-scoped
+                // context that tracks nothing else, so clearing is safe;
+                // ProjectedAccountRows.LockAsync/RecordCommittedOutcomeAsync run
+                // mid-transaction next to an attached inbox message and therefore
+                // detach one entry instead.
                 DbContext.ChangeTracker.Clear();
 
                 // 1. Insert first (AD-4). A unique violation aborts the
@@ -197,6 +217,61 @@ internal sealed class OutboxRepository(PaymentsDbContext dbContext, TimeProvider
         BusinessMetrics.RecordStoreOperation(
             StoreName, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Added);
         return PaymentAcceptance.Stored;
+    }
+
+    public async Task<MessageTransitionOutcome> CancelLocallyAsync(
+        OutboxMessage claimed,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(claimed);
+
+        var claimedStatus = claimed.Status;
+        var claimedProcessedAt = claimed.ProcessedAt;
+        var claimedLastError = claimed.LastError;
+        var attempts = 0;
+        var transition = MessageTransitionOutcome.Conflicted;
+        await ExecuteInTransactionAsync(async () =>
+        {
+            if (attempts++ > 0)
+            {
+                // An execution-strategy retry re-runs this delegate on the same
+                // context after a rollback. The previous attempt may have saved
+                // the cancel, leaving the row Cancelled in memory and as the
+                // concurrency token's original value, and may have left its
+                // unsaved release tracked, which this attempt's first save would
+                // otherwise flush without the row lock. Drop both, start again
+                // from the claimed row, and write every column, so the cached
+                // payload the caller set before the first attempt is written too.
+                var release = DbContext.ChangeTracker.Entries<ProjectedAccount>()
+                    .FirstOrDefault(entry => entry.Entity.AccountNumber == claimed.FromAccount);
+                if (release is not null)
+                {
+                    release.State = EntityState.Detached;
+                }
+
+                DbContext.Entry(claimed).State = EntityState.Detached;
+                claimed.Status = claimedStatus;
+                claimed.ProcessedAt = claimedProcessedAt;
+                claimed.LastError = claimedLastError;
+                DbContext.Attach(claimed).State = EntityState.Modified;
+            }
+
+            transition = await MarkAsCancelledAsync(claimed, reason, cancellationToken).ConfigureAwait(false);
+            if (transition != MessageTransitionOutcome.Applied)
+            {
+                return;
+            }
+
+            var now = TimeProvider.GetUtcNow().UtcDateTime;
+            var account = await ProjectedAccountRows
+                .LockAsync(DbContext, claimed.FromAccount, now, cancellationToken).ConfigureAwait(false);
+            account.Reserved = Math.Max(0m, account.Reserved - claimed.Amount);
+            account.UpdatedAt = now;
+            await DbContext.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+
+        return transition;
     }
 
     /// <summary>

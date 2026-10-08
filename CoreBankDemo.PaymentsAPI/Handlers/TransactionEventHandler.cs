@@ -79,9 +79,13 @@ internal sealed class TransactionEventHandler(
             {
                 // Npgsql retry-on-failure (on by default under Aspire) re-runs
                 // this delegate: every attempt starts from the pre-transaction
-                // state, never from a previous attempt's in-memory Completed.
+                // state, never from a previous attempt's in-memory Completed --
+                // and untracked, so the completion re-attaches the row with this
+                // status as the concurrency token's original value instead of a
+                // rolled-back attempt's saved Completed.
                 message.Status = originalStatus;
                 message.ProcessedAt = originalProcessedAt;
+                inboxRepository.Detach(message);
 
                 switch (message.EventType)
                 {
@@ -118,7 +122,16 @@ internal sealed class TransactionEventHandler(
                             $"Unsupported stored transaction-events type '{message.EventType}' for inbox message {message.Id}.");
                 }
 
-                await inboxRepository.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false);
+                // MarkAsCompletedAsync answers AlreadyTerminal, without throwing,
+                // when another worker completed this row meanwhile (a stale-claim
+                // reclaim); committing then would apply this event's projection
+                // effects a second time.
+                if (await inboxRepository.MarkAsCompletedAsync(message, cancellationToken).ConfigureAwait(false)
+                    != MessageTransitionOutcome.Applied)
+                {
+                    throw new InvalidOperationException(
+                        $"Inbox message {message.Id} was completed by another worker; rolling back this attempt's projection effects.");
+                }
             }, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

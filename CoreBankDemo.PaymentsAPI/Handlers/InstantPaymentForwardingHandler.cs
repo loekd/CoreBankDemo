@@ -63,6 +63,7 @@ public interface IInstantPaymentForwardingHandler
 
 internal sealed class InstantPaymentForwardingHandler(
     IOutboxMessageStore<OutboxMessage> store,
+    IOutboxRepository repository,
     ICoreBankTransactionForwarder forwarder,
     IDistributedLockService lockService,
     IOptions<InstantRailOptions> options,
@@ -333,7 +334,7 @@ internal sealed class InstantPaymentForwardingHandler(
                 // the row must end Cancelled, never Completed.
                 if (submission.Status == MessageConstants.Status.Cancelled)
                 {
-                    return await ConcludeCancelledAsync(payment, claimed, submission, startedAt, CoreBankCancelReason, cancellationToken)
+                    return await ConcludeCancelledAsync(payment, claimed, submission, startedAt, CoreBankCancelReason, neverForwarded: false, cancellationToken)
                         .ConfigureAwait(false);
                 }
 
@@ -466,7 +467,7 @@ internal sealed class InstantPaymentForwardingHandler(
         switch (answer?.Status)
         {
             case MessageConstants.Status.Cancelled:
-                return await ConcludeCancelledAsync(payment, claimed, answer, startedAt, CoreBankCancelReason, cancellationToken)
+                return await ConcludeCancelledAsync(payment, claimed, answer, startedAt, CoreBankCancelReason, neverForwarded: false, cancellationToken)
                     .ConfigureAwait(false);
 
             case MessageConstants.Status.Completed:
@@ -519,7 +520,7 @@ internal sealed class InstantPaymentForwardingHandler(
             var cancelledAt = timeProvider.GetUtcNow();
             var submission = new TransactionSubmission(claimed.TransactionId, MessageConstants.Status.Cancelled, cancelledAt);
             claimed.ResponsePayload = JsonSerializer.Serialize(submission);
-            return await ConcludeCancelledAsync(payment, claimed, submission, startedAt, reason, cancellationToken).ConfigureAwait(false);
+            return await ConcludeCancelledAsync(payment, claimed, submission, startedAt, reason, neverForwarded: true, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -542,6 +543,14 @@ internal sealed class InstantPaymentForwardingHandler(
     /// an <see cref="MessageTransitionOutcome.Applied"/> transition is a
     /// provably dead row; anything else means another writer moved the row
     /// since the claim, and the honest answer is the deferral.
+    /// <para>
+    /// <paramref name="neverForwarded"/> picks who releases the debtor's
+    /// reservation (spec: payments-account-projection). A command that never
+    /// left PaymentsAPI gets no <c>transaction.cancelled</c> event, so
+    /// <see cref="IOutboxRepository.CancelLocallyAsync"/> releases it in the
+    /// cancel's own transaction; a cancel CoreBank confirmed is released by
+    /// CoreBank's event, so that path only marks the row.
+    /// </para>
     /// </summary>
     private async Task<InstantForwardResult> ConcludeCancelledAsync(
         PaymentSnapshot payment,
@@ -549,12 +558,15 @@ internal sealed class InstantPaymentForwardingHandler(
         TransactionSubmission submission,
         DateTimeOffset startedAt,
         string reason,
+        bool neverForwarded,
         CancellationToken cancellationToken)
     {
         MessageTransitionOutcome transition;
         try
         {
-            transition = await store.MarkAsCancelledAsync(claimed, reason, cancellationToken).ConfigureAwait(false);
+            transition = neverForwarded
+                ? await repository.CancelLocallyAsync(claimed, reason, cancellationToken).ConfigureAwait(false)
+                : await store.MarkAsCancelledAsync(claimed, reason, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

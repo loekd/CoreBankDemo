@@ -22,6 +22,15 @@ internal interface IInboxMessageRepository
 
     /// <summary>The kernel's own completion transition; called by the handler inside its transaction so the processor's later call finds the row <see cref="MessageTransitionOutcome.AlreadyTerminal"/>.</summary>
     Task<MessageTransitionOutcome> MarkAsCompletedAsync(InboxMessage message, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Stops tracking <paramref name="message"/>, so the next
+    /// <see cref="MarkAsCompletedAsync"/> re-attaches it with its current
+    /// <c>Status</c> as the original value. A transaction attempt that follows
+    /// a rolled-back one would otherwise inherit that attempt's saved
+    /// <c>Completed</c> as the concurrency token's original value.
+    /// </summary>
+    void Detach(InboxMessage message);
 }
 
 /// <summary>
@@ -37,4 +46,15 @@ internal sealed class InboxMessageRepository(PaymentsDbContext dbContext, TimePr
     protected override DbSet<InboxMessage> InboxMessages => DbContext.InboxMessages;
 
     protected override BusinessMetrics.StoreName StoreName => BusinessMetrics.StoreName.PaymentsInbox;
+
+    public void Detach(InboxMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+
+        var entry = DbContext.Entry(message);
+        if (entry.State != EntityState.Detached)
+        {
+            entry.State = EntityState.Detached;
+        }
+    }
 }

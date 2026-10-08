@@ -684,6 +684,37 @@ public class TransactionEventHandlerTests
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
         statusesSeen.Should().Equal(MessageConstants.Status.Processing, MessageConstants.Status.Processing);
+        // Each attempt also starts untracked, so the completion re-attaches the
+        // row with Processing as the concurrency token's original value rather
+        // than the rolled-back attempt's saved Completed.
+        inbox.Verify(r => r.Detach(message), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task A_completion_another_worker_already_made_rolls_back_this_attempts_projection_effects()
+    {
+        // MarkAsCompletedAsync reports a row someone else already completed as
+        // AlreadyTerminal instead of throwing; committing anyway would apply
+        // the settlement and the release a second time.
+        var inbox = TransactionalInbox();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+            })
+            .ReturnsAsync(MessageTransitionOutcome.AlreadyTerminal);
+        var message = Inbox(Constants.TransactionCompleted, "txn-dup", payload: Serialize(new TransactionCompletedEvent("txn-dup", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        message.ProcessedAt = null;
+        var handler = CreateHandler(inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage($"*{message.Id}*completed by another worker*");
+        message.Status.Should().Be(MessageConstants.Status.Processing, "the restore-on-failure puts the pre-transaction status back");
+        message.ProcessedAt.Should().BeNull();
     }
 
     [Fact]

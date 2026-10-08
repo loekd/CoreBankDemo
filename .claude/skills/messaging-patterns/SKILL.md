@@ -65,7 +65,9 @@ A handler that owns business state commits it **with** the message-store row, th
 await repository.ExecuteInTransactionAsync(async () =>
 {
     await accounts.SettleAsync(...);              // business state
-    await repository.MarkAsCompletedAsync(message, ct);
+    // AlreadyTerminal (not an exception) means another worker completed the row: roll back.
+    if (await repository.MarkAsCompletedAsync(message, ct) != MessageTransitionOutcome.Applied)
+        throw new InvalidOperationException($"Inbox message {message.Id} was completed by another worker; rolling back this attempt's projection effects.");
 }, ct);
 
 // Outbox: insert the row first (AD-4 dedupe), then the business state, one commit.
