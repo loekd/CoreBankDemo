@@ -163,4 +163,28 @@ public class OperatorConsolePaymentStatusFetchTests
         harness.Payments.ReleaseSubmission.SetResult();
         await submit;
     }
+
+    [Fact]
+    public async Task ASecondFetch_WhileOneIsOut_IsIgnored_WithoutACallOrARecord()
+    {
+        var (controller, harness) = await AttachedAsync();
+        harness.Payments.FetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseFetch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = controller.FetchPaymentStatusAsync("tx-1", CancellationToken.None);
+        await harness.Payments.FetchStarted.Task;
+        var recordsBefore = controller.State.Evidence.Count;
+
+        var second = controller.FetchPaymentStatusAsync("tx-2", CancellationToken.None);
+        var ignoredAtOnce = second.IsCompleted;
+        var stateWhileOut = controller.State.PaymentStatusFetch;
+        harness.Payments.ReleaseFetch.SetResult();
+        await Task.WhenAll(first, second);
+
+        harness.Payments.FetchIds.Should().Equal("tx-1");
+        ignoredAtOnce.Should().BeTrue("the second press is answered without waiting on a call");
+        (await second).Succeeded.Should().BeFalse();
+        stateWhileOut!.TransactionId.Should().Be("tx-1");
+        stateWhileOut.InFlight.Should().BeTrue();
+        controller.State.Evidence.Should().HaveCount(recordsBefore + 1, "only the first fetch is recorded");
+    }
 }

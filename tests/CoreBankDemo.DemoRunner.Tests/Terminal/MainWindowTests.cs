@@ -377,6 +377,45 @@ public class MainWindowTests
         controller.State.TrackedPayments.Should().ContainSingle();
     }
 
+    /// <summary>
+    /// Enter in the id field reaches the default button even while it is disabled, so a second
+    /// press during a fetch must still send nothing.
+    /// </summary>
+    [Fact]
+    public async Task EnterInTheFetchField_WhileAFetchIsOut_SendsNoSecondCall()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.Regular));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.Regular, CancellationToken.None);
+        using var app = TerminalAppFactory.CreateHeadless(100, 30);
+        using var window = new MainWindow(
+            app, controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false);
+        app.Begin(window);
+        // The headless app installs a UI synchronization context whose queue this test never
+        // pumps; the fetch's continuations must run on the pool instead.
+        SynchronizationContext.SetSynchronizationContext(null);
+        window.HandleKeyForTest(Key.D1);
+        window.ResizeForTest(100, 30);
+        window.SelectComposeModeForTest(ComposeMode.Fetch);
+        window.FetchIdField.Text = "tx-1";
+        window.FetchIdField.SetFocus();
+        harness.Payments.FetchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Payments.ReleaseFetch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        window.FetchIdField.HasFocus.Should().BeTrue();
+        app.Keyboard.RaiseKeyDownEvent(Key.Enter);
+        await harness.Payments.FetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var first = window.LastDispatchedTask!;
+        window.RenderForTest();
+        app.Keyboard.RaiseKeyDownEvent(Key.Enter);
+
+        // Checked before the first call is released: a second call would have registered by now.
+        harness.Payments.FetchIds.Should().Equal("tx-1");
+        harness.Payments.ReleaseFetch.SetResult();
+        await first.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     [Fact]
     public async Task FetchButton_CountsUpAndIsDisabled_WhileItsCallIsOut()
     {

@@ -1166,6 +1166,15 @@ public sealed class OperatorConsoleController
     public async Task<InspectionResult> FetchPaymentStatusAsync(string transactionId, CancellationToken ct)
     {
         var state = State;
+        if (state.PaymentStatusFetch is { InFlight: true })
+        {
+            // One fetch at a time: Enter in the id field reaches the Fetch button even while it is
+            // disabled. The press is ignored — no call, no record, and the line keeps the fetch
+            // that is out.
+            return new InspectionResult(
+                false, 0, KnownEndpoints.PaymentStatus, null, "A payment status fetch is already out.", TimeSpan.Zero);
+        }
+
         var id = transactionId?.Trim() ?? string.Empty;
         var startedAt = _time.GetUtcNow();
         InspectionResult result;
