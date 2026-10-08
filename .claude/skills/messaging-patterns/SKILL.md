@@ -55,6 +55,30 @@ Two debits from one account therefore share a lane and execute in arrival order,
 
 Always use `PartitionHelper` — never write a second implementation. Its mapping (`fmix32(fnv1a(key)) % count`) is pinned by known-vector tests; changing it needs an ADR and a drained database.
 
+## Atomic handlers: business state and the message row in one transaction
+
+A handler that owns business state commits it **with** the message-store row, through the kernel's own helpers, never with a second connection:
+
+```csharp
+// Inbox: apply the event, then complete the row yourself inside the transaction.
+// The kernel's MarkAsCompletedAsync afterwards sees AlreadyTerminal and does nothing.
+await repository.ExecuteInTransactionAsync(async () =>
+{
+    await accounts.SettleAsync(...);              // business state
+    await repository.MarkAsCompletedAsync(message, ct);
+}, ct);
+
+// Outbox: insert the row first (AD-4 dedupe), then the business state, one commit.
+await ExecuteInTransactionAsync(async () =>
+{
+    OutboxMessages.Add(message); await DbContext.SaveChangesAsync(ct);   // unique violation => rollback => Duplicate
+    var account = await ProjectedAccountRows.LockAsync(DbContext, message.FromAccount, now, ct);
+    account.Reserved += message.Amount; await DbContext.SaveChangesAsync(ct);
+}, ct);
+```
+
+Reference implementations: `CoreBankAPI/Inbox/TransactionExecutionHandler.cs` (inbox, story 4.6), `PaymentsAPI/Handlers/TransactionEventHandler.cs` (inbox, ADR-028), `PaymentsAPI/Outbox/OutboxRepository.AcceptAsync` (outbox + state, ADR-028). Any exception rolls everything back and the kernel records a retry (ADR-023); never catch inside the delegate to "save what you can".
+
 ## Key files
 
 | File | Purpose |
@@ -65,3 +89,4 @@ Always use `PartitionHelper` — never write a second implementation. Its mappin
 | `CoreBankDemo.Messaging/Outbox/OutboxProcessorBase.cs` | Base outbox service |
 | `CoreBankDemo.CoreBankAPI/Inbox/InboxProcessor.cs` | Reference inbox implementation |
 | `CoreBankDemo.CoreBankAPI/Outbox/MessagingOutboxProcessor.cs` | Reference outbox implementation; PaymentsAPI forwarding lands in story 5.4 |
+| `CoreBankDemo.PaymentsAPI/Accounts/ProjectedAccountRows.cs` | Account projection row upsert + `FOR UPDATE` (ADR-028) |

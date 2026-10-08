@@ -1,6 +1,6 @@
 # PaymentsAPI keeps a local account projection and refuses debits it can see are unfunded
 
-> **Status:** Approved for planning
+> **Status:** Implemented
 > **Kind:** design spec
 > **Original date:** 2026-10-08
 > **Related:** [ADR-001](../../adr/ADR-001-idempotent-inbox.md); [ADR-002](../../adr/ADR-002-transactional-outbox.md); [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md); [ADR-026](../../adr/ADR-026-partition-payment-commands-by-debtor-account.md); [ADR-027](../../adr/ADR-027-payment-status-local-projection.md); [constraints](../../constraints.md); story 4.6 ([atomic inbox execution](2026-08-27-story-4-6-atomic-inbox-execution-with-event-enqueue-design.md))
@@ -186,8 +186,9 @@ Standard OpenTelemetry mechanisms only (observability skill); no new `ActivitySo
   `FailedPaymentTags.FailureReason = "insufficient_funds"`, so it lands on the failed-payments
   dashboard beside CoreBank's rejections. The structured log carries `IdempotencyKey`,
   `PartitionId`, the account, the available and the requested amount.
-- `TransactionEventHandler` adds `account.settled_balance` and `account.reserved` tags on
-  `balance.updated` next to the tags it already sets, and logs each release.
+- `TransactionEventHandler` adds `account.settled_balance` and `account.released` (the amount
+  released by this event) tags on `balance.updated` next to the tags it already sets, and logs
+  each release.
 
 ## Testing
 
@@ -232,8 +233,10 @@ xUnit + AwesomeAssertions + Moq, ≥90 % line coverage, three tiers (ADR-016). T
   metric and span tags.
 - **`Controllers/PaymentsController.cs`**: the `422` arm.
 - **`Handlers/TransactionEventHandler.cs`**: the transaction, the projection calls, the completion
-  stamp; gains `IInboxMessageRepository` (for `ExecuteInTransactionAsync`) and `PaymentsDbContext`
-  (to attach the message), mirroring `TransactionExecutionHandler`.
+  stamp; gains `IInboxMessageRepository` (for `ExecuteInTransactionAsync` and the kernel's
+  `MarkAsCompletedAsync`, which attaches the row and stamps completion itself) and
+  `IAccountProjectionStore`; no direct `PaymentsDbContext` dependency, so it stays unit-testable
+  through mocks.
 - **`CoreBankDemo.ServiceDefaults/BusinessMetrics.cs`**: `PaymentOutcome.InsufficientFunds`.
 - **`CoreBankDemo.LoadTestSupport/DatabaseResetCoordinator.cs`**: truncate `ProjectedAccounts`.
 - **`demo-requests.http`**: an example that drains a demo account and shows the `422`.
