@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults;
@@ -13,7 +14,9 @@ public enum PaymentStorageOutcome
 {
     Stored,
     Duplicate,
-    ValidationFailed
+    ValidationFailed,
+    /// <summary>Refused at the door by the local account projection (ADR-028); nothing stored.</summary>
+    InsufficientFunds
 }
 
 public sealed record PaymentSnapshot(
@@ -52,6 +55,12 @@ internal sealed class PaymentStorageHandler(
     ILogger<PaymentStorageHandler> logger,
     BusinessMetrics businessMetrics) : IPaymentStorageHandler
 {
+    /// <summary>The only text a refused caller sees; amounts never leave the log and the span.</summary>
+    internal const string InsufficientFundsError = "Insufficient funds";
+
+    /// <summary>Span tag value for the traces dashboard's failed-payments table.</summary>
+    internal const string InsufficientFundsReason = "insufficient_funds";
+
     public async Task<PaymentStorageResult> StoreAsync(
         PaymentRequest request,
         string? idempotencyKey,
@@ -107,14 +116,40 @@ internal sealed class PaymentStorageHandler(
             ["PartitionId"] = partitionId
         });
 
-        if (await repository.StoreIfNewAsync(message, cancellationToken).ConfigureAwait(false))
+        var acceptance = await repository.AcceptAsync(message, cancellationToken).ConfigureAwait(false);
+        switch (acceptance)
         {
-            logger.LogInformation(
-                "Stored payment {IdempotencyKey} in partition {PartitionId}",
-                key,
-                partitionId);
-            businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored, scheme);
-            return new PaymentStorageResult(PaymentStorageOutcome.Stored, ToSnapshot(message), []);
+            case PaymentAcceptance.Stored:
+                logger.LogInformation(
+                    "Stored payment {IdempotencyKey} in partition {PartitionId}",
+                    key,
+                    partitionId);
+                businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.Stored, scheme);
+                return new PaymentStorageResult(PaymentStorageOutcome.Stored, ToSnapshot(message), []);
+
+            case PaymentAcceptance.InsufficientFunds:
+                // ADR-028: a door refusal. Nothing was accepted, so CoreBank
+                // stays the only source of outcomes; the figures stay in the
+                // log and on the span, never in the response.
+                logger.LogWarning(
+                    "Refused payment {IdempotencyKey} in partition {PartitionId}: account {FromAccount} is known to be short of {Amount} {Currency}",
+                    key,
+                    partitionId,
+                    request.FromAccount,
+                    normalizedAmount,
+                    request.Currency);
+                var activity = Activity.Current;
+                activity?.SetTag(FailedPaymentTags.Outcome, FailedPaymentTags.Rejected);
+                activity?.SetTag(FailedPaymentTags.FailureReason, InsufficientFundsReason);
+                activity?.SetTag(FailedPaymentTags.TransactionId, key);
+                businessMetrics.RecordPaymentIntake(BusinessMetrics.PaymentOutcome.InsufficientFunds, scheme);
+                return new PaymentStorageResult(PaymentStorageOutcome.InsufficientFunds, null, [InsufficientFundsError]);
+
+            case PaymentAcceptance.Duplicate:
+                break;
+
+            default:
+                throw new InvalidOperationException($"Unhandled payment acceptance: {acceptance}");
         }
 
         logger.LogInformation(

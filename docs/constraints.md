@@ -13,7 +13,7 @@ This document is the guardrail contract for every design spec, plan and implemen
 ## 2. External contract (same externally observable behavior as `main`)
 
 - **PaymentsAPI** (ports 5294, load-test 5295)
-  - `POST /api/payments` → validate → store in Outbox (idempotent on `Idempotency-Key` header, GUID generated if absent) → `202 Accepted`; duplicate key → `202` referencing the existing record.
+  - `POST /api/payments` → validate → store in Outbox and raise the debtor's reservation in one transaction (idempotent on `Idempotency-Key` header, GUID generated if absent) → `202 Accepted`; duplicate key → `202` referencing the existing record; a debit the local account projection knows is unfunded → `422` with `Insufficient funds`, nothing stored, key not consumed (ADR-028).
   - `GET /api/payments/{transactionId}` → `200` with `PaymentResponse` whose `Status` is CoreBank's committed outcome (`Completed`/`Failed`/`Cancelled`) or `Pending`, read from the local outbox row without calling CoreBank; unknown id → `404` (ADR-027).
   - Forwards with a single `POST /api/transactions/process`; there is no destination-account pre-validation (ADR-023).
   - Consumes Dapr CloudEvents from topic `transaction-events` at `/events/transactions/{completed|failed|balance-updated|cancelled|unknown}` into an Inbox (`cancelled` per ADR-020's addendum).

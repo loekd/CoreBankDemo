@@ -151,4 +151,42 @@ public class OutboxRepositoryTests(PostgresContainerFixture fixture) : PaymentsP
         await using var verification = store.CreateContext();
         verification.OutboxMessages.Count(message => message.IdempotencyKey == "race-key").Should().Be(1);
     }
+
+    [Fact]
+    public async Task RecordCommittedOutcomeAsync_retried_on_the_same_context_after_a_rollback_records_the_outcome()
+    {
+        // An execution-strategy retry re-runs the inbox transaction on the same
+        // context: the first attempt's payload was accepted into the tracker,
+        // then rolled back in the database.
+        var ct = TestContext.Current.CancellationToken;
+        await using var store = CreateStore();
+        await using (var seed = store.CreateContext())
+        {
+            var message = PaymentsApiTestData.Outbox("retried-key");
+            message.Status = MessageConstants.Status.Completed;
+            message.ResponsePayload = """{"TransactionId":"retried-key","Status":"Pending","ProcessedAt":"2026-08-28T12:00:00+00:00"}""";
+            seed.OutboxMessages.Add(message);
+            await seed.SaveChangesAsync(ct);
+        }
+        await using var context = store.CreateContext();
+        var repository = new OutboxRepository(context, System.TimeProvider.System, TestBusinessMetrics.Instance);
+        var settledAt = new DateTimeOffset(2026, 8, 28, 12, 0, 5, TimeSpan.Zero);
+        await using (var attempt1 = await context.Database.BeginTransactionAsync(ct))
+        {
+            (await repository.RecordCommittedOutcomeAsync("retried-key", MessageConstants.Status.Completed, settledAt, ct)).Should().BeTrue();
+            await attempt1.RollbackAsync(ct);
+        }
+
+        bool recorded;
+        await using (var attempt2 = await context.Database.BeginTransactionAsync(ct))
+        {
+            recorded = await repository.RecordCommittedOutcomeAsync("retried-key", MessageConstants.Status.Completed, settledAt, ct);
+            await attempt2.CommitAsync(ct);
+        }
+
+        recorded.Should().BeTrue("the retry must see the rolled-back database payload, not the stale tracked one");
+        await using var verification = store.CreateContext();
+        var row = verification.OutboxMessages.Single(row => row.TransactionId == "retried-key");
+        row.ResponsePayload.Should().Contain("\"Status\":\"Completed\"");
+    }
 }

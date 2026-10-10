@@ -13,9 +13,10 @@ namespace CoreBankDemo.PaymentsAPI.Controllers;
 /// check <see cref="ModelState"/>, call <see cref="IPaymentStorageHandler"/>
 /// and (for <c>scheme=instant</c>) <see cref="IInstantPaymentForwardingHandler"/>,
 /// or, for the <c>GET</c>, <see cref="IPaymentStatusHandler"/>, and map
-/// results to an <see cref="IActionResult"/> -- no persistence, idempotency,
-/// partitioning, rounding, tracing, clock, or budget/claim logic here; all of
-/// that lives in the handlers.
+/// results to an <see cref="IActionResult"/>: a
+/// <see cref="PaymentStorageOutcome.InsufficientFunds"/> maps to <c>422</c>
+/// (ADR-028) -- no persistence, idempotency, partitioning, rounding, tracing,
+/// clock, or budget/claim logic here; all of that lives in the handlers.
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -62,6 +63,11 @@ public class PaymentsController(
                     request.Scheme),
             PaymentStorageOutcome.ValidationFailed =>
                 BadRequest(new { Errors = result.Errors }),
+            // ADR-028: a door refusal from the local account projection. Both
+            // rails answer the same; nothing was stored, so there is no
+            // Location and the instant inline attempt never starts.
+            PaymentStorageOutcome.InsufficientFunds =>
+                StatusCode(StatusCodes.Status422UnprocessableEntity, new { Errors = result.Errors }),
             _ => throw new InvalidOperationException($"Unhandled payment storage outcome: {result.Outcome}")
         };
     }

@@ -238,6 +238,25 @@ public class PaymentsControllerTests
     }
 
     [Theory]
+    [InlineData(PaymentSchemes.Standard)]
+    [InlineData(PaymentSchemes.Instant)]
+    public async Task ProcessPayment_returns_422_with_the_handler_errors_when_funds_are_insufficient_on_either_rail(string scheme)
+    {
+        var request = ValidRequest() with { Scheme = scheme };
+        _handler
+            .Setup(h => h.StoreAsync(request, IdempotencyKey, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PaymentStorageResult(PaymentStorageOutcome.InsufficientFunds, null, ["Insufficient funds"]));
+        var controller = CreateController(IdempotencyKey);
+
+        var result = await controller.ProcessPayment(request, TestContext.Current.CancellationToken);
+
+        var unprocessable = result.Should().BeOfType<ObjectResult>().Subject;
+        unprocessable.StatusCode.Should().Be(StatusCodes.Status422UnprocessableEntity);
+        GetErrors(unprocessable.Value).Should().Equal("Insufficient funds");
+        _instantHandler.VerifyNoOtherCalls();
+    }
+
+    [Theory]
     [InlineData(PaymentStorageOutcome.Stored)]
     [InlineData(PaymentStorageOutcome.Duplicate)]
     public async Task ProcessPayment_throws_when_a_success_outcome_is_missing_its_persisted_snapshot(

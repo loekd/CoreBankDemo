@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.PaymentsAPI;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
@@ -46,9 +47,9 @@ public class PaymentStorageHandlerTests
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
 
         var result = await handler.StoreAsync(Request, key, TestContext.Current.CancellationToken);
@@ -71,9 +72,9 @@ public class PaymentStorageHandlerTests
         var captured = new List<OutboxMessage>();
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured.Add(message))
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
 
         foreach (var key in new[] { "x", new string('a', 100), "mapped-key" })
@@ -94,9 +95,9 @@ public class PaymentStorageHandlerTests
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
 
         await handler.StoreAsync(Request with { Scheme = scheme }, "priority-key", TestContext.Current.CancellationToken);
@@ -110,9 +111,9 @@ public class PaymentStorageHandlerTests
         var captured = new List<OutboxMessage>();
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured.Add(message))
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
 
         await handler.StoreAsync(Request with { Scheme = PaymentSchemes.Instant }, "held-key", TestContext.Current.CancellationToken);
@@ -132,9 +133,9 @@ public class PaymentStorageHandlerTests
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
         var request = Request with { Amount = decimal.Parse(input, System.Globalization.CultureInfo.InvariantCulture) };
 
@@ -152,9 +153,9 @@ public class PaymentStorageHandlerTests
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), cancellation.Token))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), cancellation.Token))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var logger = new CapturingLogger();
         var handler = CreateHandler(repository.Object, logger);
 
@@ -200,9 +201,9 @@ public class PaymentStorageHandlerTests
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
 
         var result = await handler.StoreAsync(Request, null, TestContext.Current.CancellationToken);
@@ -238,9 +239,9 @@ public class PaymentStorageHandlerTests
         OutboxMessage? captured = null;
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .Callback<OutboxMessage, CancellationToken>((message, _) => captured = message)
-            .ReturnsAsync(true);
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var handler = CreateHandler(repository.Object);
         using var activity = new Activity("store-payment").SetIdFormat(ActivityIdFormat.W3C);
         activity.TraceStateString = "vendor=value";
@@ -261,9 +262,9 @@ public class PaymentStorageHandlerTests
         winner.Amount = 99m;
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), cancellation.Token))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), cancellation.Token))
             .Callback<OutboxMessage, CancellationToken>((message, _) => candidateId = message.Id)
-            .ReturnsAsync(false);
+            .ReturnsAsync(PaymentAcceptance.Duplicate);
         repository
             .Setup(store => store.FindByIdempotencyKeyAsync("duplicate-key", cancellation.Token))
             .ReturnsAsync(winner);
@@ -291,14 +292,74 @@ public class PaymentStorageHandlerTests
         repository.VerifyAll();
     }
 
+    // ---- ADR-028: account projection refusal ----
+
+    [Fact]
+    public async Task Insufficient_funds_returns_the_outcome_with_a_single_bare_error_and_no_snapshot()
+    {
+        var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        repository
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentAcceptance.InsufficientFunds);
+        var logger = new CapturingLogger();
+        var handler = CreateHandler(repository.Object, logger);
+
+        var result = await handler.StoreAsync(Request, "short-key", TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(PaymentStorageOutcome.InsufficientFunds);
+        result.Payment.Should().BeNull();
+        result.Errors.Should().Equal("Insufficient funds");
+        logger.Messages.Should().ContainSingle(message => message.Contains("Refused payment short-key"));
+        repository.Verify(store => store.FindByIdempotencyKeyAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Theory]
+    [InlineData(PaymentSchemes.Standard, "standard")]
+    [InlineData(PaymentSchemes.Instant, "instant")]
+    public async Task Insufficient_funds_records_the_intake_metric_for_the_scheme(string scheme, string expectedScheme)
+    {
+        var repository = new Mock<IOutboxRepository>();
+        repository
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentAcceptance.InsufficientFunds);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
+
+        await handler.StoreAsync(Request with { Scheme = scheme }, "short-key", TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should().ContainSingle(m => m.InstrumentName == "corebankdemo.payment.intake").Which;
+        measurement.Tags["outcome"].Should().Be("insufficient_funds");
+        measurement.Tags["payment.scheme"].Should().Be(expectedScheme);
+    }
+
+    [Fact]
+    public async Task Insufficient_funds_tags_the_current_span_as_a_rejected_payment()
+    {
+        var repository = new Mock<IOutboxRepository>();
+        repository
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentAcceptance.InsufficientFunds);
+        var handler = CreateHandler(repository.Object);
+        using var activity = new Activity("accept-payment").SetIdFormat(ActivityIdFormat.W3C);
+        activity.Start();
+
+        await handler.StoreAsync(Request, "short-key", TestContext.Current.CancellationToken);
+
+        activity.TagObjects.Should().Contain(
+            new KeyValuePair<string, object?>(FailedPaymentTags.Outcome, FailedPaymentTags.Rejected),
+            new KeyValuePair<string, object?>(FailedPaymentTags.FailureReason, "insufficient_funds"),
+            new KeyValuePair<string, object?>(FailedPaymentTags.TransactionId, "short-key"));
+    }
+
     // ---- Story 6.5: business metrics ----
 
     [Fact]
     public async Task StoreAsync_records_a_stored_payment_intake_metric_for_a_fresh_key()
     {
         var repository = new Mock<IOutboxRepository>();
-        repository.Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(true);
+        repository.Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentAcceptance.Stored);
         var businessMetrics = new BusinessMetrics();
         using var listener = new MetricsTestListener(businessMetrics);
         var handler = CreateHandler(repository.Object, businessMetrics: businessMetrics);
@@ -314,8 +375,8 @@ public class PaymentStorageHandlerTests
     {
         var winner = PaymentsApiTestData.Outbox("duplicate-key");
         var repository = new Mock<IOutboxRepository>();
-        repository.Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
+        repository.Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentAcceptance.Duplicate);
         repository.Setup(store => store.FindByIdempotencyKeyAsync("duplicate-key", It.IsAny<CancellationToken>()))
             .ReturnsAsync(winner);
         var businessMetrics = new BusinessMetrics();
@@ -347,8 +408,8 @@ public class PaymentStorageHandlerTests
     {
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(false);
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentAcceptance.Duplicate);
         repository
             .Setup(store => store.FindByIdempotencyKeyAsync("missing", It.IsAny<CancellationToken>()))
             .ReturnsAsync((OutboxMessage?)null);
@@ -366,7 +427,7 @@ public class PaymentStorageHandlerTests
         var expected = new InvalidOperationException("database unavailable");
         var repository = new Mock<IOutboxRepository>();
         repository
-            .Setup(store => store.StoreIfNewAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
+            .Setup(store => store.AcceptAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(expected);
         var handler = CreateHandler(repository.Object);
 

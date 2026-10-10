@@ -151,6 +151,41 @@ public class PaymentsDbContextTests(PostgresContainerFixture fixture) : Payments
         await act.Should().ThrowAsync<DbUpdateException>();
     }
 
+    [Fact]
+    public async Task Model_includes_the_projected_accounts_table()
+    {
+        await using var store = CreateStore();
+        await using var context = store.CreateContext();
+
+        var account = context.Model.FindEntityType(typeof(CoreBankDemo.PaymentsAPI.Accounts.ProjectedAccount))!;
+        account.GetTableName().Should().Be("ProjectedAccounts");
+        account.FindPrimaryKey()!.Properties.Select(property => property.Name)
+            .Should().Equal(nameof(CoreBankDemo.PaymentsAPI.Accounts.ProjectedAccount.AccountNumber));
+        AssertMaxLength(account, nameof(CoreBankDemo.PaymentsAPI.Accounts.ProjectedAccount.AccountNumber), 50);
+        AssertMaxLength(account, nameof(CoreBankDemo.PaymentsAPI.Accounts.ProjectedAccount.Currency), 3);
+        foreach (var name in new[] { "SettledBalance", "Reserved" })
+        {
+            account.FindProperty(name)!.GetPrecision().Should().Be(18);
+            account.FindProperty(name)!.GetScale().Should().Be(2);
+        }
+        account.FindProperty("SettledBalance")!.IsNullable.Should().BeTrue();
+        account.FindProperty("Currency")!.IsNullable.Should().BeTrue();
+        AssertRequired(account, "Reserved", "UpdatedAt");
+
+        // Round trip: a NULL settled balance survives the database.
+        context.ProjectedAccounts.Add(new CoreBankDemo.PaymentsAPI.Accounts.ProjectedAccount
+        {
+            AccountNumber = "NL91ABNA0417164300",
+            UpdatedAt = new DateTime(2026, 10, 8, 12, 0, 0, DateTimeKind.Utc)
+        });
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+        await using var verification = store.CreateContext();
+        var row = await verification.ProjectedAccounts.SingleAsync(TestContext.Current.CancellationToken);
+        row.SettledBalance.Should().BeNull();
+        row.Reserved.Should().Be(0m);
+        row.Currency.Should().BeNull();
+    }
+
     private static void AssertIndex(
         IEnumerable<Microsoft.EntityFrameworkCore.Metadata.IIndex> indexes,
         bool unique,

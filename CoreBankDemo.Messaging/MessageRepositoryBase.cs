@@ -38,6 +38,13 @@ public abstract class MessageRepositoryBase<TMessage, TDbContext>
     /// </summary>
     protected TimeProvider TimeProvider { get; }
 
+    /// <summary>
+    /// The injected <see cref="BusinessMetrics"/> instance, for a leaf
+    /// repository that needs to record an outcome itself rather than through
+    /// this base's own recording methods.
+    /// </summary>
+    protected BusinessMetrics BusinessMetrics => _businessMetrics;
+
     /// <summary>The store's message table; named by the inbox/outbox-specific base.</summary>
     protected abstract DbSet<TMessage> Messages { get; }
 
