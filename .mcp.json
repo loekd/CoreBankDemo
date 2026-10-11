@@ -14,7 +14,9 @@
       "args": ["opentelemetry-mcp"],
       "env": {
         "BACKEND_TYPE": "tempo",
-        "BACKEND_URL": "http://localhost:3200"
+        "BACKEND_URL": "http://localhost:3200",
+        "NO_PROXY": "localhost,127.0.0.1,::1,gateway.docker.internal",
+        "no_proxy": "localhost,127.0.0.1,::1,gateway.docker.internal"
       }
     },
     "grafana": {
