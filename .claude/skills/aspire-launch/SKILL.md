@@ -21,6 +21,14 @@ description: |
 | Regular dev | `CoreBankDemo.AppHost/CoreBankDemo.AppHost.csproj` |
 | Load testing | `CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj` |
 
+## Preflight (before every start)
+
+```bash
+aspire ps
+```
+
+The two AppHosts both bind CoreBankAPI's stable ingress port 5032 (ADR-014) and cannot run side by side: the second one's PaymentsAPI silently forwards into the first one's CoreBank. If `aspire ps` lists an AppHost you did not start, stop and ask the user before touching it — it may belong to another session on this machine. If it lists the one you are about to start, `aspire stop` it first.
+
 ## Start
 
 ```bash
@@ -62,6 +70,7 @@ killall dcp
 ## Rules
 
 - Never use `dotnet run` to start AppHosts — use `aspire start`.
+- Always run `aspire ps` before `aspire start`; never start while another AppHost is running (port 5032 collision).
 - Always specify `--apphost` — this repo has two AppHosts.
 - Always use `aspire wait <resource>` before probing APIs or running assertions.
 - Never use `sleep` to wait for health — use `aspire wait`.
