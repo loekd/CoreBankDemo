@@ -240,6 +240,10 @@ As the process record, I want the accepted rebuild decisions audited against the
 
 - A duplicate standard-rail `POST /api/payments` reports `Completed` for a payment CoreBank has received but not yet executed. — `PaymentsController.ToDuplicateResult` echoes the outbox row's kernel `Status` verbatim on the standard rail, and that column turns `Completed` once CoreBank has stored the command in its inbox (AD-11: transport state only). The instant rail and `GET /api/payments/{transactionId}` derive the status from CoreBank's committed outcome instead; aligning the standard duplicate response changes an existing response and needs its own decision.
 
+### [payments-account-projection](superpowers/specs/2026-10-08-payments-account-projection-design.md)
+
+- A whitespace-only `Idempotency-Key` passes PaymentsAPI's length check but is "unusable" to CoreBank (`TransactionRejectionHandler`), which answers a plain `400` with no `transaction.failed`, so the reservation PaymentsAPI raised for it is never released. — Tightening PaymentsAPI's `400` touches the external contract (constraints §2, Ask First); decision deferred.
+
 ## Open retrospective action items
 
 These carry-forwards were copied from the epic retrospectives during the 2026-09-10 migration; items verifiable as done in the code were removed then, the rest have not been re-verified.

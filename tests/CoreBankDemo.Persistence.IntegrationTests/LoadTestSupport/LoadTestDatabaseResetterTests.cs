@@ -94,6 +94,13 @@ public sealed class LoadTestDatabaseResetterTests(
         payments.OutboxMessages.Add(PaymentsApiTestData.Outbox("payments-outbox"));
         payments.InboxMessages.Add(PaymentsApiTestData.Inbox(
             "payments-inbox", "test.event", "account"));
+        payments.ProjectedAccounts.Add(new CoreBankDemo.PaymentsAPI.Accounts.ProjectedAccount
+        {
+            AccountNumber = "NL01LOAD0000000001",
+            SettledBalance = 1m,
+            Reserved = 1m,
+            UpdatedAt = new DateTime(2026, 8, 30, 0, 0, 0, DateTimeKind.Utc)
+        });
         await coreBank.SaveChangesAsync(cancellationToken);
         await payments.SaveChangesAsync(cancellationToken);
 
@@ -111,6 +118,7 @@ public sealed class LoadTestDatabaseResetterTests(
         (await coreBank.MessagingOutboxMessages.CountAsync(cancellationToken)).Should().Be(0);
         (await payments.OutboxMessages.CountAsync(cancellationToken)).Should().Be(0);
         (await payments.InboxMessages.CountAsync(cancellationToken)).Should().Be(0);
+        (await payments.ProjectedAccounts.CountAsync(cancellationToken)).Should().Be(0);
     }
 
     [Fact]

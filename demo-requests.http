@@ -38,6 +38,35 @@ Idempotency-Key: demo-instant-001
   "scheme": "instant"
 }
 
+### 2e. Refused at the door: the local account projection (ADR-028)
+### PaymentsAPI only refuses what it *knows* is short: after at least one
+### settlement it has seen NL39RABO0300065264's balance (2500.00 at seed).
+### First move money out of it so it has a settled balance locally, then ask
+### for more than is left -> 422 Unprocessable Content, body
+### { "errors": ["Insufficient funds"] }, nothing stored, no CoreBank call.
+### An account PaymentsAPI has never seen a balance.updated for is always
+### accepted and left to CoreBank to judge.
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL39RABO0300065264",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 2400.00,
+  "currency": "EUR"
+}
+
+### then (give the balance.updated event a moment to arrive)
+POST http://localhost:5294/api/payments
+Content-Type: application/json
+
+{
+  "fromAccount": "NL39RABO0300065264",
+  "toAccount": "NL20INGB0001234567",
+  "amount": 500.00,
+  "currency": "EUR"
+}
+
 ### 2c. Instant rail timed out -> 504 Gateway Timeout, Status: Cancelled (ADR-020)
 ### The 504 needs Core Bank to be reachable for the cancel while the process
 ### call fails: e.g. Dev Proxy configured to reject (not delay) only

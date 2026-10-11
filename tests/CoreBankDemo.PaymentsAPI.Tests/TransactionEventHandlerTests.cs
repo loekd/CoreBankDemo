@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.Messaging;
+using CoreBankDemo.PaymentsAPI.Accounts;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
@@ -19,8 +20,10 @@ namespace CoreBankDemo.PaymentsAPI.Tests;
 /// <see cref="Activity.Current"/> -- the consumer span
 /// <see cref="CoreBankDemo.Messaging.InboxProcessorBase{TMessage}"/> already
 /// restores, never a second <see cref="ActivitySource"/> created here --
-/// malformed-payload and unsupported-type failures, and that handling never
-/// mutates <see cref="InboxMessage"/> itself (kernel-owned completion).
+/// malformed-payload and unsupported-type failures, the event's effect on the
+/// account projection, and that the handler completes its own inbox row
+/// through <see cref="IInboxMessageRepository.MarkAsCompletedAsync"/> inside
+/// the same transaction (transactional inbox, spec: payments-account-projection).
 /// </summary>
 public class TransactionEventHandlerTests
 {
@@ -34,7 +37,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionCompletedEvent("txn-1", "Completed", Now);
         var message = Inbox(Constants.TransactionCompleted, "txn-1", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler(logger);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -61,7 +64,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionFailedEvent("txn-2", "Failed", Now, "Insufficient funds");
         var message = Inbox(Constants.TransactionFailed, "txn-2", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler(logger);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -92,7 +95,7 @@ public class TransactionEventHandlerTests
         var activity = observedActivity.Activity;
         var payload = new TransactionFailedEvent("txn-2", "Failed", Now, errorReason);
         var message = Inbox(Constants.TransactionFailed, "txn-2", payload: Serialize(payload));
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -109,7 +112,7 @@ public class TransactionEventHandlerTests
         // the outbox row is cancelled, never a second time here.
         using var observedActivity = StartListenedActivity();
         var activity = observedActivity.Activity;
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         await handler.HandleAsync(
             Inbox(Constants.TransactionCompleted, "txn-1", payload: Serialize(new TransactionCompletedEvent("txn-1", "Completed", Now))),
@@ -129,7 +132,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionFailedEvent("txn-3", "Failed", Now, null);
         var message = Inbox(Constants.TransactionFailed, "txn-3", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler(logger);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -152,7 +155,7 @@ public class TransactionEventHandlerTests
             accountNumber: "NL91ABNA0417164300",
             payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler(logger);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -180,13 +183,16 @@ public class TransactionEventHandlerTests
         var payload = new TransactionCompletedEvent("txn-5", "Completed", Now);
         var message = Inbox(Constants.TransactionCompleted, "txn-5", payload: Serialize(payload));
         message.Status = MessageConstants.Status.Processing;
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var inbox = TransactionalInbox();
+        var handler = CreateHandler(inbox: inbox);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
         await act.Should().NotThrowAsync();
-        message.Status.Should().Be(MessageConstants.Status.Processing);
+        // Completion is the handler's job now; the repository's own terminal
+        // guard makes the second delivery's call a no-op.
+        inbox.Verify(r => r.MarkAsCompletedAsync(message, It.IsAny<CancellationToken>()), Times.Exactly(2));
         message.Payload.Should().Be(Serialize(payload));
     }
 
@@ -194,7 +200,7 @@ public class TransactionEventHandlerTests
     public async Task Invalid_json_throws_JsonException_so_the_kernel_records_retry()
     {
         var message = Inbox(Constants.TransactionCompleted, "txn-6", payload: "{not-json");
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -205,7 +211,7 @@ public class TransactionEventHandlerTests
     public async Task Json_null_throws_InvalidOperationException_so_the_kernel_records_retry()
     {
         var message = Inbox(Constants.TransactionCompleted, "txn-6", payload: "null");
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -217,7 +223,7 @@ public class TransactionEventHandlerTests
     public async Task Missing_required_payload_fields_throw_JsonException_so_the_kernel_records_retry()
     {
         var message = Inbox(Constants.TransactionCompleted, "txn-6", payload: "{}");
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -231,7 +237,7 @@ public class TransactionEventHandlerTests
             Constants.TransactionCompleted,
             "txn-6",
             payload: """{"transactionId":null,"status":"Completed","processedAt":"2026-08-29T12:00:00Z"}""");
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -242,7 +248,7 @@ public class TransactionEventHandlerTests
     public async Task Unsupported_stored_event_type_throws_an_explicit_unsupported_type_error()
     {
         var message = Inbox("com.corebank.unknown.type", "txn-7", payload: "{}");
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -260,7 +266,7 @@ public class TransactionEventHandlerTests
             "txn-8",
             payload: Serialize(new TransactionCompletedEvent("txn-8", "Completed", Now)));
         message.Status = MessageConstants.Status.Processing;
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         var act = () => handler.HandleAsync(message, cts.Token);
 
@@ -284,6 +290,13 @@ public class TransactionEventHandlerTests
         repository
             .Setup(r => r.RecordCommittedOutcomeAsync("txn-9", status, Now, It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
+        if (eventType != Constants.TransactionCompleted)
+        {
+            // Failed/cancelled also look the payment up to release its reservation.
+            repository
+                .Setup(r => r.FindByIdempotencyKeyAsync("txn-9", It.IsAny<CancellationToken>()))
+                .ReturnsAsync((OutboxMessage?)null);
+        }
         var payload = eventType switch
         {
             Constants.TransactionCompleted => Serialize(new TransactionCompletedEvent("txn-9", status, Now)),
@@ -294,7 +307,7 @@ public class TransactionEventHandlerTests
         };
         var message = Inbox(eventType, "txn-9", payload: payload);
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, repository.Object);
+        var handler = CreateHandler(logger, repository);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -310,7 +323,7 @@ public class TransactionEventHandlerTests
         var payload = new TransactionCancelledEvent("txn-2c", "Cancelled", Now, "Cancelled by the instant rail on budget exhaustion");
         var message = Inbox(Constants.TransactionCancelled, "txn-2c", payload: Serialize(payload));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler(logger);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -333,7 +346,7 @@ public class TransactionEventHandlerTests
         var activity = observedActivity.Activity;
         var payload = new TransactionCancelledEvent("txn-2d", "Cancelled", Now, null);
         var message = Inbox(Constants.TransactionCancelled, "txn-2d", payload: Serialize(payload));
-        var handler = new TransactionEventHandler(new CapturingLogger(), new Mock<IOutboxRepository>().Object);
+        var handler = CreateHandler();
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -348,7 +361,7 @@ public class TransactionEventHandlerTests
     {
         var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
         var message = Inbox(Constants.TransactionCancelled, "txn-2f", payload: Serialize(new TransactionCancelledEvent("txn-2f", status, Now, null)));
-        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+        var handler = CreateHandler(outbox: repository);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -367,7 +380,7 @@ public class TransactionEventHandlerTests
             Constants.TransactionCancelled,
             "txn-2g",
             payload: """{"transactionId":"txn-2g","status":null,"processedAt":"2026-08-29T12:34:56+00:00","reason":null}""");
-        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+        var handler = CreateHandler(outbox: repository);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -385,9 +398,12 @@ public class TransactionEventHandlerTests
         repository
             .Setup(r => r.RecordCommittedOutcomeAsync("txn-2e", "Cancelled", Now, It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
+        repository
+            .Setup(r => r.FindByIdempotencyKeyAsync("txn-2e", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((OutboxMessage?)null);
         var message = Inbox(Constants.TransactionCancelled, "txn-2e", payload: Serialize(new TransactionCancelledEvent("txn-2e", "Cancelled", Now, null)));
         var logger = new CapturingLogger();
-        var handler = new TransactionEventHandler(logger, repository.Object);
+        var handler = CreateHandler(logger, repository);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -399,12 +415,17 @@ public class TransactionEventHandlerTests
     public async Task Balance_events_never_touch_the_payment_row()
     {
         var repository = new Mock<IOutboxRepository>(MockBehavior.Strict);
+        repository
+            .Setup(r => r.FindByIdempotencyKeyAsync("txn-10", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentsApiTestData.Outbox("txn-10"));
         var payload = new BalanceUpdatedEvent("txn-10", "NL91ABNA0417164300", -25m, 975m, "EUR");
         var message = Inbox(Constants.BalanceUpdated, "txn-10", "NL91ABNA0417164300", Serialize(payload));
-        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+        var handler = CreateHandler(outbox: repository);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
+        // The payment is only read (to find the reservation to release), never written.
+        repository.Verify(r => r.FindByIdempotencyKeyAsync("txn-10", It.IsAny<CancellationToken>()), Times.Once);
         repository.VerifyNoOtherCalls();
     }
 
@@ -421,11 +442,323 @@ public class TransactionEventHandlerTests
             Constants.TransactionCompleted,
             "txn-11",
             payload: Serialize(new TransactionCompletedEvent("txn-11", "Completed", Now)));
-        var handler = new TransactionEventHandler(new CapturingLogger(), repository.Object);
+        var handler = CreateHandler(outbox: repository);
 
         var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
         await act.Should().ThrowAsync<Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException>();
+    }
+
+    [Fact]
+    public async Task Balance_update_for_the_debtor_settles_and_releases_the_payment_amount_inside_the_transaction()
+    {
+        var accounts = new Mock<IAccountProjectionStore>(MockBehavior.Strict);
+        var outbox = new Mock<IOutboxRepository>();
+        var inbox = TransactionalInbox();
+        var calls = new List<string>();
+        outbox
+            .Setup(r => r.FindByIdempotencyKeyAsync("txn-4", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentsApiTestData.Outbox("txn-4")); // FromAccount NL91…, Amount 12.34
+        accounts
+            .Setup(a => a.SettleAsync("NL91ABNA0417164300", 987.66m, "EUR", It.IsAny<CancellationToken>()))
+            .Callback(() => calls.Add("settle")).Returns(Task.CompletedTask);
+        accounts
+            .Setup(a => a.ReleaseAsync("NL91ABNA0417164300", 12.34m, It.IsAny<CancellationToken>()))
+            .Callback(() => calls.Add("release")).ReturnsAsync(0m);
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback(() => calls.Add("complete")).ReturnsAsync(MessageTransitionOutcome.Applied);
+        var message = Inbox(Constants.BalanceUpdated, "txn-4", accountNumber: "NL91ABNA0417164300",
+            payload: Serialize(new BalanceUpdatedEvent("txn-4", "NL91ABNA0417164300", -12.34m, 987.66m, "EUR")));
+        var handler = CreateHandler(outbox: outbox, accounts: accounts, inbox: inbox);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        calls.Should().Equal("settle", "release", "complete");
+        accounts.VerifyAll();
+    }
+
+    [Fact]
+    public async Task Balance_update_for_the_creditor_only_settles()
+    {
+        var accounts = new Mock<IAccountProjectionStore>(MockBehavior.Strict);
+        var outbox = new Mock<IOutboxRepository>();
+        outbox
+            .Setup(r => r.FindByIdempotencyKeyAsync("txn-4", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentsApiTestData.Outbox("txn-4")); // debtor is NL91…, this event is for NL20…
+        accounts
+            .Setup(a => a.SettleAsync("NL20INGB0001234567", 1012.34m, "EUR", It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var message = Inbox(Constants.BalanceUpdated, "txn-4", accountNumber: "NL20INGB0001234567",
+            payload: Serialize(new BalanceUpdatedEvent("txn-4", "NL20INGB0001234567", 12.34m, 1012.34m, "EUR")));
+        var handler = CreateHandler(outbox: outbox, accounts: accounts);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        accounts.Verify(a => a.ReleaseAsync(It.IsAny<string>(), It.IsAny<decimal>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Balance_update_for_an_unknown_transaction_only_settles()
+    {
+        var accounts = new Mock<IAccountProjectionStore>(MockBehavior.Strict);
+        var outbox = new Mock<IOutboxRepository>();
+        outbox
+            .Setup(r => r.FindByIdempotencyKeyAsync("someone-elses", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((OutboxMessage?)null);
+        accounts
+            .Setup(a => a.SettleAsync("NL39RABO0300065264", 2500m, "EUR", It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var message = Inbox(Constants.BalanceUpdated, "someone-elses", accountNumber: "NL39RABO0300065264",
+            payload: Serialize(new BalanceUpdatedEvent("someone-elses", "NL39RABO0300065264", 5m, 2500m, "EUR")));
+        var handler = CreateHandler(outbox: outbox, accounts: accounts);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        accounts.VerifyAll();
+    }
+
+    [Theory]
+    [InlineData(Constants.TransactionFailed)]
+    [InlineData(Constants.TransactionCancelled)]
+    public async Task Failed_and_cancelled_release_the_debtor_reservation_and_record_the_outcome(string eventType)
+    {
+        var accounts = new Mock<IAccountProjectionStore>(MockBehavior.Strict);
+        var outbox = new Mock<IOutboxRepository>();
+        outbox
+            .Setup(r => r.FindByIdempotencyKeyAsync("txn-r", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentsApiTestData.Outbox("txn-r"));
+        outbox
+            .Setup(r => r.RecordCommittedOutcomeAsync("txn-r", It.IsAny<string>(), Now, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        accounts
+            .Setup(a => a.ReleaseAsync("NL91ABNA0417164300", 12.34m, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(0m);
+        var payload = eventType == Constants.TransactionFailed
+            ? Serialize(new TransactionFailedEvent("txn-r", "Failed", Now, "Insufficient funds"))
+            : Serialize(new TransactionCancelledEvent("txn-r", "Cancelled", Now, "budget"));
+        var handler = CreateHandler(outbox: outbox, accounts: accounts);
+
+        await handler.HandleAsync(Inbox(eventType, "txn-r", payload: payload), TestContext.Current.CancellationToken);
+
+        accounts.VerifyAll();
+        outbox.Verify(r => r.RecordCommittedOutcomeAsync("txn-r", It.IsAny<string>(), Now, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Completed_event_touches_no_account()
+    {
+        var accounts = new Mock<IAccountProjectionStore>(MockBehavior.Strict);
+        var handler = CreateHandler(accounts: accounts);
+
+        await handler.HandleAsync(
+            Inbox(Constants.TransactionCompleted, "txn-1", payload: Serialize(new TransactionCompletedEvent("txn-1", "Completed", Now))),
+            TestContext.Current.CancellationToken);
+
+        accounts.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task Release_below_zero_clamps_and_warns()
+    {
+        var accounts = new Mock<IAccountProjectionStore>();
+        var outbox = new Mock<IOutboxRepository>();
+        outbox
+            .Setup(r => r.FindByIdempotencyKeyAsync("txn-old", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(PaymentsApiTestData.Outbox("txn-old"));
+        accounts
+            .Setup(a => a.ReleaseAsync("NL91ABNA0417164300", 12.34m, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(12.34m); // nothing was reserved: projection younger than the payment
+        var logger = new CapturingLogger();
+        var message = Inbox(Constants.BalanceUpdated, "txn-old", accountNumber: "NL91ABNA0417164300",
+            payload: Serialize(new BalanceUpdatedEvent("txn-old", "NL91ABNA0417164300", -12.34m, 100m, "EUR")));
+        var handler = CreateHandler(logger, outbox, accounts);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        logger.Entries.Should().ContainSingle(entry => entry.Level == LogLevel.Warning && entry.Message.Contains("12.34"));
+    }
+
+    [Fact]
+    public async Task A_failing_projection_write_propagates_and_never_completes_the_row()
+    {
+        var accounts = new Mock<IAccountProjectionStore>();
+        var inbox = TransactionalInbox();
+        accounts
+            .Setup(a => a.SettleAsync(It.IsAny<string>(), It.IsAny<decimal>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        var message = Inbox(Constants.BalanceUpdated, "txn-x", accountNumber: "NL91ABNA0417164300",
+            payload: Serialize(new BalanceUpdatedEvent("txn-x", "NL91ABNA0417164300", -1m, 1m, "EUR")));
+        var handler = CreateHandler(accounts: accounts, inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom");
+        inbox.Verify(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task A_failing_completion_restores_the_message_status_so_the_kernel_can_record_the_retry()
+    {
+        // MarkAsCompletedAsync stamps the in-memory row before its save; if the
+        // save (or the commit) then fails, a message still saying Completed
+        // would make the kernel's retry transition a no-op (AlreadyTerminal)
+        // while the database row stays Processing.
+        var inbox = TransactionalInbox();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+            })
+            .ThrowsAsync(new InvalidOperationException("boom"));
+        var message = Inbox(Constants.TransactionCompleted, "txn-rc", payload: Serialize(new TransactionCompletedEvent("txn-rc", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        message.ProcessedAt = null;
+        var handler = CreateHandler(inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom");
+        message.Status.Should().Be(MessageConstants.Status.Processing);
+        message.ProcessedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_completion_cancelled_mid_flight_restores_the_message_status()
+    {
+        using var cts = new CancellationTokenSource();
+        var inbox = TransactionalInbox();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Returns<InboxMessage, CancellationToken>((m, token) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+                cts.Cancel();
+                token.ThrowIfCancellationRequested();
+                return Task.FromResult(MessageTransitionOutcome.Applied);
+            });
+        var message = Inbox(Constants.TransactionCompleted, "txn-cc", payload: Serialize(new TransactionCompletedEvent("txn-cc", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        message.ProcessedAt = null;
+        var handler = CreateHandler(inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        message.Status.Should().Be(MessageConstants.Status.Processing);
+        message.ProcessedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_retried_transaction_attempt_starts_from_the_original_message_status()
+    {
+        // Npgsql retry-on-failure re-runs the transaction delegate; an attempt
+        // that inherited the previous attempt's in-memory Completed would make
+        // MarkAsCompletedAsync answer AlreadyTerminal and commit without
+        // completing the row.
+        var inbox = new Mock<IInboxMessageRepository>();
+        inbox
+            .Setup(r => r.ExecuteInTransactionAsync(It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()))
+            .Returns<Func<Task>, CancellationToken>(async (operation, _) =>
+            {
+                await operation();
+                await operation();
+            });
+        var statusesSeen = new List<string>();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                statusesSeen.Add(m.Status);
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+            })
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var message = Inbox(Constants.TransactionCompleted, "txn-rt", payload: Serialize(new TransactionCompletedEvent("txn-rt", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        var handler = CreateHandler(inbox: inbox);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        statusesSeen.Should().Equal(MessageConstants.Status.Processing, MessageConstants.Status.Processing);
+        // Each attempt also starts untracked, so the completion re-attaches the
+        // row with Processing as the concurrency token's original value rather
+        // than the rolled-back attempt's saved Completed.
+        inbox.Verify(r => r.Detach(message), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task A_completion_another_worker_already_made_rolls_back_this_attempts_projection_effects()
+    {
+        // MarkAsCompletedAsync reports a row someone else already completed as
+        // AlreadyTerminal instead of throwing; committing anyway would apply
+        // the settlement and the release a second time.
+        var inbox = TransactionalInbox();
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .Callback<InboxMessage, CancellationToken>((m, _) =>
+            {
+                m.Status = MessageConstants.Status.Completed;
+                m.ProcessedAt = Now.UtcDateTime;
+            })
+            .ReturnsAsync(MessageTransitionOutcome.AlreadyTerminal);
+        var message = Inbox(Constants.TransactionCompleted, "txn-dup", payload: Serialize(new TransactionCompletedEvent("txn-dup", "Completed", Now)));
+        message.Status = MessageConstants.Status.Processing;
+        message.ProcessedAt = null;
+        var handler = CreateHandler(inbox: inbox);
+
+        var act = () => handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage($"*{message.Id}*completed by another worker*");
+        message.Status.Should().Be(MessageConstants.Status.Processing, "the restore-on-failure puts the pre-transaction status back");
+        message.ProcessedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Balance_update_tags_the_span_with_the_projection_state()
+    {
+        using var observedActivity = StartListenedActivity();
+        var accounts = new Mock<IAccountProjectionStore>();
+        var outbox = new Mock<IOutboxRepository>();
+        outbox.Setup(r => r.FindByIdempotencyKeyAsync("txn-t", It.IsAny<CancellationToken>())).ReturnsAsync((OutboxMessage?)null);
+        var message = Inbox(Constants.BalanceUpdated, "txn-t", accountNumber: "NL91ABNA0417164300",
+            payload: Serialize(new BalanceUpdatedEvent("txn-t", "NL91ABNA0417164300", -1m, 99m, "EUR")));
+        var handler = CreateHandler(outbox: outbox, accounts: accounts);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        observedActivity.Activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("account.settled_balance", 99m));
+        observedActivity.Activity.TagObjects.Should().Contain(new KeyValuePair<string, object?>("account.released", 0m));
+    }
+
+    private static TransactionEventHandler CreateHandler(
+        ILogger<TransactionEventHandler>? logger = null,
+        Mock<IOutboxRepository>? outbox = null,
+        Mock<IAccountProjectionStore>? accounts = null,
+        Mock<IInboxMessageRepository>? inbox = null)
+    {
+        inbox ??= TransactionalInbox();
+        return new TransactionEventHandler(
+            logger ?? new CapturingLogger(),
+            (outbox ?? new Mock<IOutboxRepository>()).Object,
+            inbox.Object,
+            (accounts ?? new Mock<IAccountProjectionStore>()).Object);
+    }
+
+    /// <summary>A repository whose transaction just runs the delegate and whose completion succeeds.</summary>
+    private static Mock<IInboxMessageRepository> TransactionalInbox()
+    {
+        var inbox = new Mock<IInboxMessageRepository>();
+        inbox
+            .Setup(r => r.ExecuteInTransactionAsync(It.IsAny<Func<Task>>(), It.IsAny<CancellationToken>()))
+            .Returns<Func<Task>, CancellationToken>((operation, _) => operation());
+        inbox
+            .Setup(r => r.MarkAsCompletedAsync(It.IsAny<InboxMessage>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        return inbox;
     }
 
     private static ObservedActivity StartListenedActivity()
