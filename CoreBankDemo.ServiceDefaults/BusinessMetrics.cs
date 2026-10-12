@@ -37,6 +37,7 @@ public sealed class BusinessMetrics : IDisposable
     public const string MessagingQueueDurationInstrumentName = "corebankdemo.messaging.queue.duration";
     public const string MessagingDeliveriesInstrumentName = "corebankdemo.messaging.deliveries";
     public const string PaymentInstantDurationInstrumentName = "corebankdemo.payment.instant.duration";
+    public const string TransactionExecutionDurationInstrumentName = "corebankdemo.transaction.execution.duration";
 
     /// <summary>Outcome of payments intake (spec-6-5 metric contract).</summary>
     public enum PaymentOutcome
@@ -99,6 +100,22 @@ public sealed class BusinessMetrics : IDisposable
     {
         Completed,
         BusinessRejected
+    }
+
+    /// <summary>
+    /// Outcome of one <c>TransactionExecutor.ExecuteAsync</c> attempt — the
+    /// account locking, validation and ledger update inside the enclosing
+    /// transaction, before any event is enqueued or anything commits.
+    /// <see cref="Completed"/> and <see cref="BusinessRejected"/> are the
+    /// executor's two results; <see cref="Failed"/> is an attempt that threw
+    /// (a lock wait, a database error) and will roll back. An attempt
+    /// abandoned because the caller cancelled is not recorded.
+    /// </summary>
+    public enum TransactionExecutionOutcome
+    {
+        Completed,
+        BusinessRejected,
+        Failed
     }
 
     /// <summary>Durable message store kind — never inferred from a CLR type name (design notes).</summary>
@@ -190,6 +207,7 @@ public sealed class BusinessMetrics : IDisposable
     private readonly Histogram<double> _queueDuration;
     private readonly Counter<long> _deliveries;
     private readonly Histogram<double> _instantPaymentDuration;
+    private readonly Histogram<double> _transactionExecutionDuration;
 
     /// <summary>
     /// Exposed only for <see cref="System.Diagnostics.Metrics.MeterListener"/>-based
@@ -246,6 +264,11 @@ public sealed class BusinessMetrics : IDisposable
             PaymentInstantDurationInstrumentName,
             unit: "ms",
             description: "Elapsed time of one instant-rail request's inline attempt, from claim to conclusion or budget expiry.");
+
+        _transactionExecutionDuration = _meter.CreateHistogram<double>(
+            TransactionExecutionDurationInstrumentName,
+            unit: "ms",
+            description: "Elapsed time of one CoreBank transaction execution attempt (account locking, validation, ledger update), by outcome.");
     }
 
     /// <summary>Records one payments-intake outcome. Recorded after the handler outcome is known.</summary>
@@ -309,6 +332,22 @@ public sealed class BusinessMetrics : IDisposable
             new KeyValuePair<string, object?>("outcome", ToTag(outcome)));
     }
 
+    /// <summary>
+    /// Records how long one transaction execution attempt took, tagged by its
+    /// outcome. Unlike <see cref="RecordTransactionProcessed"/> this is
+    /// recorded as soon as the executor returns or throws — it measures the
+    /// execution itself (where lock contention shows up), not whether the
+    /// enclosing transaction later committed. Recorded once per attempt, so a
+    /// retried attempt counts again.
+    /// </summary>
+    public void RecordTransactionExecutionDuration(TransactionExecutionOutcome outcome, TimeSpan duration)
+    {
+        var milliseconds = Math.Max(0d, duration.TotalMilliseconds);
+        _transactionExecutionDuration.Record(
+            milliseconds,
+            new KeyValuePair<string, object?>("outcome", ToTag(outcome)));
+    }
+
     /// <summary>Records one concrete HTTP/Dapr send or receive attempt outcome.</summary>
     public void RecordDelivery(DeliveryDirection direction, Transport transport, MessageType messageType, DeliveryOutcome outcome) =>
         _deliveries.Add(
@@ -356,6 +395,14 @@ public sealed class BusinessMetrics : IDisposable
     {
         TransactionProcessedOutcome.Completed => "completed",
         TransactionProcessedOutcome.BusinessRejected => "business_rejected",
+        _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)
+    };
+
+    private static string ToTag(TransactionExecutionOutcome outcome) => outcome switch
+    {
+        TransactionExecutionOutcome.Completed => "completed",
+        TransactionExecutionOutcome.BusinessRejected => "business_rejected",
+        TransactionExecutionOutcome.Failed => "failed",
         _ => throw new ArgumentOutOfRangeException(nameof(outcome), outcome, null)
     };
 

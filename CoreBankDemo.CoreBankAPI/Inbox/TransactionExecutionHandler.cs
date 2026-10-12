@@ -39,12 +39,7 @@ internal sealed class TransactionExecutionHandler(
                     dbContext.Attach(message);
                 }
 
-                var result = await executor.ExecuteAsync(
-                    message.FromAccount,
-                    message.ToAccount,
-                    message.Amount,
-                    message.TransactionId,
-                    cancellationToken);
+                var result = await ExecuteTimedAsync(message, cancellationToken);
 
                 message.ResponsePayload = JsonSerializer.Serialize(result.Response);
                 message.Status = MessageConstants.Status.Completed;
@@ -140,5 +135,46 @@ internal sealed class TransactionExecutionHandler(
             businessMetrics.RecordStoreOperation(
                 BusinessMetrics.StoreName.CoreBankOutbox, BusinessMetrics.StoreKind.Outbox, BusinessMetrics.StoreOperationOutcome.Added);
         }
+    }
+
+    /// <summary>
+    /// Runs the executor and records <c>corebankdemo.transaction.execution.duration</c>
+    /// for the attempt. Queue duration only measures how long the row waited
+    /// before pickup; this is the only measurement of the execution itself, so
+    /// it is recorded the moment the executor returns or throws (per attempt,
+    /// before commit) rather than with the committed-outcome counters below.
+    /// A caller-requested cancellation is not an execution outcome and records
+    /// nothing, matching the handler's own cancellation path.
+    /// </summary>
+    private async Task<TransactionExecutionResult> ExecuteTimedAsync(InboxMessage message, CancellationToken cancellationToken)
+    {
+        var startedAt = timeProvider.GetUtcNow();
+        TransactionExecutionResult result;
+        try
+        {
+            result = await executor.ExecuteAsync(
+                message.FromAccount,
+                message.ToAccount,
+                message.Amount,
+                message.TransactionId,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            businessMetrics.RecordTransactionExecutionDuration(
+                BusinessMetrics.TransactionExecutionOutcome.Failed, timeProvider.GetUtcNow() - startedAt);
+            throw;
+        }
+
+        businessMetrics.RecordTransactionExecutionDuration(
+            result.Success
+                ? BusinessMetrics.TransactionExecutionOutcome.Completed
+                : BusinessMetrics.TransactionExecutionOutcome.BusinessRejected,
+            timeProvider.GetUtcNow() - startedAt);
+        return result;
     }
 }
