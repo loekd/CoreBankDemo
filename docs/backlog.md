@@ -214,10 +214,9 @@ As the process record, I want the accepted rebuild decisions audited against the
 ### [LGTM observability backend](superpowers/specs/2026-09-16-lgtm-observability-design.md)
 
 - The LGTM dashboard has no Inbox/Outbox backlog-depth gauge; it shows in-vs-out rates per store instead. — No instrument reports pending rows, and subtracting cumulative counters goes wrong once a replica restarts. A per-store observable gauge adds an instrument to the banking services, so it needs its own design.
-- `corebank-trace-analysis` still analyses traces only. — Extend it to check error rate, retries, and terminal failures through `mcp-grafana` (Prometheus, Loki) before digging into Tempo traces.
+- `corebank-trace-analysis` reads Tempo only (its script checks errors, latency, lanes and cross-hop context from traces). — Extend it to check error rate, retries, and terminal failures through `mcp-grafana` (Prometheus, Loki) before digging into Tempo traces.
 - The design spec no longer matches the implementation in four places. — `dashboards.yaml` needs its own file mount at `provisioning/dashboards/corebank.yaml` (Grafana reads provider YAML only from the top level); the `service` variable values are `CoreBank.PaymentsAPI`/`CoreBank.CoreBankAPI`, not `payments-api`/`corebank-api`; the variable's "All" value is `.+` because Loki rejects `.*`; the log-exporter test inspects the exporter by reflection. Update the spec's sections 1, 3, and 6.
 - The OTLP log-exporter registration test in `CoreBankDemo.ServiceDefaults.Tests` reads private OpenTelemetry SDK members (`LoggerProviderSdk.Processor`, `BaseExportProcessor<LogRecord>.exporter`) by reflection. — The SDK exposes no public view of the exporter, so an OpenTelemetry package bump can break the test without any behavior change. Replace it with an observable assertion (for example, an in-process OTLP receiver) or accept and document the brittleness.
-- `opentelemetry-mcp` crashes on startup when `NO_PROXY` contains the bracketed `[::1]` entry Aspire needs in the sandbox (httpx: `Invalid port ':1]'`). — Verified working only with `NO_PROXY=localhost,127.0.0.1`. Set that override in the `.mcp.json` server's `env`, or document it in the README next to the `uvx` note.
 
 ### [ADR-023 follow-ups](superpowers/specs/2026-09-18-corebank-sole-outcome-source-design.md)
 

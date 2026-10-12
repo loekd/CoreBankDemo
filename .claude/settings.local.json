@@ -35,8 +35,6 @@
       "Read(//tmp/**)",
       "Bash(echo \"AppHost start initiated, PID: $!\")",
       "Read(//private/tmp/**)",
-      "mcp__opentelemetry-mcp__find_errors",
-      "mcp__opentelemetry-mcp__list_services",
       "Bash(dotnet test *)",
       "Bash(git status *)",
       "Bash(echo \"EXIT CODE: $?\")",
@@ -48,7 +46,6 @@
   },
   "enabledMcpjsonServers": [
     "aspire",
-    "corebank-loadtest",
-    "opentelemetry-mcp"
+    "corebank-loadtest"
   ]
 }

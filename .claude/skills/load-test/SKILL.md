@@ -189,7 +189,7 @@ All `get_*` tools take no arguments and return the 50 most recent rows, newest f
 
 ## 6. Produce the final trace/order verdict
 
-After assertions complete (pass or fail), run the replicated Inbox and Outbox Tier-2 tests and invoke the **corebank-trace-analysis** skill with the exact run timestamps. Require both replica identities, intact `traceparent`/`tracestate` across both hops, and no overlapping same-store/partition processing spans. A green k6 state gate is not a complete acceptance verdict without this evidence.
+After assertions complete (pass or fail), run the replicated Inbox and Outbox Tier-2 tests (`dotnet test tests/CoreBankDemo.Persistence.IntegrationTests --filter "FullyQualifiedName~Replicated"`) and invoke the **corebank-trace-analysis** skill. Its bundled `scripts/processing-lanes.py` queries Tempo directly and prints PASS/FAIL for: both replica identities on every (store, partition) lane, no overlapping same-store/partition processing spans, N/N/3N/3N stage cardinality, exactly the k6 run's intentional duplicate replays as the only error spans, no slow spans, and intact parent links across both hops. Take the window from k6's `Starting load test` console line (UTC) — never from a trace tool's own timestamps. A green k6 state gate is not a complete acceptance verdict without a `VERDICT: PASS` from that script.
 
 ## 7. Stop
 

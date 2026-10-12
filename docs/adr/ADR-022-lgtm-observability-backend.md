@@ -65,8 +65,13 @@ Inbox/Outbox drain, and logs next to traces, in one UI.
   "Grafana", because `grafana/k6` is already part of the LoadTests topology. "Grafana"
   appears only where the product itself is meant: the dashboard JSON, `GF_*` variables,
   `mcp-grafana`, and the UI in prose.
-- **Agent tooling.** `opentelemetry-mcp` points at Tempo (`http://localhost:3200`, traces
-  only); a new `grafana` server (`uvx mcp-grafana`) covers Prometheus, Loki and dashboards.
+- **Agent tooling.** A `grafana` server (`uvx mcp-grafana`) covers Prometheus, Loki and
+  dashboards. Trace analysis queries Tempo directly (`http://localhost:3200`, TraceQL with
+  `select()`), through the `corebank-trace-analysis` skill's bundled script. The
+  `opentelemetry-mcp` server originally configured here was removed on 2026-10-12: it crashed on
+  the sandbox's bracketed `[::1]` `NO_PROXY` entry, reported span times without a zone, and its
+  span summaries carried none of the attributes (replica id, store, partition) the acceptance
+  verdict needs, all of which one TraceQL query returns.
 
 Rejected: separate Collector, Tempo, Loki, Prometheus and Grafana containers (five configs
 and failure points for a live demo); a Collector fan-out keeping Jaeger for traces (two UIs

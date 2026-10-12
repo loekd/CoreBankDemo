@@ -317,9 +317,9 @@ Scale is set in `CoreBankDemo.LoadTests/appsettings.json` (`TransactionCount`, `
 LoadTestSupport also exposes an **MCP server** at `http://localhost:5181/` for agent-driven
 orchestration — see `mcp-config.example.json` and
 [CoreBankDemo.LoadTestSupport/README.md](CoreBankDemo.LoadTestSupport/README.md). Full details in
-[CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md). The `opentelemetry-mcp`
-(Tempo traces) and `grafana` (`mcp-grafana`: Prometheus, Loki, dashboards) servers in `.mcp.json`
-need `uvx` on `PATH`.
+[CoreBankDemo.LoadTests/README.md](CoreBankDemo.LoadTests/README.md). The `grafana` server
+(`mcp-grafana`: Prometheus, Loki, dashboards) in `.mcp.json` needs `uvx` on `PATH`; trace analysis
+queries Tempo directly over TraceQL (`.claude/skills/corebank-trace-analysis/scripts/processing-lanes.py`).
 
 ## Security note
 
