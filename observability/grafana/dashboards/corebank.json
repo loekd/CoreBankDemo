@@ -410,13 +410,233 @@
       "description": "Inbox execution outcomes: completed or business_rejected."
     },
     {
+      "id": 24,
+      "type": "row",
+      "title": "CoreBank throughput and latency",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Transactions processed/s",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ops",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(corebankdemo_transaction_processed_total{service_name=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "processed/s",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Committed transaction executions per second, all business outcomes. The throughput a slower run loses."
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "corebank-inbox queue duration p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 19,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(corebankdemo_messaging_queue_duration_milliseconds_bucket{messaging_store_name=\"corebank-inbox\", service_name=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "p95",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Time a CoreBank inbox row waited before a processor picked it up. Rises when execution falls behind intake."
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Execution duration p95",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 19,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "ms",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(corebankdemo_transaction_execution_duration_milliseconds_bucket{service_name=~\"$service\"}[$__rate_interval])))",
+          "legendFormat": "{{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Time one TransactionExecutor.ExecuteAsync attempt took: account locking, validation and ledger update. Lock contention shows here, not in queue duration."
+    },
+    {
       "id": 7,
       "type": "row",
       "title": "Inbox/Outbox",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 27,
         "w": 24,
         "h": 1
       },
@@ -432,7 +652,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 28,
         "w": 12,
         "h": 8
       },
@@ -531,7 +751,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 19,
+        "y": 28,
         "w": 12,
         "h": 8
       },
@@ -600,7 +820,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 27,
+        "y": 36,
         "w": 8,
         "h": 8
       },
@@ -669,7 +889,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 27,
+        "y": 36,
         "w": 10,
         "h": 8
       },
@@ -738,7 +958,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 27,
+        "y": 36,
         "w": 6,
         "h": 8
       },
@@ -799,7 +1019,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 35,
+        "y": 44,
         "w": 24,
         "h": 1
       },
@@ -815,7 +1035,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 36,
+        "y": 45,
         "w": 8,
         "h": 8
       },
@@ -883,7 +1103,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 36,
+        "y": 45,
         "w": 8,
         "h": 8
       },
@@ -951,7 +1171,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 36,
+        "y": 45,
         "w": 8,
         "h": 8
       },
@@ -1019,7 +1239,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 44,
+        "y": 53,
         "w": 8,
         "h": 8
       },
@@ -1088,7 +1308,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 44,
+        "y": 53,
         "w": 8,
         "h": 8
       },
@@ -1156,7 +1376,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 44,
+        "y": 53,
         "w": 8,
         "h": 8
       },
@@ -1251,7 +1471,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 52,
+        "y": 61,
         "w": 24,
         "h": 1
       },
@@ -1268,7 +1488,7 @@
       "description": "Structured logs at warning severity and above. Each line carries trace_id; the Loki datasource's derived field links it to the Tempo trace.",
       "gridPos": {
         "x": 0,
-        "y": 53,
+        "y": 62,
         "w": 24,
         "h": 10
       },
@@ -1306,7 +1526,7 @@
       "description": "Traces containing a span with error status.",
       "gridPos": {
         "x": 0,
-        "y": 63,
+        "y": 72,
         "w": 12,
         "h": 9
       },
@@ -1356,7 +1576,7 @@
       "description": "Payment requests whose server span exceeded 2s (the corebank-trace-analysis end-to-end threshold).",
       "gridPos": {
         "x": 12,
-        "y": 63,
+        "y": 72,
         "w": 12,
         "h": 9
       },
