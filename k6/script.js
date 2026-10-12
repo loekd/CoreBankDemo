@@ -13,19 +13,13 @@ const VU_COUNT          = parseInt(__ENV.VU_COUNT          || '10', 10);
 const DRAIN_TIMEOUT_MS  = parseInt(__ENV.DRAIN_TIMEOUT_MS  || `${5 * 60 * 1000}`, 10);
 const TEARDOWN_TIMEOUT_SECONDS = Math.ceil((DRAIN_TIMEOUT_MS + 60_000) / 1000);
 
-// Fixed load-test accounts seeded by k6/seed/01_corebank_seed.sql
-const ACCOUNTS = [
-    'NL01LOAD0000000001',
-    'NL02LOAD0000000002',
-    'NL03LOAD0000000003',
-    'NL04LOAD0000000004',
-    'NL05LOAD0000000005',
-    'NL06LOAD0000000006',
-    'NL07LOAD0000000007',
-    'NL08LOAD0000000008',
-    'NL09LOAD0000000009',
-    'NL10LOAD0000000010',
-];
+// Fixed load-test accounts seeded by LoadTestSupport (LoadTestConstants.AccountCount);
+// 32 spreads them over all four partitions.
+const ACCOUNT_COUNT = 32;
+const ACCOUNTS = Array.from({ length: ACCOUNT_COUNT }, (_, i) => {
+    const n = String(i + 1);
+    return `NL${n.padStart(2, '0')}LOAD${n.padStart(10, '0')}`;
+});
 
 // ---------------------------------------------------------------------------
 // Shared state: pre-generate all idempotency keys so we can track them.
