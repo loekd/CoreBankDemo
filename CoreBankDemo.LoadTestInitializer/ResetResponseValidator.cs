@@ -8,7 +8,7 @@ public static class ResetResponseValidator
     // this project stays a lightweight console app and does not reference
     // LoadTestSupport (which would pull in EF Core, MCP, and both API projects).
     // Keep these two literals in sync with LoadTestConstants.AccountCount/InitialBalance.
-    internal const int ExpectedAccountCount = 10;
+    internal const int ExpectedAccountCount = 32;
     internal const decimal InitialBalance = 10_000_000m;
     internal const decimal ExpectedTotalBalance = ExpectedAccountCount * InitialBalance;
 
