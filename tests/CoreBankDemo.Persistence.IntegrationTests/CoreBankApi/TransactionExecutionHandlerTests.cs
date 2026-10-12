@@ -197,6 +197,130 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         outboxCount.Should().Be(0);
     }
 
+    [Fact]
+    public async Task HandleAsync_records_the_execution_duration_of_a_completed_execution()
+    {
+        await using var context = CreateContext();
+        var message = NewMessage();
+        context.InboxMessages.Add(message);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
+        var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Loose);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Completed, TimeProvider.GetUtcNow());
+        var result = new TransactionExecutionResult(true, response, null, 50m, 75m);
+
+        // The executor is where the clock advances: the measurement must span
+        // the execution only, not the event enqueueing or the commit after it.
+        executor.Setup(x => x.ExecuteAsync(FromAccount, ToAccount, 50m, TransactionId, It.IsAny<CancellationToken>()))
+            .Callback(() => TimeProvider.Advance(TimeSpan.FromMilliseconds(40)))
+            .ReturnsAsync(result);
+
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.transaction.execution.duration").Which;
+        measurement.Value.Should().Be(40d);
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?> { ["outcome"] = "completed" });
+    }
+
+    [Fact]
+    public async Task HandleAsync_records_the_execution_duration_of_a_business_rejection()
+    {
+        await using var context = CreateContext();
+        var message = NewMessage();
+        context.InboxMessages.Add(message);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
+        var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Loose);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
+        var response = new TransactionResponse(TransactionId, MessageConstants.Status.Failed, TimeProvider.GetUtcNow());
+        var result = new TransactionExecutionResult(false, response, "Insufficient funds", null, null);
+
+        executor.Setup(x => x.ExecuteAsync(FromAccount, ToAccount, 50m, TransactionId, It.IsAny<CancellationToken>()))
+            .Callback(() => TimeProvider.Advance(TimeSpan.FromMilliseconds(15)))
+            .ReturnsAsync(result);
+
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+
+        await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.transaction.execution.duration").Which;
+        measurement.Value.Should().Be(15d);
+        measurement.Tags["outcome"].Should().Be("business_rejected");
+    }
+
+    [Fact]
+    public async Task HandleAsync_records_a_failed_execution_duration_when_the_executor_throws()
+    {
+        await using var context = CreateContext();
+        var message = NewMessage();
+        context.InboxMessages.Add(message);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
+        var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Strict);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
+
+        executor.Setup(x => x.ExecuteAsync(FromAccount, ToAccount, 50m, TransactionId, It.IsAny<CancellationToken>()))
+            .Callback(() => TimeProvider.Advance(TimeSpan.FromMilliseconds(250)))
+            .ThrowsAsync(new InvalidOperationException("boom during execution"));
+
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+
+        var act = async () => await handler.HandleAsync(message, TestContext.Current.CancellationToken);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("boom during execution");
+
+        // The attempt is measured even though it rolls back — a slow, failing
+        // execution is exactly the lock-contention signal this histogram
+        // exists for — while the committed-outcome counter stays silent.
+        var measurement = listener.Measurements.Should()
+            .ContainSingle(m => m.InstrumentName == "corebankdemo.transaction.execution.duration").Which;
+        measurement.Value.Should().Be(250d);
+        measurement.Tags["outcome"].Should().Be("failed");
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == "corebankdemo.transaction.processed");
+    }
+
+    [Fact]
+    public async Task HandleAsync_records_no_execution_duration_when_the_caller_cancels_during_execution()
+    {
+        await using var context = CreateContext();
+        var message = NewMessage();
+        context.InboxMessages.Add(message);
+        await context.SaveChangesAsync(TestContext.Current.CancellationToken);
+
+        using var cts = new CancellationTokenSource();
+        var executor = new Mock<ITransactionExecutor>(MockBehavior.Strict);
+        var enqueuer = new Mock<IOutboxEventEnqueuer>(MockBehavior.Strict);
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
+
+        executor.Setup(x => x.ExecuteAsync(FromAccount, ToAccount, 50m, TransactionId, It.IsAny<CancellationToken>()))
+            .Callback(() => cts.Cancel())
+            .ThrowsAsync(new OperationCanceledException(cts.Token));
+
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+
+        var act = async () => await handler.HandleAsync(message, cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        listener.Measurements.Should().NotContain(m => m.InstrumentName == "corebankdemo.transaction.execution.duration");
+    }
+
     private InboxMessage NewMessage() => new()
     {
         Id = Guid.NewGuid(),

@@ -52,6 +52,7 @@ public class BusinessMetricsTests
             BusinessMetrics.MessagingQueueDurationInstrumentName,
             BusinessMetrics.MessagingDeliveriesInstrumentName,
             BusinessMetrics.PaymentInstantDurationInstrumentName,
+            BusinessMetrics.TransactionExecutionDurationInstrumentName,
         ]);
 
         published.Should().OnlyContain(p => !string.IsNullOrWhiteSpace(p.Unit));
@@ -65,6 +66,7 @@ public class BusinessMetricsTests
         published.Single(p => p.Name == BusinessMetrics.MessagingQueueDurationInstrumentName).Unit.Should().Be("ms");
         published.Single(p => p.Name == BusinessMetrics.MessagingDeliveriesInstrumentName).Unit.Should().Be("{delivery}");
         published.Single(p => p.Name == BusinessMetrics.PaymentInstantDurationInstrumentName).Unit.Should().Be("ms");
+        published.Single(p => p.Name == BusinessMetrics.TransactionExecutionDurationInstrumentName).Unit.Should().Be("ms");
     }
 
     [Theory]
@@ -130,6 +132,35 @@ public class BusinessMetricsTests
         using var listener = new MetricsTestListener(metrics);
 
         metrics.RecordInstantPaymentDuration(BusinessMetrics.InstantPaymentOutcome.Deferred, TimeSpan.FromMilliseconds(-50));
+
+        listener.Measurements.Should().ContainSingle().Which.Value.Should().Be(0d);
+    }
+
+    [Theory]
+    [InlineData(BusinessMetrics.TransactionExecutionOutcome.Completed, "completed")]
+    [InlineData(BusinessMetrics.TransactionExecutionOutcome.BusinessRejected, "business_rejected")]
+    [InlineData(BusinessMetrics.TransactionExecutionOutcome.Failed, "failed")]
+    public void RecordTransactionExecutionDuration_emits_exactly_one_measurement_with_only_the_outcome_tag(
+        BusinessMetrics.TransactionExecutionOutcome outcome, string expectedTag)
+    {
+        using var metrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(metrics);
+
+        metrics.RecordTransactionExecutionDuration(outcome, TimeSpan.FromMilliseconds(42));
+
+        var measurement = listener.Measurements.Should().ContainSingle().Which;
+        measurement.InstrumentName.Should().Be(BusinessMetrics.TransactionExecutionDurationInstrumentName);
+        measurement.Value.Should().Be(42d);
+        measurement.Tags.Should().BeEquivalentTo(new Dictionary<string, object?> { ["outcome"] = expectedTag });
+    }
+
+    [Fact]
+    public void RecordTransactionExecutionDuration_clamps_a_negative_duration_to_zero()
+    {
+        using var metrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(metrics);
+
+        metrics.RecordTransactionExecutionDuration(BusinessMetrics.TransactionExecutionOutcome.Failed, TimeSpan.FromMilliseconds(-5));
 
         listener.Measurements.Should().ContainSingle().Which.Value.Should().Be(0d);
     }

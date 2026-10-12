@@ -36,6 +36,21 @@ public class CoreBankDashboardTests
             .Should().Contain("/d/corebank-traces", "the detailed dashboard offers a shortcut to the trace search");
     }
 
+    [Theory]
+    [InlineData("corebankdemo_messaging_queue_duration_milliseconds_bucket", BusinessMetrics.MessagingQueueDurationInstrumentName)]
+    [InlineData("corebankdemo_transaction_execution_duration_milliseconds_bucket", BusinessMetrics.TransactionExecutionDurationInstrumentName)]
+    [InlineData("corebankdemo_transaction_execution_duration_milliseconds_count", BusinessMetrics.TransactionExecutionDurationInstrumentName)]
+    [InlineData("corebankdemo_transaction_processed_total", BusinessMetrics.TransactionProcessedInstrumentName)]
+    public void Prometheus_metric_names_translate_back_to_their_BusinessMetrics_instrument(string prometheusMetric, string instrumentName)
+    {
+        // The OTLP-to-Prometheus translation the drift test relies on: "." to
+        // "_", "_total" on counters, "_milliseconds" plus the histogram series
+        // suffix on the millisecond histograms (queue, instant-payment and
+        // transaction-execution duration).
+        DashboardQueries.ToInstrumentName(prometheusMetric).Should().Be(instrumentName);
+        DashboardQueries.InstrumentNames().Should().Contain(instrumentName);
+    }
+
     [Fact]
     public void Every_corebankdemo_metric_the_dashboard_queries_is_a_BusinessMetrics_instrument()
     {
