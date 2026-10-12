@@ -47,7 +47,12 @@ public sealed class PostgresContainerFixture()
     /// </summary>
     private string AdminConnectionString => Container.GetConnectionString();
 
-    protected override PostgreSqlBuilder Configure() => new(PostgresImage.Tag);
+    /// <summary>
+    /// <c>track_commit_timestamp=on</c> matches the LoadTests AppHost: the
+    /// load-test ordering checks read <c>pg_xact_commit_timestamp</c>.
+    /// </summary>
+    protected override PostgreSqlBuilder Configure() =>
+        new PostgreSqlBuilder(PostgresImage.Tag).WithCommand("-c", "track_commit_timestamp=on");
 
     /// <inheritdoc />
     protected override async ValueTask InitializeAsync()

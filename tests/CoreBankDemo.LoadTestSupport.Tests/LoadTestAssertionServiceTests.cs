@@ -767,6 +767,67 @@ public class LoadTestAssertionServiceTests
     }
 
     [Fact]
+    public void Rows_whose_request_windows_overlapped_owe_each_other_no_order()
+    {
+        // The Payments outbox shape behind the load-test flake: A was stamped
+        // first but its accepting transaction committed after B's. The lane
+        // only sees committed rows and orders those by stamp, so either
+        // forwarding order is legitimate -- neither row was accepted before
+        // the other was stamped.
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        OrderingObservation Row(string key, int stampMs, int acceptedMs, int processedMs) =>
+            new("PaymentsOutbox", 0, key, t.AddMilliseconds(stampMs), t.AddMilliseconds(processedMs),
+                Guid.NewGuid(), AcceptedAt: t.AddMilliseconds(acceptedMs));
+
+        var stampedFirstForwardedLast = new[]
+        {
+            Row("A", stampMs: 0, acceptedMs: 200, processedMs: 1000),
+            Row("B", stampMs: 100, acceptedMs: 110, processedMs: 500),
+        };
+        var stampedFirstForwardedFirst = new[]
+        {
+            Row("A", stampMs: 0, acceptedMs: 200, processedMs: 500),
+            Row("B", stampMs: 100, acceptedMs: 110, processedMs: 1000),
+        };
+
+        LoadTestAssertionCalculator.FindOrderingViolations(stampedFirstForwardedLast).Should().BeEmpty();
+        LoadTestAssertionCalculator.FindOrderingViolations(stampedFirstForwardedFirst).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void A_row_accepted_before_the_next_was_stamped_must_be_processed_first()
+    {
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var accepted = new OrderingObservation("PaymentsOutbox", 0, "accepted-first", t, t.AddSeconds(5),
+            Guid.NewGuid(), AcceptedAt: t.AddMilliseconds(10));
+        var stampedLater = new OrderingObservation("PaymentsOutbox", 0, "stamped-later", t.AddMilliseconds(20), t.AddSeconds(4),
+            Guid.NewGuid(), AcceptedAt: t.AddMilliseconds(30));
+
+        var violations = LoadTestAssertionCalculator.FindOrderingViolations([accepted, stampedLater]);
+
+        violations.Should().ContainSingle().Which.Should().Be(new OrderingViolation(
+            "PaymentsOutbox", 0, "accepted-first", "stamped-later",
+            t, t.AddMilliseconds(20), t.AddSeconds(5), t.AddSeconds(4)));
+        LoadTestAssertionCalculator.FindAccountOrderingViolations(
+            [accepted with { FromAccount = AccountNumber(1) }, stampedLater with { FromAccount = AccountNumber(1) }])
+            .Should().ContainSingle();
+    }
+
+    [Fact]
+    public void Without_an_accepted_time_the_stamp_order_stays_binding_including_the_id_tiebreak()
+    {
+        // The stores without a commit timestamp keep plain stamp order, and two
+        // rows sharing a stamp are ordered by Id exactly as the claim query does.
+        var t = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var lowId = new OrderingObservation("CoreBankInbox", 0, "low-id", t, t.AddSeconds(5), new Guid("00000000-0000-0000-0000-000000000001"));
+        var highId = new OrderingObservation("CoreBankInbox", 0, "high-id", t, t.AddSeconds(4), new Guid("00000000-0000-0000-0000-000000000002"));
+
+        LoadTestAssertionCalculator.FindOrderingViolations([highId, lowId]).Should().ContainSingle()
+            .Which.Should().BeEquivalentTo(new { EarlierKey = "low-id", LaterKey = "high-id" });
+        LoadTestAssertionCalculator.FindOrderingViolations([lowId with { ProcessedAt = t.AddSeconds(3) }, highId]).Should().BeEmpty();
+    }
+
+    [Fact]
     public void Ordering_inversion_fails_with_exact_partition_evidence()
     {
         var observations = new[]
