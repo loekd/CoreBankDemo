@@ -19,6 +19,25 @@ description: |
 - You are not allowed to create or run arbitrary bash commands. You must restrict yourself to running the 'aspire' cli and 'curl' for HTTP calls. No other tools are allowed.
 - Never reset the database unless explicitly asked to do so, as this is a destructive operation!
 - **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run a different number of transactions or VUs, use `--` to pass .NET configuration overrides to the AppHost (see below).
+- **Step 0 is mandatory.** Do not run `aspire start` while any other AppHost is running (see below). The failure it prevents is silent and costs ~6 minutes per attempt.
+
+## 0. Preflight: no other AppHost may be running
+
+Both AppHosts expose CoreBankAPI on the same stable ingress port (**5032**, ADR-014). The PaymentsAPI ports differ (5294 Regular, 5295 LoadTests), so every health check passes, but the LoadTests PaymentsAPI forwards to whichever CoreBank owns 5032. With `CoreBankDemo.AppHost` up, k6's setup probe lands in the Regular bank (`Account NL01LOAD… not found` → `200 Failed`), k6 exits before its scenario, and `poll_until_drained` reports `0/100` until it times out.
+
+Run this first, every time:
+
+```bash
+aspire ps
+```
+
+| `aspire ps` shows | Do |
+|---|---|
+| `No running AppHost found` | continue to step 1 |
+| `CoreBankDemo.LoadTests.csproj` running | a previous run is still up: `aspire stop --apphost CoreBankDemo.LoadTests/CoreBankDemo.LoadTests.csproj --non-interactive`, then continue |
+| `CoreBankDemo.AppHost.csproj` (or anything else) running | **STOP. Do not start.** Report the table to the user and ask whether to stop it — it may belong to another session (the parallel dev container shares this machine). Only after it is gone, continue |
+
+Optional cross-check when `aspire ps` is unavailable: `curl -s -o /dev/null -w "%{http_code}" http://localhost:5032/health` must fail to connect (`000`); a `200` means some CoreBank already owns the port. The Aspire MCP `list_apphosts` tool gives the same answer as `aspire ps`.
 
 ## 1. Start the disposable LoadTests AppHost
 
