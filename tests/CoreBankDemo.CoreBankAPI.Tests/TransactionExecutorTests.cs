@@ -1,6 +1,7 @@
 using AwesomeAssertions;
 using CoreBankDemo.CoreBankAPI.Inbox;
 using CoreBankDemo.Messaging;
+using Microsoft.Extensions.Options;
 using Moq;
 using Xunit;
 
@@ -11,6 +12,9 @@ public class TransactionExecutorTests
     private const string FromAccountNumber = "NL91ABNA0417164300";
     private const string ToAccountNumber = "NL20INGB0001234567";
     private const string TransactionId = "txn-123";
+    private static readonly IOptions<DemoOptions> RowLocking = Options.Create(new DemoOptions());
+    private static readonly IOptions<DemoOptions> PartitionLocking =
+        Options.Create(new DemoOptions { LockStrategy = LockStrategy.Partition });
 
     public static TheoryData<TransactionFailureScenario> FailureScenarios => new()
     {
@@ -85,7 +89,7 @@ public class TransactionExecutorTests
             .Callback<string, CancellationToken>((accountNumber, _) => callOrder.Add(accountNumber))
             .ReturnsAsync(toAccount);
 
-        var executor = new TransactionExecutor(repository.Object, timeProvider);
+        var executor = new TransactionExecutor(repository.Object, timeProvider, RowLocking);
 
         var result = await executor.ExecuteAsync(
             fromAccountNumber,
@@ -133,7 +137,7 @@ public class TransactionExecutorTests
             .Callback<string, CancellationToken>((accountNumber, _) => callOrder.Add(accountNumber))
             .ReturnsAsync(fromAccount);
 
-        var executor = new TransactionExecutor(repository.Object, timeProvider);
+        var executor = new TransactionExecutor(repository.Object, timeProvider, RowLocking);
 
         var result = await executor.ExecuteAsync(
             fromAccountNumber,
@@ -167,7 +171,7 @@ public class TransactionExecutorTests
         repository.Setup(r => r.LockForUpdateAsync(FromAccountNumber, It.IsAny<CancellationToken>()))
             .ReturnsAsync(account);
 
-        var executor = new TransactionExecutor(repository.Object, timeProvider);
+        var executor = new TransactionExecutor(repository.Object, timeProvider, RowLocking);
 
         var result = await executor.ExecuteAsync(
             FromAccountNumber,
@@ -214,7 +218,7 @@ public class TransactionExecutorTests
         var fromStartingBalance = scenario.FromAccount?.Balance;
         var toStartingBalance = scenario.ToAccount?.Balance;
 
-        var executor = new TransactionExecutor(repository.Object, timeProvider);
+        var executor = new TransactionExecutor(repository.Object, timeProvider, RowLocking);
 
         var result = await executor.ExecuteAsync(
             scenario.FromAccountNumber,
@@ -239,6 +243,151 @@ public class TransactionExecutorTests
         repository.Verify(r => r.LockForUpdateAsync(expectedLockOrder[0], It.IsAny<CancellationToken>()), Times.Once);
         repository.Verify(r => r.LockForUpdateAsync(expectedLockOrder[1], It.IsAny<CancellationToken>()), Times.Once);
         repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public void DemoOptions_default_to_row_locking()
+    {
+        new DemoOptions().LockStrategy.Should().Be(LockStrategy.Row);
+    }
+
+    [Fact]
+    public async Task Partition_strategy_locks_distinct_partitions_ascending_then_loads_both_accounts_without_row_locks()
+    {
+        var timeProvider = new FakeTimeProvider();
+        // ACC-B hashes to partition 2, ACC-C to partition 1 (PartitionHelper, 4 partitions):
+        // the from-account's partition is the higher id, so ascending order is [1, 2].
+        const string fromAccountNumber = "ACC-B";
+        const string toAccountNumber = "ACC-C";
+        PartitionHelper.GetPartitionId(fromAccountNumber, 4).Should().Be(2);
+        PartitionHelper.GetPartitionId(toAccountNumber, 4).Should().Be(1);
+        var fromAccount = ActiveAccount(fromAccountNumber, 100m);
+        var toAccount = ActiveAccount(toAccountNumber, 25m);
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+        var callOrder = new List<string>();
+
+        repository.Setup(r => r.LockPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Callback<int, CancellationToken>((partitionId, _) => callOrder.Add($"lock:{partitionId}"))
+            .Returns(Task.CompletedTask);
+        repository.Setup(r => r.FindByAccountNumberAsync(fromAccountNumber, It.IsAny<CancellationToken>()))
+            .Callback<string, CancellationToken>((accountNumber, _) => callOrder.Add($"find:{accountNumber}"))
+            .ReturnsAsync(fromAccount);
+        repository.Setup(r => r.FindByAccountNumberAsync(toAccountNumber, It.IsAny<CancellationToken>()))
+            .Callback<string, CancellationToken>((accountNumber, _) => callOrder.Add($"find:{accountNumber}"))
+            .ReturnsAsync(toAccount);
+
+        var executor = new TransactionExecutor(repository.Object, timeProvider, PartitionLocking);
+
+        var result = await executor.ExecuteAsync(
+            fromAccountNumber,
+            toAccountNumber,
+            50m,
+            TransactionId,
+            TestContext.Current.CancellationToken);
+
+        callOrder.Should().Equal("lock:1", "lock:2", $"find:{fromAccountNumber}", $"find:{toAccountNumber}");
+        result.Success.Should().BeTrue();
+        result.NewFromBalance.Should().Be(50m);
+        result.NewToBalance.Should().Be(75m);
+        fromAccount.Balance.Should().Be(50m);
+        toAccount.Balance.Should().Be(75m);
+        repository.Verify(r => r.LockPartitionAsync(1, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.LockPartitionAsync(2, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.FindByAccountNumberAsync(fromAccountNumber, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.FindByAccountNumberAsync(toAccountNumber, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.LockForUpdateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task Partition_strategy_locks_a_shared_partition_once_for_two_accounts_in_the_same_partition()
+    {
+        var timeProvider = new FakeTimeProvider();
+        // ACC-A and ACC-E both hash to partition 0.
+        const string fromAccountNumber = "ACC-A";
+        const string toAccountNumber = "ACC-E";
+        PartitionHelper.GetPartitionId(fromAccountNumber, 4).Should().Be(0);
+        PartitionHelper.GetPartitionId(toAccountNumber, 4).Should().Be(0);
+        var fromAccount = ActiveAccount(fromAccountNumber, 10m);
+        var toAccount = ActiveAccount(toAccountNumber, 0m);
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+
+        repository.Setup(r => r.LockPartitionAsync(0, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        repository.Setup(r => r.FindByAccountNumberAsync(fromAccountNumber, It.IsAny<CancellationToken>())).ReturnsAsync(fromAccount);
+        repository.Setup(r => r.FindByAccountNumberAsync(toAccountNumber, It.IsAny<CancellationToken>())).ReturnsAsync(toAccount);
+
+        var executor = new TransactionExecutor(repository.Object, timeProvider, PartitionLocking);
+
+        var result = await executor.ExecuteAsync(
+            fromAccountNumber,
+            toAccountNumber,
+            10m,
+            TransactionId,
+            TestContext.Current.CancellationToken);
+
+        result.Success.Should().BeTrue();
+        result.NewFromBalance.Should().Be(0m);
+        result.NewToBalance.Should().Be(10m);
+        repository.Verify(r => r.LockPartitionAsync(0, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.LockPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.FindByAccountNumberAsync(fromAccountNumber, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.FindByAccountNumberAsync(toAccountNumber, It.IsAny<CancellationToken>()), Times.Once);
+        repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task Partition_strategy_locks_once_and_loads_once_for_a_same_account_transfer_and_returns_the_validator_failure()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var expectedPartitionId = PartitionHelper.GetPartitionId(FromAccountNumber, 4);
+        var account = ActiveAccount(FromAccountNumber, 100m);
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+
+        repository.Setup(r => r.LockPartitionAsync(expectedPartitionId, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        repository.Setup(r => r.FindByAccountNumberAsync(FromAccountNumber, It.IsAny<CancellationToken>())).ReturnsAsync(account);
+
+        var executor = new TransactionExecutor(repository.Object, timeProvider, PartitionLocking);
+
+        var result = await executor.ExecuteAsync(
+            FromAccountNumber,
+            FromAccountNumber,
+            50m,
+            TransactionId,
+            TestContext.Current.CancellationToken);
+
+        result.Success.Should().BeFalse();
+        result.ErrorReason.Should().Be("Cannot transfer to the same account");
+        account.Balance.Should().Be(100m);
+        repository.Verify(r => r.LockPartitionAsync(expectedPartitionId, It.IsAny<CancellationToken>()), Times.Once);
+        repository.Verify(r => r.FindByAccountNumberAsync(FromAccountNumber, It.IsAny<CancellationToken>()), Times.Once);
+        repository.VerifyNoOtherCalls();
+    }
+
+    [Fact]
+    public async Task Partition_strategy_returns_failed_response_when_the_source_account_is_unknown()
+    {
+        var timeProvider = new FakeTimeProvider();
+        var toAccount = ActiveAccount(ToAccountNumber, 25m);
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+
+        repository.Setup(r => r.LockPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        repository.Setup(r => r.FindByAccountNumberAsync(FromAccountNumber, It.IsAny<CancellationToken>())).ReturnsAsync((Account?)null);
+        repository.Setup(r => r.FindByAccountNumberAsync(ToAccountNumber, It.IsAny<CancellationToken>())).ReturnsAsync(toAccount);
+
+        var executor = new TransactionExecutor(repository.Object, timeProvider, PartitionLocking);
+
+        var result = await executor.ExecuteAsync(
+            FromAccountNumber,
+            ToAccountNumber,
+            50m,
+            TransactionId,
+            TestContext.Current.CancellationToken);
+
+        result.Success.Should().BeFalse();
+        result.ErrorReason.Should().Be($"Source account {FromAccountNumber} not found or inactive");
+        result.Response.Status.Should().Be(MessageConstants.Status.Failed);
+        toAccount.Balance.Should().Be(25m);
+        repository.Verify(r => r.LockPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
     }
 
     private static Account ActiveAccount(string accountNumber, decimal balance) => new()
