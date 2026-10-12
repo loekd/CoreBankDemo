@@ -89,6 +89,9 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     .WaitFor(coreBankDb)
     .WithReference(redis)
     .WaitFor(redis)
+    // Demo:LockStrategy pass-through (row | partition): flip with
+    // Demo__LockStrategy=partition on the host and a topology restart, no rebuild.
+    .WithEnvironment("Demo__LockStrategy", builder.Configuration["Demo:LockStrategy"] ?? "row")
     .WithEnvironment("ProcessorStartGate__Enabled", "true")
     .WithEnvironment("OTLP_ENDPOINT", lgtmOtlpGrpcEndpoint)
     .WithHttpHealthCheck("/health")

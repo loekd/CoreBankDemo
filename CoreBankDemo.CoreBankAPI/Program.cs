@@ -44,6 +44,14 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
 builder.AddInboxProcessingOptions();
 builder.AddMessagingOutboxProcessingOptions();
 
+// Demo:LockStrategy (row | partition, default row): how TransactionExecutor
+// serializes concurrent transfers. Read once at startup, never per call.
+builder.Services.AddOptions<DemoOptions>()
+    .BindConfiguration(DemoOptions.SectionName)
+    .Validate(options => Enum.IsDefined(options.LockStrategy),
+        "Demo:LockStrategy must be 'row' or 'partition'.")
+    .ValidateOnStart();
+
 // The ActivitySource is already registered as a singleton by
 // AddServiceDefaults("CoreBank.CoreBankAPI") above and wired into the OTel
 // trace provider under that same name — reuse it rather than registering a

@@ -6,6 +6,7 @@ internal interface IAccountRepository
 {
     Task<Account?> LockForUpdateAsync(string accountNumber, CancellationToken cancellationToken);
     Task<Account?> FindByAccountNumberAsync(string accountNumber, CancellationToken cancellationToken);
+    Task LockPartitionAsync(int partitionId, CancellationToken cancellationToken);
 }
 
 internal sealed class AccountRepository(CoreBankDbContext dbContext) : IAccountRepository
@@ -27,5 +28,15 @@ internal sealed class AccountRepository(CoreBankDbContext dbContext) : IAccountR
     public Task<Account?> FindByAccountNumberAsync(string accountNumber, CancellationToken cancellationToken) =>
         dbContext.Accounts.FirstOrDefaultAsync(
             account => account.AccountNumber == accountNumber,
+            cancellationToken);
+
+    /// <summary>
+    /// Transaction-scoped advisory lock on a partition id: held until the
+    /// ambient transaction commits or rolls back, so it must run inside
+    /// <c>ExecuteInTransactionAsync</c>.
+    /// </summary>
+    public Task LockPartitionAsync(int partitionId, CancellationToken cancellationToken) =>
+        dbContext.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock({(long)partitionId})",
             cancellationToken);
 }

@@ -1,5 +1,6 @@
 using CoreBankDemo.CoreBankAPI.Models;
 using CoreBankDemo.Messaging;
+using Microsoft.Extensions.Options;
 
 namespace CoreBankDemo.CoreBankAPI.Inbox;
 
@@ -13,8 +14,14 @@ internal interface ITransactionExecutor
         CancellationToken cancellationToken);
 }
 
-internal sealed class TransactionExecutor(IAccountRepository accountRepository, TimeProvider timeProvider) : ITransactionExecutor
+internal sealed class TransactionExecutor(
+    IAccountRepository accountRepository,
+    TimeProvider timeProvider,
+    IOptions<DemoOptions> demoOptions) : ITransactionExecutor
 {
+    private const int PartitionCount = 4;
+    private readonly LockStrategy lockStrategy = demoOptions.Value.LockStrategy;
+
     public async Task<TransactionExecutionResult> ExecuteAsync(
         string fromAccountNumber,
         string toAccountNumber,
@@ -63,6 +70,25 @@ internal sealed class TransactionExecutor(IAccountRepository accountRepository, 
         string toAccountNumber,
         CancellationToken cancellationToken)
     {
+        if (lockStrategy == LockStrategy.Partition)
+        {
+            // One lane per partition, ids ascending: no deadlocks, no per-row ordering dance.
+            var partitionIds = new[] { fromAccountNumber, toAccountNumber }
+                .Select(accountNumber => PartitionHelper.GetPartitionId(accountNumber, PartitionCount))
+                .Distinct()
+                .Order();
+            foreach (var partitionId in partitionIds)
+            {
+                await accountRepository.LockPartitionAsync(partitionId, cancellationToken);
+            }
+
+            var fromAccount = await accountRepository.FindByAccountNumberAsync(fromAccountNumber, cancellationToken);
+            var toAccount = string.Equals(fromAccountNumber, toAccountNumber, StringComparison.Ordinal)
+                ? fromAccount
+                : await accountRepository.FindByAccountNumberAsync(toAccountNumber, cancellationToken);
+            return (fromAccount, toAccount);
+        }
+
         if (string.Equals(fromAccountNumber, toAccountNumber, StringComparison.Ordinal))
         {
             var account = await accountRepository.LockForUpdateAsync(fromAccountNumber, cancellationToken);

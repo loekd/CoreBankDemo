@@ -121,6 +121,51 @@ public class AccountRowLockTests(PostgresContainerFixture fixture)
         result.Should().BeNull();
     }
 
+    [Fact]
+    public async Task LockPartitionAsync_blocks_a_competing_connection_on_the_same_partition_until_the_holder_commits()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var holderContext = CreateContext();
+        await using var holderTransaction = await holderContext.Database.BeginTransactionAsync(ct);
+        await new AccountRepository(holderContext).LockPartitionAsync(2, ct);
+
+        await using var waiterContext = CreateContext();
+        await using var waiterTransaction = await waiterContext.Database.BeginTransactionAsync(ct);
+        var waiter = new AccountRepository(waiterContext).LockPartitionAsync(2, ct);
+
+        var observedBlocking = await BlockedForAWhileAsync(waiter);
+
+        await holderTransaction.CommitAsync(ct);
+
+        await waiter.WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
+        await waiterTransaction.CommitAsync(ct);
+
+        observedBlocking.Should().BeTrue(
+            "a transaction-scoped advisory lock on the same partition id must block until the holder commits");
+    }
+
+    [Fact]
+    public async Task LockPartitionAsync_does_not_block_a_competing_connection_on_a_different_partition()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var holderContext = CreateContext();
+        await using var holderTransaction = await holderContext.Database.BeginTransactionAsync(ct);
+        await new AccountRepository(holderContext).LockPartitionAsync(1, ct);
+
+        await using var otherContext = CreateContext();
+        await using var otherTransaction = await otherContext.Database.BeginTransactionAsync(ct);
+        var other = new AccountRepository(otherContext).LockPartitionAsync(3, ct);
+
+        var observedBlocking = await BlockedForAWhileAsync(other);
+
+        await otherTransaction.CommitAsync(ct);
+        await holderTransaction.CommitAsync(ct);
+
+        observedBlocking.Should().BeFalse("advisory locks on different partition ids are independent");
+    }
+
     /// <summary>
     /// Bounded observation that <paramref name="contended"/> really is blocked:
     /// a short, fixed window (never an unbounded wait) that the task must not
