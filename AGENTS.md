@@ -20,6 +20,7 @@ Mission-critical banking demo for a conference talk. Shows resilient, observable
 → **aspire-launch** skill: start and stop AppHosts via Aspire CLI.
 → **aspire-mcp** skill: inspect resource state, logs, and traces via Aspire MCP.
 → **load-test** skill: run a full load test and assert results via the LoadTestSupport API.
+→ **corebank-regression-analysis** skill: find out why one load-test run is slower than a baseline run.
 
 ## Workflow
 
