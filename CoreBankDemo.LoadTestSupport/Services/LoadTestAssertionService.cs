@@ -83,7 +83,15 @@ public sealed record OrderingObservation(
     // CoreBank inbox) -- the partition key of those two stores. Null for the
     // event stores, which partition on the transaction id or account number
     // and are judged by neither of the per-account checks.
-    string? FromAccount = null);
+    string? FromAccount = null,
+    // When the row became visible to its lane: the commit of the accepting
+    // transaction. EnqueuedAt is stamped before that transaction opens, so a
+    // row stamped earlier can become visible later than a younger one. A lane
+    // can only order what it can see, so FIFO is only owed between rows whose
+    // request windows did not overlap: X must precede Y when X was accepted
+    // before Y was stamped. Null (the stores without a commit timestamp)
+    // means EnqueuedAt itself, i.e. plain stamp order.
+    DateTime? AcceptedAt = null);
 
 public sealed record OrderingViolation(
     string Store,
@@ -294,6 +302,20 @@ public sealed class LoadTestAssertionService(
             cancelled);
     }
 
+    /// <summary>Shape of the raw commit-order query over the Payments outbox; column names match the SELECT list.</summary>
+    private sealed class PaymentsOutboxOrderingRow
+    {
+        public int PartitionId { get; set; }
+        public required string IdempotencyKey { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTimeOffset? AcceptedAt { get; set; }
+        public DateTime? ProcessedAt { get; set; }
+        public Guid Id { get; set; }
+        public int Priority { get; set; }
+        public required string Status { get; set; }
+        public required string FromAccount { get; set; }
+    }
+
     /// <summary>
     /// Runs the full assertion suite. <paramref name="expectedUnique"/> is
     /// nullable to preserve <c>/assert/results</c>'s existing optional-query-
@@ -339,18 +361,32 @@ public sealed class LoadTestAssertionService(
             .ToListAsync(ct);
 
         var orderingObservations = new List<OrderingObservation>();
-        orderingObservations.AddRange(await paymentsDb.OutboxMessages
-            .Select(message => new OrderingObservation(
-                "PaymentsOutbox",
-                message.PartitionId,
-                message.IdempotencyKey,
-                message.CreatedAt,
-                message.ProcessedAt,
-                message.Id,
-                message.Priority,
-                message.Status,
-                message.FromAccount))
-            .ToListAsync(ct));
+        // The Payments outbox carries the commit timestamp of its accepting
+        // transaction as AcceptedAt (docs/constraints.md: "in the order they
+        // were accepted"). CreatedAt is stamped before that transaction opens
+        // and the lane can only see committed rows, so FIFO is owed only
+        // between rows whose request windows did not overlap. Requires
+        // track_commit_timestamp=on (LoadTests AppHost, Testcontainers fixture).
+        var paymentsOutboxRows = await paymentsDb.Database
+            .SqlQuery<PaymentsOutboxOrderingRow>($"""
+                SELECT "PartitionId", "IdempotencyKey", "CreatedAt",
+                       pg_xact_commit_timestamp(("AcceptedXid" % 4294967296)::text::xid) AS "AcceptedAt",
+                       "ProcessedAt", "Id", "Priority", "Status", "FromAccount"
+                FROM "OutboxMessages"
+                """)
+            .ToListAsync(ct);
+        orderingObservations.AddRange(paymentsOutboxRows.Select(row => new OrderingObservation(
+            "PaymentsOutbox",
+            row.PartitionId,
+            row.IdempotencyKey,
+            row.CreatedAt,
+            row.ProcessedAt,
+            row.Id,
+            row.Priority,
+            row.Status,
+            row.FromAccount,
+            row.AcceptedAt?.UtcDateTime ?? throw new InvalidOperationException(
+                $"PaymentsOutbox row {row.IdempotencyKey} has no commit timestamp; the load-test PostgreSQL must run with track_commit_timestamp=on."))));
         orderingObservations.AddRange(await coreBankDb.InboxMessages
             .Select(message => new OrderingObservation(
                 "CoreBankInbox",
@@ -766,50 +802,50 @@ public static class LoadTestAssertionCalculator
         observations.Where(item => item.Status != Status.Cancelled);
 
     /// <summary>
-    /// Walks one FIFO lane in enqueue order and yields every
-    /// (earlier, later) pair where the later row was processed before the
-    /// latest-processed row enqueued ahead of it. Both rows of a pair carry a
-    /// ProcessedAt.
+    /// Walks one FIFO lane in enqueue order and yields, for every row, the
+    /// latest-processed row that was owed precedence over it
+    /// (<see cref="MustPrecede"/>) yet was processed after it. Both rows of
+    /// a pair carry a ProcessedAt.
     /// </summary>
     private static IEnumerable<(OrderingObservation Earlier, OrderingObservation Later)> FindInversions(
         IEnumerable<OrderingObservation> lane)
     {
-        OrderingObservation? latestPrior = null;
-        // Grouping by EnqueuedAt alone collapsed every row sharing an
-        // exact timestamp (realistic under real concurrent load, since
-        // timestamps come from TimeProvider.GetUtcNow() per-request
-        // rather than a monotonic sequence) into one group that was
-        // never compared against itself -- silently reducing detection
-        // power exactly during the highest-throughput phase this check
-        // exists to police. Id is the same stable secondary tiebreaker
-        // GetClaimableMessagesQuery already uses
-        // (.OrderBy(EnqueuedAt).ThenBy(Id)) to give same-timestamp rows a
-        // deterministic order, so grouping by (EnqueuedAt, Id) instead
-        // makes every row its own step again and restores comparability.
-        foreach (var enqueueGroup in lane
-                     .OrderBy(item => item.EnqueuedAt)
-                     .ThenBy(item => item.Id)
-                     .GroupBy(item => (item.EnqueuedAt, item.Id)))
+        var rows = lane
+            .Where(item => item.ProcessedAt.HasValue)
+            .OrderBy(item => item.EnqueuedAt)
+            .ThenBy(item => item.Id)
+            .ToList();
+        foreach (var later in rows)
         {
-            var current = enqueueGroup
-                .Where(item => item.ProcessedAt.HasValue)
-                .OrderBy(item => item.ProcessedAt)
-                .ToList();
-            if (latestPrior?.ProcessedAt is { } priorProcessed
-                && current.FirstOrDefault()?.ProcessedAt is { } currentProcessed
-                && currentProcessed < priorProcessed)
+            var earlier = rows
+                .Where(candidate => !ReferenceEquals(candidate, later)
+                    && MustPrecede(candidate, later)
+                    && candidate.ProcessedAt > later.ProcessedAt)
+                .OrderByDescending(candidate => candidate.ProcessedAt)
+                .FirstOrDefault();
+            if (earlier is not null)
             {
-                yield return (latestPrior, current[0]);
-            }
-
-            var latestCurrent = current.LastOrDefault();
-            if (latestCurrent?.ProcessedAt is not null
-                && (latestPrior?.ProcessedAt is null || latestCurrent.ProcessedAt > latestPrior.ProcessedAt))
-            {
-                latestPrior = latestCurrent;
+                yield return (earlier, later);
             }
         }
     }
+
+    /// <summary>
+    /// Whether the lane owes <paramref name="earlier"/> precedence over
+    /// <paramref name="later"/>. With a commit timestamp
+    /// (<see cref="OrderingObservation.AcceptedAt"/>) that is "accepted before
+    /// the other was stamped": two requests in flight at the same time have
+    /// no order the lane could have honoured, because it only sees committed
+    /// rows and orders those by stamp. Without one, stamp order is binding,
+    /// with Id as the same tiebreaker <c>GetClaimableMessagesQuery</c> uses for
+    /// rows sharing a stamp (timestamps come from TimeProvider.GetUtcNow()
+    /// per request, so ties are realistic under load).
+    /// </summary>
+    private static bool MustPrecede(OrderingObservation earlier, OrderingObservation later) =>
+        earlier.AcceptedAt is { } accepted
+            ? accepted < later.EnqueuedAt
+            : earlier.EnqueuedAt < later.EnqueuedAt
+              || (earlier.EnqueuedAt == later.EnqueuedAt && earlier.Id.CompareTo(later.Id) < 0);
 
     /// <summary>
     /// Replays completed transactions on top of each load-test account's

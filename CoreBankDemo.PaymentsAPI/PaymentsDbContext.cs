@@ -20,6 +20,9 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
             MessageRepositoryBase<OutboxMessage, PaymentsDbContext>.ConfigureDedupeIndex(
                 entity, nameof(OutboxMessage.IdempotencyKey));
             MessageRepositoryBase<OutboxMessage, PaymentsDbContext>.ConfigureConcurrencyToken(entity);
+            entity.Property(e => e.AcceptedXid)
+                .HasDefaultValueSql("pg_current_xact_id()::text::bigint")
+                .ValueGeneratedOnAdd();
             entity.HasIndex(e => new { e.PartitionId, e.Status, e.Priority, e.CreatedAt });
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.CreatedAt);
