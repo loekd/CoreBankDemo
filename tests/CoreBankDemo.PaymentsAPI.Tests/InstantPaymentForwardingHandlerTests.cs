@@ -40,6 +40,7 @@ public class InstantPaymentForwardingHandlerTests
     private static readonly ActivitySource ActivitySource = new(nameof(InstantPaymentForwardingHandlerTests));
 
     private readonly Mock<IOutboxMessageStore<OutboxMessage>> _store = new(MockBehavior.Strict);
+    private readonly Mock<IOutboxRepository> _repository = new(MockBehavior.Strict);
     private readonly Mock<ICoreBankTransactionForwarder> _forwarder = new(MockBehavior.Strict);
     private readonly TestLockService _lock = new();
     private readonly BusinessMetrics _businessMetrics = new();
@@ -61,14 +62,32 @@ public class InstantPaymentForwardingHandlerTests
     private static TransactionSubmission CancelledSubmission(DateTimeOffset? at = null) =>
         new(Payment.TransactionId, MessageConstants.Status.Cancelled, at ?? DateTimeOffset.UtcNow);
 
-    /// <summary>The claim-by-id + cancel pair every locally-cancelled path ends with.</summary>
+    /// <summary>
+    /// The claim-by-id + cancel pair every locally-cancelled path ends with:
+    /// the cancel goes through the repository's releasing cancel, never the
+    /// store's bare transition (spec: payments-account-projection).
+    /// </summary>
     private OutboxMessage SetUpLocalCancel()
     {
         var claimed = ClaimedMessage();
         _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
-        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _repository.Setup(r => r.CancelLocallyAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(MessageTransitionOutcome.Applied);
         return claimed;
+    }
+
+    /// <summary>A local cancel releases the reservation in the cancel's own transaction and never uses the store's bare transition.</summary>
+    private void ShouldHaveCancelledLocally(OutboxMessage claimed)
+    {
+        _repository.Verify(r => r.CancelLocallyAsync(claimed, InstantPaymentForwardingHandler.LocalCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>A cancel through CoreBank leaves the release to CoreBank's transaction.cancelled event.</summary>
+    private void ShouldHaveCancelledThroughCoreBank(OutboxMessage claimed)
+    {
+        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.CoreBankCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        _repository.Verify(r => r.CancelLocallyAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     private InstantPaymentForwardingHandler CreateHandler(
@@ -77,6 +96,7 @@ public class InstantPaymentForwardingHandlerTests
         TimeProvider? timeProvider = null) =>
         new(
             _store.Object,
+            _repository.Object,
             _forwarder.Object,
             _lock,
             Options.Create(options ?? new InstantRailOptions()),
@@ -216,7 +236,7 @@ public class InstantPaymentForwardingHandlerTests
         // makes this a test of the budget arithmetic rather than of the scheduler.
         result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
         _lock.LockNames.Should().HaveCount(2, "the lock is retried until the forward phase runs out");
-        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.LocalCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        ShouldHaveCancelledLocally(claimed);
         _forwarder.VerifyNoOtherCalls();
     }
 
@@ -244,6 +264,7 @@ public class InstantPaymentForwardingHandlerTests
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred);
         _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _repository.Verify(r => r.CancelLocallyAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         listener.Measurements.Should()
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("deferred");
@@ -275,6 +296,7 @@ public class InstantPaymentForwardingHandlerTests
             .ContainSingle(m => m.InstrumentName == BusinessMetrics.PaymentInstantDurationInstrumentName)
             .Which.Tags["outcome"].Should().Be("cancelled");
         ShouldHaveCountedOneCancelledItem(listener);
+        ShouldHaveCancelledLocally(claimed);
     }
 
     [Theory]
@@ -289,7 +311,7 @@ public class InstantPaymentForwardingHandlerTests
             .ReturnsAsync(MessageConstants.Status.Pending);
         var claimed = ClaimedMessage();
         _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
-        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _repository.Setup(r => r.CancelLocallyAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(transition);
         var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
         _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
@@ -314,7 +336,7 @@ public class InstantPaymentForwardingHandlerTests
             .ReturnsAsync(MessageConstants.Status.Pending);
         var claimed = ClaimedMessage();
         _store.Setup(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
-        _store.Setup(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _repository.Setup(r => r.CancelLocallyAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("db unavailable"));
         var clock = new BudgetClock(new DateTimeOffset(2026, 9, 8, 12, 0, 0, TimeSpan.Zero));
         _lock.OnAttempt = () => clock.Advance(TimeSpan.FromMilliseconds(200));
@@ -370,6 +392,7 @@ public class InstantPaymentForwardingHandlerTests
         result.ProcessedAt.Should().Be(processedAt);
         _store.Verify(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
         _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _repository.Verify(r => r.CancelLocallyAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -384,7 +407,7 @@ public class InstantPaymentForwardingHandlerTests
         var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
-        _store.Verify(s => s.MarkAsCancelledAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+        ShouldHaveCancelledLocally(claimed);
         _forwarder.VerifyNoOtherCalls();
     }
 
@@ -605,7 +628,7 @@ public class InstantPaymentForwardingHandlerTests
         result.ProcessedAt.Should().Be(cancelledAt);
         _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Exactly(2));
         _forwarder.Verify(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()), Times.Once);
-        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.CoreBankCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        ShouldHaveCancelledThroughCoreBank(claimed);
         _store.Verify(s => s.MarkAsFailedWithRetryAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
         _lock.LockNames.Should().ContainSingle("the cancel happens inside the one lock acquisition, never after releasing it");
@@ -727,7 +750,7 @@ public class InstantPaymentForwardingHandlerTests
         _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Never);
         _forwarder.Verify(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()), Times.Once);
         clock.Delays.Should().BeEmpty();
-        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.CoreBankCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        ShouldHaveCancelledThroughCoreBank(claimed);
     }
 
     [Fact]
@@ -1058,6 +1081,7 @@ public class InstantPaymentForwardingHandlerTests
         result.ProcessedAt.Should().Be(cancelledAt);
         _store.Verify(s => s.MarkAsCompletedAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
         _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        ShouldHaveCancelledThroughCoreBank(claimed);
         ShouldHaveCountedOneCancelledItem(listener);
     }
 
@@ -1082,6 +1106,7 @@ public class InstantPaymentForwardingHandlerTests
             new DateTimeOffset(2026, 9, 2, 12, 0, 10, TimeSpan.Zero));
         var handler = new InstantPaymentForwardingHandler(
             _store.Object,
+            _repository.Object,
             _forwarder.Object,
             _lock,
             Options.Create(new InstantRailOptions { BudgetMilliseconds = 9000, AttemptTimeoutMilliseconds = 2500, MaxAttempts = 5 }),
@@ -1219,7 +1244,7 @@ public class InstantPaymentForwardingHandlerTests
 
         result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
         _store.Verify(s => s.TryClaimByIdAsync(Payment.Id, It.IsAny<CancellationToken>()), Times.Once);
-        _store.Verify(s => s.MarkAsCancelledAsync(claimed, InstantPaymentForwardingHandler.LocalCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        ShouldHaveCancelledLocally(claimed);
         _store.VerifyNoOtherCalls();
         _forwarder.VerifyNoOtherCalls();
     }

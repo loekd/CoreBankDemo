@@ -34,6 +34,8 @@ internal sealed class LoadTestDatabaseResetter(
             "TRUNCATE TABLE \"OutboxMessages\" RESTART IDENTITY CASCADE", cancellationToken).ConfigureAwait(false);
         await paymentsDb.Database.ExecuteSqlRawAsync(
             "TRUNCATE TABLE \"InboxMessages\" RESTART IDENTITY CASCADE", cancellationToken).ConfigureAwait(false);
+        await paymentsDb.Database.ExecuteSqlRawAsync(
+            "TRUNCATE TABLE \"ProjectedAccounts\" RESTART IDENTITY CASCADE", cancellationToken).ConfigureAwait(false);
         await coreBankDb.Database.ExecuteSqlRawAsync(
             "TRUNCATE TABLE \"InboxMessages\" RESTART IDENTITY CASCADE", cancellationToken).ConfigureAwait(false);
         await coreBankDb.Database.ExecuteSqlRawAsync(

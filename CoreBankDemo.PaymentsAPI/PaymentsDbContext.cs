@@ -1,3 +1,4 @@
+using CoreBankDemo.PaymentsAPI.Accounts;
 using CoreBankDemo.PaymentsAPI.Inbox;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.Messaging;
@@ -9,6 +10,7 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
 {
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
+    public DbSet<ProjectedAccount> ProjectedAccounts => Set<ProjectedAccount>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -52,6 +54,17 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
             entity.Property(e => e.Status).IsRequired().HasMaxLength(20);
             entity.Property(e => e.TraceParent).HasMaxLength(55);
             entity.Property(e => e.TraceState).HasMaxLength(512);
+        });
+
+        modelBuilder.Entity<ProjectedAccount>(entity =>
+        {
+            entity.ToTable("ProjectedAccounts");
+            entity.HasKey(e => e.AccountNumber);
+            entity.Property(e => e.AccountNumber).IsRequired().HasMaxLength(50);
+            entity.Property(e => e.SettledBalance).HasPrecision(18, 2);
+            entity.Property(e => e.Reserved).HasPrecision(18, 2).IsRequired().HasDefaultValue(0m);
+            entity.Property(e => e.Currency).HasMaxLength(3);
+            entity.Property(e => e.UpdatedAt).IsRequired();
         });
     }
 }

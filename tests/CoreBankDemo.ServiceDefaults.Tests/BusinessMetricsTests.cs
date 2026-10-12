@@ -71,6 +71,7 @@ public class BusinessMetricsTests
     [InlineData(BusinessMetrics.PaymentOutcome.Stored, "stored")]
     [InlineData(BusinessMetrics.PaymentOutcome.Duplicate, "duplicate")]
     [InlineData(BusinessMetrics.PaymentOutcome.ValidationFailed, "validation_failed")]
+    [InlineData(BusinessMetrics.PaymentOutcome.InsufficientFunds, "insufficient_funds")]
     public void RecordPaymentIntake_emits_exactly_one_measurement_with_the_outcome_and_scheme_tags(
         BusinessMetrics.PaymentOutcome outcome, string expectedTag)
     {

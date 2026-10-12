@@ -1,4 +1,5 @@
 using AwesomeAssertions;
+using CoreBankDemo.PaymentsAPI.Accounts;
 using CoreBankDemo.PaymentsAPI.Controllers;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Outbox;
@@ -36,6 +37,23 @@ public class PaymentStorageRegistrationTests
         scope.ServiceProvider.GetRequiredService<IOutboxRepository>().Should().BeOfType<OutboxRepository>();
         scope.ServiceProvider.GetRequiredService<IPaymentStorageHandler>().Should().BeOfType<PaymentStorageHandler>();
         scope.ServiceProvider.GetRequiredService<IPaymentStatusHandler>().Should().BeOfType<PaymentStatusHandler>();
+    }
+
+    [Fact]
+    public void AddPaymentStorage_registers_the_account_projection_store_as_scoped()
+    {
+        using var provider = BuildProvider(new Dictionary<string, string?>
+        {
+            ["OutboxProcessing:PartitionCount"] = "4",
+            ["OutboxProcessing:LockExpirySeconds"] = "30",
+            ["OutboxProcessing:PollingIntervalMs"] = "200"
+        });
+
+        using var scope = provider.CreateScope();
+        var first = scope.ServiceProvider.GetRequiredService<IAccountProjectionStore>();
+        var second = scope.ServiceProvider.GetRequiredService<IAccountProjectionStore>();
+
+        first.Should().BeOfType<AccountProjectionStore>().And.BeSameAs(second);
     }
 
     [Fact]

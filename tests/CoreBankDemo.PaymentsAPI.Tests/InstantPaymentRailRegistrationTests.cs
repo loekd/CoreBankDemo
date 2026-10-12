@@ -213,6 +213,7 @@ public class InstantPaymentRailRegistrationTests
         services.AddOptions<OutboxProcessingOptions>();
         services.AddInstantPaymentRail(Configuration(values));
         services.AddScoped(_ => new Mock<IOutboxMessageStore<OutboxMessage>>().Object);
+        services.AddScoped(_ => new Mock<IOutboxRepository>().Object);
         services.AddScoped(_ => new Mock<ICoreBankTransactionForwarder>().Object);
         return services.BuildServiceProvider();
     }

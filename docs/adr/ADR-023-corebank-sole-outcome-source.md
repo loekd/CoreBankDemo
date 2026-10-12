@@ -3,6 +3,7 @@
 **Date:** 2026-09-18
 **Status:** Accepted
 **Deciders:** Architecture team
+**Amended by:** ADR-028 (decision 1 means *no remote pre-validation*; PaymentsAPI may refuse a debit at the door from its local account projection, and such a payment was never accepted)
 **Supersedes in part:**
 - Story 5.4's boundary "never skip the destination-account validation call before submission" — the call is removed.
 - ADR-005's fault target `/api/accounts/validate` — the checked-in errors file targets `/api/transactions/process`.

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using AwesomeAssertions;
 using CoreBankDemo.PaymentsAPI;
+using CoreBankDemo.PaymentsAPI.Accounts;
 using CoreBankDemo.Persistence.IntegrationTests.Infrastructure;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.PaymentsAPI.Handlers;
@@ -118,7 +119,9 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
                         new OutboxRepository(
                             _.GetRequiredService<PaymentsDbContext>(),
                             System.TimeProvider.System,
-                            TestBusinessMetrics.Instance)),
+                            TestBusinessMetrics.Instance),
+                        _.GetRequiredService<InboxMessageRepository>(),
+                        new AccountProjectionStore(_.GetRequiredService<PaymentsDbContext>(), System.TimeProvider.System)),
                     observedActivity)));
         using var activitySource = new ActivitySource(nameof(InboxProcessorTests));
         using var listener = new ActivityListener
@@ -296,6 +299,8 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : PaymentsPos
         // TransactionEventHandler records committed outcomes on the payment row.
         services.AddScoped<OutboxRepository>();
         services.AddScoped<IOutboxRepository>(sp => sp.GetRequiredService<OutboxRepository>());
+        services.AddScoped<IInboxMessageRepository>(sp => sp.GetRequiredService<InboxMessageRepository>());
+        services.AddScoped<IAccountProjectionStore, AccountProjectionStore>();
         services.AddScoped<IInboxMessageHandler<InboxMessage>, TransactionEventHandler>();
         configure?.Invoke(services);
 

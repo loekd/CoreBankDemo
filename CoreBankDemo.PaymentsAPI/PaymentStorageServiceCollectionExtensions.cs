@@ -1,3 +1,4 @@
+using CoreBankDemo.PaymentsAPI.Accounts;
 using CoreBankDemo.PaymentsAPI.Handlers;
 using CoreBankDemo.PaymentsAPI.Outbox;
 using CoreBankDemo.ServiceDefaults.Configuration;
@@ -35,6 +36,10 @@ public static class PaymentStorageServiceCollectionExtensions
         services.AddScoped<IOutboxRepository>(provider => provider.GetRequiredService<OutboxRepository>());
         services.AddScoped<IPaymentStorageHandler, PaymentStorageHandler>();
         services.AddScoped<IPaymentStatusHandler, PaymentStatusHandler>();
+        // Spec: payments-account-projection. Scoped like the repositories so
+        // the inbox handler's projection writes share the scope's DbContext
+        // and therefore its transaction.
+        services.AddScoped<IAccountProjectionStore, AccountProjectionStore>();
         return services;
     }
 }

@@ -42,6 +42,7 @@ Formal decision records are maintained in [`docs/adr/`](docs/adr/).
 | [ADR-012](docs/adr/ADR-012-three-tier-testing-and-coverage-gate.md) | Three test tiers and an enforced coverage gate | Accepted | Use the cheapest tier that can honestly prove each behavior. |
 | [ADR-013](docs/adr/ADR-013-checked-in-openapi-build-time-kiota.md) | Checked-in OpenAPI with build-time Kiota generation | Accepted | Commit the contract and generator version, not generated client source. |
 | [ADR-014](docs/adr/ADR-014-replicated-local-topology-stable-ingress.md) | Replicated local topology behind stable Aspire ingress | Accepted | Competing replicas remain accessible through stable logical endpoints. |
+| [ADR-028](docs/adr/ADR-028-local-account-projection-door-check.md) | PaymentsAPI keeps a local account projection and may refuse a debit at the door | Accepted | A debit certain to be rejected never leaves PaymentsAPI; CoreBank still decides the outcome of every accepted payment. |
 
 ## Running the Demo
 
@@ -388,6 +389,15 @@ Defaults.PollingInterval     // 5 seconds
 - Status (string: Pending|Processing|Completed|Failed) (`Failed` is no longer written as a row status, ADR-023)
 - TraceParent (string, nullable)
 - TraceState (string, nullable)
+```
+
+**ProjectedAccounts Table** (ADR-028 — PaymentsAPI's local view of the accounts it has seen):
+```sql
+- AccountNumber (string, PK)
+- SettledBalance (decimal, nullable — NULL until the first balance.updated)
+- Reserved (decimal — accepted debits not yet settled)
+- Currency (string, nullable)
+- UpdatedAt (datetime)
 ```
 
 ### Core Bank API (corebankdb)
