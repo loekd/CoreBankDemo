@@ -637,10 +637,11 @@ internal sealed class InstantPaymentForwardingHandler(
             "Instant rail: payment {IdempotencyKey} cancelled ({Reason})", payment.IdempotencyKey, reason);
         // Tagged here, once the row is provably dead, so the traces dashboard
         // lists this payment as failed with its reason (FailedPaymentTags).
-        // Lands on the ProcessOutboxMessage span when the cancel went through
-        // CoreBank (as on the background rail) and on the request span when
-        // the command never left PaymentsAPI; the dashboard selects by tag,
-        // not by span.
+        // Lands on the ProcessOutboxMessage span whenever the row was claimed
+        // by the forward loop (a cancel through CoreBank, or ADR-029's local
+        // cancel on an open circuit) and on the request span when the command
+        // was cancelled before the loop ever claimed it; the dashboard selects
+        // by tag, not by span.
         Activity.Current?.SetTag(FailedPaymentTags.Outcome, FailedPaymentTags.Cancelled);
         Activity.Current?.SetTag(FailedPaymentTags.FailureReason, reason);
         Activity.Current?.SetTag(FailedPaymentTags.TransactionId, claimed.TransactionId);

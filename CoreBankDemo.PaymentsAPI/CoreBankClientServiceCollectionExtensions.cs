@@ -78,6 +78,8 @@ internal static class CoreBankClientServiceCollectionExtensions
                 // ShouldHandle is left at Polly's HTTP default on purpose: 5xx, 408, 429,
                 // HttpRequestException and TimeoutRejectedException count as failures; a
                 // caller-cancelled attempt (the instant rail's per-attempt timer) does not.
+                // The breaker keeps time on the TimeProvider registered in DI (Polly's
+                // registry resolves it), the same clock the instant rail budgets on.
                 pipeline.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
                 {
                     FailureRatio = options.FailureRatio,

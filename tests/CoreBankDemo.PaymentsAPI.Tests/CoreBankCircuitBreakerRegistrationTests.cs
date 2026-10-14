@@ -1,3 +1,4 @@
+using System.Diagnostics.Metrics;
 using System.Net;
 using System.Net.Http.Json;
 using AwesomeAssertions;
@@ -7,6 +8,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
 using Xunit;
 
 namespace CoreBankDemo.PaymentsAPI.Tests;
@@ -123,19 +125,32 @@ public class CoreBankCircuitBreakerRegistrationTests
     }
 
     [Fact]
-    public void Disabled_breaker_registers_no_resilience_handler()
+    public async Task Disabled_breaker_registers_no_resilience_handler_and_calls_still_flow()
     {
+        var calls = 0;
         using var provider = BuildProvider(new Dictionary<string, string?>
         {
             [$"{CoreBankCircuitBreakerOptions.SectionName}:Enabled"] = "false"
+        }, _ =>
+        {
+            calls++;
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
         });
         var factory = provider.GetRequiredService<IHttpMessageHandlerFactory>();
+        using var scope = provider.CreateScope();
+        var client = scope.ServiceProvider.GetRequiredService<ICoreBankApiClient>();
 
         var names = WalkDelegatingHandlerChain(factory.CreateHandler(CoreBankClientServiceCollectionExtensions.HttpClientName));
+        var first = await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
+        var second = await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
+        var third = await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
 
         names.Should().NotContain(name => name.Contains("Resilience"),
             "Enabled=false must restore the pre-ADR-029 chain exactly");
         names.Should().Contain(name => name.Contains(nameof(LastResponseStatusHandler)));
+        new[] { first, second, third }.Should().OnlyContain(r => r.RetryReason == CoreBankRetryReason.TransportRejection && r.StatusCode == 503,
+            "without a breaker every call reaches the transport and reports the wire status");
+        calls.Should().Be(3);
     }
 
     [Theory]
@@ -176,16 +191,106 @@ public class CoreBankCircuitBreakerRegistrationTests
     }
 
     [Fact]
-    public async Task Breaker_half_opens_after_the_break_and_closes_on_a_successful_probe()
+    public async Task Opening_the_circuit_emits_a_Polly_strategy_event_under_the_documented_pipeline_name()
     {
-        // The shortest break Polly allows is 500 ms; this test really waits
-        // it out once. Responses: two failures (opens), then success.
+        // ServiceDefaults exports the "Polly" meter (ADR-029); the Grafana
+        // panel selects on pipeline.name, so that value must be the one the
+        // ADR and the logging helper document.
+        var events = new List<Dictionary<string, object?>>();
+        using var meterListener = new MeterListener
+        {
+            InstrumentPublished = (instrument, listener) =>
+            {
+                if (instrument.Meter.Name == "Polly" && instrument.Name == "resilience.polly.strategy.events")
+                {
+                    listener.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        meterListener.SetMeasurementEventCallback<int>((_, _, tags, _) =>
+        {
+            lock (events)
+            {
+                events.Add(tags.ToArray().ToDictionary(t => t.Key, t => t.Value));
+            }
+        });
+        meterListener.Start();
+        using var provider = BuildProvider(new Dictionary<string, string?>
+        {
+            [$"{CoreBankCircuitBreakerOptions.SectionName}:MinimumThroughput"] = "2",
+            [$"{CoreBankCircuitBreakerOptions.SectionName}:FailureRatio"] = "0.5",
+        }, _ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        using var scope = provider.CreateScope();
+        var client = scope.ServiceProvider.GetRequiredService<ICoreBankApiClient>();
+
+        await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
+        await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
+
+        Dictionary<string, object?>[] snapshot;
+        lock (events)
+        {
+            snapshot = events.ToArray();
+        }
+
+        snapshot.Should().Contain(tags =>
+            Equals(tags["event.name"], "OnCircuitOpened")
+            && Equals(tags["pipeline.name"], "corebank-api-circuit-breaker"));
+    }
+
+    [Fact]
+    public async Task Caller_cancelled_attempts_are_not_counted_as_breaker_failures()
+    {
+        // The instant rail's per-attempt timer cancels the caller's token
+        // (spec: "Never count a caller-cancelled attempt"; the LoadTests
+        // latency profile cancels every attempt this way). Three such
+        // attempts exceed MinimumThroughput 2 and would open the circuit at
+        // ratio 0.5 if they counted; the next live call must still reach the
+        // transport.
         var calls = 0;
         using var provider = BuildProvider(new Dictionary<string, string?>
         {
             [$"{CoreBankCircuitBreakerOptions.SectionName}:MinimumThroughput"] = "2",
             [$"{CoreBankCircuitBreakerOptions.SectionName}:FailureRatio"] = "0.5",
-            [$"{CoreBankCircuitBreakerOptions.SectionName}:BreakDurationSeconds"] = "0.5",
+        }, async (_, cancellationToken) =>
+        {
+            calls++;
+            if (calls <= 3)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        });
+        using var scope = provider.CreateScope();
+        var client = scope.ServiceProvider.GetRequiredService<ICoreBankApiClient>();
+
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+            attemptCts.CancelAfter(TimeSpan.FromMilliseconds(50));
+            var act = () => client.GetAccountDetailsAsync("NL91ABNA0417164300", attemptCts.Token);
+            await act.Should().ThrowAsync<OperationCanceledException>("the client propagates the caller's own cancellation");
+        }
+
+        var live = await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
+
+        calls.Should().Be(4, "the circuit stayed closed, so the live call went to the transport");
+        live.RetryReason.Should().Be(CoreBankRetryReason.TransportRejection, "a wire answer, not CircuitOpen");
+    }
+
+    [Fact]
+    public async Task Breaker_half_opens_after_the_break_and_closes_on_a_successful_probe()
+    {
+        // The breaker keeps time on the host's injected TimeProvider
+        // (conventions skill), so the break is advanced, not slept through.
+        // Responses: two failures (opens), then success.
+        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 10, 14, 12, 0, 0, TimeSpan.Zero));
+        var calls = 0;
+        using var provider = BuildProvider(new Dictionary<string, string?>
+        {
+            [$"{CoreBankCircuitBreakerOptions.SectionName}:MinimumThroughput"] = "2",
+            [$"{CoreBankCircuitBreakerOptions.SectionName}:FailureRatio"] = "0.5",
+            [$"{CoreBankCircuitBreakerOptions.SectionName}:BreakDurationSeconds"] = "10",
         }, _ => ++calls <= 2
             ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
             : new HttpResponseMessage(HttpStatusCode.OK)
@@ -199,7 +304,7 @@ public class CoreBankCircuitBreakerRegistrationTests
                     isActive = true,
                     createdAt = new DateTimeOffset(2026, 8, 20, 9, 0, 0, TimeSpan.Zero)
                 })
-            });
+            }, clock);
         using var scope = provider.CreateScope();
         var client = scope.ServiceProvider.GetRequiredService<ICoreBankApiClient>();
         await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
@@ -207,7 +312,7 @@ public class CoreBankCircuitBreakerRegistrationTests
         (await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken))
             .RetryReason.Should().Be(CoreBankRetryReason.CircuitOpen);
 
-        await Task.Delay(TimeSpan.FromMilliseconds(700), TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(10.5));
         var probe = await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
         var afterClose = await client.GetAccountDetailsAsync("NL91ABNA0417164300", TestContext.Current.CancellationToken);
 
@@ -221,11 +326,19 @@ public class CoreBankCircuitBreakerRegistrationTests
 
     private static ServiceProvider BuildProvider(
         Dictionary<string, string?> values,
-        Func<HttpRequestMessage, HttpResponseMessage> respond)
+        Func<HttpRequestMessage, HttpResponseMessage> respond,
+        TimeProvider? timeProvider = null) =>
+        BuildProvider(values, (request, _) => Task.FromResult(respond(request)), timeProvider);
+
+    private static ServiceProvider BuildProvider(
+        Dictionary<string, string?> values,
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond,
+        TimeProvider? timeProvider = null)
     {
         var services = new ServiceCollection();
         var configuration = Configuration(values);
         services.AddSingleton<IConfiguration>(configuration);
+        services.AddSingleton(timeProvider ?? TimeProvider.System);
         services.AddLogging();
         services.AddServiceDiscovery();
         // The real host applies the standard resilience handler to every
@@ -258,12 +371,12 @@ public class CoreBankCircuitBreakerRegistrationTests
         return names;
     }
 
-    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> respond)
+    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond)
         : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken cancellationToken) =>
-            Task.FromResult(respond(request));
+            respond(request, cancellationToken);
     }
 
     private static IConfiguration Configuration(IEnumerable<KeyValuePair<string, string?>> values) =>

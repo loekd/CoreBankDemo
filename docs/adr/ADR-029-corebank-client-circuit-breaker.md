@@ -20,7 +20,8 @@ errors, every 200 ms poll tick and every instant attempt went to the wire and fa
 ## Decision
 
 1. **One strategy, the circuit breaker.** The `corebank-api` pipeline is `LastResponseStatusHandler` →
-   `RemoveAllResilienceHandlers()` → one named resilience handler (`corebank-api-circuit-breaker`)
+   `RemoveAllResilienceHandlers()` → one named resilience handler (`circuit-breaker`; Polly prefixes the
+   client name, so its telemetry and log lines report the pipeline as `corebank-api-circuit-breaker`)
    holding one `HttpCircuitBreakerStrategyOptions` strategy → service discovery. No retry, timeout,
    hedging or rate limiter. Retry stays where ADR-023 and ADR-024 put it.
 2. **Polly's HTTP transient predicate is kept.** `5xx`, `408`, `429`, `HttpRequestException` and
