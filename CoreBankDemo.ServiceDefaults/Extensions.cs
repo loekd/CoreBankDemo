@@ -194,6 +194,10 @@ public static class Extensions
                         .AddHttpClientInstrumentation()
                         .AddRuntimeInstrumentation()
                         .AddMeter(BusinessMetrics.MeterName)
+                        // Polly's resilience telemetry (meter "Polly": resilience.polly.strategy.events
+                        // and the duration histograms) so the corebank-api circuit breaker's
+                        // open/half-open/close events reach Prometheus (ADR-029).
+                        .AddMeter("Polly")
                         .AddOtlpExporter(options => ApplyOtlpEndpoint(options, otlpEndpoint));
                 })
                 .WithTracing(tracing =>
