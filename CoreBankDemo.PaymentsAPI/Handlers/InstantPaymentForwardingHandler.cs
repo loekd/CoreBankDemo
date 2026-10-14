@@ -83,6 +83,13 @@ internal sealed class InstantPaymentForwardingHandler(
     internal const string LocalCancelReason = "Instant rail budget exhausted before the command left PaymentsAPI";
     internal const string CoreBankCancelReason = "Instant rail budget exhausted; cancelled at CoreBank before execution";
 
+    /// <summary>
+    /// ADR-029: every attempt was refused by the client's circuit breaker, so
+    /// no request ever left this process; the claimed row is cancelled in
+    /// place, with no network call.
+    /// </summary>
+    internal const string CircuitOpenCancelReason = "Instant rail: CoreBank circuit open; the command never left PaymentsAPI";
+
     /// <summary>Span event recorded once per deliberate wait between attempts (ADR-024).</summary>
     internal const string RetryWaitEventName = "instant_rail.retry_wait";
 
@@ -301,6 +308,13 @@ internal sealed class InstantPaymentForwardingHandler(
         var attemptTimeout = TimeSpan.FromMilliseconds(opts.AttemptTimeoutMilliseconds);
         var forwardDeadline = ForwardDeadline(startedAt, opts);
 
+        // ADR-029: an attempt the circuit breaker refused never touched a
+        // socket. While that is true of every attempt so far, the command
+        // provably never left PaymentsAPI and may be cancelled locally; once
+        // any attempt has gone to the wire, only CoreBank can say where the
+        // command is, and the ADR-020 cancel phase decides.
+        var anyAttemptReachedWire = false;
+
         // ADR-024: the window is a ceiling, not a quota. Attempts run while a
         // useful one still fits and the cap allows; between them the loop
         // waits the server's Retry-After or a jittered backoff -- still
@@ -353,15 +367,39 @@ internal sealed class InstantPaymentForwardingHandler(
             catch (OperationCanceledException)
             {
                 // Per-attempt timeout: retry while budget/attempts remain.
+                anyAttemptReachedWire = true;
                 logger.LogInformation(
                     "Instant rail attempt {Attempt} timed out for payment {IdempotencyKey}",
                     attempt, payment.IdempotencyKey);
+            }
+            catch (CoreBankRetryException ex) when (ex.RetryReason == CoreBankRetryReason.CircuitOpen)
+            {
+                logger.LogWarning(
+                    "Instant rail attempt {Attempt} for payment {IdempotencyKey} was refused by the open CoreBank circuit",
+                    attempt, payment.IdempotencyKey);
+                if (!anyAttemptReachedWire)
+                {
+                    // Cancel the claim this loop already holds; CancelLocallyAsync
+                    // re-claims by id and would lose it.
+                    var cancelledAt = timeProvider.GetUtcNow();
+                    var cancelledSubmission = new TransactionSubmission(claimed.TransactionId, MessageConstants.Status.Cancelled, cancelledAt);
+                    claimed.ResponsePayload = JsonSerializer.Serialize(cancelledSubmission);
+                    return await ConcludeCancelledAsync(
+                            payment, claimed, cancelledSubmission, startedAt, CircuitOpenCancelReason, neverForwarded: true, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                // An earlier attempt reached the wire: no wait (the circuit
+                // will not close within the window), straight to the cancel
+                // phase, which asks CoreBank.
+                break;
             }
             catch (CoreBankRetryException ex)
             {
                 // Transport failure with the transport's own diagnostics: the
                 // status decides nothing here (AD-11), but a 429/503's
                 // Retry-After sets how long the next wait is.
+                anyAttemptReachedWire = true;
                 retryAfter = ex.RetryAfter;
                 statusCode = ex.StatusCode;
                 logger.LogWarning(
@@ -374,6 +412,7 @@ internal sealed class InstantPaymentForwardingHandler(
                 // Transport failure -- counts toward retry, never toward a
                 // business outcome (AD-11); the existing retry policy is
                 // "retry within budget/attempts, then cancel".
+                anyAttemptReachedWire = true;
                 logger.LogWarning(
                     ex,
                     "Instant rail attempt {Attempt} failed for payment {IdempotencyKey}",
@@ -398,7 +437,8 @@ internal sealed class InstantPaymentForwardingHandler(
             await Task.Delay(decision.Wait, timeProvider, cancellationToken).ConfigureAwait(false);
         }
 
-        // Budget or attempts exhausted, still under the partition lock (so a
+        // Budget or attempts exhausted, or the circuit opened after an attempt
+        // reached the wire (ADR-029); still under the partition lock (so a
         // later row in this partition/priority cannot overtake this one while
         // its fate is decided): two-phase cancel through CoreBank.
         return await CancelThroughCoreBankAsync(payment, claimed, opts, startedAt, cancellationToken).ConfigureAwait(false);
