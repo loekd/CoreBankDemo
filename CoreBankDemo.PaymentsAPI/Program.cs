@@ -17,7 +17,7 @@ builder.Services.AddHealthChecks()
 
 builder.AddNpgsqlDbContext<PaymentsDbContext>("paymentsdb");
 builder.Services.AddPaymentStorage(builder.Configuration);
-builder.Services.AddCoreBankApiClient();
+builder.Services.AddCoreBankApiClient(builder.Configuration);
 
 // Story 5.4: forwarding processor. IOutboxRepository is already scoped by
 // AddPaymentStorage; expose the same instance under the kernel's narrow

@@ -1,4 +1,6 @@
+using CoreBankDemo.PaymentsAPI.Models;
 using CoreBankDemo.PaymentsAPI.Outbox;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Kiota.Abstractions;
@@ -23,8 +25,21 @@ internal static class CoreBankClientServiceCollectionExtensions
 {
     internal const string HttpClientName = "corebank-api";
 
-    internal static IServiceCollection AddCoreBankApiClient(this IServiceCollection services)
+    internal static IServiceCollection AddCoreBankApiClient(this IServiceCollection services, IConfiguration configuration)
     {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        // ADR-029: the breaker's thresholds are configuration, validated at
+        // startup (Story 3.1 pattern). FailureRatio's lower bound is exclusive
+        // (Polly rejects 0), which DataAnnotations' Range cannot express.
+        services.AddOptions<CoreBankCircuitBreakerOptions>()
+            .Bind(configuration.GetSection(CoreBankCircuitBreakerOptions.SectionName))
+            .ValidateDataAnnotations()
+            .Validate(
+                options => options.FailureRatio > 0,
+                $"{CoreBankCircuitBreakerOptions.SectionName}: FailureRatio must be greater than 0.")
+            .ValidateOnStart();
+
         // ServiceDefaults' ConfigureHttpClientDefaults applies AddStandardResilienceHandler()
         // (with its own retry policy) to every named HttpClient, including this one. AD-11
         // requires all CoreBank retry decisions to live in the outbox layer, not the HTTP
