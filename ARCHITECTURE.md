@@ -20,7 +20,7 @@ CoreBankDemo is a distributed banking system consisting of a **Payments API** (a
 | OpenTelemetry + LGTM (Grafana, Tempo, Loki, Prometheus) | Distributed tracing, metrics, structured logs |
 | Microsoft DevProxy | Fault injection (503, 429, 500 errors) |
 | K6 | Automated load and resilience testing |
-| Microsoft.Extensions.Http.Resilience | Retry, circuit breaker, timeout on HTTP clients |
+| Microsoft.Extensions.Http.Resilience | Circuit breaker on the CoreBank client (ADR-029); the standard handler on every other HTTP client |
 
 ## Architecture Decisions
 
@@ -90,7 +90,7 @@ A devcontainer configuration is provided in `.devcontainer/` for GitHub Codespac
 │  │  • POST /events/transactions/*                             │  │
 │  │                                                            │  │
 │  │  Features:                                                 │  │
-│  │  • Standard Resilience Handler (Retry, CB, Timeout)       │  │
+│  │  • Circuit breaker on the CoreBank client (ADR-029)       │  │
 │  │  • Outbox Pattern (PostgreSQL: paymentsdb)                │  │
 │  │  • Inbox Pattern (PostgreSQL: paymentsdb)                 │  │
 │  │  • Message Ordering (Partition by IdempotencyKey)         │  │
@@ -177,7 +177,7 @@ The solution uses a shared `CoreBankDemo.Messaging` library to provide reusable 
 **Key Features:**
 - Generic implementations supporting any message type and DbContext
 - Partitioned processing with distributed locking (via Dapr)
-- Automatic retry without limit: a failed row returns to `Pending` and is retried on the next poll tick; a batch stops at its first failed row so nothing overtakes it (ADR-023). For the payments outbox's CoreBank hop the poll interval is the only retry delay: the `corebank-api` client runs without the HTTP resilience pipeline (AD-11); only the instant rail's inline loop honours `Retry-After` and backs off (ADR-024). Other HttpClients keep the standard resilience handler (ADR-006)
+- Automatic retry without limit: a failed row returns to `Pending` and is retried on the next poll tick; a batch stops at its first failed row so nothing overtakes it (ADR-023). For the payments outbox's CoreBank hop the poll interval is the only retry delay: the `corebank-api` client's HTTP pipeline holds a circuit breaker and nothing else (AD-11, ADR-029): a break makes each tick fail fast instead of going to the wire; only the instant rail's inline loop honours `Retry-After` and backs off (ADR-024). Other HttpClients keep the standard resilience handler (ADR-006)
 - OpenTelemetry tracing integration
 - Configurable via `InboxProcessingOptions` and `OutboxProcessingOptions`
 
@@ -576,10 +576,9 @@ CoreBankDemo/
 
 ## Resilience Strategy Layers
 
-1. **Network Layer** - Standard Resilience Handler
-   - Retry with exponential backoff
-   - Circuit breaker
-   - Timeout policies
+1. **Network Layer** - HTTP client pipelines
+   - CoreBank client: circuit breaker only (ADR-029); retry lives in the outbox layer (ADR-023, ADR-024)
+   - Every other client: the standard resilience handler (retry, circuit breaker, timeout; ADR-006, ADR-007)
    - Handles ~95% of transient issues
 
 2. **Application Layer** - Outbox Pattern

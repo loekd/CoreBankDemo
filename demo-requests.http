@@ -98,7 +98,11 @@ Idempotency-Key: demo-instant-cancelled-001
 GET http://localhost:5032/api/transactions/demo-instant-cancelled-001
 
 ### ===== STAGE 1: RETRY & CIRCUIT BREAKER =====
-### (Enable GenericRandomErrorPlugin in devproxy.json first)
+### (Arm faults in the DemoRunner console or Dev Proxy. The CoreBank client's
+### breaker (ADR-029) opens at a 20 % failure ratio over 30 s once 10 calls
+### were seen per replica, and stays open 10 s: the 5 % and 10 % error steps
+### keep it closed, the 25 % step opens it. During a break an instant payment
+### answers 504 at once; a standard payment is accepted and drains afterwards.)
 
 ### 3. Test through DevProxy - Will retry on failures
 POST http://localhost:5294/api/payments

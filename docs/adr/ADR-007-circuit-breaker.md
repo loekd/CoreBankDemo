@@ -3,7 +3,7 @@
 **Date:** 2026-05-23  
 **Status:** Accepted
 **Deciders:** Architecture team
-**Superseded in part by:** ADR-008 and ADR-013 replace the named HTTP client implementation; the circuit-breaker decision remains accepted
+**Superseded in part by:** ADR-008 and ADR-013 replace the named HTTP client implementation; ADR-029 replaces the Implementation section (the breaker is a lone strategy on the `corebank-api` client, not part of the standard resilience handler, which that client does not use). The circuit-breaker decision remains accepted
 
 ## Context
 

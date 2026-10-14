@@ -1,6 +1,6 @@
 # A circuit breaker, and only a circuit breaker, returns to the `corebank-api` client
 
-> **Status:** Draft
+> **Status:** Implemented
 > **Kind:** design spec
 > **Original date:** 2026-10-14
 > **Related:** [ADR-029](../../adr/ADR-029-corebank-client-circuit-breaker.md) (new); [ADR-007](../../adr/ADR-007-circuit-breaker.md); [ADR-023](../../adr/ADR-023-corebank-sole-outcome-source.md); [ADR-024](../../adr/ADR-024-instant-rail-retry-policy.md); [ADR-020](../../adr/ADR-020-instant-rail-timeout-cancellation.md); [instant rail Retry-After](2026-09-23-instant-rail-retry-after-design.md); [story 5.3](2026-08-29-story-5-3-contract-generated-kiota-corebank-client-design.md); [constraints](../../constraints.md)
