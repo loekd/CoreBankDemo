@@ -9,6 +9,7 @@ using CoreBankDemo.PaymentsAPI.Outbox;
 using Microsoft.Extensions.Time.Testing;
 using Microsoft.Kiota.Abstractions.Authentication;
 using Microsoft.Kiota.Http.HttpClientLibrary;
+using Polly.CircuitBreaker;
 using Polly.Timeout;
 using Xunit;
 using GeneratedClient = CoreBankDemo.PaymentsAPI.GeneratedClients.CoreBank.CoreBankApiKiotaClient;
@@ -680,6 +681,26 @@ public class CoreBankApiClientTests
         result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
         result.RetryReason.Should().Be(CoreBankRetryReason.Timeout);
         result.StatusCode.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Call_treats_an_open_circuit_as_CircuitOpen_with_no_status_and_no_retry_after()
+    {
+        // The corebank-api pipeline's circuit breaker (ADR-029) throws this
+        // before any socket is touched. Distinct from TransportException so
+        // the instant rail can prove the command never left PaymentsAPI.
+        using var handler = new FakeHttpMessageHandler((_, _) =>
+            throw new BrokenCircuitException("The circuit is now open and is not allowing calls."));
+        var client = CreateClient(handler);
+
+        var result = await client.ProcessTransactionAsync(
+            new TransactionSubmissionRequest("NL91ABNA0417164300", "NL20INGB0001234567", 10m, "EUR", "tx-1"),
+            TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(CoreBankClientOutcome.Retry);
+        result.RetryReason.Should().Be(CoreBankRetryReason.CircuitOpen);
+        result.StatusCode.Should().BeNull();
+        result.RetryAfter.Should().BeNull();
     }
 
     [Fact]
