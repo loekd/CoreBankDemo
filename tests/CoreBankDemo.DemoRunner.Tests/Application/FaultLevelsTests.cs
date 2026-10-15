@@ -44,7 +44,7 @@ public class FaultLevelsTests
         var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
 
         var flaky = presets.Should().ContainSingle(preset => preset.Name == "Flaky CoreBank").Subject;
-        flaky.Levels.Should().Be(new FaultLevels(60, 0, 0, 0), "a payment is cancelled only when all three attempts fail: 0.6³ ≈ 22 %");
+        flaky.Levels.Should().Be(new FaultLevels(60, 200, 800, 0), "a payment is cancelled only when all three attempts fail: 0.6³ ≈ 22 %; the band paces attempts without ever reaching the 2.5 s attempt timeout");
         flaky.Levels.Normalized().Should().Be(flaky.Levels, "a preset must land on reachable slider positions");
     }
 

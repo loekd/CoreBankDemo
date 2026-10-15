@@ -45,9 +45,12 @@ the running system on 2026-10-15, the Regular Dev Proxy profile could do neither
    outside that set is neither a success nor a failure to the breaker. The error knob can
    therefore never open the circuit at any rate.
 3. **The console offers two Regular presets in place of "Instant-rail jitter".** *Flaky CoreBank*
-   (errors 60 %, nothing else): a payment is cancelled only when all three attempts fail,
-   0.6³ ≈ 22 %, about four of twenty, each in about a second; at 100 % a single payment walks
-   through every retry and ends cancelled. *Throttled CoreBank* (10 transfers per minute, nothing
+   (errors 60 %, latency 200–800 ms): a payment is cancelled only when all three attempts fail,
+   0.6³ ≈ 22 %, about four of twenty; at 100 % a single payment walks through every retry and
+   ends cancelled. The band exists to pace the attempts so the retries are visible on stage
+   (without it a 4xx arrives in milliseconds and the whole walk takes about a second); it stays
+   far below the 2.5 s attempt timeout, so it can never overrun one, and the breaker ignores
+   caller-cancelled attempts anyway. *Throttled CoreBank* (10 transfers per minute, nothing
    else) is a two-step demo. First a **standard** burst from a *different* debtor (the seeded
    `NL39RABO0300065264`, partition 2): the eleventh command gets `429`, its row stays Pending, and
    the background rail's 200 ms retries open each replica's circuit (ADR-029) within a second or

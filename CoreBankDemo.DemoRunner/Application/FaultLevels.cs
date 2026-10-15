@@ -100,8 +100,10 @@ public sealed record FaultLevels(
             // never 202 deferred. The checked-in errors file answers 409/423, which Polly's
             // transient predicate ignores: this knob can never open the CoreBank circuit. A
             // payment is cancelled only when all three attempts fail, so 60 % cancels about
-            // one in five; 100 % on a single payment walks through every retry (ADR-030).
-            new FaultPreset("Flaky CoreBank", new FaultLevels(60, 0, 0, 0)),
+            // one in five; 100 % on a single payment walks through every retry (ADR-030). The
+            // 200–800 ms band only paces the attempts so the retries read on stage: it stays
+            // well under the 2.5 s attempt timeout, so it can never overrun one.
+            new FaultPreset("Flaky CoreBank", new FaultLevels(60, 200, 800, 0)),
             // Ten transfers per minute, then 429s that open the circuit (ADR-029). Trip it with a
             // standard burst from another debtor first: a payment whose own 429 trips the
             // breaker has its cancel refused by the open circuit, ends 202, and that Pending row

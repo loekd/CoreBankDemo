@@ -199,8 +199,9 @@ through and a faulted instant payment ends `504 Cancelled` rather than `202 Pend
 of the box it injects a 5% error rate of `409`/`423` answers (`devproxy-errors.json`; statuses the
 circuit breaker does not count, so the error knob never opens it), 20–200 ms of latency, and a
 1000-request/min rate limit — tune those in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`.
-The console's presets: **Flaky CoreBank** (60% errors, about one instant payment in five cancelled
-after three attempts; 100% on a single payment shows every retry) and **Throttled CoreBank** (10
+The console's presets: **Flaky CoreBank** (60% errors with 200–800 ms of latency to pace the
+attempts, about one instant payment in five cancelled after three attempts; 100% on a single
+payment shows every retry) and **Throttled CoreBank** (10
 transfers per minute: first a standard burst from another debtor, say `NL39RABO0300065264`, whose
 `429`s open the circuit, then an instant burst, refused in milliseconds; see ADR-030 for why the
 order matters).
