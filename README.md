@@ -193,9 +193,18 @@ system, not a demo toggle. The only host-level flag is `Features:UseDevProxy`.
 ## Fault injection
 
 Dev Proxy sits between the Payments API and the Core Bank API and is enabled by default in
-`CoreBankDemo.AppHost/appsettings.json`. It watches `http://127.0.0.1:5032/api/*` and, out of the
-box, injects a 5% error rate (`devproxy-errors.json`), 20–200 ms of latency, and a 1000-request/min
-rate limit — tune those in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`.
+`CoreBankDemo.AppHost/appsettings.json`. Every plugin watches only the transfer command,
+`POST http://127.0.0.1:5032/api/transactions/process`, so the instant rail's cancel always gets
+through and a faulted instant payment ends `504 Cancelled` rather than `202 Pending` (ADR-030). Out
+of the box it injects a 5% error rate of `409`/`423` answers (`devproxy-errors.json`; statuses the
+circuit breaker does not count, so the error knob never opens it), 20–200 ms of latency, and a
+1000-request/min rate limit — tune those in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`.
+The console's presets: **Flaky CoreBank** (60% errors with 200–800 ms of latency to pace the
+attempts, about one instant payment in five cancelled after three attempts; 100% on a single
+payment shows every retry) and **Throttled CoreBank** (10
+transfers per minute: first a standard burst from another debtor, say `NL39RABO0300065264`, whose
+`429`s open the circuit, then an instant burst, refused in milliseconds; see ADR-030 for why the
+order matters).
 
 To run without it (and without needing the binary on `PATH`):
 
@@ -359,8 +368,9 @@ the cancel that followed *succeeded* — the payment was provably withdrawn befo
 (ADR-020). Nothing moved and no event will follow; resending the same `Idempotency-Key` replays the
 same `504`, and a retry with a new key is safe. You see it when the process call fails but Core
 Bank still answers the cancel (a rejected or dropped process call, partition-lock starvation, a
-failed lock backend). With Core Bank stopped, or under the latency preset, the cancel fails or is
-delayed too and the honest `202 Pending` remains: the background rail settles the payment later.
+failed lock backend). With Core Bank stopped, the cancel fails too and the honest `202 Pending`
+remains: the background rail settles the payment later. Dev Proxy faults never reach the cancel
+call (ADR-030), so a faulted instant payment ends `504`, not `202`.
 
 **`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Apple Silicon)**
 A bug in the published image, not in this repository, and harmless — RedisInsight is an optional

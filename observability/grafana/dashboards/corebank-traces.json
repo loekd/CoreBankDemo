@@ -23,7 +23,7 @@
   },
   "timezone": "browser",
   "schemaVersion": 41,
-  "version": 1,
+  "version": 2,
   "annotations": {
     "list": [
       {
@@ -467,13 +467,13 @@
       ]
     },
     {
-      "id": 6,
-      "type": "nodeGraph",
-      "title": "Service map",
-      "description": "Calls between services in the selected time range, from Tempo's service graph. Database and Redis connections show as their host (localhost, 127.0.0.1).",
+      "id": 13,
+      "type": "timeseries",
+      "title": "CoreBank circuit",
+      "description": "Circuit-breaker transitions on PaymentsAPI's corebank-api client (ADR-029), from Polly's resilience meter, summed over both replicas per 30 s. Red bars are the circuit opening; while it is open every call to CoreBank is refused in PaymentsAPI and instant payments answer 504 Cancelled. Half-open is the single probe after the 10 s break; closed means the probe succeeded. Legend totals are for the selected time range.",
       "datasource": {
-        "type": "tempo",
-        "uid": "tempo"
+        "type": "prometheus",
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 12,
@@ -481,15 +481,134 @@
         "w": 12,
         "h": 12
       },
-      "options": {},
+      "interval": "30s",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 85,
+            "gradientMode": "none",
+            "barAlignment": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "opened"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "half-open"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "closed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "datasource": {
-            "type": "tempo",
-            "uid": "tempo"
+            "type": "prometheus",
+            "uid": "prometheus"
           },
-          "queryType": "serviceMap",
-          "refId": "A"
+          "editorMode": "code",
+          "expr": "sum(increase(resilience_polly_strategy_events_total{service_name=\"CoreBank.PaymentsAPI\", pipeline_name=\"corebank-api-circuit-breaker\", event_name=\"OnCircuitOpened\"}[$__interval]))",
+          "legendFormat": "opened",
+          "range": true,
+          "refId": "O"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(resilience_polly_strategy_events_total{service_name=\"CoreBank.PaymentsAPI\", pipeline_name=\"corebank-api-circuit-breaker\", event_name=\"OnCircuitHalfOpened\"}[$__interval]))",
+          "legendFormat": "half-open",
+          "range": true,
+          "refId": "H"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(resilience_polly_strategy_events_total{service_name=\"CoreBank.PaymentsAPI\", pipeline_name=\"corebank-api-circuit-breaker\", event_name=\"OnCircuitClosed\"}[$__interval]))",
+          "legendFormat": "closed",
+          "range": true,
+          "refId": "C"
         }
       ]
     },

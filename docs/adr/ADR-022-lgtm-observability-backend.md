@@ -45,7 +45,8 @@ Inbox/Outbox drain, and logs next to traces, in one UI.
 - **Traces dashboard as home page.** `observability/grafana/dashboards/corebank-traces.json`
   (uid `corebank-traces`) is a Jaeger-style trace search: Service and Operation filters (from
   Tempo span metrics), rate, errors and p95 for that operation, the matching end-to-end traces,
-  and Tempo's service map. Below that, a "Today" row of three totals since midnight, in the
+  and, since ADR-030, the CoreBank circuit panel (breaker transitions from Polly's meter; it
+  replaced Tempo's service map, which the talk does not use). Below that, a "Today" row of three totals since midnight, in the
   order a payment flows: payments received (stored in the Payments outbox), transactions
   processed, and messages sent (the `transaction-completed` or `transaction-failed` result event
   from CoreBank's outbox). The three are equal unless there is an outage. They are exact counts

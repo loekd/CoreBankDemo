@@ -39,13 +39,30 @@ public class FaultLevelsTests
     }
 
     [Fact]
-    public void PresetsForRegular_OfferAnInstantRailJitterBandStraddlingTheAttemptTimeout()
+    public void PresetsForRegular_OfferAFlakyCoreBankErrorRateThatCancelsAboutOneInFive()
     {
         var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
 
-        var jitter = presets.Should().ContainSingle(preset => preset.Name == "Instant-rail jitter").Subject;
-        jitter.Levels.Should().Be(new FaultLevels(5, 1200, 3000, 0));
-        jitter.Levels.Normalized().Should().Be(jitter.Levels, "a preset must land on reachable slider positions");
+        var flaky = presets.Should().ContainSingle(preset => preset.Name == "Flaky CoreBank").Subject;
+        flaky.Levels.Should().Be(new FaultLevels(60, 200, 800, 0), "a payment is cancelled only when all three attempts fail: 0.6³ ≈ 22 %; the band paces attempts without ever reaching the 2.5 s attempt timeout");
+        flaky.Levels.Normalized().Should().Be(flaky.Levels, "a preset must land on reachable slider positions");
+    }
+
+    [Fact]
+    public void PresetsForRegular_OfferAThrottledCoreBankThatOpensTheCircuitOn429s()
+    {
+        var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
+
+        var throttled = presets.Should().ContainSingle(preset => preset.Name == "Throttled CoreBank").Subject;
+        throttled.Levels.Should().Be(new FaultLevels(0, 0, 0, 10));
+        throttled.Levels.Normalized().Should().Be(throttled.Levels, "a preset must land on reachable slider positions");
+    }
+
+    [Fact]
+    public void PresetsForRegular_AreOfferedInTalkOrder()
+    {
+        FaultLevels.PresetsFor(TopologyProfile.Regular).Select(preset => preset.Name)
+            .Should().Equal("All off", "Regular profile", "Flaky CoreBank", "Throttled CoreBank");
     }
 
     [Fact]
