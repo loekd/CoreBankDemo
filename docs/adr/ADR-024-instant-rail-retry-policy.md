@@ -11,6 +11,7 @@ for `MaxAttempts` only, the "Always" constraint "do not touch `BudgetMillisecond
 — that constraint was about the k6 load-coverage story's own scope, not a ceiling on future changes.
 **Corrects:** ADR-023's and `ARCHITECTURE.md`'s statement that backoff for CoreBank calls lives in the HTTP
 resilience pipeline.
+**Superseded in part by:** ADR-029 (the `corebank-api` client now carries a circuit breaker; the Decision's "neither Kiota's `RetryHandler` nor the standard resilience handler is enabled" still holds for *retry* middleware)
 
 ## Context
 

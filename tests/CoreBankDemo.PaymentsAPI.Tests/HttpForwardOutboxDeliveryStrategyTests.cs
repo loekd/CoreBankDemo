@@ -619,6 +619,27 @@ public class HttpForwardOutboxDeliveryStrategyTests
         assertion.Which.Message.Should().Be("Transaction submission failed: Timeout.");
     }
 
+    [Fact]
+    public async Task ForwardAsync_surfaces_an_open_circuit_as_a_CircuitOpen_retry_exception()
+    {
+        // ADR-029: the background kernel stores this message as LastError and
+        // retries on the next tick; the instant rail reads the typed reason.
+        var client = new FakeCoreBankApiClient
+        {
+            SubmitResult = CoreBankResult<TransactionSubmission>.Retry(CoreBankRetryReason.CircuitOpen)
+        };
+        ICoreBankTransactionForwarder strategy = new HttpForwardOutboxDeliveryStrategy(
+            client, _store.Object, BusinessMetrics, TimeProvider.System, NullLogger<HttpForwardOutboxDeliveryStrategy>.Instance);
+
+        var act = () => strategy.ForwardAsync(Message(), executeInline: false, TestContext.Current.CancellationToken);
+
+        var assertion = await act.Should().ThrowAsync<CoreBankRetryException>();
+        assertion.Which.RetryReason.Should().Be(CoreBankRetryReason.CircuitOpen);
+        assertion.Which.StatusCode.Should().BeNull();
+        assertion.Which.RetryAfter.Should().BeNull();
+        assertion.Which.Message.Should().Be("Transaction submission failed: CircuitOpen.");
+    }
+
     private sealed class FakeCoreBankApiClient : ICoreBankApiClient
     {
         public CoreBankResult<TransactionSubmission>? SubmitResult { get; set; }
