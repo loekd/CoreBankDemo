@@ -191,6 +191,8 @@ All `get_*` tools take no arguments and return the 50 most recent rows, newest f
 
 After assertions complete (pass or fail), run the replicated Inbox and Outbox Tier-2 tests (`dotnet test tests/CoreBankDemo.Persistence.IntegrationTests --filter "FullyQualifiedName~Replicated"`) and invoke the **corebank-trace-analysis** skill. Its bundled `scripts/processing-lanes.py` queries Tempo directly and prints PASS/FAIL for: both replica identities on every (store, partition) lane, no overlapping same-store/partition processing spans, N/N/3N/3N stage cardinality, exactly the k6 run's intentional duplicate replays as the only error spans, no slow spans, and intact parent links across both hops. Take the window from k6's `Starting load test` console line (UTC) — never from a trace tool's own timestamps. A green k6 state gate is not a complete acceptance verdict without a `VERDICT: PASS` from that script.
 
+**Tempo ingestion lag.** Spans reach Tempo a minute or so after the run ends, so a script run straight after `poll_until_drained` sees a partial run and fails for the wrong reason: stage cardinality below N/N/3N/3N (e.g. 573/573/1719/1719 of 1000/1000/3000/3000) and fewer intentional replays than `--retries`, with every other check green. Stop the AppHost first (step 7 flushes the exporters), then re-run the script until the cardinality and replay counts are exact; observed 2026-10-15, a 1000-transaction run was complete about 60 s after drain. Only a verdict taken on the complete run counts.
+
 ## 7. Stop
 
 See **aspire-launch** skill. Stop the single LoadTests AppHost:
