@@ -40,6 +40,9 @@ public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : Db
             // "win" the same row, since EF would never detect the race via
             // optimistic concurrency on SaveChanges.
             MessageRepositoryBase<InboxMessage, CoreBankDbContext>.ConfigureConcurrencyToken(entity);
+            entity.Property(e => e.AcceptedXid)
+                .HasDefaultValueSql("pg_current_xact_id()::text::bigint")
+                .ValueGeneratedOnAdd();
             entity.HasIndex(e => new { e.PartitionId, e.Status, e.Priority, e.ReceivedAt }); // Partition-based query index
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.ReceivedAt);

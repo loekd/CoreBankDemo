@@ -54,7 +54,7 @@ Stdlib only; `--tempo` overrides the URL; `--start/--end` replace `--k6-start` f
 | Intentional replays | exactly `--retries` PaymentsAPI `postgresql` spans with `error.type 23505` | the dedupe path changed, or real unique-index failures |
 | Other error spans | 0 | investigate (Step 4) |
 | Error traces reaching CoreBank | 0 | a duplicate was forwarded — exactly-once at risk |
-| Slow spans / traces | none > 500 ms, none > 2 s | a stalled hop or lock wait |
+| Slow spans / traces | none > 500 ms, none > 2 s, outside instant-rail traces; in a trace that settled inline (`messaging.inline = true`) the root span may run up to the instant budget (`--instant-budget-ms`, default 9000) and the forward-path spans up to the attempt timeout (`--instant-attempt-ms`, default 2500), the trace up to budget + 2 s (ADR-018/ADR-020: the rail waits for its turn inside its budget) | a stalled hop or lock wait |
 | Cross-hop parent links | sampled trace has PaymentsAPI→CoreBank (HTTP) and inbound-to-PaymentsAPI (Dapr) edges | `traceparent` dropped on a hop |
 
 It also prints, as information, each lane's span count per replica and which partitions the command stores used (the load accounts hash to 0, 1, 2 under ADR-026; a command row in partition 3 means routing drift).

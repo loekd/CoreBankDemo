@@ -35,3 +35,7 @@ CoreBankDemo.AppHost/dev-proxy/
 # AppHost under whoever pulls next. It is per-developer CLI state, not project
 # configuration — both AppHosts are selected explicitly by path.
 /aspire.config.json
+
+# Python caches (skill script tests)
+__pycache__/
+.pytest_cache/

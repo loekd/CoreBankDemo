@@ -89,8 +89,8 @@ public sealed record OrderingObservation(
     // row stamped earlier can become visible later than a younger one. A lane
     // can only order what it can see, so FIFO is only owed between rows whose
     // request windows did not overlap: X must precede Y when X was accepted
-    // before Y was stamped. Null (the stores without a commit timestamp)
-    // means EnqueuedAt itself, i.e. plain stamp order.
+    // before Y was stamped. Null (the CoreBank outbox, the one store without
+    // a commit timestamp) means EnqueuedAt itself, i.e. plain stamp order.
     DateTime? AcceptedAt = null);
 
 public sealed record OrderingViolation(
@@ -302,6 +302,16 @@ public sealed class LoadTestAssertionService(
             cancelled);
     }
 
+    /// <summary>
+    /// The accepting transaction's commit timestamp, which every commit-ordered
+    /// store must have: a missing one means the load-test PostgreSQL runs
+    /// without <c>track_commit_timestamp=on</c>, and that fails loudly rather
+    /// than silently falling back to stamp order.
+    /// </summary>
+    private static DateTime RequireAcceptedAt(string store, string idempotencyKey, DateTimeOffset? acceptedAt) =>
+        acceptedAt?.UtcDateTime ?? throw new InvalidOperationException(
+            $"{store} row {idempotencyKey} has no commit timestamp; the load-test PostgreSQL must run with track_commit_timestamp=on.");
+
     /// <summary>Shape of the raw commit-order query over the Payments outbox; column names match the SELECT list.</summary>
     private sealed class PaymentsOutboxOrderingRow
     {
@@ -314,6 +324,33 @@ public sealed class LoadTestAssertionService(
         public int Priority { get; set; }
         public required string Status { get; set; }
         public required string FromAccount { get; set; }
+    }
+
+    /// <summary>Shape of the raw commit-order query over the CoreBank inbox; column names match the SELECT list.</summary>
+    private sealed class CoreBankInboxOrderingRow
+    {
+        public int PartitionId { get; set; }
+        public required string IdempotencyKey { get; set; }
+        public DateTime ReceivedAt { get; set; }
+        public DateTimeOffset? AcceptedAt { get; set; }
+        public DateTime? ProcessedAt { get; set; }
+        public Guid Id { get; set; }
+        public int Priority { get; set; }
+        public required string Status { get; set; }
+        public required string FromAccount { get; set; }
+    }
+
+    /// <summary>Shape of the raw commit-order query over the Payments inbox; column names match the SELECT list.</summary>
+    private sealed class PaymentsInboxOrderingRow
+    {
+        public int PartitionId { get; set; }
+        public required string IdempotencyKey { get; set; }
+        public DateTime ReceivedAt { get; set; }
+        public DateTimeOffset? AcceptedAt { get; set; }
+        public DateTime? ProcessedAt { get; set; }
+        public Guid Id { get; set; }
+        public int Priority { get; set; }
+        public required string Status { get; set; }
     }
 
     /// <summary>
@@ -385,20 +422,29 @@ public sealed class LoadTestAssertionService(
             row.Priority,
             row.Status,
             row.FromAccount,
-            row.AcceptedAt?.UtcDateTime ?? throw new InvalidOperationException(
-                $"PaymentsOutbox row {row.IdempotencyKey} has no commit timestamp; the load-test PostgreSQL must run with track_commit_timestamp=on."))));
-        orderingObservations.AddRange(await coreBankDb.InboxMessages
-            .Select(message => new OrderingObservation(
-                "CoreBankInbox",
-                message.PartitionId,
-                message.IdempotencyKey,
-                message.ReceivedAt,
-                message.ProcessedAt,
-                message.Id,
-                message.Priority,
-                message.Status,
-                message.FromAccount))
-            .ToListAsync(ct));
+            RequireAcceptedAt("PaymentsOutbox", row.IdempotencyKey, row.AcceptedAt))));
+        // Both inbox stores carry the same commit timestamp: their intake handlers
+        // stamp ReceivedAt before the insert commits, and the three events of one
+        // transaction (Payments) or two intakes (CoreBank) arrive concurrently.
+        var coreBankInboxRows = await coreBankDb.Database
+            .SqlQuery<CoreBankInboxOrderingRow>($"""
+                SELECT "PartitionId", "IdempotencyKey", "ReceivedAt",
+                       pg_xact_commit_timestamp(("AcceptedXid" % 4294967296)::text::xid) AS "AcceptedAt",
+                       "ProcessedAt", "Id", "Priority", "Status", "FromAccount"
+                FROM "InboxMessages"
+                """)
+            .ToListAsync(ct);
+        orderingObservations.AddRange(coreBankInboxRows.Select(row => new OrderingObservation(
+            "CoreBankInbox",
+            row.PartitionId,
+            row.IdempotencyKey,
+            row.ReceivedAt,
+            row.ProcessedAt,
+            row.Id,
+            row.Priority,
+            row.Status,
+            row.FromAccount,
+            RequireAcceptedAt("CoreBankInbox", row.IdempotencyKey, row.AcceptedAt))));
         orderingObservations.AddRange(await coreBankDb.MessagingOutboxMessages
             .Select(message => new OrderingObservation(
                 "CoreBankOutbox",
@@ -410,17 +456,24 @@ public sealed class LoadTestAssertionService(
                 message.Priority,
                 message.Status))
             .ToListAsync(ct));
-        orderingObservations.AddRange(await paymentsDb.InboxMessages
-            .Select(message => new OrderingObservation(
-                "PaymentsInbox",
-                message.PartitionId,
-                message.IdempotencyKey,
-                message.ReceivedAt,
-                message.ProcessedAt,
-                message.Id,
-                message.Priority,
-                message.Status))
-            .ToListAsync(ct));
+        var paymentsInboxRows = await paymentsDb.Database
+            .SqlQuery<PaymentsInboxOrderingRow>($"""
+                SELECT "PartitionId", "IdempotencyKey", "ReceivedAt",
+                       pg_xact_commit_timestamp(("AcceptedXid" % 4294967296)::text::xid) AS "AcceptedAt",
+                       "ProcessedAt", "Id", "Priority", "Status"
+                FROM "InboxMessages"
+                """)
+            .ToListAsync(ct);
+        orderingObservations.AddRange(paymentsInboxRows.Select(row => new OrderingObservation(
+            "PaymentsInbox",
+            row.PartitionId,
+            row.IdempotencyKey,
+            row.ReceivedAt,
+            row.ProcessedAt,
+            row.Id,
+            row.Priority,
+            row.Status,
+            AcceptedAt: RequireAcceptedAt("PaymentsInbox", row.IdempotencyKey, row.AcceptedAt))));
 
         var request = new ComputeAssertionRequest(
             ExpectedUnique: expectedUnique,
