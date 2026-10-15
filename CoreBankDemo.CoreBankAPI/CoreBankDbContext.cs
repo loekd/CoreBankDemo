@@ -59,6 +59,9 @@ public class CoreBankDbContext(DbContextOptions<CoreBankDbContext> options) : Db
         modelBuilder.Entity<MessagingOutboxMessage>(entity =>
         {
             entity.HasKey(e => e.Id);
+            entity.Property(e => e.AcceptedXid)
+                .HasDefaultValueSql("pg_current_xact_id()::text::bigint")
+                .ValueGeneratedOnAdd();
             entity.HasIndex(e => new { e.PartitionId, e.Status, e.CreatedAt }); // Partition-based query index
             entity.HasIndex(e => new { e.TransactionId, e.EventType, e.AccountNumber }).IsUnique();
             entity.HasIndex(e => e.Status);

@@ -89,8 +89,8 @@ public sealed record OrderingObservation(
     // row stamped earlier can become visible later than a younger one. A lane
     // can only order what it can see, so FIFO is only owed between rows whose
     // request windows did not overlap: X must precede Y when X was accepted
-    // before Y was stamped. Null (the CoreBank outbox, the one store without
-    // a commit timestamp) means EnqueuedAt itself, i.e. plain stamp order.
+    // before Y was stamped. Every store supplies one from the live database;
+    // null means EnqueuedAt itself, i.e. plain stamp order.
     DateTime? AcceptedAt = null);
 
 public sealed record OrderingViolation(
@@ -340,6 +340,19 @@ public sealed class LoadTestAssertionService(
         public required string FromAccount { get; set; }
     }
 
+    /// <summary>Shape of the raw commit-order query over the CoreBank outbox; column names match the SELECT list.</summary>
+    private sealed class CoreBankOutboxOrderingRow
+    {
+        public int PartitionId { get; set; }
+        public required string IdempotencyKey { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTimeOffset? AcceptedAt { get; set; }
+        public DateTime? ProcessedAt { get; set; }
+        public Guid Id { get; set; }
+        public int Priority { get; set; }
+        public required string Status { get; set; }
+    }
+
     /// <summary>Shape of the raw commit-order query over the Payments inbox; column names match the SELECT list.</summary>
     private sealed class PaymentsInboxOrderingRow
     {
@@ -423,7 +436,7 @@ public sealed class LoadTestAssertionService(
             row.Status,
             row.FromAccount,
             RequireAcceptedAt("PaymentsOutbox", row.IdempotencyKey, row.AcceptedAt))));
-        // Both inbox stores carry the same commit timestamp: their intake handlers
+        // Every other store carries the same commit timestamp. The inbox intake handlers
         // stamp ReceivedAt before the insert commits, and the three events of one
         // transaction (Payments) or two intakes (CoreBank) arrive concurrently.
         var coreBankInboxRows = await coreBankDb.Database
@@ -445,17 +458,27 @@ public sealed class LoadTestAssertionService(
             row.Status,
             row.FromAccount,
             RequireAcceptedAt("CoreBankInbox", row.IdempotencyKey, row.AcceptedAt))));
-        orderingObservations.AddRange(await coreBankDb.MessagingOutboxMessages
-            .Select(message => new OrderingObservation(
-                "CoreBankOutbox",
-                message.PartitionId,
-                message.IdempotencyKey,
-                message.CreatedAt,
-                message.ProcessedAt,
-                message.Id,
-                message.Priority,
-                message.Status))
-            .ToListAsync(ct));
+        // The CoreBank outbox stamps CreatedAt inside the executing transaction,
+        // which commits later with the inbox row and the balance; two transactions
+        // on different inbox partitions enqueue into one outbox partition concurrently.
+        var coreBankOutboxRows = await coreBankDb.Database
+            .SqlQuery<CoreBankOutboxOrderingRow>($"""
+                SELECT "PartitionId", "IdempotencyKey", "CreatedAt",
+                       pg_xact_commit_timestamp(("AcceptedXid" % 4294967296)::text::xid) AS "AcceptedAt",
+                       "ProcessedAt", "Id", "Priority", "Status"
+                FROM "MessagingOutboxMessages"
+                """)
+            .ToListAsync(ct);
+        orderingObservations.AddRange(coreBankOutboxRows.Select(row => new OrderingObservation(
+            "CoreBankOutbox",
+            row.PartitionId,
+            row.IdempotencyKey,
+            row.CreatedAt,
+            row.ProcessedAt,
+            row.Id,
+            row.Priority,
+            row.Status,
+            AcceptedAt: RequireAcceptedAt("CoreBankOutbox", row.IdempotencyKey, row.AcceptedAt))));
         var paymentsInboxRows = await paymentsDb.Database
             .SqlQuery<PaymentsInboxOrderingRow>($"""
                 SELECT "PartitionId", "IdempotencyKey", "ReceivedAt",
