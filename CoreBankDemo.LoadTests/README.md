@@ -8,7 +8,8 @@ Verifies that the CoreBankDemo system processes every payment transaction **exac
 ┌─────────────────────────────────────────────────────┐
 │  CoreBankDemo.LoadTests  (Aspire AppHost)            │
 │                                                      │
-│  Postgres (disposable) ──► paymentsdb                │
+│  Postgres (disposable, port 5432, pgAdmin 5050)      │
+│                        ──► paymentsdb                │
 │                        └──► corebankdb  (+ 10 seeded │
 │                                           accounts)  │
 │  Redis (disposable, port 6381)                       │
@@ -20,6 +21,11 @@ Verifies that the CoreBankDemo system processes every payment transaction **exac
 │                                         │   │   │   │
 │  k6 container ──────────────────────────┘───┘───┘   │
 └─────────────────────────────────────────────────────┘
+
+The Aspire Dashboard (15888), LGTM (Grafana 3000, Tempo 3200, OTLP 4317/4318), Postgres (5432) and
+pgAdmin (5050) use the same fixed host ports as the Regular AppHost, so one sandbox port publish
+serves both; the two AppHosts never run side by side. Redis differs on purpose (6381 here, 6379 in
+the Regular AppHost) because each Dapr components directory is tied to its port.
 ```
 
 ### Test flow
