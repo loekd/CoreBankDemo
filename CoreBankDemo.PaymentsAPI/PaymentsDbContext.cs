@@ -46,6 +46,9 @@ public class PaymentsDbContext(DbContextOptions<PaymentsDbContext> options) : Db
                 nameof(InboxMessage.EventType),
                 nameof(InboxMessage.AccountNumber));
             MessageRepositoryBase<InboxMessage, PaymentsDbContext>.ConfigureConcurrencyToken(entity);
+            entity.Property(e => e.AcceptedXid)
+                .HasDefaultValueSql("pg_current_xact_id()::text::bigint")
+                .ValueGeneratedOnAdd();
             entity.HasIndex(e => new { e.PartitionId, e.Status, e.Priority, e.ReceivedAt });
             entity.HasIndex(e => e.Status);
             entity.HasIndex(e => e.ReceivedAt);
