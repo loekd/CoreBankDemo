@@ -48,7 +48,7 @@ public class MainWindowFaultsTests
         await ArmAsync(controller);
         window.RenderForTest();
 
-        window.VisiblePresetNames.Should().Equal("All off", "Regular profile", "Instant-rail jitter");
+        window.VisiblePresetNames.Should().Equal("All off", "Regular profile", "Flaky CoreBank", "Throttled CoreBank");
         window.TriggerPresetForTest(1);
         window.RenderForTest();
 
@@ -248,7 +248,7 @@ public class MainWindowFaultsTests
         window.ResizeForTest(72, 24);
         window.RenderForTest();
 
-        window.VisiblePresetNames.Should().Equal("All off", "Regular profile", "Instant-rail jitter");
+        window.VisiblePresetNames.Should().Equal("All off", "Regular profile", "Flaky CoreBank", "Throttled CoreBank");
         window.PresetLabelText.Should().NotContain("not shown");
     }
 
@@ -263,7 +263,8 @@ public class MainWindowFaultsTests
         window.ResizeForTest(45, 24);
         window.RenderForTest();
 
-        window.VisiblePresetNames.Should().NotContain("Regular profile").And.NotContain("Instant-rail jitter");
+        // At this width the two short names fit (one per row); the two long ones cannot.
+        window.VisiblePresetNames.Should().Equal("All off", "Flaky CoreBank");
         window.PresetLabelText.Should().Contain("2 more presets not shown at this width");
     }
 

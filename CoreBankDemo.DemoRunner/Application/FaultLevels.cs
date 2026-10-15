@@ -95,11 +95,20 @@ public sealed record FaultLevels(
         [
             new FaultPreset("All off", AllZero),
             new FaultPreset("Regular profile", CheckedInDefaults(TopologyProfile.Regular)),
-            // An instant attempt makes one proxied call (ADR-023 removed the pre-validation),
-            // so the band itself has to straddle the rail's 2.5 s attempt timeout: about one
-            // attempt in four overruns, a few payments in a burst of fifty overrun both, and
-            // roughly half of those end cancelled.
-            new FaultPreset("Instant-rail jitter", new FaultLevels(5, 1200, 3000, 0)),
+            // Every Regular-profile plugin watches only POST /api/transactions/process, so the
+            // instant rail's cancel always gets through and a failed payment ends 504 Cancelled,
+            // never 202 deferred. The checked-in errors file answers 409/423, which Polly's
+            // transient predicate ignores: this knob can never open the CoreBank circuit. A
+            // payment is cancelled only when all three attempts fail, so 60 % cancels about
+            // one in five; 100 % on a single payment walks through every retry (ADR-030).
+            new FaultPreset("Flaky CoreBank", new FaultLevels(60, 0, 0, 0)),
+            // Ten transfers per minute, then 429s that open the circuit (ADR-029). Trip it with a
+            // standard burst from another debtor first: a payment whose own 429 trips the
+            // breaker has its cancel refused by the open circuit, ends 202, and that Pending row
+            // then heads its partition for the whole window, starving every instant payment
+            // behind it (ADR-030). With the circuit already open, an instant burst is refused
+            // locally in milliseconds; "All off" lets it close and the held rows drain.
+            new FaultPreset("Throttled CoreBank", new FaultLevels(0, 0, 0, 10)),
         ],
         TopologyProfile.LoadTests =>
         [

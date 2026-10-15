@@ -7,7 +7,7 @@
       "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
       "configSection": "rateLimiting",
       "urlsToWatch": [
-        "http://127.0.0.1:5032/api/*"
+        "http://127.0.0.1:5032/api/transactions/process"
       ]
     },
     {
@@ -16,7 +16,7 @@
       "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
       "configSection": "latency",
       "urlsToWatch": [
-        "http://127.0.0.1:5032/api/*"
+        "http://127.0.0.1:5032/api/transactions/process"
       ]
     },
     {
@@ -25,7 +25,7 @@
       "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
       "configSection": "errorsCoreBank",
       "urlsToWatch": [
-        "http://127.0.0.1:5032/api/*"
+        "http://127.0.0.1:5032/api/transactions/process"
       ]
     }
   ],
@@ -45,6 +45,6 @@
     "maxMs": 200
   },
   "urlsToWatch": [
-    "http://127.0.0.1:5032/api/*"
+    "http://127.0.0.1:5032/api/transactions/process"
   ]
 }
