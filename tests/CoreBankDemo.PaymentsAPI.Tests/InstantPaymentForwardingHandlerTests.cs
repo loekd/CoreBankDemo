@@ -1361,6 +1361,108 @@ public class InstantPaymentForwardingHandlerTests
         Activity.Current.Should().BeSameAs(requestSpan, "the request is current again once the wait is over");
     }
 
+    private static CoreBankRetryException CircuitOpen() =>
+        new("Transaction submission", CoreBankRetryReason.CircuitOpen, statusCode: null, retryAfter: null);
+
+    [Fact]
+    public async Task ForwardAsync_cancels_locally_at_once_when_the_circuit_refuses_the_first_attempt()
+    {
+        // ADR-029: a BrokenCircuitException is thrown before any socket is
+        // touched, so the command provably never left PaymentsAPI; the row
+        // the loop already holds is cancelled in place and the caller gets
+        // 504 in milliseconds -- no wait, no cancel call to CoreBank.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>())).ThrowsAsync(CircuitOpen());
+        _repository.Setup(r => r.CancelLocallyAsync(claimed, InstantPaymentForwardingHandler.CircuitOpenCancelReason, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var clock = new BudgetClock(new DateTimeOffset(2026, 10, 14, 12, 0, 0, TimeSpan.Zero));
+        var businessMetrics = new BusinessMetrics();
+        using var listener = new MetricsTestListener(businessMetrics);
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 3 }, businessMetrics, clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Cancelled);
+        _forwarder.Verify(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()), Times.Once);
+        _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+        _repository.Verify(r => r.CancelLocallyAsync(claimed, InstantPaymentForwardingHandler.CircuitOpenCancelReason, It.IsAny<CancellationToken>()), Times.Once);
+        _store.Verify(s => s.MarkAsCancelledAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _store.Verify(s => s.TryClaimByIdAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never,
+            "the loop cancels the claim it already holds; re-claiming would lose it");
+        clock.Delays.Should().BeEmpty("nothing is waited for after a CircuitOpen attempt");
+        requestSpan.Events.Should().NotContain(e => e.Name == InstantPaymentForwardingHandler.RetryWaitEventName);
+        requestSpan.TagObjects.Should().Contain(
+            new KeyValuePair<string, object?>(FailedPaymentTags.FailureReason, InstantPaymentForwardingHandler.CircuitOpenCancelReason));
+        claimed.ResponsePayload.Should().Contain(MessageConstants.Status.Cancelled);
+        ShouldHaveCountedOneCancelledItem(listener);
+        _lock.LockNames.Should().ContainSingle();
+    }
+
+    [Theory]
+    [InlineData("timeout")]
+    [InlineData("rejection")]
+    [InlineData("exception")]
+    public async Task ForwardAsync_goes_straight_to_the_cancel_phase_when_the_circuit_opens_after_an_attempt_reached_the_wire(string firstFailure)
+    {
+        // Attempt 1 went to the wire (and may be at CoreBank); attempt 2 met
+        // the open circuit. Only CoreBank can say, so the ADR-020 cancel
+        // phase runs -- but without the wait a retry would have taken, and
+        // without a third attempt.
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        var calls = 0;
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>()))
+            .Returns<OutboxMessage, bool, CancellationToken>((_, _, _) =>
+            {
+                calls++;
+                if (calls > 1)
+                {
+                    throw CircuitOpen();
+                }
+
+                throw firstFailure switch
+                {
+                    "timeout" => new OperationCanceledException(),
+                    "rejection" => new CoreBankRetryException("Transaction submission", CoreBankRetryReason.TransportRejection, 500, null),
+                    _ => new InvalidOperationException("transport failure"),
+                };
+            });
+        _forwarder.Setup(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>())).ReturnsAsync((TransactionSubmission?)null);
+        _store.Setup(s => s.MarkAsFailedWithRetryAsync(claimed, It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(MessageTransitionOutcome.Applied);
+        var clock = new BudgetClock(new DateTimeOffset(2026, 10, 14, 12, 0, 0, TimeSpan.Zero));
+        using var requestSpan = new Activity("POST api/Payments").Start();
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 3 }, timeProvider: clock);
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred, "a cancel that meets the open circuit establishes nothing");
+        calls.Should().Be(2, "a CircuitOpen attempt ends the forward phase; no third attempt");
+        _forwarder.Verify(f => f.CancelAsync(claimed, It.IsAny<CancellationToken>()), Times.Once);
+        _repository.Verify(r => r.CancelLocallyAsync(It.IsAny<OutboxMessage>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "attempt 1 may have reached CoreBank, so a local cancel would be a lie");
+        clock.Delays.Should().ContainSingle("one wait after attempt 1, none after the CircuitOpen attempt");
+        requestSpan.Events.Where(e => e.Name == InstantPaymentForwardingHandler.RetryWaitEventName).Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task ForwardAsync_defers_when_the_circuit_open_local_cancel_cannot_be_persisted()
+    {
+        var claimed = ClaimedMessage();
+        _store.Setup(s => s.TryClaimByIdIfOldestAsync(Payment.Id, Payment.PartitionId, It.IsAny<CancellationToken>())).ReturnsAsync(claimed);
+        _forwarder.Setup(f => f.ForwardAsync(claimed, true, It.IsAny<CancellationToken>())).ThrowsAsync(CircuitOpen());
+        _repository.Setup(r => r.CancelLocallyAsync(claimed, InstantPaymentForwardingHandler.CircuitOpenCancelReason, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("database unavailable"));
+        var handler = CreateHandler(new InstantRailOptions { MaxAttempts = 3 });
+
+        var result = await handler.ForwardAsync(Payment, TestContext.Current.CancellationToken);
+
+        result.Outcome.Should().Be(InstantDeliveryOutcome.Deferred, "the honest unknown, never 504, when the cancel is not provably persisted");
+        _forwarder.Verify(f => f.CancelAsync(It.IsAny<OutboxMessage>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     private sealed class SequencedTimeProvider(params DateTimeOffset[] values) : TimeProvider
     {
         private int _index;

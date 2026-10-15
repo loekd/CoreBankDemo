@@ -24,7 +24,7 @@ public class CoreBankClientRegistrationTests
     {
         var services = new ServiceCollection();
 
-        services.AddCoreBankApiClient();
+        services.AddCoreBankApiClient(new ConfigurationBuilder().Build());
 
         using var provider = services.BuildServiceProvider();
         using var scope = provider.CreateScope();
@@ -39,7 +39,7 @@ public class CoreBankClientRegistrationTests
     {
         var services = new ServiceCollection();
 
-        services.AddCoreBankApiClient();
+        services.AddCoreBankApiClient(new ConfigurationBuilder().Build());
 
         using var provider = services.BuildServiceProvider();
         var httpClient = provider.GetRequiredService<IHttpClientFactory>()
@@ -53,7 +53,7 @@ public class CoreBankClientRegistrationTests
     {
         var services = new ServiceCollection();
 
-        services.AddCoreBankApiClient();
+        services.AddCoreBankApiClient(new ConfigurationBuilder().Build());
 
         using var provider = services.BuildServiceProvider();
         using var firstScope = provider.CreateScope();
@@ -85,7 +85,7 @@ public class CoreBankClientRegistrationTests
 
         services.AddSingleton<IConfiguration>(new ConfigurationBuilder().Build());
         services.AddServiceDiscovery();
-        services.AddCoreBankApiClient();
+        services.AddCoreBankApiClient(new ConfigurationBuilder().Build());
         services.AddHttpClient(CoreBankClientServiceCollectionExtensions.HttpClientName)
             .ConfigurePrimaryHttpMessageHandler(() => new StubHttpMessageHandler(request =>
             {

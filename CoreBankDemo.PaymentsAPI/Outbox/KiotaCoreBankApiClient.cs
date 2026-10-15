@@ -2,6 +2,7 @@ using CoreBankDemo.Messaging;
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Kiota.Abstractions;
+using Polly.CircuitBreaker;
 using Polly.Timeout;
 using GeneratedClient = CoreBankDemo.PaymentsAPI.GeneratedClients.CoreBank.CoreBankApiKiotaClient;
 using GeneratedModels = CoreBankDemo.PaymentsAPI.GeneratedClients.CoreBank.Models;
@@ -286,12 +287,12 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client, TimeProvide
         }
         catch (TimeoutRejectedException)
         {
-            // The standard resilience pipeline's own attempt/total-request
-            // timeout fired (Microsoft.Extensions.Http.Resilience, applied
-            // to every named HttpClient -- including "corebank-api" -- via
-            // ServiceDefaults' ConfigureHttpClientDefaults). Recognized
-            // explicitly so a real timeout is classified as Timeout rather
-            // than falling through to the generic TransportException below.
+            // Polly's timeout strategy raises this type. The corebank-api
+            // pipeline holds no timeout strategy (only a circuit breaker,
+            // ADR-029), so today this branch is reachable only from a test or
+            // if a timeout strategy is ever added; it is kept so that such a
+            // timeout is classified as Timeout rather than falling through to
+            // the generic TransportException below.
             return CoreBankResult<T>.Retry(CoreBankRetryReason.Timeout);
         }
         catch (OperationCanceledException)
@@ -300,6 +301,14 @@ internal sealed class KiotaCoreBankApiClient(GeneratedClient client, TimeProvide
             // HttpClient.Timeout with no resilience pipeline attached, such
             // as in a test).
             return CoreBankResult<T>.Retry(CoreBankRetryReason.Timeout);
+        }
+        catch (BrokenCircuitException)
+        {
+            // The corebank-api pipeline's circuit breaker refused the call
+            // (ADR-029). No request was sent, so there is no status and no
+            // Retry-After; the instant rail reads this reason as proof the
+            // command never left PaymentsAPI.
+            return CoreBankResult<T>.Retry(CoreBankRetryReason.CircuitOpen);
         }
         catch (Exception)
         {

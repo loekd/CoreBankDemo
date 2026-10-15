@@ -53,7 +53,7 @@ internal enum CoreBankClientOutcome
 /// Deliberately does not carry response bodies or any Kiota-generated type
 /// (the one header that matters, <c>Retry-After</c>, travels as
 /// <see cref="CoreBankResult{T}.RetryAfter"/>) — only enough shape for a
-/// caller to distinguish the four transport-failure classes.
+/// caller to distinguish the five transport-failure classes.
 /// </summary>
 internal enum CoreBankRetryReason
 {
@@ -67,7 +67,14 @@ internal enum CoreBankRetryReason
     Timeout,
 
     /// <summary>Any other transport exception (connection reset, DNS failure, etc.).</summary>
-    TransportException
+    TransportException,
+
+    /// <summary>
+    /// The client's circuit breaker rejected the call (ADR-029); nothing was
+    /// sent. The one retry reason that proves the command never left
+    /// PaymentsAPI.
+    /// </summary>
+    CircuitOpen
 }
 
 /// <summary>
