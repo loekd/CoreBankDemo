@@ -132,7 +132,7 @@ public sealed class MainWindow : Window
     private const int FaultTrackX = 17;
     private const int FaultTrackWidthPreferred = 24;
     private const int FaultTrackWidthCompact = 10;
-    private const int MaximumFaultPresets = 3;
+    private const int MaximumFaultPresets = 4;
 
     /// <summary>
     /// The rail's own short labels, deliberately one word each. The rail is

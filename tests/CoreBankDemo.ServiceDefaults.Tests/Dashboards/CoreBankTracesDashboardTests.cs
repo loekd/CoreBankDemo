@@ -17,6 +17,7 @@ public class CoreBankTracesDashboardTests
 {
     private const string ProvisionedDashboardDirectory = "/otel-lgtm/grafana/conf/provisioning/dashboards/custom";
     private const string FailedPaymentsTable = "Which payment failed, and why";
+    private const string CircuitPanel = "CoreBank circuit";
 
     private static readonly string DashboardPath =
         Path.Combine(AppContext.BaseDirectory, "Dashboards", "corebank-traces.json");
@@ -37,7 +38,10 @@ public class CoreBankTracesDashboardTests
     [Fact]
     public void Every_trace_and_span_metric_query_filters_on_the_selected_service_and_operation()
     {
-        var queries = PanelQueries(except: FailedPaymentsTable)
+        // The circuit panel charts PaymentsAPI's corebank-api client breaker (ADR-029): it is
+        // one circuit per replica whatever service or operation is selected, so it takes neither
+        // filter.
+        var queries = PanelQueries(FailedPaymentsTable, CircuitPanel)
             .Where(query => !DashboardQueries.MetricReference.IsMatch(query))
             .ToList();
 
@@ -155,17 +159,32 @@ public class CoreBankTracesDashboardTests
     }
 
     [Fact]
-    public void Service_map_query_is_rendered_by_the_node_graph_panel()
+    public void Circuit_panel_charts_the_three_breaker_transitions_as_bars()
     {
-        using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
+        // ADR-030: the throttled burst is shown on this dashboard, so the breaker's transitions
+        // (ADR-029) are charted where the service map used to be. Polly's meter emits
+        // transitions, not state, so the panel is bars of events, never a reconstructed state
+        // timeline that could lie after a replica restart.
+        var panel = Panel(CircuitPanel);
 
-        var serviceMapPanels = dashboard.RootElement.GetProperty("panels").EnumerateArray()
-            .Where(panel => panel.TryGetProperty("targets", out var targets) && targets.EnumerateArray().Any(IsServiceMap))
-            .Select(panel => panel.GetProperty("type").GetString())
-            .ToList();
+        panel.GetProperty("type").GetString().Should().Be("timeseries");
+        panel.GetProperty("fieldConfig").GetProperty("defaults").GetProperty("custom").GetProperty("drawStyle").GetString()
+            .Should().Be("bars");
 
-        // Grafana panel plugin ids are case-sensitive: "nodegraph" renders "plugin not found".
-        serviceMapPanels.Should().ContainSingle().Which.Should().Be("nodeGraph");
+        var targets = panel.GetProperty("targets").EnumerateArray().ToList();
+        targets.Select(target => target.GetProperty("legendFormat").GetString())
+            .Should().Equal(["opened", "half-open", "closed"], "the legend reads in the order a break unfolds");
+        foreach (var (target, eventName) in targets.Zip(["OnCircuitOpened", "OnCircuitHalfOpened", "OnCircuitClosed"]))
+        {
+            var expr = QueryOf(target);
+            expr.Should().Contain("resilience_polly_strategy_events_total", "Polly's resilience meter is exported by ServiceDefaults (ADR-029)");
+            expr.Should().Contain("pipeline_name=\"corebank-api-circuit-breaker\"", "only the corebank-api client's breaker, not any other Polly pipeline");
+            expr.Should().Contain("service_name=\"CoreBank.PaymentsAPI\"");
+            expr.Should().Contain($"event_name=\"{eventName}\"");
+        }
+
+        panel.GetProperty("options").GetProperty("legend").GetProperty("calcs").EnumerateArray().Select(calc => calc.GetString())
+            .Should().Equal(["sum"], "the legend totals the range so a burst's opens can be read without hovering");
     }
 
     [Theory]
@@ -193,12 +212,12 @@ public class CoreBankTracesDashboardTests
             .ToList();
     }
 
-    /// <summary>The PromQL and TraceQL of every panel target, leaving out the service map query.</summary>
-    private static List<string> PanelQueries(string? except = null)
+    /// <summary>The PromQL and TraceQL of every panel target, leaving out the service map query and the named panels.</summary>
+    private static List<string> PanelQueries(params string[] except)
     {
         using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
         return dashboard.RootElement.GetProperty("panels").EnumerateArray()
-            .Where(panel => panel.TryGetProperty("targets", out _) && panel.GetProperty("title").GetString() != except)
+            .Where(panel => panel.TryGetProperty("targets", out _) && !except.Contains(panel.GetProperty("title").GetString()))
             .SelectMany(panel => panel.GetProperty("targets").EnumerateArray())
             .Where(target => !IsServiceMap(target))
             .Select(QueryOf)

@@ -8,7 +8,7 @@
       },
       "responses": [
         {
-          "statusCode": 503,
+          "statusCode": 409,
           "headers": [
             {
               "name": "Content-Type",
@@ -16,27 +16,11 @@
             }
           ],
           "body": {
-            "error": "Service temporarily unavailable"
+            "error": "Ledger busy: a posting run holds the debtor account"
           }
         },
         {
-          "statusCode": 429,
-          "headers": [
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            },
-            {
-              "name": "Retry-After",
-              "value": "2"
-            }
-          ],
-          "body": {
-            "error": "Too many requests"
-          }
-        },
-        {
-          "statusCode": 500,
+          "statusCode": 423,
           "headers": [
             {
               "name": "Content-Type",
@@ -44,11 +28,10 @@
             }
           ],
           "body": {
-            "error": "Internal server error"
+            "error": "Account locked by the end-of-day batch"
           }
         }
       ]
     }
   ]
 }
-
