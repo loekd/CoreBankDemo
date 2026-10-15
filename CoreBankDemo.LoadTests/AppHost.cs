@@ -59,8 +59,15 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
 var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
 
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
-var postgres = builder.AddPostgres("postgres", password: postgresPassword)
+// Same host ports as the Regular AppHost (5432, pgAdmin 5050): the two AppHosts never run
+// side by side, and a sandbox publishes one fixed set of ports for both.
+var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5432)
     .WithImageTag("18.3")
+    .WithPgAdmin(pgAdmin => {
+        pgAdmin
+            .WithHostPort(5050)
+            .WithEndpoint("http", endpoint => endpoint.TargetHost = "0.0.0.0");
+    })
     // The load-test ordering checks judge the Payments outbox by commit order
     // (pg_xact_commit_timestamp); same flag on the Testcontainers fixture.
     .WithArgs("-c", "track_commit_timestamp=on");

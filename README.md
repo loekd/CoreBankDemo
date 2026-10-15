@@ -111,6 +111,8 @@ That starts PostgreSQL, Redis, LGTM, both APIs with their Dapr sidecars, and Dev
 interface (`0.0.0.0`) rather than loopback, so a host-side port publish can actually reach them. A
 devcontainer forwards them from the inside, where loopback would have been fine either way; a
 sandbox needs them published explicitly, e.g. `sbx ports <sandbox> --publish 15888:15888/tcp`. The
+LoadTests AppHost uses the same fixed dashboard, LGTM, Postgres and pgAdmin ports, so one set of
+publishes serves both AppHosts (they never run side by side). The
 APIs and the OTLP ingest ports stay on loopback on purpose — only in-container callers dial those.
 
 Health endpoints live at `/health` on both APIs. Neither API serves a Swagger UI — the Core Bank
