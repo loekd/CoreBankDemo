@@ -59,9 +59,12 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
 var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
 
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
-// Same host ports as the Regular AppHost (5432, pgAdmin 5050): the two AppHosts never run
-// side by side, and a sandbox publishes one fixed set of ports for both.
-var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5432)
+// Own fixed host port, not the Regular AppHost's 5432: that Postgres is
+// ContainerLifetime.Persistent and keeps 5432 after `aspire stop`, so sharing the port
+// made DCP's proxy fail to bind and every project silently connect to the stale Regular
+// database (where track_commit_timestamp is off). pgAdmin keeps the Regular port (5050);
+// its container is not persistent, and the two AppHosts never run side by side.
+var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5433)
     .WithImageTag("18.3")
     .WithPgAdmin(pgAdmin => {
         pgAdmin
