@@ -26,7 +26,7 @@ public class CoreBankCircuitBreakerLoggingTests
     {
         using var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
         var args = new OnCircuitOpenedArguments<HttpResponseMessage>(
-            ResilienceContextPool.Shared.Get(), Outcome.FromResult(response), TimeSpan.FromSeconds(10), isManual: false);
+            ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken), Outcome.FromResult(response), TimeSpan.FromSeconds(10), isManual: false);
 
         CoreBankCircuitBreakerLogging.Opened(_logger.Object, args);
 
@@ -38,7 +38,7 @@ public class CoreBankCircuitBreakerLoggingTests
     public void Opened_names_the_exception_type_when_an_exception_tripped_it()
     {
         var args = new OnCircuitOpenedArguments<HttpResponseMessage>(
-            ResilienceContextPool.Shared.Get(),
+            ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken),
             Outcome.FromException<HttpResponseMessage>(new HttpRequestException("connection refused")),
             TimeSpan.FromSeconds(10),
             isManual: false);
