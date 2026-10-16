@@ -18,12 +18,12 @@ description: |
 
 - You are not allowed to create or run arbitrary bash commands. You must restrict yourself to running the 'aspire' cli and 'curl' for HTTP calls. No other tools are allowed.
 - Never reset the database unless explicitly asked to do so, as this is a destructive operation!
-- **Default transaction count is 100** (configured in `CoreBankDemo.LoadTests/appsettings.json`). To run a different number of transactions or VUs, use `--` to pass .NET configuration overrides to the AppHost (see below).
+- **Default run is 1000 transactions with 10 VUs** (configured in `CoreBankDemo.LoadTests/appsettings.json`; the same default the DemoRunner console runs). To run a different number of transactions or VUs, use `--` to pass .NET configuration overrides to the AppHost (see below).
 - **Step 0 is mandatory.** Do not run `aspire start` while any other AppHost is running (see below). The failure it prevents is silent and costs ~6 minutes per attempt.
 
 ## 0. Preflight: no other AppHost may be running
 
-Both AppHosts expose CoreBankAPI on the same stable ingress port (**5032**, ADR-014). The PaymentsAPI ports differ (5294 Regular, 5295 LoadTests), so every health check passes, but the LoadTests PaymentsAPI forwards to whichever CoreBank owns 5032. With `CoreBankDemo.AppHost` up, k6's setup probe lands in the Regular bank (`Account NL01LOAD… not found` → `200 Failed`), k6 exits before its scenario, and `poll_until_drained` reports `0/100` until it times out.
+Both AppHosts expose CoreBankAPI on the same stable ingress port (**5032**, ADR-014). The PaymentsAPI ports differ (5294 Regular, 5295 LoadTests), so every health check passes, but the LoadTests PaymentsAPI forwards to whichever CoreBank owns 5032. With `CoreBankDemo.AppHost` up, k6's setup probe lands in the Regular bank (`Account NL01LOAD… not found` → `200 Failed`), k6 exits before its scenario, and `poll_until_drained` reports `0/1000` until it times out.
 
 Run this first, every time:
 
@@ -121,7 +121,7 @@ parse_drain_progress() {
     -H "Content-Type: application/json" \
     -H "Accept: application/json, text/event-stream" \
     -H "Mcp-Session-Id: $session_id" \
-    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120,"minimumExpectedCompleted":100},"_meta":{"progressToken":"drain-1"}}}' | \
+    -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"poll_until_drained","arguments":{"timeoutSeconds":120,"minimumExpectedCompleted":1000},"_meta":{"progressToken":"drain-1"}}}' | \
   tee /tmp/drain_response.txt | \
   grep -o '"message":"[^"]*"' | \
   sed 's/"message":"\(.*\)"/\1/' | \
@@ -137,7 +137,7 @@ parse_drain_progress "$SESSION_ID"
 - The `-N` (`--no-buffer`) flag is required so curl streams SSE events as they arrive
 - `tee /tmp/drain_response.txt` captures the full response while displaying progress
 - The grep/sed pipeline extracts progress messages and displays them with formatting
-- **Always pass `minimumExpectedCompleted`** (typically 100 for default, 1000 for large runs) to prevent false drain detection while k6 is still submitting
+- **Always pass `minimumExpectedCompleted`** (1000 for the default run; the `TransactionCount` you passed otherwise) to prevent false drain detection while k6 is still submitting
 
 Intermediate progress notifications (SSE events during polling):
 ```
@@ -155,14 +155,14 @@ data: {"result":{"content":[{"type":"text","text":"{\"isDrained\":true,\"pollCou
 
 Runs the full assertion suite once drained. Call only after `poll_until_drained` returns `isDrained: true`.
 
-Pass `expectedUnique` equal to the `TransactionCount` that was used (default: 100).
+Pass `expectedUnique` equal to the `TransactionCount` that was used (default: 1000).
 
 ```bash
 curl -s -X POST http://localhost:5181/ \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_assertion_results","arguments":{"expectedUnique":100}}}'
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_assertion_results","arguments":{"expectedUnique":1000}}}'
 ```
 
 Assert that the response content contains `"allPassed":true`. Inspect individual checks on failure.

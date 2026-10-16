@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using CommunityToolkit.Aspire.Hosting.Dapr;
 using DevProxy.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -57,6 +58,30 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
     .WithLifetime(ContainerLifetime.Persistent);
 
 var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
+
+// Run identity for the lock-impact dashboard (observability/grafana/dashboards/
+// lock-impact.json): one local timestamp per `aspire start`, stamped on both APIs as
+// the OTel resource attribute run.id. Prometheus keeps it on target_info only (it is
+// not a promoted attribute), as the label run_id. Aspire already assigns
+// OTEL_RESOURCE_ATTRIBUTES (service.instance.id) to every project, so the stamp is
+// appended to whatever that callback left, never assigned over it.
+var runId = TimeProvider.System.GetLocalNow().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+void StampRunId(IResourceBuilder<ProjectResource> project) => project.WithEnvironment(context =>
+{
+    var stamp = $"run.id={runId}";
+    context.EnvironmentVariables["OTEL_RESOURCE_ATTRIBUTES"] =
+        context.EnvironmentVariables.TryGetValue("OTEL_RESOURCE_ATTRIBUTES", out var existing)
+            ? existing switch
+            {
+                null => stamp,
+                string text when text.Length == 0 => stamp,
+                string text => $"{text},{stamp}",
+                ReferenceExpression expression => ReferenceExpression.Create($"{expression},{stamp}"),
+                _ => throw new InvalidOperationException(
+                    $"OTEL_RESOURCE_ATTRIBUTES is a {existing.GetType().Name}; cannot append {stamp}."),
+            }
+            : stamp;
+});
 
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
 // Own fixed host port, not the Regular AppHost's 5432: that Postgres is
@@ -120,6 +145,7 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     })
     .WaitFor(lgtm)
     .WaitFor(pubsub);
+StampRunId(coreBankApi);
 
 // Opt-in latency injection (Features:UseDevProxy, default false). The profile
 // delays every CoreBankAPI transaction endpoint -- process AND cancel, since
@@ -185,6 +211,7 @@ var paymentsApi = builder.AddProject<Projects.CoreBankDemo_PaymentsAPI>("payment
     })
     .WaitFor(lgtm)
     .WaitFor(pubsub);
+StampRunId(paymentsApi);
 
 if (devProxy is not null)
 {
@@ -228,7 +255,7 @@ var initializer = builder.AddProject<Projects.CoreBankDemo_LoadTestInitializer>(
     .WaitFor(paymentsApi)
     .WaitFor(loadTestSupport);
 
-var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "100";
+var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "1000";
 var vuCount = builder.Configuration["LoadTest:VuCount"] ?? "10";
 
 builder.AddContainer("k6", "grafana/k6")
