@@ -15,6 +15,15 @@ public class InboxMessage : IInboxMessage
     public string? TraceParent { get; set; }
     public string? TraceState { get; set; }
 
+    /// <summary>
+    /// The PostgreSQL transaction id of the accepting transaction, assigned by
+    /// the database on insert (<c>pg_current_xact_id()</c>). The row's own
+    /// <c>xmin</c> moves on every status update, so this is what the load
+    /// test's ordering check joins to <c>pg_xact_commit_timestamp</c>: the
+    /// lane processes rows in commit order, not <see cref="ReceivedAt"/> order.
+    /// </summary>
+    public long AcceptedXid { get; set; }
+
     public required string TransactionId { get; set; }
     public required string EventType { get; set; }
     public required string AccountNumber { get; set; }

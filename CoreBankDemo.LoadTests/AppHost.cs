@@ -59,8 +59,18 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
 var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
 
 var postgresPassword = builder.AddParameter("postgres-password", "postgres-dev-load-test", secret: false);
-var postgres = builder.AddPostgres("postgres", password: postgresPassword)
+// Own fixed host port, not the Regular AppHost's 5432: that Postgres is
+// ContainerLifetime.Persistent and keeps 5432 after `aspire stop`, so sharing the port
+// made DCP's proxy fail to bind and every project silently connect to the stale Regular
+// database (where track_commit_timestamp is off). pgAdmin keeps the Regular port (5050);
+// its container is not persistent, and the two AppHosts never run side by side.
+var postgres = builder.AddPostgres("postgres", password: postgresPassword, port: 5433)
     .WithImageTag("18.3")
+    .WithPgAdmin(pgAdmin => {
+        pgAdmin
+            .WithHostPort(5050)
+            .WithEndpoint("http", endpoint => endpoint.TargetHost = "0.0.0.0");
+    })
     // The load-test ordering checks judge the Payments outbox by commit order
     // (pg_xact_commit_timestamp); same flag on the Testcontainers fixture.
     .WithArgs("-c", "track_commit_timestamp=on");

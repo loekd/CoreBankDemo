@@ -11,8 +11,9 @@ PASS/FAIL lines for the acceptance claims the k6 state gate cannot see:
   * the only error spans are the k6 run's intentional duplicate replays
     (one PostgreSQL 23505 per retry, each in a trace that never reached
     CoreBank)
-  * no slow spans, and trace context intact across both hops on a sampled
-    end-to-end trace
+  * no slow spans (instant-rail traces may spend their budget waiting for
+    their turn, ADR-018/ADR-020), and trace context intact across both hops
+    on a sampled end-to-end trace
 
 Stdlib only. Exit code 1 when any check fails, 2 when Tempo is unreachable.
 
@@ -192,18 +193,68 @@ def check_errors(report: Report, tempo: str, start: int, end: int, retries: int)
     report.check(reached_count == 0, f"error traces that also contain a CoreBank span: {reached_count}")
 
 
-def check_latency(report: Report, tempo: str, start: int, end: int) -> None:
-    slow = search(tempo, "{ duration > 500ms }", start, end)
-    slow_count = sum(1 for _ in spans_of(slow))
-    report.check(slow_count == 0, f"spans slower than 500 ms: {slow_count}")
-    try:
-        slow_traces = search(tempo, "{ traceDuration > 2s }", start, end)
-        report.check(
-            not slow_traces.get("traces"),
-            f"traces longer than 2 s: {len(slow_traces.get('traces') or [])}",
+def check_latency(
+    report: Report,
+    tempo: str,
+    start: int,
+    end: int,
+    instant_budget_ms: int,
+    instant_attempt_ms: int,
+    search_fn=search,
+) -> None:
+    """Slow spans and traces, with the instant rail's wait semantics applied.
+
+    The instant rail waits for its turn in dispatch order inside its budget
+    (ADR-018, ADR-020), so in a trace that settled inline (a span carrying
+    ``messaging.inline = true``) the root span may legitimately run up to
+    PaymentsAPI's ``BudgetMilliseconds`` and the spans on the inline forward
+    path (the inline claim, the HTTP hop, CoreBank's own inline wait) up to
+    its ``AttemptTimeoutMilliseconds``. Every other span keeps the 500 ms bar,
+    every other trace the 2 s bar; an instant trace gets budget + 2 s.
+    """
+    instant_traces = {trace["traceID"] for trace in search_fn(tempo, "{ span.messaging.inline = true }", start, end).get("traces", [])}
+    slow_root_ids = {
+        span["spanID"]
+        for _, span, _ in spans_of(search_fn(tempo, "{ duration > 500ms && nestedSetParent < 0 }", start, end))
+    }
+    general = 0
+    instant_over = 0
+    instant_within = []
+    for trace_id, span, _ in spans_of(search_fn(tempo, "{ duration > 500ms }", start, end)):
+        duration_ms = int(span["durationNanos"]) / 1_000_000
+        if trace_id not in instant_traces:
+            general += 1
+            continue
+        allowed = instant_budget_ms if span["spanID"] in slow_root_ids else instant_attempt_ms
+        if duration_ms > allowed:
+            instant_over += 1
+        else:
+            instant_within.append(duration_ms)
+    report.check(general == 0, f"spans slower than 500 ms outside instant-rail traces: {general}")
+    report.check(
+        instant_over == 0,
+        f"instant-rail spans over budget ({instant_budget_ms} ms root) / attempt timeout ({instant_attempt_ms} ms forward path): {instant_over}",
+    )
+    if instant_within:
+        report.info(
+            f"instant-rail spans over 500 ms but within their allowance: {len(instant_within)}"
+            f" (slowest {max(instant_within):.0f} ms)"
         )
+    try:
+        slow_traces = search_fn(tempo, "{ traceDuration > 2s }", start, end).get("traces") or []
     except urllib.error.HTTPError as error:  # older Tempo without traceDuration
         report.info(f"traceDuration query unsupported ({error.code}); skipped")
+        return
+    instant_trace_bar = instant_budget_ms + 2000
+    over = [
+        trace
+        for trace in slow_traces
+        if trace["traceID"] not in instant_traces or float(trace.get("durationMs", 0)) > instant_trace_bar
+    ]
+    report.check(
+        not over,
+        f"traces longer than 2 s (instant-rail traces: longer than {instant_trace_bar} ms): {len(over)}",
+    )
 
 
 def check_cross_hop(report: Report, tempo: str, trace_id: str) -> None:
@@ -235,6 +286,8 @@ def main() -> int:
     parser.add_argument("--end", help="window end, ISO 8601 UTC")
     parser.add_argument("--expected", type=int, default=100, help="LoadTest:TransactionCount (default 100)")
     parser.add_argument("--retries", type=int, default=10, help="k6 intentional retries (default 10)")
+    parser.add_argument("--instant-budget-ms", type=int, default=9000, help="Payments:InstantRail:BudgetMilliseconds; root-span bar in instant-rail traces (default 9000)")
+    parser.add_argument("--instant-attempt-ms", type=int, default=2500, help="Payments:InstantRail:AttemptTimeoutMilliseconds; forward-path span bar in instant-rail traces (default 2500)")
     args = parser.parse_args()
 
     if args.k6_start:
@@ -257,7 +310,7 @@ def main() -> int:
 
     sample = check_processing_lanes(report, args.tempo, start, end, args.expected)
     check_errors(report, args.tempo, start, end, args.retries)
-    check_latency(report, args.tempo, start, end)
+    check_latency(report, args.tempo, start, end, args.instant_budget_ms, args.instant_attempt_ms)
     if sample:
         check_cross_hop(report, args.tempo, sample)
 
