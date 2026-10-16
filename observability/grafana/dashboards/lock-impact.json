@@ -1,0 +1,267 @@
+{
+  "uid": "lock-impact",
+  "title": "Load test — lock impact",
+  "description": "One load-test run at a time, picked from the Run dropdown: peak throughput, how often CoreBank waited on a partition advisory lock, and the processed-per-second curve. Run identity: CoreBankDemo.LoadTests/AppHost.cs stamps the OTel resource attribute run.id (a local timestamp, one per `aspire start`) on both APIs through OTEL_RESOURCE_ATTRIBUTES. Prometheus keeps it on target_info only, as the label run_id (it is not a promoted attribute), so every metric query joins it on: metric * on(job, instance) group_left(run_id) target_info{run_id=\"$run\"}. Tempo keeps it on every span as resource.run.id, which is how the lock tile is scoped. Spelling: run.id (OTel attribute, TraceQL) and run_id (Prometheus label) are the same attribute.",
+  "tags": [
+    "corebank",
+    "load-test"
+  ],
+  "editable": true,
+  "graphTooltip": 0,
+  "style": "dark",
+  "refresh": "5s",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m"
+    ]
+  },
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "run",
+        "label": "Run",
+        "description": "Load-test runs in the dashboard's time range, newest first: the run.id stamp of the LoadTests AppHost, read back from Prometheus target_info as run_id.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(target_info{run_id!=\"\"}, run_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "definition": "label_values(target_info{run_id!=\"\"}, run_id)",
+        "refresh": 2,
+        "includeAll": false,
+        "multi": false,
+        "sort": 2,
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Throughput (peak)",
+      "description": "Highest transactions-processed-per-second rate CoreBank reached during the selected run (both replicas summed, 15 s rate window over the 1 s metric export). Scoped to $run by joining run_id from target_info. Min step 5 s: the LGTM Prometheus datasource defaults to a 60 s step, which hides a run that lasts less than a minute.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2EADD4"
+          },
+          "decimals": 0,
+          "unit": "suffix: payments/s",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "max"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "text": {
+          "valueSize": 64
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[15s]) * on(job, instance) group_left(run_id) target_info{run_id=\"$run\"})",
+          "legendFormat": "$run",
+          "range": true,
+          "refId": "A",
+          "interval": "5s"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Advisory-lock waits",
+      "description": "How many times CoreBank executed SELECT pg_advisory_xact_lock(...) during the selected run: zero on the row-locking build, one per partition per transaction on the partition-locking build. Counted from Tempo with a TraceQL metrics query over the Npgsql spans (every Npgsql span is named 'postgresql', so Tempo's span metrics cannot tell the lock apart; the SQL text can), scoped to $run through resource.run.id on the spans themselves. Spans reach Tempo up to a minute after the run ends, so this tile settles later than the two Prometheus panels. Tempo caps metrics queries at 3 h: keep the dashboard range at or below that. The tile reduces the count_over_time field only: Tempo also returns an exemplar frame per step, which must not be summed.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "unit": "locale",
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "/^count_over_time$/",
+          "values": false
+        },
+        "text": {
+          "valueSize": 64
+        },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "query": "{ resource.run.id = \"$run\" && resource.service.name = \"CoreBank.CoreBankAPI\" && span.db.query.text =~ \".*pg_advisory_xact_lock.*\" } | count_over_time()",
+          "limit": 20,
+          "tableType": "spans",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Transactions processed / s",
+      "description": "CoreBank transactions processed per second over the selected run, both replicas summed (15 s rate window over the 1 s metric export). Scoped to $run by joining run_id from target_info. Min step 5 s: the LGTM Prometheus datasource defaults to a 60 s step, which hides a run that lasts less than a minute.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2EADD4"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2.5,
+            "fillOpacity": 12,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none"
+            },
+            "axisBorderShow": false
+          },
+          "decimals": 0,
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}[15s]) * on(job, instance) group_left(run_id) target_info{run_id=\"$run\"})",
+          "legendFormat": "$run",
+          "range": true,
+          "refId": "A",
+          "interval": "5s"
+        }
+      ]
+    }
+  ]
+}
