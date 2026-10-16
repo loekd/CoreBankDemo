@@ -255,7 +255,7 @@ var initializer = builder.AddProject<Projects.CoreBankDemo_LoadTestInitializer>(
     .WaitFor(paymentsApi)
     .WaitFor(loadTestSupport);
 
-var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "100";
+var transactionCount = builder.Configuration["LoadTest:TransactionCount"] ?? "1000";
 var vuCount = builder.Configuration["LoadTest:VuCount"] ?? "10";
 
 builder.AddContainer("k6", "grafana/k6")
