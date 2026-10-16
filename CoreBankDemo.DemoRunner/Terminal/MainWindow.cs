@@ -299,7 +299,7 @@ public sealed class MainWindow : Window
     private readonly Label _loadStatus = new();
     private readonly ListView _loadResults = new();
     private readonly Button _runLoadButton = NewButton("Run accepted load workflow");
-    private readonly TextField _expectedUnique = new() { Text = "100" };
+    private readonly TextField _expectedUnique = new() { Text = "1000" };
     private readonly Label _loadHint = new();
 
     // Terminal.Gui 2.4.17 has no Slider<T>; LinearRange<int> is the range control.
