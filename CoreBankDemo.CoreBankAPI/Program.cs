@@ -45,11 +45,17 @@ builder.AddInboxProcessingOptions();
 builder.AddMessagingOutboxProcessingOptions();
 
 // Demo:LockStrategy (row | partition, default row): how TransactionExecutor
-// serializes concurrent transfers. Read once at startup, never per call.
+// serializes concurrent transfers. Demo:LockRelease (commit | afterPublish, default
+// commit): whether those locks are given back at commit or only once the transfer's
+// events are published. Read once at startup, never per call.
 builder.Services.AddOptions<DemoOptions>()
     .BindConfiguration(DemoOptions.SectionName)
     .Validate(options => Enum.IsDefined(options.LockStrategy),
         "Demo:LockStrategy must be 'row' or 'partition'.")
+    .Validate(options => Enum.IsDefined(options.LockRelease),
+        "Demo:LockRelease must be 'commit' or 'afterPublish'.")
+    .Validate(options => options.PublishWaitMilliseconds > 0,
+        "Demo:PublishWaitMilliseconds must be positive.")
     .ValidateOnStart();
 
 // The ActivitySource is already registered as a singleton by

@@ -11,7 +11,7 @@ namespace CoreBankDemo.ServiceDefaults.Tests.Dashboards;
 /// time, picked by the <c>run</c> variable. The run identity is the OTel resource
 /// attribute <c>run.id</c> the LoadTests AppHost stamps on both APIs; Prometheus keeps it
 /// on <c>target_info</c> only (as <c>run_id</c>), so every metric query must join it on,
-/// and Tempo keeps it on every span (as <c>resource.run.id</c>). Both AppHost sources are
+/// including the execution p95 tile. Both AppHost sources are
 /// linked into this project's output, so a renamed attribute, a dropped stamp, or a stamp
 /// leaking into the Regular AppHost fails the build instead of emptying the dropdown.
 /// </summary>
@@ -20,7 +20,7 @@ public class LockImpactDashboardTests
     private const string ResourceAttribute = "run.id";
     private const string PrometheusLabel = "run_id";
     private const string ThroughputTile = "Throughput (peak)";
-    private const string LockWaitsTile = "Advisory-lock waits";
+    private const string ExecutionTile = "Execution p95";
     private const string ThroughputChart = "Transactions processed / s";
 
     private static readonly string DashboardPath =
@@ -64,7 +64,7 @@ public class LockImpactDashboardTests
             .ToList();
 
         panels.Select(panel => (panel.GetProperty("title").GetString(), panel.GetProperty("type").GetString()))
-            .Should().Equal([(ThroughputTile, "stat"), (LockWaitsTile, "stat"), (ThroughputChart, "timeseries")]);
+            .Should().Equal([(ThroughputTile, "stat"), (ExecutionTile, "stat"), (ThroughputChart, "timeseries")]);
         panels[2].GetProperty("gridPos").GetProperty("w").GetInt32().Should().Be(24, "the chart spans the full width");
     }
 
@@ -113,32 +113,26 @@ public class LockImpactDashboardTests
     }
 
     [Fact]
-    public void Lock_waits_tile_counts_the_advisory_lock_spans_of_the_selected_run_from_tempo()
+    public void Execution_p95_tile_is_the_runs_own_quantile_of_the_execution_histogram()
     {
-        // Every Npgsql span is named "postgresql", so Tempo's span metrics cannot single out
-        // the lock; the SQL text on the span can, and resource.run.id scopes it to the run.
-        var panel = Panel(LockWaitsTile);
+        // A lock held across publishing is waited for inside the executor call, so the
+        // transaction.execution.duration histogram is where the plant shows: ~5 ms on the
+        // default build, hundreds of ms with Demo:LockRelease = afterPublish. The counters
+        // start at zero with each run's processes, so the series' last point is the run's p95.
+        var panel = Panel(ExecutionTile);
         var target = panel.GetProperty("targets").EnumerateArray().Should().ContainSingle().Subject;
 
-        target.GetProperty("datasource").GetProperty("type").GetString().Should().Be("tempo");
-        target.GetProperty("queryType").GetString().Should().Be("traceql");
-        var query = target.GetProperty("query").GetString()!;
-        query.Should().StartWith($"{{ resource.{ResourceAttribute} = \"$run\"");
-        query.Should().Contain("span.db.query.text =~ \".*pg_advisory_xact_lock.*\"");
-        query.Should().EndWith("| count_over_time()", "a TraceQL metrics query, summed over the range by the tile");
+        target.GetProperty("datasource").GetProperty("type").GetString().Should().Be("prometheus");
+        var expr = QueryOf(target);
+        expr.Should().StartWith("histogram_quantile(0.95, sum by (le) (corebankdemo_transaction_execution_duration_milliseconds_bucket{service_name=\"CoreBank.CoreBankAPI\"}");
+        target.GetProperty("range").GetBoolean().Should().BeTrue("the join needs target_info at each step of the run, not at the instant the dashboard is viewed");
 
-        var reduce = panel.GetProperty("options").GetProperty("reduceOptions");
-        reduce.GetProperty("calcs").EnumerateArray().Select(calc => calc.GetString()).Should().Equal(["sum"]);
-        reduce.GetProperty("fields").GetString().Should().Be("/^count_over_time$/",
-            "Tempo also returns an exemplar frame per step that must not be summed into the count");
-
+        panel.GetProperty("options").GetProperty("reduceOptions").GetProperty("calcs").EnumerateArray()
+            .Select(calc => calc.GetString()).Should().Equal(["lastNotNull"]);
+        panel.GetProperty("fieldConfig").GetProperty("defaults").GetProperty("unit").GetString().Should().Be("ms");
         var steps = panel.GetProperty("fieldConfig").GetProperty("defaults").GetProperty("thresholds").GetProperty("steps")
-            .EnumerateArray().Select(step => (step.GetProperty("color").GetString(), step.GetProperty("value")))
-            .ToList();
-        steps.Select(step => step.Item1).Should().Equal(["green", "red"]);
-        steps[1].Item2.GetInt32().Should().Be(1, "one lock wait is already the wrong build");
-        panel.GetProperty("fieldConfig").GetProperty("defaults").GetProperty("noValue").GetString().Should().Be("0",
-            "a run with no lock spans at all must read 0, not No data");
+            .EnumerateArray().Select(step => step.GetProperty("color").GetString()).ToList();
+        steps.Should().Equal(["green", "red"], "a healthy executor is green; a held lock turns the tile red");
     }
 
     [Fact]
@@ -173,7 +167,7 @@ public class LockImpactDashboardTests
         using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
 
         dashboard.RootElement.GetProperty("time").GetProperty("from").GetString().Should().Be("now-3h",
-            "Tempo caps metrics queries at 3 h, so the default range must not exceed it");
+            "a rehearsal's runs are minutes apart, so three hours keeps the dropdown to the runs that matter");
         dashboard.RootElement.GetProperty("refresh").GetString().Should().Be("5s");
         dashboard.RootElement.GetProperty("style").GetString().Should().Be("dark");
     }

@@ -21,6 +21,7 @@ internal sealed class TransactionExecutor(
 {
     private const int PartitionCount = 4;
     private readonly LockStrategy lockStrategy = demoOptions.Value.LockStrategy;
+    private readonly LockRelease lockRelease = demoOptions.Value.LockRelease;
 
     public async Task<TransactionExecutionResult> ExecuteAsync(
         string fromAccountNumber,
@@ -70,14 +71,15 @@ internal sealed class TransactionExecutor(
         string toAccountNumber,
         CancellationToken cancellationToken)
     {
+        if (lockRelease == LockRelease.AfterPublish)
+        {
+            await HoldUntilPublishedAsync(fromAccountNumber, toAccountNumber, cancellationToken);
+        }
+
         if (lockStrategy == LockStrategy.Partition)
         {
             // One lane per partition, ids ascending: no deadlocks, no per-row ordering dance.
-            var partitionIds = new[] { fromAccountNumber, toAccountNumber }
-                .Select(accountNumber => PartitionHelper.GetPartitionId(accountNumber, PartitionCount))
-                .Distinct()
-                .Order();
-            foreach (var partitionId in partitionIds)
+            foreach (var partitionId in PartitionIds(fromAccountNumber, toAccountNumber))
             {
                 await accountRepository.LockPartitionAsync(partitionId, cancellationToken);
             }
@@ -106,6 +108,37 @@ internal sealed class TransactionExecutor(
             ? (firstAccount, secondAccount)
             : (secondAccount, firstAccount);
     }
+
+    /// <summary>
+    /// <c>Demo:LockRelease = afterPublish</c>, the planted flaw: session-scoped holds on the
+    /// keys this strategy serializes on, taken before the strategy's own locks and in the
+    /// same order (so a holder never waits on a lock another holder takes first), and
+    /// given back by <see cref="TransactionExecutionHandler"/> only once the transfer's
+    /// outcome events have been published.
+    /// </summary>
+    private async Task HoldUntilPublishedAsync(string fromAccountNumber, string toAccountNumber, CancellationToken cancellationToken)
+    {
+        if (lockStrategy == LockStrategy.Partition)
+        {
+            foreach (var partitionId in PartitionIds(fromAccountNumber, toAccountNumber))
+            {
+                await accountRepository.HoldPartitionAsync(partitionId, cancellationToken);
+            }
+
+            return;
+        }
+
+        foreach (var accountNumber in new[] { fromAccountNumber, toAccountNumber }.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+        {
+            await accountRepository.HoldAccountAsync(accountNumber, cancellationToken);
+        }
+    }
+
+    private static IEnumerable<int> PartitionIds(string fromAccountNumber, string toAccountNumber) =>
+        new[] { fromAccountNumber, toAccountNumber }
+            .Select(accountNumber => PartitionHelper.GetPartitionId(accountNumber, PartitionCount))
+            .Distinct()
+            .Order();
 }
 
 internal sealed record TransactionExecutionResult(
