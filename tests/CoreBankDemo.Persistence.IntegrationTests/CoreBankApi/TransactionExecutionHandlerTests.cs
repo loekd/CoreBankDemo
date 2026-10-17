@@ -8,6 +8,7 @@ using CoreBankDemo.CoreBankAPI.Outbox;
 using CoreBankDemo.Messaging;
 using CoreBankDemo.ServiceDefaults;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Moq;
 using Xunit;
 
@@ -18,6 +19,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
     private const string FromAccount = "NL91ABNA0417164300";
     private const string ToAccount = "NL20INGB0001234567";
     private const string TransactionId = "txn-123";
+    private static readonly IOptions<DemoOptions> RowLocking = Options.Create(new DemoOptions());
 
     [Fact]
     public async Task HandleAsync_commits_completion_payload_and_success_outbox_calls_for_success()
@@ -41,7 +43,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, FromAccount, -50m, 50m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, ToAccount, 50m, 75m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -97,7 +99,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
             .ReturnsAsync(result);
         enqueuer.Setup(x => x.EnqueueTransactionFailedAsync(message, "Insufficient funds", It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -147,7 +149,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, ToAccount, 50m, 75m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
         var handler = new TransactionExecutionHandler(
-            executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider, businessMetrics);
+            executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         var act = async () => await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -182,7 +184,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, FromAccount, -50m, 50m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
         enqueuer.Setup(x => x.EnqueueBalanceUpdatedAsync(message, ToAccount, 50m, 75m, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider, TestBusinessMetrics.Instance);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, new ThrowingSaveCoreBankDbContext(context), TimeProvider, TestBusinessMetrics.Instance, new AccountRepository(context), RowLocking);
 
         var act = async () => await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -219,7 +221,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
             .Callback(() => TimeProvider.Advance(TimeSpan.FromMilliseconds(40)))
             .ReturnsAsync(result);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -249,7 +251,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
             .Callback(() => TimeProvider.Advance(TimeSpan.FromMilliseconds(15)))
             .ReturnsAsync(result);
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -277,7 +279,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
             .Callback(() => TimeProvider.Advance(TimeSpan.FromMilliseconds(250)))
             .ThrowsAsync(new InvalidOperationException("boom during execution"));
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         var act = async () => await handler.HandleAsync(message, TestContext.Current.CancellationToken);
 
@@ -312,7 +314,7 @@ public class TransactionExecutionHandlerTests(PostgresContainerFixture fixture) 
             .Callback(() => cts.Cancel())
             .ThrowsAsync(new OperationCanceledException(cts.Token));
 
-        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics);
+        var handler = new TransactionExecutionHandler(executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, new AccountRepository(context), RowLocking);
 
         var act = async () => await handler.HandleAsync(message, cts.Token);
 

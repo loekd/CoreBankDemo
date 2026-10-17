@@ -230,6 +230,8 @@ public class InboxProcessorTests(PostgresContainerFixture fixture) : CoreBankApi
         services.AddScoped<IInboxMessageStore<InboxMessage>>(sp => sp.GetRequiredService<InboxMessageRepository>());
         services.AddScoped<ITransactionExecutor, InProcessTransactionExecutor>();
         services.AddScoped<IOutboxEventEnqueuer, OutboxEventEnqueuer>();
+        services.AddScoped<IAccountRepository, AccountRepository>();
+        services.AddSingleton<IOptions<DemoOptions>>(Options.Create(new DemoOptions()));
         overrideScopedServices?.Invoke(services);
         services.AddScoped<TransactionExecutionHandler>();
         services.AddScoped<IInboxMessageHandler<InboxMessage>>(sp => sp.GetRequiredService<TransactionExecutionHandler>());

@@ -124,7 +124,7 @@ public class LockImpactDashboardTests
         target.GetProperty("queryType").GetString().Should().Be("traceql");
         var query = target.GetProperty("query").GetString()!;
         query.Should().StartWith($"{{ resource.{ResourceAttribute} = \"$run\"");
-        query.Should().Contain("span.db.query.text =~ \".*pg_advisory_xact_lock.*\"");
+        query.Should().Contain("span.db.query.text =~ \".*pg_advisory_(xact_)?lock.*\"", "the session-scoped pg_advisory_lock and the older pg_advisory_xact_lock both count; pg_advisory_unlock_all does not");
         query.Should().EndWith("| count_over_time()", "a TraceQL metrics query, summed over the range by the tile");
 
         var reduce = panel.GetProperty("options").GetProperty("reduceOptions");

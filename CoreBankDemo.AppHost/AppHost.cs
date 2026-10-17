@@ -126,6 +126,11 @@ var coreBankApi = builder.AddProject<Projects.CoreBankDemo_CoreBankAPI>("coreban
     // Demo:LockStrategy pass-through (row | partition): flip with
     // Demo__LockStrategy=partition on the host and a topology restart, no rebuild.
     .WithEnvironment("Demo__LockStrategy", builder.Configuration["Demo:LockStrategy"] ?? "row")
+    // Demo:LockRelease (commit | afterPublish) and Demo:PublishWaitMilliseconds: whether
+    // the executor's locks are given back at commit or only once the transfer's events
+    // are published, and the cap on that hold; same pass-through as Demo:LockStrategy.
+    .WithEnvironment("Demo__LockRelease", builder.Configuration["Demo:LockRelease"] ?? "commit")
+    .WithEnvironment("Demo__PublishWaitMilliseconds", builder.Configuration["Demo:PublishWaitMilliseconds"] ?? "5000")
     .WithHttpHealthCheck("/health")
     .WithEnvironment("OTLP_ENDPOINT", lgtmOtlpGrpcEndpoint)
     .WithDaprSidecar(opt =>

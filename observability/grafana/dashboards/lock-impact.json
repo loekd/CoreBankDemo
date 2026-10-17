@@ -131,7 +131,7 @@
       "id": 2,
       "type": "stat",
       "title": "Advisory-lock waits",
-      "description": "How many times CoreBank executed SELECT pg_advisory_xact_lock(...) during the selected run: zero on the row-locking build, one per partition per transaction on the partition-locking build. Counted from Tempo with a TraceQL metrics query over the Npgsql spans (every Npgsql span is named 'postgresql', so Tempo's span metrics cannot tell the lock apart; the SQL text can), scoped to $run through resource.run.id on the spans themselves. Spans reach Tempo up to a minute after the run ends, so this tile settles later than the two Prometheus panels. Tempo caps metrics queries at 3 h: keep the dashboard range at or below that. The tile reduces the count_over_time field only: Tempo also returns an exemplar frame per step, which must not be summed.",
+      "description": "How many advisory locks CoreBank took during the selected run: the transaction-scoped pg_advisory_xact_lock per partition of Demo:LockStrategy = partition, and the session-scoped pg_advisory_lock holds of Demo:LockRelease = afterPublish (per account under row locking, per partition under partition locking), which are kept past commit until the transfer's events are published. Zero on the default row-locking, release-at-commit build. Counted from Tempo with a TraceQL metrics query over the Npgsql spans (every Npgsql span is named 'postgresql', so Tempo's span metrics cannot tell the lock apart; the SQL text can), scoped to $run through resource.run.id on the spans themselves. Spans reach Tempo up to a minute after the run ends, so this tile settles later than the two Prometheus panels. Tempo caps metrics queries at 3 h: keep the dashboard range at or below that. The tile reduces the count_over_time field only: Tempo also returns an exemplar frame per step, which must not be summed.",
       "datasource": {
         "type": "tempo",
         "uid": "tempo"
@@ -190,7 +190,7 @@
             "uid": "tempo"
           },
           "queryType": "traceql",
-          "query": "{ resource.run.id = \"$run\" && resource.service.name = \"CoreBank.CoreBankAPI\" && span.db.query.text =~ \".*pg_advisory_xact_lock.*\" } | count_over_time()",
+          "query": "{ resource.run.id = \"$run\" && resource.service.name = \"CoreBank.CoreBankAPI\" && span.db.query.text =~ \".*pg_advisory_(xact_)?lock.*\" } | count_over_time()",
           "limit": 20,
           "tableType": "spans",
           "refId": "A"

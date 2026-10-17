@@ -166,6 +166,75 @@ public class AccountRowLockTests(PostgresContainerFixture fixture)
         observedBlocking.Should().BeFalse("advisory locks on different partition ids are independent");
     }
 
+    [Fact]
+    public async Task HoldPartitionAsync_blocks_a_competing_holder_past_commit_until_the_holder_releases()
+    {
+        // Session-scoped on purpose (Demo:LockRelease = afterPublish): the holder's commit
+        // does not release the hold; only ReleaseHeldLocksAsync does.
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var holderContext = CreateContext();
+        await holderContext.Database.OpenConnectionAsync(ct);
+        var holder = new AccountRepository(holderContext);
+        await using (var holderTransaction = await holderContext.Database.BeginTransactionAsync(ct))
+        {
+            await holder.HoldPartitionAsync(2, ct);
+            await holderTransaction.CommitAsync(ct);
+        }
+
+        await using var waiterContext = CreateContext();
+        await waiterContext.Database.OpenConnectionAsync(ct);
+        var waiterRepository = new AccountRepository(waiterContext);
+        var waiter = waiterRepository.HoldPartitionAsync(2, ct);
+
+        var blockedAfterCommit = await BlockedForAWhileAsync(waiter);
+
+        await holder.ReleaseHeldLocksAsync(ct);
+        await waiter.WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
+        await waiterRepository.ReleaseHeldLocksAsync(ct);
+        await waiterContext.Database.CloseConnectionAsync();
+        await holderContext.Database.CloseConnectionAsync();
+
+        blockedAfterCommit.Should().BeTrue(
+            "a session hold on the same partition id outlives the holder's commit and blocks until it is released");
+    }
+
+    [Fact]
+    public async Task HoldAccountAsync_blocks_a_competing_holder_of_the_same_account_and_not_of_another_or_of_its_partition()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        await using var holderContext = CreateContext();
+        await holderContext.Database.OpenConnectionAsync(ct);
+        var holder = new AccountRepository(holderContext);
+        await holder.HoldAccountAsync("NL91ABNA0417164300", ct);
+
+        await using var sameContext = CreateContext();
+        await sameContext.Database.OpenConnectionAsync(ct);
+        var sameRepository = new AccountRepository(sameContext);
+        var same = sameRepository.HoldAccountAsync("NL91ABNA0417164300", ct);
+
+        await using var otherContext = CreateContext();
+        await otherContext.Database.OpenConnectionAsync(ct);
+        var otherRepository = new AccountRepository(otherContext);
+        // A different account, and a partition hold: separate key spaces never collide.
+        await otherRepository.HoldAccountAsync("NL20INGB0001234567", ct).WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
+        await otherRepository.HoldPartitionAsync(0, ct).WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
+
+        var sameBlocked = await BlockedForAWhileAsync(same);
+
+        await holder.ReleaseHeldLocksAsync(ct);
+        await same.WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
+        await sameRepository.ReleaseHeldLocksAsync(ct);
+        await otherRepository.ReleaseHeldLocksAsync(ct);
+        foreach (var context in new[] { sameContext, otherContext, holderContext })
+        {
+            await context.Database.CloseConnectionAsync();
+        }
+
+        sameBlocked.Should().BeTrue("two transfers touching the same account serialize on its session hold");
+    }
+
     /// <summary>
     /// Bounded observation that <paramref name="contended"/> really is blocked:
     /// a short, fixed window (never an unbounded wait) that the task must not

@@ -15,6 +15,10 @@ public class TransactionExecutorTests
     private static readonly IOptions<DemoOptions> RowLocking = Options.Create(new DemoOptions());
     private static readonly IOptions<DemoOptions> PartitionLocking =
         Options.Create(new DemoOptions { LockStrategy = LockStrategy.Partition });
+    private static readonly IOptions<DemoOptions> RowLockingHeldUntilPublished =
+        Options.Create(new DemoOptions { LockRelease = LockRelease.AfterPublish });
+    private static readonly IOptions<DemoOptions> PartitionLockingHeldUntilPublished =
+        Options.Create(new DemoOptions { LockStrategy = LockStrategy.Partition, LockRelease = LockRelease.AfterPublish });
 
     public static TheoryData<TransactionFailureScenario> FailureScenarios => new()
     {
@@ -420,5 +424,85 @@ public class TransactionExecutorTests
         string ExpectedError)
     {
         public override string ToString() => Name;
+    }
+
+    [Fact]
+    public async Task AfterPublish_release_under_row_strategy_holds_both_accounts_ascending_before_the_row_locks()
+    {
+        // The hold order equals the FOR UPDATE order (ordinal), so a holder never waits on
+        // a key another holder takes first. ToAccountNumber sorts before FromAccountNumber.
+        var calls = new List<string>();
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+        repository.Setup(r => r.HoldAccountAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, CancellationToken>((account, _) => calls.Add($"hold:{account}")).Returns(Task.CompletedTask);
+        repository.Setup(r => r.LockForUpdateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, CancellationToken>((account, _) => calls.Add($"row:{account}"))
+            .ReturnsAsync((string account, CancellationToken _) => ActiveAccount(account, 100m));
+
+        var executor = new TransactionExecutor(repository.Object, new FakeTimeProvider(), RowLockingHeldUntilPublished);
+        var result = await executor.ExecuteAsync(FromAccountNumber, ToAccountNumber, 50m, TransactionId, CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        calls.Should().Equal(
+            $"hold:{ToAccountNumber}", $"hold:{FromAccountNumber}",
+            $"row:{ToAccountNumber}", $"row:{FromAccountNumber}");
+        repository.Verify(r => r.HoldPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task AfterPublish_release_under_row_strategy_holds_a_same_account_transfer_once()
+    {
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+        repository.Setup(r => r.HoldAccountAsync(FromAccountNumber, It.IsAny<CancellationToken>())).Returns(Task.CompletedTask);
+        repository.Setup(r => r.LockForUpdateAsync(FromAccountNumber, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ActiveAccount(FromAccountNumber, 100m));
+
+        var executor = new TransactionExecutor(repository.Object, new FakeTimeProvider(), RowLockingHeldUntilPublished);
+        await executor.ExecuteAsync(FromAccountNumber, FromAccountNumber, 50m, TransactionId, CancellationToken.None);
+
+        repository.Verify(r => r.HoldAccountAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task AfterPublish_release_under_partition_strategy_holds_the_distinct_partitions_ascending_before_the_partition_locks()
+    {
+        var fromAccountNumber = "ACC-B";
+        var toAccountNumber = "ACC-C";
+        PartitionHelper.GetPartitionId(fromAccountNumber, 4).Should().Be(2);
+        PartitionHelper.GetPartitionId(toAccountNumber, 4).Should().Be(1);
+        var calls = new List<string>();
+        var repository = new Mock<IAccountRepository>(MockBehavior.Strict);
+        repository.Setup(r => r.HoldPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Callback<int, CancellationToken>((id, _) => calls.Add($"hold:{id}")).Returns(Task.CompletedTask);
+        repository.Setup(r => r.LockPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Callback<int, CancellationToken>((id, _) => calls.Add($"lock:{id}")).Returns(Task.CompletedTask);
+        repository.Setup(r => r.FindByAccountNumberAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string account, CancellationToken _) => ActiveAccount(account, 100m));
+
+        var executor = new TransactionExecutor(repository.Object, new FakeTimeProvider(), PartitionLockingHeldUntilPublished);
+        var result = await executor.ExecuteAsync(fromAccountNumber, toAccountNumber, 50m, TransactionId, CancellationToken.None);
+
+        result.Success.Should().BeTrue();
+        calls.Should().Equal("hold:1", "hold:2", "lock:1", "lock:2");
+        repository.Verify(r => r.HoldAccountAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Commit_release_takes_no_session_holds_under_either_strategy()
+    {
+        foreach (var options in new[] { RowLocking, PartitionLocking })
+        {
+            var repository = new Mock<IAccountRepository>();
+            repository.Setup(r => r.LockForUpdateAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string account, CancellationToken _) => ActiveAccount(account, 100m));
+            repository.Setup(r => r.FindByAccountNumberAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .ReturnsAsync((string account, CancellationToken _) => ActiveAccount(account, 100m));
+
+            await new TransactionExecutor(repository.Object, new FakeTimeProvider(), options)
+                .ExecuteAsync(FromAccountNumber, ToAccountNumber, 50m, TransactionId, CancellationToken.None);
+
+            repository.Verify(r => r.HoldAccountAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            repository.Verify(r => r.HoldPartitionAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
     }
 }
