@@ -1,7 +1,7 @@
 {
   "uid": "lock-impact",
   "title": "Load test — lock impact",
-  "description": "One load-test run at a time, picked from the Run dropdown: peak throughput, how often CoreBank waited on a partition advisory lock, and the processed-per-second curve. Run identity: CoreBankDemo.LoadTests/AppHost.cs stamps the OTel resource attribute run.id (a local timestamp, one per `aspire start`) on both APIs through OTEL_RESOURCE_ATTRIBUTES. Prometheus keeps it on target_info only, as the label run_id (it is not a promoted attribute), so every metric query joins it on: metric * on(job, instance) group_left(run_id) target_info{run_id=\"$run\"}. Tempo keeps it on every span as resource.run.id, which is how the lock tile is scoped. Spelling: run.id (OTel attribute, TraceQL) and run_id (Prometheus label) are the same attribute.",
+  "description": "One load-test run at a time, picked from the Run dropdown: peak throughput, CoreBank's execution p95 (where a lock held across publishing shows up as waiting), and the processed-per-second curve. Run identity: CoreBankDemo.LoadTests/AppHost.cs stamps the OTel resource attribute run.id (a local timestamp, one per `aspire start`) on both APIs through OTEL_RESOURCE_ATTRIBUTES. Prometheus keeps it on target_info only, as the label run_id (it is not a promoted attribute), so every metric query joins it on: metric * on(job, instance) group_left(run_id) target_info{run_id=\"$run\"}. Spelling: run.id (OTel attribute, TraceQL) and run_id (Prometheus label) are the same attribute.",
   "tags": [
     "corebank",
     "load-test"
@@ -130,11 +130,11 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Advisory-lock waits",
-      "description": "How many advisory locks CoreBank took during the selected run: the transaction-scoped pg_advisory_xact_lock per partition of Demo:LockStrategy = partition, and the session-scoped pg_advisory_lock holds of Demo:LockRelease = afterPublish (per account under row locking, per partition under partition locking), which are kept past commit until the transfer's events are published. Zero on the default row-locking, release-at-commit build. Counted from Tempo with a TraceQL metrics query over the Npgsql spans (every Npgsql span is named 'postgresql', so Tempo's span metrics cannot tell the lock apart; the SQL text can), scoped to $run through resource.run.id on the spans themselves. Spans reach Tempo up to a minute after the run ends, so this tile settles later than the two Prometheus panels. Tempo caps metrics queries at 3 h: keep the dashboard range at or below that. The tile reduces the count_over_time field only: Tempo also returns an exemplar frame per step, which must not be summed.",
+      "title": "Execution p95",
+      "description": "95th percentile of CoreBank's transaction execution time over the whole selected run (corebankdemo.transaction.execution.duration, the executor call: lock acquisition, account loads, balance update). About 5 ms on the default build; with Demo:LockRelease = afterPublish every transfer first waits for the accounts another transfer still holds until its events are published, and that wait lands here. The histogram counters start at zero with each run's processes, so the last point of the series is the run's own p95. Scoped to $run by joining run_id from target_info. Min step 5 s: the LGTM Prometheus datasource defaults to a 60 s step, which hides a run that lasts less than a minute.",
       "datasource": {
-        "type": "tempo",
-        "uid": "tempo"
+        "type": "prometheus",
+        "uid": "prometheus"
       },
       "gridPos": {
         "x": 12,
@@ -148,8 +148,8 @@
             "mode": "thresholds"
           },
           "decimals": 0,
-          "unit": "locale",
-          "noValue": "0",
+          "unit": "ms",
+          "noValue": "-",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -159,7 +159,7 @@
               },
               {
                 "color": "red",
-                "value": 1
+                "value": 50
               }
             ]
           }
@@ -173,9 +173,9 @@
         "orientation": "auto",
         "reduceOptions": {
           "calcs": [
-            "sum"
+            "lastNotNull"
           ],
-          "fields": "/^count_over_time$/",
+          "fields": "",
           "values": false
         },
         "text": {
@@ -186,13 +186,14 @@
       "targets": [
         {
           "datasource": {
-            "type": "tempo",
-            "uid": "tempo"
+            "type": "prometheus",
+            "uid": "prometheus"
           },
-          "queryType": "traceql",
-          "query": "{ resource.run.id = \"$run\" && resource.service.name = \"CoreBank.CoreBankAPI\" && span.db.query.text =~ \".*pg_advisory_(xact_)?lock.*\" } | count_over_time()",
-          "limit": 20,
-          "tableType": "spans",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le) (corebankdemo_transaction_execution_duration_milliseconds_bucket{service_name=\"CoreBank.CoreBankAPI\"} * on(job, instance) group_left(run_id) target_info{run_id=\"$run\"}))",
+          "interval": "5s",
+          "legendFormat": "$run",
+          "range": true,
           "refId": "A"
         }
       ]
