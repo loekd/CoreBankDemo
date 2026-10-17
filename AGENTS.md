@@ -21,6 +21,7 @@ Mission-critical banking demo for a conference talk. Shows resilient, observable
 → **aspire-mcp** skill: inspect resource state, logs, and traces via Aspire MCP.
 → **load-test** skill: run a full load test and assert results via the LoadTestSupport API.
 → **corebank-regression-analysis** skill: find out why one load-test run is slower than a baseline run.
+→ **feature-impact** skill: measure the checked-out branch against `origin/main` (unit tier, two acceptance runs, one report) as a background run that never diagnoses or edits.
 
 ## Workflow
 
