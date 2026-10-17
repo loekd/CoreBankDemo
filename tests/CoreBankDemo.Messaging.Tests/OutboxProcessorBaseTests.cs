@@ -38,6 +38,21 @@ public class OutboxProcessorBaseTests
     private static readonly ActivitySource ActivitySource = new(nameof(OutboxProcessorBaseTests));
     private static readonly BusinessMetrics TestBusinessMetrics = new();
 
+    /// <summary>
+    /// Explicit static constructor on purpose: without one the class is beforefieldinit and
+    /// the statics above initialise lazily, at the first static access. When
+    /// <see cref="Dispatch_activity_carries_idempotency_key_and_partition_id_tags"/> happens to
+    /// run first in the class (xUnit's test order depends on the assembly path), it registers
+    /// an <see cref="ActivityListener"/> whose <c>ShouldListenTo</c> reads
+    /// <see cref="ActivitySource"/> before the constructor above has run; creating that source
+    /// then calls the listener, which sees null, and every later test fails with
+    /// <see cref="TypeInitializationException"/>. With an explicit static constructor the
+    /// statics are initialised before any instance exists, so no listener can be registered first.
+    /// </summary>
+    static OutboxProcessorBaseTests()
+    {
+    }
+
     private sealed class TestOutboxProcessor : OutboxProcessorBase<TestOutboxEventMessage>
     {
         public TestOutboxProcessor(
