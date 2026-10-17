@@ -405,7 +405,7 @@ public class MainWindowTests
 
         window.FetchIdField.HasFocus.Should().BeTrue();
         app.Keyboard.RaiseKeyDownEvent(Key.Enter);
-        await harness.Payments.FetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await harness.Payments.FetchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         var first = window.LastDispatchedTask!;
         window.RenderForTest();
         app.Keyboard.RaiseKeyDownEvent(Key.Enter);
@@ -413,7 +413,7 @@ public class MainWindowTests
         // Checked before the first call is released: a second call would have registered by now.
         harness.Payments.FetchIds.Should().Equal("tx-1");
         harness.Payments.ReleaseFetch.SetResult();
-        await first.WaitAsync(TimeSpan.FromSeconds(5));
+        await first.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 
     [Fact]

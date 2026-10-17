@@ -51,7 +51,7 @@ public class CoreBankCircuitBreakerLoggingTests
     [Fact]
     public void HalfOpened_logs_information()
     {
-        CoreBankCircuitBreakerLogging.HalfOpened(_logger.Object, new OnCircuitHalfOpenedArguments(ResilienceContextPool.Shared.Get()));
+        CoreBankCircuitBreakerLogging.HalfOpened(_logger.Object, new OnCircuitHalfOpenedArguments(ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken)));
 
         SingleLine(LogLevel.Information).Should().Contain("half-open");
     }
@@ -61,7 +61,7 @@ public class CoreBankCircuitBreakerLoggingTests
     {
         using var response = new HttpResponseMessage(HttpStatusCode.OK);
         var args = new OnCircuitClosedArguments<HttpResponseMessage>(
-            ResilienceContextPool.Shared.Get(), Outcome.FromResult(response), isManual: false);
+            ResilienceContextPool.Shared.Get(TestContext.Current.CancellationToken), Outcome.FromResult(response), isManual: false);
 
         CoreBankCircuitBreakerLogging.Closed(_logger.Object, args);
 
