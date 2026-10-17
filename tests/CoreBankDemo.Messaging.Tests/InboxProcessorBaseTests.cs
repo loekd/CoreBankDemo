@@ -42,6 +42,19 @@ public class InboxProcessorBaseTests
     private static readonly ActivitySource ActivitySource = new(nameof(InboxProcessorBaseTests));
     private static readonly BusinessMetrics TestBusinessMetrics = new();
 
+    /// <summary>
+    /// Explicit static constructor on purpose, for the same reason as in
+    /// <see cref="OutboxProcessorBaseTests"/>: the activity-tag test registers an
+    /// <see cref="ActivityListener"/> whose <c>ShouldListenTo</c> reads <see cref="ActivitySource"/>;
+    /// if that test runs first in the class (xUnit's order depends on the assembly path) and the
+    /// class is beforefieldinit, the listener is called during the static field initialiser and
+    /// the type initialiser fails for every test. An explicit static constructor runs the statics
+    /// before any instance exists.
+    /// </summary>
+    static InboxProcessorBaseTests()
+    {
+    }
+
     private sealed class TestInboxProcessor : InboxProcessorBase<TestInboxMessage>
     {
         public TestInboxProcessor(
