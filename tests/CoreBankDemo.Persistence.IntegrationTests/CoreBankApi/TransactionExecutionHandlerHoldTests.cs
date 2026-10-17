@@ -40,11 +40,11 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         await using var observer = CreateContext();
-        var (handler, message) = await ArrangeAsync(context, Options.Create(new DemoOptions { LockStrategy = strategy, LockRelease = LockRelease.AfterPublish }), ct);
+        var (handler, message, pid) = await ArrangeAsync(context, Options.Create(new DemoOptions { LockStrategy = strategy, LockRelease = LockRelease.AfterPublish }), ct);
 
         var handling = handler.HandleAsync(message, ct);
 
-        var key = await WaitForHoldAsync(observer, strategy, ct);
+        var key = await WaitForHoldAsync(observer, pid, strategy, ct);
         (await observer.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct)).Status
             .Should().Be(MessageConstants.Status.Completed, "the transfer is committed while the key is still held");
         (await Task.WhenAny(handling, Task.Delay(ObservationWindow, ct))).Should().NotBe(handling,
@@ -54,7 +54,7 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
             $"UPDATE \"MessagingOutboxMessages\" SET \"Status\" = {MessageConstants.Status.Completed} WHERE \"TransactionId\" = {TransactionId}", ct);
 
         await handling.WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
-        (await HoldsAsync(observer, key, ct)).Should().Be(0, "the hold is released once the events are out");
+        (await HoldsAsync(observer, pid, key, ct)).Should().Be(0, "the hold is released once the events are out");
     }
 
     [Fact]
@@ -64,16 +64,16 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct);
         await using var context = CreateContext();
         await using var observer = CreateContext();
-        var (handler, message) = await ArrangeAsync(context, Options.Create(new DemoOptions { LockRelease = LockRelease.AfterPublish }), ct);
+        var (handler, message, pid) = await ArrangeAsync(context, Options.Create(new DemoOptions { LockRelease = LockRelease.AfterPublish }), ct);
 
         var handling = handler.HandleAsync(message, cancellation.Token);
-        var key = await WaitForHoldAsync(observer, LockStrategy.Row, ct);
+        var key = await WaitForHoldAsync(observer, pid, LockStrategy.Row, ct);
 
         await cancellation.CancelAsync();
 
         // The transfer is already committed, so a cancelled wait is not a failed transfer.
         await handling.WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
-        (await HoldsAsync(observer, key, ct)).Should().Be(0);
+        (await HoldsAsync(observer, pid, key, ct)).Should().Be(0);
         (await observer.InboxMessages.AsNoTracking().SingleAsync(m => m.Id == message.Id, ct)).Status
             .Should().Be(MessageConstants.Status.Completed);
     }
@@ -85,13 +85,13 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
         await using var context = CreateContext();
         await using var observer = CreateContext();
         var options = Options.Create(new DemoOptions { LockRelease = LockRelease.AfterPublish, PublishWaitMilliseconds = 300 });
-        var (handler, message) = await ArrangeAsync(context, options, ct);
+        var (handler, message, pid) = await ArrangeAsync(context, options, ct);
 
         var handling = handler.HandleAsync(message, ct);
-        var key = await WaitForHoldAsync(observer, LockStrategy.Row, ct);
+        var key = await WaitForHoldAsync(observer, pid, LockStrategy.Row, ct);
 
         await handling.WaitAsync(PostgresContainerFixture.LockWaitTimeout, ct);
-        (await HoldsAsync(observer, key, ct)).Should().Be(0, "the cap bounds how long a key can be held");
+        (await HoldsAsync(observer, pid, key, ct)).Should().Be(0, "the cap bounds how long a key can be held");
         (await observer.MessagingOutboxMessages.AsNoTracking().CountAsync(m => m.TransactionId == TransactionId && m.Status == MessageConstants.Status.Pending, ct))
             .Should().Be(1, "giving up never touches the outbox rows");
     }
@@ -105,12 +105,11 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
         var ct = TestContext.Current.CancellationToken;
         await using var context = CreateContext();
         await using var observer = CreateContext();
-        var (handler, message) = await ArrangeAsync(context, Options.Create(new DemoOptions { LockStrategy = strategy }), ct);
+        var (handler, message, pid) = await ArrangeAsync(context, Options.Create(new DemoOptions { LockStrategy = strategy }), ct);
 
         await handler.HandleAsync(message, ct).WaitAsync(ObservationWindow, ct);
 
-        (await observer.Database.SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid IN ({AccountKeySpace}, {PartitionKeySpace})").SingleAsync(ct))
-            .Should().Be(0);
+        (await AnyHoldsAsync(observer, pid, ct)).Should().Be(0);
         (await observer.MessagingOutboxMessages.AsNoTracking().CountAsync(m => m.TransactionId == TransactionId && m.Status == MessageConstants.Status.Pending, ct))
             .Should().Be(1);
     }
@@ -121,9 +120,16 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
     /// them session holds on the pinned connection) and whose enqueuer adds one real
     /// Pending outbox row, so the hold has something to wait for.
     /// </summary>
-    private async Task<(TransactionExecutionHandler Handler, InboxMessage Message)> ArrangeAsync(
+    private async Task<(TransactionExecutionHandler Handler, InboxMessage Message, int Pid)> ArrangeAsync(
         CoreBankDbContext context, IOptions<DemoOptions> demoOptions, CancellationToken ct)
     {
+        // The test keeps the handler's connection open for the whole test (EF Core counts
+        // opens, so the handler's own open/close never closes it): every pg_locks query below
+        // is scoped to this backend pid, so parallel test classes holding advisory locks of
+        // their own cannot be mistaken for the handler's.
+        await context.Database.OpenConnectionAsync(ct);
+        var pid = await context.Database.SqlQuery<int>($"SELECT pg_backend_pid() AS \"Value\"").SingleAsync(ct);
+
         var message = new InboxMessage
         {
             Id = Guid.NewGuid(),
@@ -198,7 +204,7 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
         var repository = new InboxMessageRepository(context, TimeProvider, businessMetrics);
         var handler = new TransactionExecutionHandler(
             executor.Object, enqueuer.Object, repository, context, TimeProvider, businessMetrics, accountRepository, demoOptions);
-        return (handler, message);
+        return (handler, message, pid);
     }
 
     /// <summary>The (classid, objid) pg_locks key the strategy's first hold takes for this transfer.</summary>
@@ -207,13 +213,13 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
             ? (PartitionKeySpace, PartitionHelper.GetPartitionId(FromAccount, PartitionCount))
             : (AccountKeySpace, await observer.Database.SqlQuery<int>($"SELECT hashtext({FromAccount}) AS \"Value\"").SingleAsync(ct));
 
-    private static async Task<(int ClassId, long ObjId)> WaitForHoldAsync(CoreBankDbContext observer, LockStrategy strategy, CancellationToken ct)
+    private static async Task<(int ClassId, long ObjId)> WaitForHoldAsync(CoreBankDbContext observer, int pid, LockStrategy strategy, CancellationToken ct)
     {
         var key = await KeyAsync(observer, strategy, ct);
         var deadline = DateTime.UtcNow + PostgresContainerFixture.LockWaitTimeout;
         while (DateTime.UtcNow < deadline)
         {
-            if (await HoldsAsync(observer, key, ct) > 0)
+            if (await HoldsAsync(observer, pid, key, ct) > 0)
             {
                 return key;
             }
@@ -225,15 +231,21 @@ public class TransactionExecutionHandlerHoldTests(PostgresContainerFixture fixtu
     }
 
     /// <summary>
-    /// Granted session advisory locks on the key (two-key form: classid = key space, objid =
-    /// key). pg_locks exposes objid as an unsigned 32-bit value, so a negative hashtext key is
-    /// compared through its unsigned image.
+    /// Granted session advisory locks the handler's backend holds on the key (two-key form:
+    /// classid = key space, objid = key). pg_locks exposes objid as an unsigned 32-bit value,
+    /// so a negative hashtext key is compared through its unsigned image.
     /// </summary>
-    private static async Task<int> HoldsAsync(CoreBankDbContext observer, (int ClassId, long ObjId) key, CancellationToken ct)
+    private static async Task<int> HoldsAsync(CoreBankDbContext observer, int pid, (int ClassId, long ObjId) key, CancellationToken ct)
     {
         var objid = key.ObjId < 0 ? key.ObjId + (1L << 32) : key.ObjId;
         return await observer.Database
-            .SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = {key.ClassId} AND objid = {objid}")
+            .SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM pg_locks WHERE pid = {pid} AND locktype = 'advisory' AND granted AND classid = {key.ClassId} AND objid = {objid}")
             .SingleAsync(ct);
     }
+
+    /// <summary>Every granted session advisory lock the handler's backend holds, whatever the key.</summary>
+    private static async Task<int> AnyHoldsAsync(CoreBankDbContext observer, int pid, CancellationToken ct) =>
+        await observer.Database
+            .SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM pg_locks WHERE pid = {pid} AND locktype = 'advisory' AND granted")
+            .SingleAsync(ct);
 }
