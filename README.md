@@ -105,13 +105,14 @@ That starts PostgreSQL, Redis, LGTM, both APIs with their Dapr sidecars, and Dev
 | LGTM (Grafana, anonymous) | http://localhost:3000 — opens on the CoreBank Traces dashboard (trace search by service and operation, also at http://localhost:3000/d/corebank-traces); CoreBank dashboard at http://localhost:3000/d/corebank |
 | Payments API | http://127.0.0.1:5294 |
 | Core Bank API | http://127.0.0.1:5032 |
-| pgAdmin / RedisInsight | linked from the Aspire Dashboard |
+| pgAdmin | http://localhost:5050 |
+| RedisInsight | http://localhost:5540 (accept the terms once; the Redis connection is pre-filled) |
 
 **Running the AppHost inside a container?** The Aspire Dashboard and the LGTM Grafana UI bind every
 interface (`0.0.0.0`) rather than loopback, so a host-side port publish can actually reach them. A
 devcontainer forwards them from the inside, where loopback would have been fine either way; a
 sandbox needs them published explicitly, e.g. `sbx ports <sandbox> --publish 15888:15888/tcp`. The
-LoadTests AppHost uses the same fixed dashboard, LGTM and pgAdmin ports, so one set of publishes
+LoadTests AppHost uses the same fixed dashboard, LGTM, pgAdmin and RedisInsight ports, so one set of publishes
 serves both AppHosts (they never run side by side); only its Postgres differs (5433), because the
 Regular Postgres is persistent and would otherwise keep serving the load test after `aspire stop`. The
 APIs and the OTLP ingest ports stay on loopback on purpose — only in-container callers dial those.

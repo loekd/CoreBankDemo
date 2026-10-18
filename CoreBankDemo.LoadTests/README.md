@@ -12,7 +12,7 @@ Verifies that the CoreBankDemo system processes every payment transaction **exac
 │                        ──► paymentsdb                │
 │                        └──► corebankdb  (+ 10 seeded │
 │                                           accounts)  │
-│  Redis (disposable, port 6381)                       │
+│  Redis (disposable, port 6381, RedisInsight 5540)    │
 │  Dapr (components-loadtest/)                         │
 │                                                      │
 │  PaymentsAPI  ──────────────────────────────────┐   │
@@ -22,8 +22,8 @@ Verifies that the CoreBankDemo system processes every payment transaction **exac
 │  k6 container ──────────────────────────┘───┘───┘   │
 └─────────────────────────────────────────────────────┘
 
-The Aspire Dashboard (15888), LGTM (Grafana 3000, Tempo 3200, OTLP 4317/4318) and pgAdmin (5050)
-use the same fixed host ports as the Regular AppHost, so one sandbox port publish serves both; the
+The Aspire Dashboard (15888), LGTM (Grafana 3000, Tempo 3200, OTLP 4317/4318), pgAdmin (5050) and
+RedisInsight (5540) use the same fixed host ports as the Regular AppHost, so one sandbox port publish serves both; the
 two AppHosts never run side by side. Postgres is on its own port (5433 here, 5432 in the Regular
 AppHost): the Regular Postgres is persistent and keeps 5432 after `aspire stop`, and a load test
 that shares the port silently runs against that stale database, where `track_commit_timestamp` is
