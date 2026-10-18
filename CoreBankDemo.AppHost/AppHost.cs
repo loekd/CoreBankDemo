@@ -96,7 +96,14 @@ var redis = builder
     .WithLifetime(ContainerLifetime.Persistent)
     .WithEndpointProxySupport(false)
     .WithoutHttpsCertificate()
-    .WithRedisInsight(opt => opt.WithoutHttpsCertificate())
+    // RI_ENCRYPTION_KEYTAR=false: the published image ships a keytar.node built with
+    // 4 KB ELF page alignment, which segfaults (exit 139) on 16 KB-page kernels such as
+    // the Docker sandbox. Keytar is only one of RedisInsight's credential-encryption
+    // backends; disabling it keeps the GUI usable everywhere. Plain storage is fine here:
+    // the only stored secret is the demo Redis password above.
+    .WithRedisInsight(opt => opt
+        .WithoutHttpsCertificate()
+        .WithEnvironment("RI_ENCRYPTION_KEYTAR", "false"))
     .WithImageTag("7.4-alpine")
     .WithEnvironment("REDIS_PASSWORD", redisPassword);
 #pragma warning restore ASPIRECERTIFICATES001

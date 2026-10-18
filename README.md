@@ -375,13 +375,16 @@ failed lock backend). With Core Bank stopped, the cancel fails too and the hones
 remains: the background rail settles the payment later. Dev Proxy faults never reach the cancel
 call (ADR-030), so a faulted instant payment ends `504`, not `202`.
 
-**`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Apple Silicon)**
-A bug in the published image, not in this repository, and harmless — RedisInsight is an optional
-Redis GUI that nothing here depends on. `redis/redisinsight:3.4` ships a `keytar.node` linked with
-4 KB ELF page alignment, so on a kernel whose page size is 16 KB it cannot be mapped and segfaults
-on load; the image's own `node` and its `better_sqlite3.node` are 64 KB-aligned and load fine.
-Check yours with `getconf PAGESIZE` — on a 4 KB host the resource starts normally. Ignore the red
-resource, or drop `.WithRedisInsight(...)` from `CoreBankDemo.AppHost/AppHost.cs`.
+**`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Docker sandboxes)**
+A bug in the published image, not in this repository. `redis/redisinsight:3.4` (and every later
+tag) ships a `keytar.node` linked with 4 KB ELF page alignment, so on a kernel whose page size is
+16 KB it cannot be mapped and segfaults on load; the image's own `node` and its
+`better_sqlite3.node` are 64 KB-aligned and load fine. `CoreBankDemo.AppHost/AppHost.cs` works
+around it by starting the container with `RI_ENCRYPTION_KEYTAR=false`, which keeps RedisInsight
+from loading keytar at all (it then stores the demo Redis password unencrypted inside the
+container). If you still see exit 139, check `getconf PAGESIZE` and confirm that environment
+variable is on the container. Docker Desktop on Apple Silicon uses a 4 KB-page kernel and was
+never affected.
 
 ## Documentation
 
