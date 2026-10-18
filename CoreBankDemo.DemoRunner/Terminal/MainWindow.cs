@@ -157,6 +157,7 @@ public sealed class MainWindow : Window
     private readonly Button _aspireDashboardButton = NewButton("Aspire");
     private readonly Button _lgtmButton = NewButton("LGTM");
     private readonly Button _pgAdminButton = NewButton("pgAdmin");
+    private readonly Button _redisInsightButton = NewButton("RedisInsight");
     // Dim.Fill() rather than Dim.Fill(3): the removed bottom band is where those three rows of
     // permanent chrome went, in all five workspaces (EXPERIENCE.md, Information Architecture).
     private readonly FrameView _navigation = new() { X = 0, Y = 1, Width = RailWidthPreferred, Height = Dim.Fill(), Title = "WORKSPACES" };
@@ -444,12 +445,14 @@ public sealed class MainWindow : Window
         _faultsView = BuildFaultsView();
         _workspaces = [_operationsView, _resourcesView, _evidenceView, _loadView, _faultsView];
 
-        _aspireDashboardButton.X = Pos.AnchorEnd(31);
+        _aspireDashboardButton.X = Pos.AnchorEnd(48);
         _aspireDashboardButton.Y = 0;
-        _lgtmButton.X = Pos.AnchorEnd(20);
+        _lgtmButton.X = Pos.AnchorEnd(37);
         _lgtmButton.Y = 0;
-        _pgAdminButton.X = Pos.AnchorEnd(11);
+        _pgAdminButton.X = Pos.AnchorEnd(28);
         _pgAdminButton.Y = 0;
+        _redisInsightButton.X = Pos.AnchorEnd(16);
+        _redisInsightButton.Y = 0;
         _aspireDashboardButton.Accepting += (_, e) =>
         {
             e.Handled = true;
@@ -465,8 +468,13 @@ public sealed class MainWindow : Window
             e.Handled = true;
             OpenKnownLink("pgAdmin", KnownLinks.PgAdmin);
         };
+        _redisInsightButton.Accepting += (_, e) =>
+        {
+            e.Handled = true;
+            OpenKnownLink("RedisInsight", KnownLinks.RedisInsight);
+        };
 
-        Add(_aspireDashboardButton, _lgtmButton, _pgAdminButton, _navigation, _content);
+        Add(_aspireDashboardButton, _lgtmButton, _pgAdminButton, _redisInsightButton, _navigation, _content);
         UpdateNavigationText();
         FrameChanged += (_, _) => ApplyResponsiveLayout();
         _controller.StateChanged += OnStateChanged;
@@ -1688,6 +1696,8 @@ public sealed class MainWindow : Window
         _lgtmButton.Enabled = _controller.State.Profile != TopologyProfile.None;
         // Only the Regular AppHost runs pgAdmin.
         _pgAdminButton.Enabled = _controller.State.Profile == TopologyProfile.Regular;
+        // Both AppHosts run RedisInsight on the same fixed port.
+        _redisInsightButton.Enabled = _controller.State.Profile != TopologyProfile.None;
         _detailsButton.Enabled = true;
         _wrapButton.Enabled = true;
     }
@@ -2660,6 +2670,7 @@ public sealed class MainWindow : Window
     internal Button ClearEvidenceButton => _clearEvidenceButton;
     internal Button LgtmButton => _lgtmButton;
     internal Button PgAdminButton => _pgAdminButton;
+    internal Button RedisInsightButton => _redisInsightButton;
     internal Button AspireDashboardButton => _aspireDashboardButton;
 
     internal TextField SuppliedKeyField => _suppliedKey;

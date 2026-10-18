@@ -105,13 +105,14 @@ That starts PostgreSQL, Redis, LGTM, both APIs with their Dapr sidecars, and Dev
 | LGTM (Grafana, anonymous) | http://localhost:3000 — opens on the CoreBank Traces dashboard (trace search by service and operation, also at http://localhost:3000/d/corebank-traces); CoreBank dashboard at http://localhost:3000/d/corebank |
 | Payments API | http://127.0.0.1:5294 |
 | Core Bank API | http://127.0.0.1:5032 |
-| pgAdmin / RedisInsight | linked from the Aspire Dashboard |
+| pgAdmin | http://localhost:5050 |
+| RedisInsight | http://localhost:5540 (accept the terms once; the Redis connection is pre-filled) |
 
 **Running the AppHost inside a container?** The Aspire Dashboard and the LGTM Grafana UI bind every
 interface (`0.0.0.0`) rather than loopback, so a host-side port publish can actually reach them. A
 devcontainer forwards them from the inside, where loopback would have been fine either way; a
 sandbox needs them published explicitly, e.g. `sbx ports <sandbox> --publish 15888:15888/tcp`. The
-LoadTests AppHost uses the same fixed dashboard, LGTM and pgAdmin ports, so one set of publishes
+LoadTests AppHost uses the same fixed dashboard, LGTM, pgAdmin and RedisInsight ports, so one set of publishes
 serves both AppHosts (they never run side by side); only its Postgres differs (5433), because the
 Regular Postgres is persistent and would otherwise keep serving the load test after `aspire stop`. The
 APIs and the OTLP ingest ports stay on loopback on purpose — only in-container callers dial those.
@@ -375,13 +376,16 @@ failed lock backend). With Core Bank stopped, the cancel fails too and the hones
 remains: the background rail settles the payment later. Dev Proxy faults never reach the cancel
 call (ADR-030), so a faulted instant payment ends `504`, not `202`.
 
-**`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Apple Silicon)**
-A bug in the published image, not in this repository, and harmless — RedisInsight is an optional
-Redis GUI that nothing here depends on. `redis/redisinsight:3.4` ships a `keytar.node` linked with
-4 KB ELF page alignment, so on a kernel whose page size is 16 KB it cannot be mapped and segfaults
-on load; the image's own `node` and its `better_sqlite3.node` are 64 KB-aligned and load fine.
-Check yours with `getconf PAGESIZE` — on a 4 KB host the resource starts normally. Ignore the red
-resource, or drop `.WithRedisInsight(...)` from `CoreBankDemo.AppHost/AppHost.cs`.
+**`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Docker sandboxes)**
+A bug in the published image, not in this repository. `redis/redisinsight:3.4` (and every later
+tag) ships a `keytar.node` linked with 4 KB ELF page alignment, so on a kernel whose page size is
+16 KB it cannot be mapped and segfaults on load; the image's own `node` and its
+`better_sqlite3.node` are 64 KB-aligned and load fine. `CoreBankDemo.AppHost/AppHost.cs` works
+around it by starting the container with `RI_ENCRYPTION_KEYTAR=false`, which keeps RedisInsight
+from loading keytar at all (it then stores the demo Redis password unencrypted inside the
+container). If you still see exit 139, check `getconf PAGESIZE` and confirm that environment
+variable is on the container. Docker Desktop on Apple Silicon uses a 4 KB-page kernel and was
+never affected.
 
 ## Documentation
 

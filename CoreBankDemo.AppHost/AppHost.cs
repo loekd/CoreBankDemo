@@ -96,7 +96,18 @@ var redis = builder
     .WithLifetime(ContainerLifetime.Persistent)
     .WithEndpointProxySupport(false)
     .WithoutHttpsCertificate()
-    .WithRedisInsight(opt => opt.WithoutHttpsCertificate())
+    // RI_ENCRYPTION_KEYTAR=false: the published image ships a keytar.node built with
+    // 4 KB ELF page alignment, which segfaults (exit 139) on 16 KB-page kernels such as
+    // the Docker sandbox. Keytar is only one of RedisInsight's credential-encryption
+    // backends; disabling it keeps the GUI usable everywhere. Plain storage is fine here:
+    // the only stored secret is the demo Redis password above.
+    // Fixed host port 5540 on every interface, like pgAdmin's 5050: the DemoRunner's
+    // RedisInsight button has a stable URL and a sandbox can publish the port to the host.
+    .WithRedisInsight(opt => opt
+        .WithoutHttpsCertificate()
+        .WithEnvironment("RI_ENCRYPTION_KEYTAR", "false")
+        .WithHostPort(5540)
+        .WithEndpoint("http", endpoint => endpoint.TargetHost = "0.0.0.0"))
     .WithImageTag("7.4-alpine")
     .WithEnvironment("REDIS_PASSWORD", redisPassword);
 #pragma warning restore ASPIRECERTIFICATES001

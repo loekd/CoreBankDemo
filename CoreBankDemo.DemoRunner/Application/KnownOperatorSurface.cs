@@ -116,8 +116,9 @@ public static class KnownLinks
     public const string AspireDashboard = "aspire-dashboard";
     public const string Lgtm = "lgtm";
     public const string PgAdmin = "pgadmin";
+    public const string RedisInsight = "redisinsight";
 
     public static readonly IReadOnlySet<string> All = new HashSet<string>(
-        [AspireDashboard, Lgtm, PgAdmin],
+        [AspireDashboard, Lgtm, PgAdmin, RedisInsight],
         StringComparer.Ordinal);
 }

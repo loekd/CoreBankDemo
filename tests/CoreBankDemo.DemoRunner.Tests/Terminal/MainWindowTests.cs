@@ -887,6 +887,39 @@ public class MainWindowTests
         window.PgAdminButton.Enabled.Should().Be(enabled);
     }
 
+    /// <summary>Both AppHosts run RedisInsight on the same fixed port, so the button is live under either profile.</summary>
+    [Theory]
+    [InlineData(TopologyProfile.Regular)]
+    [InlineData(TopologyProfile.LoadTests)]
+    public async Task RedisInsightButton_IsEnabledUnderEitherProfile(TopologyProfile profile)
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(profile));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(profile, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        window.RenderForTest();
+
+        window.RedisInsightButton.Enabled.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task OpenRedisInsightLink_CopiesTheFixedUrlToTheTerminalClipboard()
+    {
+        var harness = new OperatorHarness();
+        harness.Aspire.Queue(OperatorHarness.Snapshot(TopologyProfile.LoadTests));
+        var controller = harness.CreateController();
+        await controller.AttachAsync(TopologyProfile.LoadTests, CancellationToken.None);
+        using var window = CreateWindow(controller);
+        var terminal = new StringWriter();
+        window.TerminalOut = terminal;
+
+        await window.TriggerOpenKnownLinkForTestAsync("RedisInsight", KnownLinks.RedisInsight);
+
+        terminal.ToString().Should().StartWith("\u001b]52;c;").And.EndWith("\u0007");
+        window.LastUiMessage.Should().Contain("terminal clipboard").And.Contain("http://localhost:5540");
+    }
+
     [Fact]
     public async Task OpenAspireLink_WhenNoDashboardUrlIsVerifiedYet_SaysSoAndCopiesNothing()
     {

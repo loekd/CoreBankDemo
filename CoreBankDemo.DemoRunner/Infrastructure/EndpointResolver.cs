@@ -24,6 +24,9 @@ public static class EndpointResolver
     // The Regular AppHost pins pgAdmin's host port to 5050 so this link stays stable.
     private const string PgAdminLinkUrl = "http://localhost:5050";
 
+    // Both AppHosts pin RedisInsight's host port to 5540 so this link stays stable.
+    private const string RedisInsightLinkUrl = "http://localhost:5540";
+
     public static string HealthUrlFor(string resourceName, TopologyProfile profile = TopologyProfile.Regular) => resourceName switch
     {
         KnownResources.PaymentsApi => $"{PaymentsBaseUrl(profile)}/health",
@@ -72,6 +75,7 @@ public static class EndpointResolver
     {
         KnownLinks.Lgtm => LgtmLinkUrl,
         KnownLinks.PgAdmin => PgAdminLinkUrl,
+        KnownLinks.RedisInsight => RedisInsightLinkUrl,
         _ => throw new ArgumentOutOfRangeException(nameof(linkId), linkId, "Unknown link."),
     };
 
