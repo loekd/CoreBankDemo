@@ -108,6 +108,14 @@ var redis = builder.AddRedis("redis", password: redisPassword)
     .WithHostPort(6381)
     .WithEndpointProxySupport(false)
     .WithoutHttpsCertificate()
+    // Same RedisInsight as the Regular AppHost (see its comment for RI_ENCRYPTION_KEYTAR) on the
+    // same fixed host port 5540, like pgAdmin's 5050: the two AppHosts never run side by side,
+    // so one sandbox port publish and one DemoRunner link serve both.
+    .WithRedisInsight(opt => opt
+        .WithoutHttpsCertificate()
+        .WithEnvironment("RI_ENCRYPTION_KEYTAR", "false")
+        .WithHostPort(5540)
+        .WithEndpoint("http", endpoint => endpoint.TargetHost = "0.0.0.0"))
     .WithImageTag("7.4-alpine")
     .WithEnvironment("REDIS_PASSWORD", redisPassword);
 #pragma warning restore ASPIRECERTIFICATES001
