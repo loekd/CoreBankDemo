@@ -25,7 +25,8 @@
       "pluginPath": "~appFolder/plugins/DevProxy.Plugins.dll",
       "configSection": "errorsCoreBank",
       "urlsToWatch": [
-        "http://127.0.0.1:5032/api/transactions/process"
+        "http://127.0.0.1:5032/api/transactions/process",
+        "http://127.0.0.1:5032/api/transactions/cancel"
       ]
     }
   ],
@@ -33,7 +34,7 @@
   "record": false,
   "errorsCoreBank": {
     "errorsFile": "devproxy-errors.json",
-    "rate": 5
+    "rate": 40
   },
   "rateLimiting": {
     "costPerRequest": 1,
@@ -41,10 +42,11 @@
     "resetTimeWindowSeconds": 60
   },
   "latency": {
-    "minMs": 20,
-    "maxMs": 200
+    "minMs": 100,
+    "maxMs": 400
   },
   "urlsToWatch": [
-    "http://127.0.0.1:5032/api/transactions/process"
+    "http://127.0.0.1:5032/api/transactions/process",
+    "http://127.0.0.1:5032/api/transactions/cancel"
   ]
 }

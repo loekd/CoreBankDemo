@@ -54,7 +54,7 @@ public class MainWindowFaultsTests
 
         window.ApplyFaultsButton.Enabled.Should().BeTrue();
         window.ApplyFaultsButton.Text.Should().Contain("staged");
-        window.FaultValueTexts[0].Should().Be("0% → 5%");
+        window.FaultValueTexts[0].Should().Be("0% → 40% mixed");
         window.PresetLabelText.Should().Contain("Regular profile");
         harness.Faults.Writes.Should().BeEmpty("staging never writes");
 
@@ -63,7 +63,7 @@ public class MainWindowFaultsTests
 
         harness.Faults.Writes.Should().ContainSingle()
             .Which.Levels.Should().Be(FaultLevels.CheckedInDefaults(TopologyProfile.Regular));
-        window.FaultValueTexts[0].Should().Be("5%");
+        window.FaultValueTexts[0].Should().Be("40% mixed");
         window.ApplyFaultsButton.Enabled.Should().BeFalse();
     }
 
@@ -99,7 +99,7 @@ public class MainWindowFaultsTests
         window.SendFaultKnobKeyForTest(0, Key.CursorRight).Should().BeTrue();
         window.RenderForTest();
         controller.State.Staged.ErrorRatePercent.Should().Be(5);
-        window.FaultValueTexts[0].Should().Be("0% → 5%");
+        window.FaultValueTexts[0].Should().Be("0% → 5% mixed");
 
         window.SendFaultKnobKeyForTest(0, Key.CursorRight.WithShift);
         window.RenderForTest();
@@ -115,6 +115,29 @@ public class MainWindowFaultsTests
 
         controller.State.Applied.IsAllZero.Should().BeTrue();
         harness.Faults.Writes.Should().BeEmpty("moving a knob never touches the running system");
+    }
+
+    [Fact]
+    public async Task AKnobMovedAfterAPresetKeepsThatPresetsErrorMix()
+    {
+        var harness = ArmedHarness();
+        var controller = harness.CreateController();
+        using var window = CreateWindow(controller);
+        await ArmAsync(controller);
+        window.RenderForTest();
+
+        window.TriggerPresetForTest(2);
+        window.RenderForTest();
+        controller.State.Staged.Mix.Should().Be(ErrorMix.Retryable, "Flaky CoreBank stages the retryable-only errors file");
+        window.FaultValueTexts[0].Should().Be("0% → 60% retryable");
+
+        window.SendFaultKnobKeyForTest(0, Key.End).Should().BeTrue();
+        window.RenderForTest();
+
+        controller.State.Staged.ErrorRatePercent.Should().Be(100);
+        controller.State.Staged.Mix.Should().Be(ErrorMix.Retryable, "the knobs carry no mix of their own; dragging a rate never swaps the errors file");
+        window.FaultValueTexts[0].Should().Be("0% → 100% retryable");
+        window.PresetLabelText.Should().Contain("Custom");
     }
 
     [Fact]

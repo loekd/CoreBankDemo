@@ -177,17 +177,21 @@ With `Features:UseDevProxy: true`, the AppHost starts Dev Proxy and the repo con
 PaymentsAPI→CoreBankAPI calls get an injected 503/429/500 — that's the intended ADR-005 resilience
 scenario, not a regression. Set `Features:UseDevProxy=false` for a clean demo run.
 
-The AppHost config runs **three** plugins, all against `http://127.0.0.1:5032/api/*`:
+The AppHost config runs **three** plugins. The latency and rate-limit plugins watch only the
+transfer command, `POST http://127.0.0.1:5032/api/transactions/process`; the error plugin also
+watches `POST …/api/transactions/cancel`, and the errors file decides which of the two it answers
+(ADR-030, ADR-031):
 
 | Plugin | Config section | Effect |
 |---|---|---|
 | `RateLimitingPlugin` | `rateLimiting` | 1000 req / 60s, then `429` |
-| `LatencyPlugin` | `latency` | adds 20–200 ms per request |
-| `GenericRandomErrorPlugin` | `errorsCoreBank` | ~5% injected 503/429/500 |
+| `LatencyPlugin` | `latency` | adds 100–400 ms per transfer command |
+| `GenericRandomErrorPlugin` | `errorsCoreBank` | 40% of transfer commands answered from `devproxy-errors.json` (mostly `409`/`423`, some `400`, a rare `500`); 40% of cancels answered `423` |
 
-So with `Features:UseDevProxy: true`, expect every PaymentsAPI→CoreBankAPI call to carry
-20–200 ms of added latency and a ~5% error rate. That is the intended ADR-005 resilience scenario,
-not a regression. Set `Features:UseDevProxy=false` for a clean demo run.
+So with `Features:UseDevProxy: true`, expect every PaymentsAPI→CoreBankAPI transfer to carry
+100–400 ms of added latency and about three payments per burst of twenty to end `504 Cancelled`,
+`200 Failed` or `202 Pending`. That is the intended observability mix (ADR-031), not a regression.
+Set `Features:UseDevProxy=false` for a clean demo run, or pick "All off" in the console.
 
 **The rate limit is deliberately set high (1000/60s) so it does not throttle normal runs.** The
 value as originally authored was 10/60s, which two `payments-api` replicas exhaust within seconds —

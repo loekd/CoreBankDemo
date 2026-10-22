@@ -4,7 +4,7 @@
 **Status:** Accepted
 **Deciders:** Architecture team
 **Supersedes in part:** ADR-007's Implementation section (the breaker no longer comes from the standard resilience handler, which the `corebank-api` client does not use; the decision itself stands). ADR-024's sentence "Neither Kiota's `RetryHandler` nor the standard resilience handler is enabled on the `corebank-api` client" — still true, now read as: no *retry* middleware is enabled; a breaker is.
-**Amended by:** ADR-030 (Decision 3's on-stage trip points: the Regular profile's error knob now injects `409`/`423`, which the predicate does not count, so no error-rate step opens the circuit; the throttle knob's `429`s do).
+**Amended by:** ADR-030 (Decision 3's on-stage trip points: the Regular profile's error knob now injects `409`/`423`, which the predicate does not count, so no error-rate step opens the circuit; the throttle knob's `429`s do); ADR-031 (the Regular profile's checked-in errors file is now the observability mix, whose rare `500` the predicate does count, so that profile opens a replica's circuit in roughly one burst of twenty in ten; the retryable-only file lives on under the *Flaky CoreBank* preset).
 **Corrects:** ADR-023's statements (Decision 2, Alternatives "Stored backoff", Consequences) that the resilience handler backs off and opens a circuit for CoreBank calls. It never did between 2026-08-30 and this record; from this record a breaker exists and no backoff does.
 
 Implementation spec: [`2026-10-14-corebank-circuit-breaker-design.md`](../superpowers/specs/2026-10-14-corebank-circuit-breaker-design.md).

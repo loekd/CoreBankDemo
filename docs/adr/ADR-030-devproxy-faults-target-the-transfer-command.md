@@ -4,6 +4,7 @@
 **Status:** Accepted
 **Deciders:** Architecture team
 **Amends:** ADR-005 (the injected statuses), ADR-019 (the "narrower surface" rationale for regenerating the errors file), ADR-029 Decision 3 (which error-rate step opens the circuit on stage).
+**Amended by:** ADR-031 (the Regular profile's checked-in errors file is now the observability mix, which does fault the cancel and does include statuses the breaker counts; Decisions 1–3 here describe what is now the *Flaky CoreBank* preset's retryable-only errors file).
 
 ## Context
 

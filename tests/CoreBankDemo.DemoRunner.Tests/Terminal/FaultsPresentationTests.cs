@@ -168,7 +168,7 @@ public class FaultsPresentationTests
 
         var model = PresentationModelBuilder.Build(state, Now);
 
-        model.Faults.Knobs[0].ValueText.Should().Be("5% → 40%");
+        model.Faults.Knobs[0].ValueText.Should().Be("5% mixed → 40% mixed");
         model.Faults.Knobs[1].ValueText.Should().Be("20–200 ms → 800–2000 ms");
         model.Faults.Knobs[2].ValueText.Should().Be("1000/60s", "an unstaged knob shows its live value alone");
         model.Faults.Knobs[2].IsStaged.Should().BeFalse();

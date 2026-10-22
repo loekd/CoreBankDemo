@@ -1,3 +1,4 @@
+using System.Text.Json;
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Application;
 using CoreBankDemo.DemoRunner.Infrastructure;
@@ -80,6 +81,97 @@ public class CheckedInDevProxyProfileTests
             ProfileRegistry.CheckedInErrorsPath(root, profile).Should().NotStartWith(generatedDirectory);
         }
     }
+
+    [Theory]
+    [InlineData(ErrorMix.Mixed)]
+    [InlineData(ErrorMix.Retryable)]
+    public async Task EveryRegularMix_HasACheckedInErrorsFileTheConsoleWritesAndRecognises(ErrorMix mix)
+    {
+        var root = RepositoryRoot();
+        var source = ProfileRegistry.CheckedInErrorsPath(root, TopologyProfile.Regular, mix);
+        File.Exists(source).Should().BeTrue($"{source} is the errors file the {mix} mix is copied from (ADR-031)");
+
+        var scratch = Path.Combine(Path.GetTempPath(), $"corebank-mix-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(ProfileRegistry.DevProxyConfigDirectory(scratch, TopologyProfile.Regular));
+            File.Copy(
+                ProfileRegistry.CheckedInConfigPath(root, TopologyProfile.Regular),
+                ProfileRegistry.CheckedInConfigPath(scratch, TopologyProfile.Regular));
+            foreach (var candidate in Enum.GetValues<ErrorMix>())
+            {
+                File.Copy(
+                    ProfileRegistry.CheckedInErrorsPath(root, TopologyProfile.Regular, candidate),
+                    ProfileRegistry.CheckedInErrorsPath(scratch, TopologyProfile.Regular, candidate));
+            }
+
+            var writer = new DevProxySessionConfigWriter(scratch);
+            var levels = new FaultLevels(40, 100, 400, 0, mix);
+            (await writer.WriteAsync(TopologyProfile.Regular, levels, CancellationToken.None)).Succeeded.Should().BeTrue();
+            var read = await writer.ReadAsync(TopologyProfile.Regular, CancellationToken.None);
+
+            read.Levels.Should().Be(levels, "the two real files differ, so a session written from one must read back as that one");
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TheRegularErrorsFiles_FaultWhatTheirMixPromises()
+    {
+        var root = RepositoryRoot();
+        using var mixed = JsonDocument.Parse(File.ReadAllText(
+            ProfileRegistry.CheckedInErrorsPath(root, TopologyProfile.Regular, ErrorMix.Mixed)));
+        using var retryable = JsonDocument.Parse(File.ReadAllText(
+            ProfileRegistry.CheckedInErrorsPath(root, TopologyProfile.Regular, ErrorMix.Retryable)));
+
+        var mixedByUrl = EntriesByUrl(mixed);
+        var retryableByUrl = EntriesByUrl(retryable);
+        const string process = "http://127.0.0.1:5032/api/transactions/process";
+        const string cancel = "http://127.0.0.1:5032/api/transactions/cancel";
+
+        // Retryable: 409/423 on the transfer command only. Nothing the breaker counts, no cancel.
+        retryableByUrl.Keys.Should().Equal(process);
+        retryableByUrl[process].Should().OnlyContain(status => status == 409 || status == 423);
+
+        // Mixed: mostly retried 409/423, a 400 verdict, a rare 500, and a breaker-blind 423 on the cancel.
+        mixedByUrl.Keys.Should().Equal(process, cancel);
+        var picks = mixedByUrl[process];
+        picks.Count(status => status == 409 || status == 423).Should().Be(16, "16 of 19 picks are retried without the breaker noticing");
+        picks.Count(status => status == 400).Should().Be(2, "2 of 19 picks end the payment Failed without a retry");
+        picks.Count(status => status == 500).Should().Be(1, "1 of 19 picks is the only answer the breaker counts");
+        picks.Should().HaveCount(19);
+        mixedByUrl[cancel].Should().Equal(new[] { 423 }, "a faulted cancel must not count for the breaker either");
+    }
+
+    [Fact]
+    public void TheRegularProfile_ErrorPluginWatchesTheCancelSoTheMixedFileCanReachIt()
+    {
+        var root = RepositoryRoot();
+        using var rc = JsonDocument.Parse(File.ReadAllText(ProfileRegistry.CheckedInConfigPath(root, TopologyProfile.Regular)));
+
+        var plugins = rc.RootElement.GetProperty("plugins").EnumerateArray()
+            .ToDictionary(
+                plugin => plugin.GetProperty("name").GetString()!,
+                plugin => plugin.GetProperty("urlsToWatch").EnumerateArray().Select(url => url.GetString()).ToList());
+
+        plugins["GenericRandomErrorPlugin"].Should().Equal(
+            ["http://127.0.0.1:5032/api/transactions/process", "http://127.0.0.1:5032/api/transactions/cancel"],
+            "only the error plugin reaches the cancel, and only the mixed errors file names it");
+        plugins["LatencyPlugin"].Should().Equal(
+            ["http://127.0.0.1:5032/api/transactions/process"],
+            "latency on the cancel would overrun the cancel allowance and turn every exhausted payment into a 202 (ADR-030)");
+        plugins["RateLimitingPlugin"].Should().Equal(["http://127.0.0.1:5032/api/transactions/process"]);
+    }
+
+    private static Dictionary<string, List<int>> EntriesByUrl(JsonDocument errors) =>
+        errors.RootElement.GetProperty("errors").EnumerateArray().ToDictionary(
+            entry => entry.GetProperty("request").GetProperty("url").GetString()!,
+            entry => entry.GetProperty("responses").EnumerateArray()
+                .Select(response => response.GetProperty("statusCode").GetInt32())
+                .ToList());
 
     internal static string RepositoryRoot()
     {
