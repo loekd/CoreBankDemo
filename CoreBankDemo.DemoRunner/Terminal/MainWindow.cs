@@ -1184,11 +1184,15 @@ public sealed class MainWindow : Window
         }
 
         var latency = _latencyRange.Value;
+        // The knobs carry no mix of their own: a slider moved after a preset keeps the mix
+        // that preset staged (ADR-031), so dragging Flaky's rate never silently swaps its
+        // retryable-only errors file for the mixed one.
         var staged = new FaultLevels(
             _errorRateRange.Value.End,
             latency.Start,
             latency.End,
-            _throttleRange.Value.End);
+            _throttleRange.Value.End,
+            _controller.State.Staged.Mix);
         var result = _controller.StageFaults(staged);
         if (!result.Succeeded)
         {

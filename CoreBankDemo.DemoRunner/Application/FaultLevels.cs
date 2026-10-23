@@ -1,19 +1,44 @@
 namespace CoreBankDemo.DemoRunner.Application;
 
 /// <summary>
-/// The three Dev Proxy knobs the operator steers, as one value. The same type is staged,
+/// Which checked-in errors file the error knob injects from (ADR-031). The rate says how
+/// often the proxy answers for CoreBank; the mix says what it answers with.
+/// </summary>
+public enum ErrorMix
+{
+    /// <summary>
+    /// <c>devproxy-errors.json</c>: the observability mix. Mostly <c>409</c>/<c>423</c>
+    /// (retried, invisible to the breaker), a rare <c>500</c> (counted by the breaker), and a <c>423</c> on
+    /// the instant rail's cancel so a payment whose attempts ran out sometimes ends
+    /// <c>202 Pending</c> and settles through the background rail instead of <c>504</c>.
+    /// </summary>
+    Mixed,
+
+    /// <summary>
+    /// <c>devproxy-errors-retryable.json</c>: <c>409</c>/<c>423</c> on the transfer command
+    /// only. Every injected answer is retried, the breaker never counts one, and the cancel is
+    /// never touched, so a faulted instant payment ends <c>504 Cancelled</c>, never <c>202</c>
+    /// (ADR-030).
+    /// </summary>
+    Retryable,
+}
+
+/// <summary>
+/// The Dev Proxy knobs the operator steers, as one value. The same type is staged,
 /// applied, stamped onto evidence, and read back from a config file, so a level can never
 /// mean one thing on the slider and another on the record.
 /// </summary>
-/// <param name="ErrorRatePercent">Share of intercepted calls answered with an injected 503/429/500. Zero disables the plugin.</param>
+/// <param name="ErrorRatePercent">Share of intercepted calls answered with an injected error from the <paramref name="Mix"/>. Zero disables the plugin.</param>
 /// <param name="LatencyFloorMs">Lower bound of the injected delay band. Zero (with the ceiling) disables the plugin.</param>
 /// <param name="LatencyCeilingMs">Upper bound of the injected delay band.</param>
 /// <param name="ThrottleRequestsPerWindow">Requests permitted per rate-limit window. Zero disables the plugin.</param>
+/// <param name="Mix">Which checked-in errors file the error knob answers from. Meaningless, and normalized to the default, while the rate is zero.</param>
 public sealed record FaultLevels(
     int ErrorRatePercent,
     int LatencyFloorMs,
     int LatencyCeilingMs,
-    int ThrottleRequestsPerWindow)
+    int ThrottleRequestsPerWindow,
+    ErrorMix Mix = ErrorMix.Mixed)
 {
     /// <summary>Every knob quiet. What panic-off applies and what arming resets to.</summary>
     public static FaultLevels AllZero { get; } = new(0, 0, 0, 0);
@@ -77,8 +102,8 @@ public sealed record FaultLevels(
     /// </summary>
     public static FaultLevels CheckedInDefaults(TopologyProfile profile) => profile switch
     {
-        // CoreBankDemo.AppHost/devproxy/config/devproxyrc.json
-        TopologyProfile.Regular => new FaultLevels(5, 20, 200, 1000),
+        // CoreBankDemo.AppHost/devproxy/config/devproxyrc.json + devproxy-errors.json
+        TopologyProfile.Regular => new FaultLevels(40, 100, 400, 1000, ErrorMix.Mixed),
         // CoreBankDemo.LoadTests/devproxy/config/devproxyrc-latency.json
         TopologyProfile.LoadTests => new FaultLevels(0, 9500, 12000, 0),
         _ => AllZero,
@@ -94,16 +119,28 @@ public sealed record FaultLevels(
         TopologyProfile.Regular =>
         [
             new FaultPreset("All off", AllZero),
+            // The observability mix (ADR-031): 40 % of transfer commands answered from the
+            // mixed errors file (18/19 a retried 409/423, 1/19 a 500) and 40 % of cancels
+            // answered 423, under a 100–400 ms band. Measured on a 20-payment instant burst from
+            // one debtor, four at once: a few payments per burst end 504 Cancelled or 202 Pending,
+            // the rest succeed, many after a visible retry. No injected 400: PaymentsAPI would
+            // mark the row Failed while CoreBank recorded nothing, a ghost verdict the dashboards
+            // cannot count. The band is deliberately
+            // short: a longer one lets the retry walks of the payments ahead starve the ones
+            // behind them in the same partition (a cancelled payment heads the partition until
+            // CoreBank confirms it; a deferred one until the background rail delivers it), and
+            // the burst tips from "a few" to "half". The rare 500 is the only answer the
+            // breaker counts; roughly one burst in ten still trips it.
             new FaultPreset("Regular profile", CheckedInDefaults(TopologyProfile.Regular)),
-            // Every Regular-profile plugin watches only POST /api/transactions/process, so the
-            // instant rail's cancel always gets through and a failed payment ends 504 Cancelled,
-            // never 202 deferred. The checked-in errors file answers 409/423, which Polly's
-            // transient predicate ignores: this knob can never open the CoreBank circuit. A
-            // payment is cancelled only when all three attempts fail, so 60 % cancels about
-            // one in five; 100 % on a single payment walks through every retry (ADR-030). The
-            // 200–800 ms band only paces the attempts so the retries read on stage: it stays
-            // well under the 2.5 s attempt timeout, so it can never overrun one.
-            new FaultPreset("Flaky CoreBank", new FaultLevels(60, 200, 800, 0)),
+            // The retryable-only mix: every injected answer is a 409/423 on the transfer
+            // command, which Polly's transient predicate ignores, so this knob can never open
+            // the CoreBank circuit, and the cancel is never faulted, so a failed payment ends
+            // 504 Cancelled, never 202 deferred. A payment is cancelled only when all three
+            // attempts fail, so 60 % cancels about one in five; 100 % on a single payment
+            // walks through every retry (ADR-030). The 200–800 ms band only paces the attempts
+            // so the retries read on stage: it stays well under the 2.5 s attempt timeout, so
+            // it can never overrun one.
+            new FaultPreset("Flaky CoreBank", new FaultLevels(60, 200, 800, 0, ErrorMix.Retryable)),
             // Ten transfers per minute, then 429s that open the circuit (ADR-029). Trip it with a
             // standard burst from another debtor first: a payment whose own 429 trips the
             // breaker has its cancel refused by the open circuit, ends 202, and that Pending row
@@ -129,8 +166,10 @@ public sealed record FaultLevels(
         PresetsFor(profile).FirstOrDefault(preset => preset.Levels == this)?.Name;
 
     /// <summary>
-    /// Snaps every knob onto its ladder and keeps the latency band ordered, so a value read
-    /// back from a hand-edited or foreign config still lands on a reachable slider position.
+    /// Snaps every knob onto its ladder, keeps the latency band ordered, and forgets the mix
+    /// once the error knob is off, so a value read back from a hand-edited or foreign config
+    /// still lands on a reachable slider position and a quiet config never reads as two
+    /// different quiet levels.
     /// </summary>
     public FaultLevels Normalized()
     {
@@ -143,15 +182,24 @@ public sealed record FaultLevels(
             (floor, ceiling) = (ceiling, floor);
         }
 
+        var rate = Snap(ErrorRatePercent, ErrorRateSteps);
         return new FaultLevels(
-            Snap(ErrorRatePercent, ErrorRateSteps),
+            rate,
             floor,
             ceiling,
-            Snap(ThrottleRequestsPerWindow, ThrottleSteps));
+            Snap(ThrottleRequestsPerWindow, ThrottleSteps),
+            rate > 0 ? Mix : AllZero.Mix);
     }
 
     /// <summary>Renders one knob for reading aloud — the authoritative channel, never the bar.</summary>
-    public string ErrorRateText => $"{ErrorRatePercent}%";
+    public string ErrorRateText => ErrorRatePercent <= 0 ? "0%" : $"{ErrorRatePercent}% {MixText}";
+
+    /// <summary>The mix as one word, so the error knob reads "40% mixed" or "60% retryable" aloud.</summary>
+    public string MixText => Mix switch
+    {
+        ErrorMix.Retryable => "retryable",
+        _ => "mixed",
+    };
 
     public string LatencyText => LatencyCeilingMs <= 0 ? "off" : $"{LatencyFloorMs}–{LatencyCeilingMs} ms";
 
