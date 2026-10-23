@@ -186,11 +186,11 @@ watches `POST …/api/transactions/cancel`, and the errors file decides which of
 |---|---|---|
 | `RateLimitingPlugin` | `rateLimiting` | 1000 req / 60s, then `429` |
 | `LatencyPlugin` | `latency` | adds 100–400 ms per transfer command |
-| `GenericRandomErrorPlugin` | `errorsCoreBank` | 40% of transfer commands answered from `devproxy-errors.json` (mostly `409`/`423`, some `400`, a rare `500`); 40% of cancels answered `423` |
+| `GenericRandomErrorPlugin` | `errorsCoreBank` | 40% of transfer commands answered from `devproxy-errors.json` (`409`/`423`, a rare `500`); 40% of cancels answered `423` |
 
 So with `Features:UseDevProxy: true`, expect every PaymentsAPI→CoreBankAPI transfer to carry
-100–400 ms of added latency and about three payments per burst of twenty to end `504 Cancelled`,
-`200 Failed` or `202 Pending`. That is the intended observability mix (ADR-031), not a regression.
+100–400 ms of added latency and a few payments per burst of twenty to end `504 Cancelled` or
+`202 Pending`. That is the intended observability mix (ADR-031), not a regression.
 Set `Features:UseDevProxy=false` for a clean demo run, or pick "All off" in the console.
 
 **The rate limit is deliberately set high (1000/60s) so it does not throttle normal runs.** The

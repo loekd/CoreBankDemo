@@ -84,7 +84,7 @@ public class FaultLevelsTests
 
         var regular = presets.Should().ContainSingle(preset => preset.Name == "Regular profile").Subject;
         regular.Levels.Should().Be(FaultLevels.CheckedInDefaults(TopologyProfile.Regular));
-        regular.Levels.Mix.Should().Be(ErrorMix.Mixed, "the checked-in errors file mixes retried 409/423, a 400 verdict, a rare 500 and a faulted cancel (ADR-031)");
+        regular.Levels.Mix.Should().Be(ErrorMix.Mixed, "the checked-in errors file mixes retried 409/423, a rare 500 and a faulted cancel (ADR-031)");
         regular.Levels.Normalized().Should().Be(regular.Levels, "a preset must land on reachable slider positions");
     }
 

@@ -136,11 +136,12 @@ public class CheckedInDevProxyProfileTests
         retryableByUrl.Keys.Should().Equal(process);
         retryableByUrl[process].Should().OnlyContain(status => status == 409 || status == 423);
 
-        // Mixed: mostly retried 409/423, a 400 verdict, a rare 500, and a breaker-blind 423 on the cancel.
+        // Mixed: retried 409/423, a rare 500, and a breaker-blind 423 on the cancel. No 400: a
+        // proxy-made verdict is a ghost CoreBank never recorded, so the dashboards cannot count it.
         mixedByUrl.Keys.Should().Equal(process, cancel);
         var picks = mixedByUrl[process];
-        picks.Count(status => status == 409 || status == 423).Should().Be(16, "16 of 19 picks are retried without the breaker noticing");
-        picks.Count(status => status == 400).Should().Be(2, "2 of 19 picks end the payment Failed without a retry");
+        picks.Count(status => status == 409 || status == 423).Should().Be(18, "18 of 19 picks are retried without the breaker noticing");
+        picks.Should().NotContain(400, "an injected 400 ends the row Failed at PaymentsAPI while CoreBank recorded nothing, so the dashboards and the console disagree (ADR-031)");
         picks.Count(status => status == 500).Should().Be(1, "1 of 19 picks is the only answer the breaker counts");
         picks.Should().HaveCount(19);
         mixedByUrl[cancel].Should().Equal(new[] { 423 }, "a faulted cancel must not count for the breaker either");

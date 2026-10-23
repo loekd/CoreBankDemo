@@ -201,13 +201,13 @@ Dev Proxy sits between the Payments API and the Core Bank API and is enabled by 
 command, `POST http://127.0.0.1:5032/api/transactions/process`; the error plugin also watches the
 instant rail's cancel, but only an errors file that names the cancel ever faults it (ADR-031). Out
 of the box the profile is the **observability mix**: a 40% error rate answered from
-`devproxy-errors.json` — mostly `409`/`423` (retried, invisible to the circuit breaker), a `400`
-verdict now and then (the payment ends `Failed`), a rare `500` (the one answer the breaker
-counts), and a `423` on the cancel (the payment ends `202 Pending` and settles through the
-background rail) — under 100–400 ms of latency and a 1000-request/min rate limit. On a 20-payment
-instant burst from one debtor, about three payments end somewhere other than `Completed`, spread
-over `504 Cancelled`, `200 Failed` and `202 Pending`, and about one burst in ten opens a replica's
-circuit. Tune the knobs in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json` and the
+`devproxy-errors.json` — mostly `409`/`423` (retried, invisible to the circuit breaker), a rare
+`500` (the one answer the breaker counts), and a `423` on the cancel (the payment ends
+`202 Pending` and settles through the background rail) — under 100–400 ms of latency and a
+1000-request/min rate limit. On a 20-payment instant burst from one debtor, a few payments end
+`504 Cancelled` or `202 Pending`, the rest settle, many after a visible retry, and about one burst
+in ten opens a replica's circuit. No `400` is injected on purpose: PaymentsAPI would mark the row
+`Failed` while CoreBank recorded nothing, so the console and the dashboards would disagree. Tune the knobs in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json` and the
 answers in the errors files. The console's presets: **Regular profile** (the mix above),
 **Flaky CoreBank** (60% errors from `devproxy-errors-retryable.json` — `409`/`423` on the
 transfer command only, so the breaker never counts one and a failed payment ends `504`, never

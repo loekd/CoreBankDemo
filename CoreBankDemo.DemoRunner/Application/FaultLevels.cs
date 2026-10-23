@@ -8,8 +8,7 @@ public enum ErrorMix
 {
     /// <summary>
     /// <c>devproxy-errors.json</c>: the observability mix. Mostly <c>409</c>/<c>423</c>
-    /// (retried, invisible to the breaker), a <c>400</c> verdict now and then (the row ends
-    /// <c>Failed</c>, no retry), a rare <c>500</c> (counted by the breaker), and a <c>423</c> on
+    /// (retried, invisible to the breaker), a rare <c>500</c> (counted by the breaker), and a <c>423</c> on
     /// the instant rail's cancel so a payment whose attempts ran out sometimes ends
     /// <c>202 Pending</c> and settles through the background rail instead of <c>504</c>.
     /// </summary>
@@ -121,11 +120,12 @@ public sealed record FaultLevels(
         [
             new FaultPreset("All off", AllZero),
             // The observability mix (ADR-031): 40 % of transfer commands answered from the
-            // mixed errors file (16/19 a retried 409/423, 2/19 a 400 verdict, 1/19 a 500) and
-            // 40 % of cancels answered 423, under a 100–400 ms band. Measured on a 20-payment
-            // instant burst from one debtor, four at once: about three payments per burst end
-            // somewhere other than Completed — 504 Cancelled, 200 Failed and 202 Pending all
-            // occur, the rest succeed, most after a visible retry. The band is deliberately
+            // mixed errors file (18/19 a retried 409/423, 1/19 a 500) and 40 % of cancels
+            // answered 423, under a 100–400 ms band. Measured on a 20-payment instant burst from
+            // one debtor, four at once: a few payments per burst end 504 Cancelled or 202 Pending,
+            // the rest succeed, many after a visible retry. No injected 400: PaymentsAPI would
+            // mark the row Failed while CoreBank recorded nothing, a ghost verdict the dashboards
+            // cannot count. The band is deliberately
             // short: a longer one lets the retry walks of the payments ahead starve the ones
             // behind them in the same partition (a cancelled payment heads the partition until
             // CoreBank confirms it; a deferred one until the background rail delivers it), and

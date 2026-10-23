@@ -9,9 +9,8 @@
 
 The observability talk needs one burst that shows every outcome the system can produce, so that
 the dashboards, traces and logs have something to disagree about: most payments settle, some only
-after a visible retry, a few are cancelled before they execute (`504 Cancelled`), a few are
-rejected by the core bank (`200 Failed`), and a few are deferred to the background rail
-(`202 Pending`) and settle later. Measured against the running system on 2026-10-22, the Regular
+after a visible retry, a few are cancelled before they execute (`504 Cancelled`), and a few are
+deferred to the background rail (`202 Pending`) and settle later. Measured against the running system on 2026-10-22, the Regular
 profile as ADR-030 left it could not produce that burst:
 
 1. **Nothing failed.** At 5 % and three attempts, a payment is lost only when all three attempts
@@ -49,6 +48,12 @@ at once, the console's defaults). What the measurements showed, beyond the numbe
   `MinimumThroughput` of 10 per replica, ADR-029). At one in nineteen on the transfer command and
   a `423` on the cancel it opened in about one burst in ten. A `423` on the cancel still produces
   the `202`: `CancelThroughCoreBankAsync` treats any failed cancel as "outcome unknown".
+- **An injected `400` is a ghost verdict.** PaymentsAPI reads a `400` as CoreBank's verdict
+  (ADR-023) and completes the row `Failed`, but CoreBank never received the command, recorded
+  nothing and published no `transaction.failed` event. The console counted three such payments as
+  failed while the dashboards, which read CoreBank's processed counter and the Payments outbox's
+  cancellations, showed one. A mix with a `400` therefore makes the console and Grafana disagree
+  by construction; a first cut with two `400`s in nineteen picks was dropped for that reason.
 - **The preset's rate must be a ladder step.** The console snaps to 0/5/10/25/40/60/80/100, so the
   mix is tuned at 40 %, not 45 %.
 
@@ -56,11 +61,12 @@ at once, the console's defaults). What the measurements showed, beyond the numbe
 
 1. **The checked-in Regular profile is the observability mix.** `devproxyrc.json` sets the error
    knob to 40 % and the band to 100–400 ms; `devproxy-errors.json` answers the transfer command from
-   nineteen weighted picks — eight `409`, eight `423`, two `400`, one `500` — and answers the
-   cancel with a `423`. Measured over six bursts of twenty: 4, 0, 2, 2, 6, 1 non-success payments
-   (average 2.5), with `504 Cancelled`, `200 Failed` and `202 Pending` all occurring and every
-   deferred payment settling through the background rail within two seconds of its `202`. This is
-   what the "Regular profile" chip stages and what a plain `aspire run` injects.
+   nineteen weighted picks — nine `409`, nine `423`, one `500` — and answers the cancel with a
+   `423`. No `400`: see the ghost-verdict finding above. Measured over six bursts of twenty:
+   4, 0, 6, 0, 1, 4 non-success payments (average 2.5; eleven `504 Cancelled`, four
+   `202 Pending`, no breaker trip in those six), with `504 Cancelled` and `202 Pending` both occurring and every deferred
+   payment settling through the background rail within two seconds of its `202`. This is what the
+   "Regular profile" chip stages and what a plain `aspire run` injects.
 2. **The error plugin watches the cancel; only an errors file can reach it.** The Regular
    profile's `GenericRandomErrorPlugin` lists both `POST …/api/transactions/process` and
    `POST …/api/transactions/cancel`; the latency and rate-limit plugins still watch the transfer
@@ -91,7 +97,7 @@ at once, the console's defaults). What the measurements showed, beyond the numbe
 - A plain `aspire run` of the Regular AppHost now injects 40 % faults out of the box. "All off"
   in the console, or `--Features:UseDevProxy=false`, is the quiet development setting.
 - The "Regular profile" burst is statistical: a burst of twenty can come out clean or lose six,
-  and about one burst in ten opens a replica's circuit on its `500`. That is the point of the
+  and roughly one burst in ten opens a replica's circuit on its `500` (none did in the final six). That is the point of the
   preset; the Flaky and Throttled presets remain the deterministic ones.
 - The error knob's reading now names its mix ("40% mixed", "60% retryable"); the Faults
   workspace's value column grows by one word.

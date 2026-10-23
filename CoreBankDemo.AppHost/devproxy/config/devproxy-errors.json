@@ -200,7 +200,7 @@
           }
         },
         {
-          "statusCode": 400,
+          "statusCode": 409,
           "headers": [
             {
               "name": "Content-Type",
@@ -208,11 +208,11 @@
             }
           ],
           "body": {
-            "error": "Transfer rejected: debtor account flagged by compliance"
+            "error": "Ledger busy: a posting run holds the debtor account"
           }
         },
         {
-          "statusCode": 400,
+          "statusCode": 423,
           "headers": [
             {
               "name": "Content-Type",
@@ -220,7 +220,7 @@
             }
           ],
           "body": {
-            "error": "Transfer rejected: debtor account flagged by compliance"
+            "error": "Account locked by the end-of-day batch"
           }
         },
         {
