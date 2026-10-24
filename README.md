@@ -197,18 +197,27 @@ system, not a demo toggle. The only host-level flag is `Features:UseDevProxy`.
 ## Fault injection
 
 Dev Proxy sits between the Payments API and the Core Bank API and is enabled by default in
-`CoreBankDemo.AppHost/appsettings.json`. Every plugin watches only the transfer command,
-`POST http://127.0.0.1:5032/api/transactions/process`, so the instant rail's cancel always gets
-through and a faulted instant payment ends `504 Cancelled` rather than `202 Pending` (ADR-030). Out
-of the box it injects a 5% error rate of `409`/`423` answers (`devproxy-errors.json`; statuses the
-circuit breaker does not count, so the error knob never opens it), 20–200 ms of latency, and a
-1000-request/min rate limit — tune those in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json`.
-The console's presets: **Flaky CoreBank** (60% errors with 200–800 ms of latency to pace the
-attempts, about one instant payment in five cancelled after three attempts; 100% on a single
-payment shows every retry) and **Throttled CoreBank** (10
-transfers per minute: first a standard burst from another debtor, say `NL39RABO0300065264`, whose
-`429`s open the circuit, then an instant burst, refused in milliseconds; see ADR-030 for why the
-order matters).
+`CoreBankDemo.AppHost/appsettings.json`. The latency and rate-limit plugins watch only the transfer
+command, `POST http://127.0.0.1:5032/api/transactions/process`; the error plugin also watches the
+instant rail's cancel, but only an errors file that names the cancel ever faults it (ADR-031). Out
+of the box the profile is the **observability mix**: a 40% error rate answered from
+`devproxy-errors.json` — mostly `409`/`423` (retried, invisible to the circuit breaker), a rare
+`500` (the one answer the breaker counts), and a `423` on the cancel (the payment ends
+`202 Pending` and settles through the background rail) — under 100–400 ms of latency and a
+1000-request/min rate limit. On a 20-payment instant burst from one debtor, a few payments end
+`504 Cancelled` or `202 Pending`, the rest settle, many after a visible retry, and about one burst
+in ten opens a replica's circuit. No `400` is injected on purpose: PaymentsAPI would mark the row
+`Failed` while CoreBank recorded nothing, so the console and the dashboards would disagree. Tune the knobs in `CoreBankDemo.AppHost/devproxy/config/devproxyrc.json` and the
+answers in the errors files. The console's presets: **Regular profile** (the mix above),
+**Flaky CoreBank** (60% errors from `devproxy-errors-retryable.json` — `409`/`423` on the
+transfer command only, so the breaker never counts one and a failed payment ends `504`, never
+`202` — with 200–800 ms of latency to pace the attempts, about one instant payment in five
+cancelled after three attempts; 100% on a single payment shows every retry; ADR-030) and
+**Throttled CoreBank** (10 transfers per minute: first a standard burst from another debtor, say
+`NL39RABO0300065264`, whose `429`s open the circuit, then an instant burst, refused in
+milliseconds; see ADR-030 for why the order matters). The error knob reads its errors file aloud
+with its rate ("40% mixed", "60% retryable"); a slider moved after a preset keeps that preset's
+file.
 
 To run without it (and without needing the binary on `PATH`):
 
@@ -373,8 +382,10 @@ the cancel that followed *succeeded* — the payment was provably withdrawn befo
 same `504`, and a retry with a new key is safe. You see it when the process call fails but Core
 Bank still answers the cancel (a rejected or dropped process call, partition-lock starvation, a
 failed lock backend). With Core Bank stopped, the cancel fails too and the honest `202 Pending`
-remains: the background rail settles the payment later. Dev Proxy faults never reach the cancel
-call (ADR-030), so a faulted instant payment ends `504`, not `202`.
+remains: the background rail settles the payment later. Under the Flaky preset Dev Proxy never
+faults the cancel, so a faulted instant payment ends `504`, not `202` (ADR-030); under the Regular
+profile's observability mix the cancel is answered `423` 40% of the time, and that is the
+intended source of the occasional `202` (ADR-031).
 
 **`redisinsight` exits 139 immediately (arm64 hosts with 16 KB pages, e.g. Docker sandboxes)**
 A bug in the published image, not in this repository. `redis/redisinsight:3.4` (and every later

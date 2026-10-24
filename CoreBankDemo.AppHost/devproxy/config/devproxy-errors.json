@@ -30,6 +30,230 @@
           "body": {
             "error": "Account locked by the end-of-day batch"
           }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        },
+        {
+          "statusCode": 500,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Internal server error"
+          }
+        }
+      ]
+    },
+    {
+      "request": {
+        "url": "http://127.0.0.1:5032/api/transactions/cancel",
+        "method": "POST"
+      },
+      "responses": [
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch; cancellation deferred"
+          }
         }
       ]
     }

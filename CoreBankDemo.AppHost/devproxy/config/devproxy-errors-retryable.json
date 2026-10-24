@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/dotnet/dev-proxy/main/schemas/v3.2.0/genericrandomerrorplugin.errorsfile.schema.json",
+  "errors": [
+    {
+      "request": {
+        "url": "http://127.0.0.1:5032/api/transactions/process",
+        "method": "POST"
+      },
+      "responses": [
+        {
+          "statusCode": 409,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Ledger busy: a posting run holds the debtor account"
+          }
+        },
+        {
+          "statusCode": 423,
+          "headers": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "error": "Account locked by the end-of-day batch"
+          }
+        }
+      ]
+    }
+  ]
+}

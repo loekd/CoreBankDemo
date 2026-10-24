@@ -10,7 +10,7 @@ public class FaultLevelsTests
     public void CheckedInDefaults_MirrorTheShippedProfiles()
     {
         FaultLevels.CheckedInDefaults(TopologyProfile.Regular)
-            .Should().Be(new FaultLevels(5, 20, 200, 1000));
+            .Should().Be(new FaultLevels(40, 100, 400, 1000, ErrorMix.Mixed));
         FaultLevels.CheckedInDefaults(TopologyProfile.LoadTests)
             .Should().Be(new FaultLevels(0, 9500, 12000, 0));
     }
@@ -44,7 +44,8 @@ public class FaultLevelsTests
         var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
 
         var flaky = presets.Should().ContainSingle(preset => preset.Name == "Flaky CoreBank").Subject;
-        flaky.Levels.Should().Be(new FaultLevels(60, 200, 800, 0), "a payment is cancelled only when all three attempts fail: 0.6³ ≈ 22 %; the band paces attempts without ever reaching the 2.5 s attempt timeout");
+        flaky.Levels.Should().Be(new FaultLevels(60, 200, 800, 0, ErrorMix.Retryable), "a payment is cancelled only when all three attempts fail: 0.6³ ≈ 22 %; the band paces attempts without ever reaching the 2.5 s attempt timeout");
+        flaky.Levels.Mix.Should().Be(ErrorMix.Retryable, "409/423 on the transfer command only: the breaker never counts one and the cancel is never faulted, so a failed payment ends 504, never 202 (ADR-030)");
         flaky.Levels.Normalized().Should().Be(flaky.Levels, "a preset must land on reachable slider positions");
     }
 
@@ -71,7 +72,29 @@ public class FaultLevelsTests
         var preset = FaultLevels.CheckedInDefaults(TopologyProfile.Regular);
 
         preset.MatchingPresetName(TopologyProfile.Regular).Should().Be("Regular profile");
-        (preset with { ErrorRatePercent = 40 }).MatchingPresetName(TopologyProfile.Regular).Should().BeNull();
+        (preset with { ErrorRatePercent = 60 }).MatchingPresetName(TopologyProfile.Regular).Should().BeNull();
+        (preset with { Mix = ErrorMix.Retryable }).MatchingPresetName(TopologyProfile.Regular)
+            .Should().BeNull("the mix is part of the level: the same rate from another errors file is not the preset");
+    }
+
+    [Fact]
+    public void PresetsForRegular_OfferTheObservabilityMixAsTheCheckedInProfile()
+    {
+        var presets = FaultLevels.PresetsFor(TopologyProfile.Regular);
+
+        var regular = presets.Should().ContainSingle(preset => preset.Name == "Regular profile").Subject;
+        regular.Levels.Should().Be(FaultLevels.CheckedInDefaults(TopologyProfile.Regular));
+        regular.Levels.Mix.Should().Be(ErrorMix.Mixed, "the checked-in errors file mixes retried 409/423, a rare 500 and a faulted cancel (ADR-031)");
+        regular.Levels.Normalized().Should().Be(regular.Levels, "a preset must land on reachable slider positions");
+    }
+
+    [Fact]
+    public void Normalized_ForgetsTheMixOnceTheErrorKnobIsOff()
+    {
+        new FaultLevels(0, 200, 800, 0, ErrorMix.Retryable).Normalized()
+            .Should().Be(new FaultLevels(0, 200, 800, 0), "a quiet error knob has no mix, so two quiet levels never differ only by one");
+        new FaultLevels(60, 200, 800, 0, ErrorMix.Retryable).Normalized().Mix
+            .Should().Be(ErrorMix.Retryable, "normalizing never swaps the errors file of a live knob");
     }
 
     [Fact]
@@ -108,9 +131,11 @@ public class FaultLevelsTests
     {
         var levels = new FaultLevels(40, 800, 2000, 100);
 
-        levels.ErrorRateText.Should().Be("40%");
+        levels.ErrorRateText.Should().Be("40% mixed", "the mix is read aloud with the rate: which errors file, not just how often");
+        (levels with { Mix = ErrorMix.Retryable }).ErrorRateText.Should().Be("40% retryable");
+        FaultLevels.AllZero.ErrorRateText.Should().Be("0%", "a quiet knob names no mix");
         levels.LatencyText.Should().Be("800–2000 ms");
         levels.ThrottleText.Should().Be("100/60s");
-        levels.ToString().Should().Contain("40%").And.Contain("800–2000 ms").And.Contain("100/60s");
+        levels.ToString().Should().Contain("40% mixed").And.Contain("800–2000 ms").And.Contain("100/60s");
     }
 }

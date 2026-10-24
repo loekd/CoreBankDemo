@@ -57,7 +57,7 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
         var generatedPath = ProfileRegistry.GeneratedConfigPath(repositoryRoot, profile);
         if (File.Exists(generatedPath))
         {
-            var generated = TryReadLevels(generatedPath);
+            var generated = TryReadLevels(generatedPath, profile);
             if (generated.Levels is { } sessionLevels)
             {
                 return Task.FromResult(new FaultConfigReadResult(true, sessionLevels, true, generatedPath, null));
@@ -65,7 +65,7 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
 
             // A generated config that will not parse must not silently become "no faults":
             // fall through to the checked-in profile and name the failed read.
-            var checkedInAfterFailure = TryReadLevels(ProfileRegistry.CheckedInConfigPath(repositoryRoot, profile));
+            var checkedInAfterFailure = TryReadLevels(ProfileRegistry.CheckedInConfigPath(repositoryRoot, profile), profile);
             return Task.FromResult(new FaultConfigReadResult(
                 false,
                 checkedInAfterFailure.Levels ?? fallback,
@@ -75,7 +75,7 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
         }
 
         var checkedInPath = ProfileRegistry.CheckedInConfigPath(repositoryRoot, profile);
-        var checkedIn = TryReadLevels(checkedInPath);
+        var checkedIn = TryReadLevels(checkedInPath, profile);
         return Task.FromResult(checkedIn.Levels is { } levels
             ? new FaultConfigReadResult(true, levels, false, checkedInPath, null)
             : new FaultConfigReadResult(false, fallback, false, checkedInPath, checkedIn.Error));
@@ -170,7 +170,7 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
             errors["rate"] = levels.ErrorRatePercent;
 
             Directory.CreateDirectory(ProfileRegistry.GeneratedConfigDirectory(repositoryRoot, profile));
-            WriteAtomically(ProfileRegistry.GeneratedErrorsPath(repositoryRoot, profile), BuildErrorsFile(profile, watched));
+            WriteAtomically(ProfileRegistry.GeneratedErrorsPath(repositoryRoot, profile), BuildErrorsFile(profile, levels.Mix, watched));
             WriteAtomically(targetPath, root.ToJsonString(WriteOptions));
             return new FaultConfigWriteResult(true, targetPath, null);
         }
@@ -302,15 +302,24 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
     }
 
     /// <summary>
-    /// Builds the errors file covering <b>the same URL surface the profile's other plugins
-    /// watch</b>. The checked-in errors file is a read-only preset source for the response
-    /// bodies only: copying it verbatim would scope injection to
-    /// <c>POST /api/transactions/process</c> alone, a narrower surface than the profile's
-    /// other plugins watch, so the error knob would not cover the calls the others do.
+    /// Builds the errors file for one <see cref="ErrorMix"/>: the checked-in file of that mix,
+    /// copied verbatim (ADR-031). The mix file is the contract — it decides which watched URL
+    /// is answered with what, so the retryable mix can leave the cancel alone while the mixed
+    /// one faults it — and the readback recognises a mix by comparing the written entries
+    /// with each checked-in file, so a copy that is not byte-for-byte the seed's entries would
+    /// read back as the default mix. Only a profile that ships no errors file for the mix
+    /// (LoadTests) falls back to the built-in <c>503</c>/<c>429</c>/<c>500</c> set over the
+    /// URL surface the profile's other plugins watch.
     /// </summary>
-    private string BuildErrorsFile(TopologyProfile profile, JsonArray watched)
+    private string BuildErrorsFile(TopologyProfile profile, ErrorMix mix, JsonArray watched)
     {
-        var responses = SeedErrorResponses(profile) ?? new JsonArray(
+        var seed = TryReadErrors(ProfileRegistry.CheckedInErrorsPath(repositoryRoot, profile, mix));
+        if (seed is { Count: > 0 })
+        {
+            return new JsonObject { ["errors"] = seed.DeepClone() }.ToJsonString(WriteOptions);
+        }
+
+        var responses = new JsonArray(
             ErrorResponse(503, "Service temporarily unavailable"),
             ErrorResponse(429, "Too many requests"),
             ErrorResponse(500, "Internal server error"));
@@ -339,21 +348,20 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
         return new JsonObject { ["errors"] = entries }.ToJsonString(WriteOptions);
     }
 
-    private JsonArray? SeedErrorResponses(TopologyProfile profile)
+    /// <summary>
+    /// The <c>errors</c> entries of an errors file, or <c>null</c> when the file is missing,
+    /// unreadable or not an errors file. Never throws: errors files are hand-editable.
+    /// </summary>
+    private static JsonArray? TryReadErrors(string path)
     {
-        var checkedInErrors = ProfileRegistry.CheckedInErrorsPath(repositoryRoot, profile);
-        if (!File.Exists(checkedInErrors))
+        if (!File.Exists(path))
         {
             return null;
         }
 
         try
         {
-            return (JsonNode.Parse(File.ReadAllText(checkedInErrors)) as JsonObject)?["errors"] is JsonArray errors
-                && errors.OfType<JsonObject>().FirstOrDefault()?["responses"] is JsonArray responses
-                && responses.Count > 0
-                    ? (JsonArray)responses.DeepClone()
-                    : null;
+            return (JsonNode.Parse(File.ReadAllText(path)) as JsonObject)?["errors"] as JsonArray;
         }
         catch (Exception ex) when (ex is IOException
             or UnauthorizedAccessException
@@ -361,9 +369,41 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
             or ArgumentException
             or InvalidOperationException)
         {
-            // The shipped bodies are a nicety; the built-in 503/429/500 set is the contract.
             return null;
         }
+    }
+
+    /// <summary>
+    /// Which checked-in mix the errors file an rc names is a copy of. The default mix when the
+    /// rc names no errors file, the file cannot be read, or its entries match no checked-in
+    /// file — a foreign errors file is reported as the mix a plain <c>aspire run</c> would get,
+    /// never as a mix this console can vouch for.
+    /// </summary>
+    private ErrorMix ReadMix(string configPath, JsonObject? errorsSection, TopologyProfile profile)
+    {
+        var fileName = AsString(errorsSection?["errorsFile"]);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return FaultLevels.AllZero.Mix;
+        }
+
+        // errorsFile resolves relative to the rc file that names it (see the type remarks).
+        var written = TryReadErrors(Path.Combine(Path.GetDirectoryName(configPath) ?? string.Empty, fileName));
+        if (written is null)
+        {
+            return FaultLevels.AllZero.Mix;
+        }
+
+        foreach (var mix in Enum.GetValues<ErrorMix>())
+        {
+            var seed = TryReadErrors(ProfileRegistry.CheckedInErrorsPath(repositoryRoot, profile, mix));
+            if (seed is not null && JsonNode.DeepEquals(written, seed))
+            {
+                return mix;
+            }
+        }
+
+        return FaultLevels.AllZero.Mix;
     }
 
     private static JsonObject ErrorResponse(int statusCode, string message) => new()
@@ -399,7 +439,7 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
             .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path))
         ?? DefaultPluginPath;
 
-    private static (FaultLevels? Levels, string? Error) TryReadLevels(string path)
+    private (FaultLevels? Levels, string? Error) TryReadLevels(string path, TopologyProfile profile)
     {
         try
         {
@@ -415,7 +455,8 @@ public sealed class DevProxySessionConfigWriter(string repositoryRoot) : IFaultI
                 ReadInt(errors, "rate"),
                 ReadInt(latency, "minMs"),
                 ReadInt(latency, "maxMs"),
-                ReadInt(rateLimit, "rateLimit")).Normalized(), null);
+                ReadInt(rateLimit, "rateLimit"),
+                ReadMix(path, errors, profile)).Normalized(), null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

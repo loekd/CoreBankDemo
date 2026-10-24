@@ -23,16 +23,16 @@ public class OperatorConsoleFaultTests
     {
         var (harness, controller) = await ArmedAsync(RegularShipped);
 
-        controller.StageFaults(RegularShipped with { ErrorRatePercent = 40 });
+        controller.StageFaults(RegularShipped with { ErrorRatePercent = 60 });
         var stagedState = controller.State;
         var apply = await controller.ApplyFaultsAsync(CancellationToken.None);
 
         stagedState.HasStagedFaultChange.Should().BeTrue();
-        stagedState.Applied.ErrorRatePercent.Should().Be(5, "staging must change nothing in the running system");
+        stagedState.Applied.ErrorRatePercent.Should().Be(40, "staging must change nothing in the running system");
         apply.Succeeded.Should().BeTrue();
         harness.Faults.Writes.Should().ContainSingle();
-        harness.Faults.Writes[0].Levels.Should().Be(RegularShipped with { ErrorRatePercent = 40 });
-        controller.State.Applied.ErrorRatePercent.Should().Be(40);
+        harness.Faults.Writes[0].Levels.Should().Be(RegularShipped with { ErrorRatePercent = 60 });
+        controller.State.Applied.ErrorRatePercent.Should().Be(60);
         controller.State.HasStagedFaultChange.Should().BeFalse();
         controller.State.FaultsObserved.Should().BeFalse();
         controller.State.Evidence.Last().Kind.Should().Be(EvidenceKind.Fault);
@@ -57,11 +57,11 @@ public class OperatorConsoleFaultTests
         var (harness, controller) = await ArmedAsync(RegularShipped);
         harness.Faults.WriteSucceeds = false;
 
-        controller.StageFaults(RegularShipped with { ErrorRatePercent = 40 });
+        controller.StageFaults(RegularShipped with { ErrorRatePercent = 60 });
         var apply = await controller.ApplyFaultsAsync(CancellationToken.None);
 
         apply.Succeeded.Should().BeFalse();
-        controller.State.Staged.ErrorRatePercent.Should().Be(40, "the level the operator dialled in is not discarded");
+        controller.State.Staged.ErrorRatePercent.Should().Be(60, "the level the operator dialled in is not discarded");
         controller.State.Applied.Should().Be(RegularShipped, "nothing reached the proxy");
         var record = controller.State.Evidence.Last();
         record.Kind.Should().Be(EvidenceKind.Fault);

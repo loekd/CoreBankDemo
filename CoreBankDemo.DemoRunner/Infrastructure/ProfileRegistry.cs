@@ -56,9 +56,25 @@ public static class ProfileRegistry
         _ => throw new ArgumentOutOfRangeException(nameof(profile)),
     };
 
-    /// <summary>Read-only preset source. This console never writes here.</summary>
+    /// <summary>Read-only preset source for the default mix. This console never writes here.</summary>
     public static string CheckedInErrorsPath(string repositoryRoot, TopologyProfile profile) =>
-        Path.Combine(DevProxyConfigDirectory(repositoryRoot, profile), "devproxy-errors.json");
+        CheckedInErrorsPath(repositoryRoot, profile, FaultLevels.AllZero.Mix);
+
+    /// <summary>
+    /// Read-only preset source for one <see cref="ErrorMix"/> (ADR-031). The default mix is
+    /// the bare <c>devproxy-errors.json</c> the profile's rc file names, so a plain
+    /// <c>aspire run</c> without this console injects exactly what the "Regular profile" chip
+    /// does; every other mix is a sibling named after it. This console never writes here.
+    /// </summary>
+    public static string CheckedInErrorsPath(string repositoryRoot, TopologyProfile profile, ErrorMix mix) =>
+        Path.Combine(DevProxyConfigDirectory(repositoryRoot, profile), CheckedInErrorsFileName(mix));
+
+    public static string CheckedInErrorsFileName(ErrorMix mix) => mix switch
+    {
+        ErrorMix.Mixed => "devproxy-errors.json",
+        ErrorMix.Retryable => "devproxy-errors-retryable.json",
+        _ => throw new ArgumentOutOfRangeException(nameof(mix)),
+    };
 
     public static string GeneratedConfigDirectory(string repositoryRoot, TopologyProfile profile) =>
         Path.Combine(DevProxyConfigDirectory(repositoryRoot, profile), GeneratedConfigDirectoryName);

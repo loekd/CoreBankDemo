@@ -17,7 +17,8 @@ public class DevProxySessionConfigWriterTests : IDisposable
         Directory.CreateDirectory(ProfileRegistry.DevProxyConfigDirectory(_root, TopologyProfile.Regular));
         Directory.CreateDirectory(ProfileRegistry.DevProxyConfigDirectory(_root, TopologyProfile.LoadTests));
         File.WriteAllText(ProfileRegistry.CheckedInConfigPath(_root, TopologyProfile.Regular), RegularProfile);
-        File.WriteAllText(ProfileRegistry.CheckedInErrorsPath(_root, TopologyProfile.Regular), ErrorsProfile);
+        File.WriteAllText(ProfileRegistry.CheckedInErrorsPath(_root, TopologyProfile.Regular, ErrorMix.Mixed), ErrorsProfile);
+        File.WriteAllText(ProfileRegistry.CheckedInErrorsPath(_root, TopologyProfile.Regular, ErrorMix.Retryable), RetryableErrorsProfile);
         File.WriteAllText(ProfileRegistry.CheckedInConfigPath(_root, TopologyProfile.LoadTests), LatencyProfile);
     }
 
@@ -461,24 +462,94 @@ public class DevProxySessionConfigWriterTests : IDisposable
     }
 
     [Fact]
-    public async Task Write_ErrorsFileCoversTheSameUrlSurfaceTheOtherPluginsWatch()
+    public async Task Write_ErrorsFileIsTheCheckedInFileOfTheStagedMixVerbatim()
     {
         var writer = new DevProxySessionConfigWriter(_root);
 
-        await writer.WriteAsync(TopologyProfile.Regular, new FaultLevels(40, 0, 0, 0), CancellationToken.None);
+        await writer.WriteAsync(TopologyProfile.Regular, new FaultLevels(40, 0, 0, 0, ErrorMix.Mixed), CancellationToken.None);
 
         using var errors = JsonDocument.Parse(
             File.ReadAllText(ProfileRegistry.GeneratedErrorsPath(_root, TopologyProfile.Regular)));
         var entries = errors.RootElement.GetProperty("errors").EnumerateArray().ToList();
+        entries.Should().HaveCount(2, "the mix file decides which watched URL is answered, so it is copied entry for entry (ADR-031)");
+        entries[0].GetProperty("request").GetProperty("url").GetString()
+            .Should().Be("http://127.0.0.1:5032/api/transactions/process");
+        entries[0].GetProperty("request").GetProperty("method").GetString().Should().Be("POST");
+        entries[0].GetProperty("responses")[0].GetProperty("body").GetProperty("error").GetString()
+            .Should().Be("Service temporarily unavailable");
+        entries[1].GetProperty("request").GetProperty("url").GetString()
+            .Should().Be("http://127.0.0.1:5032/api/transactions/cancel", "the mixed file faults the cancel");
+    }
+
+    [Fact]
+    public async Task Write_TheRetryableMixCopiesItsOwnFileAndLeavesTheCancelAlone()
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.WriteAsync(TopologyProfile.Regular, new FaultLevels(60, 0, 0, 0, ErrorMix.Retryable), CancellationToken.None);
+
+        using var errors = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedErrorsPath(_root, TopologyProfile.Regular)));
+        var entries = errors.RootElement.GetProperty("errors").EnumerateArray().ToList();
+        entries.Should().ContainSingle("the retryable file names the transfer command only, so a faulted instant payment ends 504, never 202 (ADR-030)");
+        entries[0].GetProperty("request").GetProperty("url").GetString()
+            .Should().Be("http://127.0.0.1:5032/api/transactions/process");
+        entries[0].GetProperty("responses").EnumerateArray()
+            .Select(response => response.GetProperty("statusCode").GetInt32())
+            .Should().Equal(409, 423);
+    }
+
+    [Theory]
+    [InlineData(ErrorMix.Mixed)]
+    [InlineData(ErrorMix.Retryable)]
+    public async Task Read_RecognisesTheMixAWriteCameFrom(ErrorMix mix)
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+        var levels = new FaultLevels(40, 200, 800, 0, mix);
+
+        await writer.WriteAsync(TopologyProfile.Regular, levels, CancellationToken.None);
+        var read = await writer.ReadAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        read.Succeeded.Should().BeTrue();
+        read.FromGeneratedSession.Should().BeTrue();
+        read.Levels.Should().Be(levels, "the mix round-trips through the errors file beside the rc, not through a field the rc does not have");
+    }
+
+    [Fact]
+    public async Task Read_AForeignErrorsFile_ReportsTheDefaultMixRatherThanOneThisConsoleCanVouchFor()
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+        await writer.WriteAsync(TopologyProfile.Regular, new FaultLevels(40, 0, 0, 0, ErrorMix.Retryable), CancellationToken.None);
+        File.WriteAllText(
+            ProfileRegistry.GeneratedErrorsPath(_root, TopologyProfile.Regular),
+            """{ "errors": [ { "request": { "url": "http://127.0.0.1:5032/api/*" }, "responses": [ { "statusCode": 418 } ] } ] }""");
+
+        var read = await writer.ReadAsync(TopologyProfile.Regular, CancellationToken.None);
+
+        read.Succeeded.Should().BeTrue();
+        read.Levels.Mix.Should().Be(FaultLevels.AllZero.Mix);
+        read.Levels.ErrorRatePercent.Should().Be(40, "the rate is still the rc's; only the mix is unknown");
+    }
+
+    [Fact]
+    public async Task Write_AProfileWithoutAnErrorsFile_FallsBackToTheBuiltInSetOverTheWatchedSurface()
+    {
+        var writer = new DevProxySessionConfigWriter(_root);
+
+        await writer.WriteAsync(TopologyProfile.LoadTests, new FaultLevels(40, 0, 0, 0), CancellationToken.None);
+
+        using var errors = JsonDocument.Parse(
+            File.ReadAllText(ProfileRegistry.GeneratedErrorsPath(_root, TopologyProfile.LoadTests)));
+        var entries = errors.RootElement.GetProperty("errors").EnumerateArray().ToList();
         entries.Should().ContainSingle();
         var request = entries[0].GetProperty("request");
         request.GetProperty("url").GetString().Should().Be(
-            "http://127.0.0.1:5032/api/*",
-            "scoping injection to POST /api/transactions/process alone would not cover the surface the other plugins watch");
+            "http://127.0.0.1:5032/api/Transactions/*",
+            "with no checked-in file to copy, injection covers the surface the profile's other plugins watch");
         request.TryGetProperty("method", out _).Should().BeFalse("every verb the surface serves is eligible");
-        // The shipped response bodies are still the preset source.
-        entries[0].GetProperty("responses")[0].GetProperty("body").GetProperty("error").GetString()
-            .Should().Be("Service temporarily unavailable");
+        entries[0].GetProperty("responses").EnumerateArray()
+            .Select(response => response.GetProperty("statusCode").GetInt32())
+            .Should().Equal(503, 429, 500);
     }
 
     [Fact]
@@ -516,9 +587,9 @@ public class DevProxySessionConfigWriterTests : IDisposable
           ],
           "port": 8000,
           "record": false,
-          "errorsCoreBank": { "errorsFile": "devproxy-errors.json", "rate": 5 },
+          "errorsCoreBank": { "errorsFile": "devproxy-errors.json", "rate": 40 },
           "rateLimiting": { "costPerRequest": 1, "rateLimit": 1000, "resetTimeWindowSeconds": 60 },
-          "latency": { "minMs": 20, "maxMs": 200 },
+          "latency": { "minMs": 100, "maxMs": 400 },
           "urlsToWatch": ["http://127.0.0.1:5032/api/*"]
         }
         """;
@@ -541,6 +612,21 @@ public class DevProxySessionConfigWriterTests : IDisposable
             {
               "request": { "url": "http://127.0.0.1:5032/api/transactions/process", "method": "POST" },
               "responses": [ { "statusCode": 503, "body": { "error": "Service temporarily unavailable" } } ]
+            },
+            {
+              "request": { "url": "http://127.0.0.1:5032/api/transactions/cancel", "method": "POST" },
+              "responses": [ { "statusCode": 423, "body": { "error": "Account locked" } } ]
+            }
+          ]
+        }
+        """;
+
+    private const string RetryableErrorsProfile = """
+        {
+          "errors": [
+            {
+              "request": { "url": "http://127.0.0.1:5032/api/transactions/process", "method": "POST" },
+              "responses": [ { "statusCode": 409, "body": { "error": "Ledger busy" } }, { "statusCode": 423, "body": { "error": "Account locked" } } ]
             }
           ]
         }
