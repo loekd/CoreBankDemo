@@ -63,6 +63,8 @@ public class CoreBankTracesDashboardTests
         var panel = Panel(FailedPaymentsTable);
 
         panel.GetProperty("type").GetString().Should().Be("table");
+        panel.TryGetProperty("timeFrom", out _).Should().BeFalse(
+            "the table follows the dashboard's time picker like the totals below it, so a rehearsal shows only its own failures");
         var target = panel.GetProperty("targets").EnumerateArray().Should().ContainSingle().Subject;
         target.GetProperty("queryType").GetString().Should().Be("traceql");
         target.GetProperty("tableType").GetString().Should().Be("spans",

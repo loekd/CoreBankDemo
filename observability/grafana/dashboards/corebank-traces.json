@@ -369,7 +369,7 @@
       "id": 11,
       "type": "table",
       "title": "Which payment failed, and why",
-      "description": "Every payment that ended without settling today: cancelled before execution (no money moved) or rejected by a business rule at CoreBank, with its reason. PaymentsAPI tags the span where the outcome is committed, so a cancel that lost its race to execution is not listed. Click the trace ID to open the full waterfall. Not narrowed by the Service and Operation filters.",
+      "description": "Every payment that ended without settling in the selected time range: cancelled before execution (no money moved) or rejected by a business rule at CoreBank, with its reason. PaymentsAPI tags the span where the outcome is committed, so a cancel that lost its race to execution is not listed. Click the trace ID to open the full waterfall. Not narrowed by the Service and Operation filters.",
       "datasource": {
         "type": "tempo",
         "uid": "tempo"
@@ -380,7 +380,6 @@
         "w": 24,
         "h": 10
       },
-      "timeFrom": "now/d",
       "fieldConfig": {
         "defaults": {
           "custom": {
