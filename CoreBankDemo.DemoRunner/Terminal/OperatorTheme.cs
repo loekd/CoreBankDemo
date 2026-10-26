@@ -166,8 +166,19 @@ internal static class OperatorTheme
 
     internal static void Apply(View view, string schemeName) => view.SchemeName = schemeName;
 
-    private static Scheme Scheme(string foreground, string background) =>
-        new(Attribute(foreground, background));
+    /// <summary>
+    /// Every scheme pins <c>Highlight</c>, the role a control draws with while the mouse is over
+    /// it, to its <c>Normal</c> attribute. DESIGN.md has no hover state; left unset, Terminal.Gui
+    /// derives one -- the surface colour lightened by 20%, in italic -- which on the rail is navy
+    /// on navy at well under 2:1. It also stays on the row: a fast move from one rail button to
+    /// the next, or a re-entry from outside the rail, loses the mouse-leave that would have
+    /// cleared it. With the two roles equal, a stuck hover is invisible.
+    /// </summary>
+    private static Scheme Scheme(string foreground, string background)
+    {
+        var attribute = Attribute(foreground, background);
+        return new Scheme(attribute) { Highlight = attribute };
+    }
 
     /// <summary>
     /// The same colours as <see cref="Scheme"/>, with every role a read-only text pane can draw
@@ -183,6 +194,7 @@ internal static class OperatorTheme
             Editable = attribute,
             Focus = attribute,
             Active = attribute,
+            Highlight = attribute,
         };
     }
 
