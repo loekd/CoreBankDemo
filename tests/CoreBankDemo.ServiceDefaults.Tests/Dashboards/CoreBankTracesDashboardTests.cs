@@ -63,6 +63,8 @@ public class CoreBankTracesDashboardTests
         var panel = Panel(FailedPaymentsTable);
 
         panel.GetProperty("type").GetString().Should().Be("table");
+        panel.TryGetProperty("timeFrom", out _).Should().BeFalse(
+            "the table follows the dashboard's time picker like the totals below it, so a rehearsal shows only its own failures");
         var target = panel.GetProperty("targets").EnumerateArray().Should().ContainSingle().Subject;
         target.GetProperty("queryType").GetString().Should().Be("traceql");
         target.GetProperty("tableType").GetString().Should().Be("spans",
@@ -72,9 +74,9 @@ public class CoreBankTracesDashboardTests
     }
 
     [Fact]
-    public void Today_row_shows_the_four_flow_totals_in_flow_order()
+    public void Totals_row_shows_the_four_flow_totals_in_flow_order()
     {
-        var titles = DailyTotals()
+        var titles = WindowTotals()
             .OrderBy(panel => panel.GetProperty("gridPos").GetProperty("x").GetInt32())
             .Select(panel => panel.GetProperty("title").GetString())
             .ToList();
@@ -86,16 +88,16 @@ public class CoreBankTracesDashboardTests
     [Fact]
     public void Failed_payments_total_adds_cancelled_outbox_rows_to_business_rejections()
     {
-        // The same "since midnight" arithmetic as the other tiles, once per
-        // source: a cancelled payments-outbox row (the only place every kind
+        // The same "since the window opened" arithmetic as the other tiles, once
+        // per source: a cancelled payments-outbox row (the only place every kind
         // of cancel is counted) plus CoreBank's business rejections.
-        var panel = DailyTotals().Should()
+        var panel = WindowTotals().Should()
             .ContainSingle(candidate => candidate.GetProperty("title").GetString() == "Failed payments").Subject;
 
         panel.GetProperty("type").GetString().Should().Be("stat");
-        panel.GetProperty("timeFrom").GetString().Should().Be("now/d");
+        panel.TryGetProperty("timeFrom", out _).Should().BeFalse("the tile follows the dashboard's time picker");
         panel.GetProperty("targets").EnumerateArray().Select(QueryOf).Should().Equal([
-            $"({SinceMidnight("corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}")}) + ({SinceMidnight("corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}")})"],
+            $"({SinceWindowStart("corebankdemo_messaging_items_processed_total{service_name=\"CoreBank.PaymentsAPI\", messaging_store_name=\"payments-outbox\", outcome=\"cancelled\"}")}) + ({SinceWindowStart("corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\", outcome=\"business_rejected\"}")})"],
             "each source falls back to 0 on its own, so a day with no rejections still shows its cancellations");
     }
 
@@ -103,16 +105,16 @@ public class CoreBankTracesDashboardTests
     [InlineData("Payments received", "corebankdemo_payment_intake_total{service_name=\"CoreBank.PaymentsAPI\", outcome=\"stored\"}")]
     [InlineData("Transactions processed", "corebankdemo_transaction_processed_total{service_name=\"CoreBank.CoreBankAPI\"}")]
     [InlineData("Messages sent", "corebankdemo_messaging_deliveries_total{service_name=\"CoreBank.CoreBankAPI\", messaging_direction=\"sent\", outcome=\"succeeded\", messaging_message_type=~\"transaction-completed|transaction-failed\"}")]
-    public void Daily_total_counts_one_per_payment_since_midnight(string title, string selector)
+    public void Window_total_counts_one_per_payment_in_the_selected_time_range(string title, string selector)
     {
-        var panel = DailyTotals().Should()
+        var panel = WindowTotals().Should()
             .ContainSingle(candidate => candidate.GetProperty("title").GetString() == title).Subject;
 
-        panel.GetProperty("type").GetString().Should().Be("stat", "a daily total is one big number, not a chart");
-        panel.GetProperty("timeFrom").GetString().Should().Be("now/d",
-            "the tile counts today so far while the trace panels keep the dashboard's own range");
+        panel.GetProperty("type").GetString().Should().Be("stat", "a total is one big number, not a chart");
+        panel.TryGetProperty("timeFrom", out _).Should().BeFalse(
+            "the tile counts the window the time picker selects, like every other panel, so a rehearsal burst shows its own number instead of the whole day's");
         panel.GetProperty("targets").EnumerateArray().Select(QueryOf).Should()
-            .Equal([SinceMidnight(selector)],
+            .Equal([SinceWindowStart(selector)],
                 "each tile is one exact count that lines up with its neighbours unless there is an outage");
     }
 
@@ -122,16 +124,17 @@ public class CoreBankTracesDashboardTests
     /// Not increase(): it skips a series' first sample, and a business counter first
     /// appears already counting, so increase() under-reports and the tiles stop lining up.
     /// Every process is its own service_instance_id series that never resets, so the last
-    /// value each reported today, less the last value it reported before midnight, is exact.
-    /// The baseline is the last sample in the week before midnight, not the sample at
-    /// midnight: a laptop asleep at midnight exports nothing then, and a series with no
-    /// baseline would otherwise count its whole lifetime as today.
+    /// value each reported inside the selected time range, less the last value it reported
+    /// before that range opened, is exact. The baseline is the last sample in the week before
+    /// the range opened, not the sample at its start: a process that exported nothing at that
+    /// moment (a laptop asleep, a service not yet started) has no sample there, and a series
+    /// with no baseline would otherwise count its whole lifetime inside the window.
     /// </summary>
-    private static string SinceMidnight(string selector)
+    private static string SinceWindowStart(string selector)
     {
-        var today = $"last_over_time({selector}[$__range])";
-        var beforeMidnight = $"last_over_time({selector}[7d] offset $__range)";
-        return $"sum(({today} - {beforeMidnight}) or {today}) or vector(0)";
+        var inWindow = $"last_over_time({selector}[$__range])";
+        var beforeWindow = $"last_over_time({selector}[7d] offset $__range)";
+        return $"sum(({inWindow} - {beforeWindow}) or {inWindow}) or vector(0)";
     }
 
     [Fact]
@@ -202,7 +205,7 @@ public class CoreBankTracesDashboardTests
     }
 
     /// <summary>Every panel that queries the business meter.</summary>
-    private static List<JsonElement> DailyTotals()
+    private static List<JsonElement> WindowTotals()
     {
         using var dashboard = JsonDocument.Parse(File.ReadAllText(DashboardPath));
         return dashboard.RootElement.GetProperty("panels").EnumerateArray()
