@@ -46,12 +46,15 @@ Inbox/Outbox drain, and logs next to traces, in one UI.
   (uid `corebank-traces`) is a Jaeger-style trace search: Service and Operation filters (from
   Tempo span metrics), rate, errors and p95 for that operation, the matching end-to-end traces,
   and, since ADR-030, the CoreBank circuit panel (breaker transitions from Polly's meter; it
-  replaced Tempo's service map, which the talk does not use). Below that, a "Today" row of three totals since midnight, in the
-  order a payment flows: payments received (stored in the Payments outbox), transactions
-  processed, and messages sent (the `transaction-completed` or `transaction-failed` result event
-  from CoreBank's outbox). The three are equal unless there is an outage. They are exact counts
-  (the last value each `service_instance_id` series reported today, less its value at midnight),
-  not `increase()`, which skips a series' first sample and under-reports. Each total is scoped
+  replaced Tempo's service map, which the talk does not use). Below that, a row of totals for the
+  dashboard's selected time range (until 2026-10-24 a "Today" row pinned to `now/d`; it now
+  follows the time picker so a rehearsal burst shows its own numbers rather than the whole
+  day's), in the order a payment flows: payments received (stored in the Payments outbox),
+  transactions processed, messages sent (the `transaction-completed` or `transaction-failed`
+  result event from CoreBank's outbox), and failed payments. Received equals processed plus
+  cancellations unless there is an outage. They are exact counts (the last value each
+  `service_instance_id` series reported inside the range, less its last value before the range
+  opened), not `increase()`, which skips a series' first sample and under-reports. Each total is scoped
   to the `service_name` that owns it, so another process exporting to the same collector (a
   test run reporting as `test-service`, for one) cannot move it. The per-instrument
   charts live on the CoreBank dashboard only. Both AppHosts set
