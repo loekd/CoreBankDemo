@@ -50,6 +50,33 @@ public class OperatorThemeTests
         }
     }
 
+    /// <summary>
+    /// DESIGN.md says there is no hover state. Terminal.Gui disagrees: a scheme that only pins
+    /// <c>Normal</c> gets a derived <c>Highlight</c> role, drawn whenever the mouse is over a
+    /// control, which is the surface colour lightened by 20% in italic -- navy on navy for the
+    /// rail, at well under 2:1. The driver also loses mouse-leave events on a fast move or a
+    /// re-entry from outside the rail, so that derived row then sticks. Pinning the hover role
+    /// to the normal one removes both the unreadable hover and the stuck variant of it.
+    /// </summary>
+    [Theory]
+    [InlineData(ThemeMode.Dark)]
+    [InlineData(ThemeMode.Light)]
+    public void EveryScheme_DrawsAHoveredControlExactlyAsANormalOne(ThemeMode mode)
+    {
+        OperatorTheme.Register(mode);
+
+        foreach (var name in AllSchemes.Append(OperatorTheme.EvidencePaneScheme))
+        {
+            var scheme = SchemeManager.GetScheme(name);
+
+            scheme.GetAttributeForRole(VisualRole.Highlight).Should().Be(
+                scheme.Normal,
+                "scheme '{0}' in {1} mode must not change colour or go italic under the mouse",
+                name,
+                mode);
+        }
+    }
+
     [Theory]
     [InlineData(ThemeMode.Dark)]
     [InlineData(ThemeMode.Light)]
