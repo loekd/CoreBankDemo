@@ -2,6 +2,9 @@ using System.Text;
 using AwesomeAssertions;
 using CoreBankDemo.DemoRunner.Terminal;
 using CoreBankDemo.DemoRunner.Tests.Fakes;
+using Terminal.Gui.Configuration;
+using Terminal.Gui.Drawing;
+using Terminal.Gui.Input;
 using Xunit;
 
 namespace CoreBankDemo.DemoRunner.Tests.Terminal;
@@ -47,6 +50,45 @@ public class NavigationRailRenderTests
             .Distinct();
 
         indents.Should().ContainSingle("a ragged rail has no column of shortcuts to aim at");
+    }
+
+    /// <summary>
+    /// A rail row under the mouse is drawn exactly as it is drawn without it. Terminal.Gui's
+    /// derived hover role turned "2 Resources" navy-on-navy italic the moment the pointer
+    /// crossed it, and because mouse-leave is lost on a fast move or a re-entry from outside the
+    /// rail, the italic row outlived the pointer. The cells are asserted, not the view's
+    /// <c>MouseState</c>: the state may well stay stuck, and that must no longer show.
+    /// </summary>
+    [Fact]
+    public void HoveredRow_KeepsTheRailsNormalColoursAndStyle()
+    {
+        using var app = TerminalAppFactory.CreateHeadless(100, 30);
+        OperatorTheme.Register(ThemeMode.Dark);
+        var controller = new OperatorHarness().CreateController();
+        using var window = new MainWindow(
+            app, controller, () => Task.CompletedTask, null, startPolling: false, marshalUpdates: false);
+        app.Begin(window);
+        window.Frame = new System.Drawing.Rectangle(0, 0, 100, 30);
+        app.LayoutAndDraw(true);
+
+        // "2 Resources" is the second rail row: rows are two apart from row 3, column 2 inward.
+        const int resourcesRow = 5;
+        app.Mouse.RaiseMouseEvent(new Mouse
+        {
+            Flags = MouseFlags.PositionReport,
+            ScreenPosition = new System.Drawing.Point(4, resourcesRow),
+        });
+        app.LayoutAndDraw(true);
+
+        var expected = SchemeManager.GetScheme(OperatorTheme.RailScheme).Normal;
+        var contents = app.Driver!.Contents!;
+        for (var column = 2; column < 2 + "2 Resources".Length; column++)
+        {
+            contents[resourcesRow, column].Attribute.Should().Be(
+                expected,
+                "column {0} of a hovered rail row must stay text-primary on surface-raised, not italic",
+                column);
+        }
     }
 
     /// <summary>Reads the rail's cells straight out of the driver's output buffer.</summary>
