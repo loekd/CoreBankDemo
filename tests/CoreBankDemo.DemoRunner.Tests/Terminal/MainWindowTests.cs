@@ -19,6 +19,25 @@ namespace CoreBankDemo.DemoRunner.Tests.Terminal;
 public class MainWindowTests
 {
     [Theory]
+    [InlineData("feature/lock-release", "CoreBankDemo — Operator Console (feature/lock-release)")]
+    [InlineData(null, "CoreBankDemo — Operator Console")]
+    public void Title_NamesTheCheckedOutBranchInParentheses(string? branch, string expected)
+    {
+        var controller = new OperatorHarness().CreateController();
+        using var app = AppTerminal.Create();
+        using var window = new MainWindow(
+            app,
+            controller,
+            () => Task.CompletedTask,
+            null,
+            startPolling: false,
+            marshalUpdates: false,
+            branch: branch);
+
+        window.Title.Should().Be(expected);
+    }
+
+    [Theory]
     [InlineData(1, WorkspaceKind.Operations)]
     [InlineData(2, WorkspaceKind.Resources)]
     [InlineData(3, WorkspaceKind.Evidence)]
