@@ -90,10 +90,10 @@ public static class Program
             options.Theme,
             Environment.GetEnvironmentVariable(CliOptions.ThemeEnvironmentVariable));
 
-        return RunConsole(controller, theme);
+        return RunConsole(controller, theme, GitBranchReader.Read(repositoryRoot));
     }
 
-    private static int RunConsole(OperatorConsoleController controller, ThemeMode theme)
+    private static int RunConsole(OperatorConsoleController controller, ThemeMode theme, string? branch)
     {
         Exception? crash = null;
         var app = AppTerminal.Create().Init();
@@ -115,7 +115,7 @@ public static class Program
         {
             await controller.ShutdownAsync(CancellationToken.None);
             app.RequestStop();
-        }, theme);
+        }, theme, branch);
         clipboard.Copied += window.ShowClipboardResult;
         ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
         {

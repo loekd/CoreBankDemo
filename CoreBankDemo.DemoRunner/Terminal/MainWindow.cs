@@ -360,8 +360,8 @@ public sealed class MainWindow : Window
     private readonly IApplication _app;
     private readonly UiRepaintCoalescer _repaints;
 
-    public MainWindow(IApplication app, OperatorConsoleController controller, Func<Task> onExitRequested, ThemeMode theme = ThemeMode.Dark)
-        : this(app, controller, onExitRequested, null, true, theme: theme)
+    public MainWindow(IApplication app, OperatorConsoleController controller, Func<Task> onExitRequested, ThemeMode theme = ThemeMode.Dark, string? branch = null)
+        : this(app, controller, onExitRequested, null, true, theme: theme, branch: branch)
     {
     }
 
@@ -373,7 +373,8 @@ public sealed class MainWindow : Window
         bool startPolling,
         bool marshalUpdates = true,
         TimeProvider? time = null,
-        ThemeMode theme = ThemeMode.Dark)
+        ThemeMode theme = ThemeMode.Dark,
+        string? branch = null)
     {
         OperatorTheme.Register(theme);
         _app = app;
@@ -387,7 +388,9 @@ public sealed class MainWindow : Window
         _evidenceBinding = new ListBinding(_evidenceList);
         _loadResultBinding = new ListBinding(_loadResults);
         _stillOpenBinding = new ListBinding(_stillOpenList);
-        Title = "CoreBankDemo — Operator Console";
+        Title = string.IsNullOrWhiteSpace(branch)
+            ? "CoreBankDemo — Operator Console"
+            : $"CoreBankDemo — Operator Console ({branch})";
         OperatorTheme.Apply(this, OperatorTheme.BaseScheme);
         OperatorTheme.Apply(_navigation, OperatorTheme.RailScheme);
         // Submit, Send burst and Fetch are the compose area's filled-teal controls, one per mode,
