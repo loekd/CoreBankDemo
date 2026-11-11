@@ -60,12 +60,13 @@ var lgtm = builder.AddContainer("lgtm", "grafana/otel-lgtm", "0.33.0")
 var lgtmOtlpGrpcEndpoint = lgtm.GetEndpoint("otlp-grpc");
 
 // Run identity for the lock-impact dashboard (observability/grafana/dashboards/
-// lock-impact.json): one local timestamp per `aspire start`, stamped on both APIs as
+// lock-impact.json): one local timestamp per `aspire start`, to the second so that two
+// starts inside one minute never share an id, stamped on both APIs as
 // the OTel resource attribute run.id. Prometheus keeps it on target_info only (it is
 // not a promoted attribute), as the label run_id. Aspire already assigns
 // OTEL_RESOURCE_ATTRIBUTES (service.instance.id) to every project, so the stamp is
 // appended to whatever that callback left, never assigned over it.
-var runId = TimeProvider.System.GetLocalNow().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+var runId = TimeProvider.System.GetLocalNow().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 void StampRunId(IResourceBuilder<ProjectResource> project) => project.WithEnvironment(context =>
 {
     var stamp = $"run.id={runId}";
