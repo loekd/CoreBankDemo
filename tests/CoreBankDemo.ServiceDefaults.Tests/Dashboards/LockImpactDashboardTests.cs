@@ -192,6 +192,16 @@ public class LockImpactDashboardTests
     }
 
     [Fact]
+    public void LoadTests_AppHost_run_id_is_unique_per_start_down_to_the_second()
+    {
+        // Two starts inside one minute (the feature-impact skill runs main and the feature
+        // branch back to back) must not share a run id: the second run would merge into
+        // the first on the dashboard and never show up as a new value of run_id.
+        AppHostSource("CoreBankDemo.LoadTests").Should().Contain("ToString(\"yyyy-MM-dd HH:mm:ss\"",
+            "a minute-resolution stamp collides when two runs start within the same minute");
+    }
+
+    [Fact]
     public void Regular_AppHost_carries_no_run_id_stamp()
     {
         AppHostSource("CoreBankDemo.AppHost").Should().NotContain(ResourceAttribute,
